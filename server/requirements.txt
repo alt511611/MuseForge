@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+httpx
+aiofiles
+python-multipart
+pydantic
+moviepy
+pillow
+python-dotenv
+aiohttp
+boto3

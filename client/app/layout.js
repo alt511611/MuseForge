@@ -1,0 +1,1 @@
+import "./globals.css"; export const metadata = { title: "MuseForge", description: "AI Micro-Drama Studio" }; export default function RootLayout({ children }) { return <html lang="en"><body>{children}</body></html>; }
