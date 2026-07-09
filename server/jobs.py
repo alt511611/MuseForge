@@ -50,6 +50,8 @@ class Job:
     num_scenes: int = 3
     user_requirement: str = ""
     demo: bool = False
+    user_id: Optional[str] = None
+    user_email: Optional[str] = None
     events: List[JobEvent] = field(default_factory=list)
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
@@ -57,7 +59,7 @@ class Job:
     _seq: int = 0
     _subscribers: List[asyncio.Queue] = field(default_factory=list, repr=False)
 
-    def to_dict(self) -> dict:
+    def to_dict(self, include_events: bool = True) -> dict:
         return {
             "id": self.id,
             "status": self.status.value,
@@ -67,7 +69,9 @@ class Job:
             "aspect_ratio": self.aspect_ratio,
             "num_scenes": self.num_scenes,
             "demo": self.demo,
-            "events": [e.to_dict() for e in self.events],
+            "user_id": self.user_id,
+            "user_email": self.user_email,
+            "events": [e.to_dict() for e in self.events] if include_events else [],
             "result": self.result,
             "error": self.error,
             "created_at": self.created_at,

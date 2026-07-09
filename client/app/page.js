@@ -4,9 +4,12 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import IdeaForm from "../components/IdeaForm";
 import { Film, Zap, GitBranch, Layers } from "lucide-react";
+import { useAuth } from "../contexts/AuthContext";
+import { friendlyError } from "../utils/errorMessages";
 
 export default function HomePage() {
   const router = useRouter();
+  const { getAccessToken } = useAuth();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState(null);
 
@@ -14,19 +17,23 @@ export default function HomePage() {
     setIsSubmitting(true);
     setError(null);
     try {
+      const token = await getAccessToken();
       const res = await fetch("/api/generate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify(formData),
       });
       if (!res.ok) {
         const err = await res.json();
-        throw new Error(err.detail || "Failed to start generation");
+        throw new Error(err.detail || "İşlem başlatılamadı");
       }
       const data = await res.json();
       router.push(`/generate/${data.job_id}`);
     } catch (err) {
-      setError(err.message);
+      setError(friendlyError(err.message));
       setIsSubmitting(false);
     }
   };
@@ -37,16 +44,12 @@ export default function HomePage() {
         <div className="absolute inset-0 pointer-events-none" aria-hidden="true">
           <div
             className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[400px] rounded-full opacity-20"
-            style={{
-              background:
-                "radial-gradient(ellipse at center, #7c3aed 0%, transparent 70%)",
-              filter: "blur(60px)",
-            }}
+            style={{ background: "radial-gradient(ellipse at center, #7c3aed 0%, transparent 70%)", filter: "blur(60px)" }}
           />
         </div>
-        <div className="relative max-w-5xl mx-auto px-6 pt-20 pb-16 text-center">
+        <div className="relative max-w-5xl mx-auto px-6 pt-16 pb-12 text-center">
           <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium mb-6"
-            style={{ backgroundColor: "rgba(124, 58, 237, 0.15)", border: "1px solid rgba(124, 58, 237, 0.3)", color: "#a78bfa" }}>
+            style={{ backgroundColor: "rgba(124,58,237,0.15)", border: "1px solid rgba(124,58,237,0.3)", color: "#a78bfa" }}>
             <Zap size={12} />
             Powered by MuAPI &amp; Claude AI
           </div>
@@ -57,26 +60,18 @@ export default function HomePage() {
             Agentic AI Video Studio
           </p>
           <p className="text-base max-w-2xl mx-auto mb-12" style={{ color: "#64748b" }}>
-            Type an idea. A multi-agent pipeline writes the script, designs the
-            storyboard, generates frames, and produces a complete cinematic
-            video — automatically.
+            Bir fikir yazın. Çok ajanlı pipeline senaryoyu yazar, storyboard tasarlar,
+            kareleri üretir ve eksiksiz bir sinematik video oluşturur — otomatik olarak.
           </p>
-          <div className="flex flex-wrap justify-center gap-3 mb-16">
+          <div className="flex flex-wrap justify-center gap-3 mb-12">
             {[
-              { icon: <Film size={14} />, label: "Screenwriter Agent" },
-              { icon: <GitBranch size={14} />, label: "Storyboard Artist" },
-              { icon: <Layers size={14} />, label: "Frame Generator" },
-              { icon: <Zap size={14} />, label: "Video Generator" },
+              { icon: <Film size={14} />, label: "Senarist Ajan" },
+              { icon: <GitBranch size={14} />, label: "Storyboard Sanatçısı" },
+              { icon: <Layers size={14} />, label: "Kare Üretici" },
+              { icon: <Zap size={14} />, label: "Video Üretici" },
             ].map((f) => (
-              <div
-                key={f.label}
-                className="flex items-center gap-2 px-4 py-2 rounded-full text-sm"
-                style={{
-                  backgroundColor: "#12121a",
-                  border: "1px solid #22223a",
-                  color: "#94a3b8",
-                }}
-              >
+              <div key={f.label} className="flex items-center gap-2 px-4 py-2 rounded-full text-sm"
+                style={{ backgroundColor: "#12121a", border: "1px solid #22223a", color: "#94a3b8" }}>
                 <span style={{ color: "#7c3aed" }}>{f.icon}</span>
                 {f.label}
               </div>
@@ -84,16 +79,11 @@ export default function HomePage() {
           </div>
         </div>
       </div>
+
       <div className="max-w-3xl mx-auto px-6 pb-24">
         {error && (
-          <div
-            className="mb-6 px-4 py-3 rounded-xl text-sm animate-fade-in"
-            style={{
-              backgroundColor: "rgba(239, 68, 68, 0.1)",
-              border: "1px solid rgba(239, 68, 68, 0.3)",
-              color: "#fca5a5",
-            }}
-          >
+          <div className="mb-6 px-4 py-3 rounded-xl text-sm animate-fade-in"
+            style={{ backgroundColor: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", color: "#fca5a5" }}>
             {error}
           </div>
         )}
