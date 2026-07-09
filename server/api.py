@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -18,8 +18,8 @@ from jobs import JobStatus, job_store, run_generation_job
 load_dotenv()
 
 ALLOWED_ORIGINS = os.environ.get(
-    "CORS_ORIGINS",
-    "http://localhost:3000,http://127.0.0.1:3000",
+    "ALLOWED_ORIGINS",
+    os.environ.get("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"),
 ).split(",")
 
 DEMO_FLAG = os.environ.get("MUSEFORGE_DEMO", "").lower() in ("1", "true", "yes")
@@ -305,6 +305,53 @@ async def admin_delete_job(job_id: str, _admin: AuthUser = Depends(get_current_a
         job.status = JobStatus.CANCELLED
     del job_store._jobs[job_id]
     return {"deleted": job_id}
+
+
+# ── Stripe endpoints ──────────────────────────────────────────────────────────
+
+class CheckoutRequest(BaseModel):
+    plan: str  # "creator" | "pro"
+    success_url: str
+    cancel_url: str
+
+
+@app.post("/api/create-checkout-session")
+async def create_checkout_session(
+    req: CheckoutRequest,
+    current_user: AuthUser = Depends(get_current_user),
+):
+    from stripe_integration import create_checkout_session as _create, get_price_id
+
+    price_id = get_price_id(req.plan)
+    if not price_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No Stripe price configured for plan '{req.plan}'. Set STRIPE_PRICE_{req.plan.upper()} env var.",
+        )
+    try:
+        url = await _create(
+            price_id=price_id,
+            user_id=current_user.user_id,
+            user_email=current_user.email,
+            success_url=req.success_url,
+            cancel_url=req.cancel_url,
+        )
+        return {"url": url}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/stripe-webhook")
+async def stripe_webhook(request: Request):
+    from stripe_integration import handle_webhook
+
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature", "")
+    try:
+        result = await handle_webhook(payload, sig)
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 if __name__ == "__main__":

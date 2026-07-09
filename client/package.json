@@ -8,6 +8,7 @@
     "start": "next start"
   },
   "dependencies": {
+    "@stripe/stripe-js": "^4.4.0",
     "@supabase/ssr": "^0.5.2",
     "@supabase/supabase-js": "^2.45.4",
     "lucide-react": "^0.381.0",

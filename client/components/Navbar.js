@@ -35,6 +35,12 @@ export default function Navbar() {
         <span className="font-black tracking-tight gradient-text text-lg">MuseForge</span>
       </Link>
 
+      <Link href="/pricing"
+        className="hidden sm:inline-flex items-center text-sm transition-colors hover:text-purple-400"
+        style={{ color: "#64748b" }}>
+        Fiyatlar
+      </Link>
+
       {!loading && (
         <div>
           {user ? (

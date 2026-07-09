@@ -1,6 +1,7 @@
 import "../globals.css";
 import { AuthProvider } from "../contexts/AuthContext";
 import Navbar from "../components/Navbar";
+import CookieConsent from "../components/CookieConsent";
 
 export const metadata = {
   title: "MuseForge — Agentic AI Video Studio",
@@ -14,6 +15,7 @@ export default function RootLayout({ children }) {
         <AuthProvider>
           <Navbar />
           {children}
+          <CookieConsent />
         </AuthProvider>
       </body>
     </html>

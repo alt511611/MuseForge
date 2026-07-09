@@ -1,16 +1,20 @@
--- MuseForge Supabase Migration
--- Bu dosyayı Supabase Dashboard → SQL Editor'de çalıştırın.
--- Mevcut SQLite jobs tablosunu kaldırıp Supabase'e taşıyın.
+-- MuseForge — Supabase Migration v2
+-- Supabase Dashboard → SQL Editor'de çalıştırın.
 
--- ── Kullanıcı profilleri tablosu ──────────────────────────────────────────────
+-- ── Profiller tablosu ─────────────────────────────────────────────────────────
 create table if not exists public.profiles (
-  id          uuid references auth.users on delete cascade primary key,
-  email       text,
-  role        text not null default 'user',   -- 'user' | 'admin'
-  created_at  timestamptz default now()
+  id              uuid references auth.users on delete cascade primary key,
+  email           text,
+  role            text        not null default 'user',   -- 'user' | 'admin'
+  plan            text        not null default 'free',   -- 'free' | 'creator' | 'pro'
+  credits         int         not null default 3,        -- ücretsiz kredit
+  stripe_customer_id text,
+  stripe_subscription_id text,
+  created_at      timestamptz default now(),
+  updated_at      timestamptz default now()
 );
 
--- Auth trigger: her yeni kullanıcı için otomatik profil oluştur
+-- Yeni kullanıcı kaydında otomatik profil oluştur
 create or replace function public.handle_new_user()
 returns trigger language plpgsql security definer set search_path = public as $$
 begin
@@ -26,55 +30,108 @@ create trigger on_auth_user_created
   after insert on auth.users
   for each row execute procedure public.handle_new_user();
 
--- ── Jobs tablosu ──────────────────────────────────────────────────────────────
--- NOT: Mevcut sistem jobs'ları bellekte tutuyor (jobs.py).
--- İleride kalıcı hale getirmek için bu tabloyu kullanın.
+-- updated_at otomatik güncelle
+create or replace function public.set_updated_at()
+returns trigger language plpgsql as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
+drop trigger if exists profiles_updated_at on public.profiles;
+create trigger profiles_updated_at
+  before update on public.profiles
+  for each row execute procedure public.set_updated_at();
+
+-- ── Jobs tablosu (isteğe bağlı kalıcı depolama) ───────────────────────────────
 create table if not exists public.jobs (
   id              text primary key,
   user_id         uuid references auth.users on delete set null,
   user_email      text,
   idea            text,
-  style           text default 'Cinematic',
-  director_style  text default 'cinematic_balanced',
-  aspect_ratio    text default '16:9',
-  num_scenes      int  default 3,
-  user_requirement text default '',
-  demo            boolean default false,
-  status          text default 'queued',
+  style           text        default 'Cinematic',
+  director_style  text        default 'cinematic_balanced',
+  aspect_ratio    text        default '16:9',
+  num_scenes      int         default 3,
+  user_requirement text       default '',
+  demo            boolean     default false,
+  status          text        default 'queued',
   result          jsonb,
   error           text,
   created_at      timestamptz default now(),
   updated_at      timestamptz default now()
 );
 
--- Row Level Security
+drop trigger if exists jobs_updated_at on public.jobs;
+create trigger jobs_updated_at
+  before update on public.jobs
+  for each row execute procedure public.set_updated_at();
+
+-- ── Row Level Security ────────────────────────────────────────────────────────
 alter table public.profiles enable row level security;
 alter table public.jobs     enable row level security;
 
--- Kullanıcılar kendi profillerini okuyabilir
+-- Kullanıcılar kendi profilini okur/günceller
 create policy "users_read_own_profile"
-  on public.profiles for select
-  using (auth.uid() = id);
+  on public.profiles for select using (auth.uid() = id);
 
--- Kullanıcılar kendi job'larını okuyabilir
+create policy "users_update_own_profile"
+  on public.profiles for update using (auth.uid() = id);
+
+-- Kullanıcılar kendi job'larını görür
 create policy "users_read_own_jobs"
-  on public.jobs for select
-  using (auth.uid() = user_id);
+  on public.jobs for select using (auth.uid() = user_id);
 
--- Adminler her şeyi görebilir (role = 'admin' check via profiles)
-create policy "admins_read_all_jobs"
+-- Adminler her şeyi yönetir
+create policy "admins_all_profiles"
+  on public.profiles for all
+  using (exists (
+    select 1 from public.profiles where id = auth.uid() and role = 'admin'
+  ));
+
+create policy "admins_all_jobs"
   on public.jobs for all
-  using (
-    exists (
-      select 1 from public.profiles
-      where id = auth.uid() and role = 'admin'
-    )
-  );
+  using (exists (
+    select 1 from public.profiles where id = auth.uid() and role = 'admin'
+  ));
 
--- ── Admin kullanıcısı atama (email ile) ──────────────────────────────────────
+-- ── Plan limitleri yardımcı görünümü ──────────────────────────────────────────
+create or replace view public.plan_limits as
+select
+  'free'    as plan, 3  as monthly_credits, 3  as max_scenes, false as hd_export
+union all
+select 'creator',       30, 5, false
+union all
+select 'pro',          150, 5, true;
+
+-- ── Admin atama ───────────────────────────────────────────────────────────────
 -- Bir kullanıcıyı admin yapmak için:
--- update public.profiles set role = 'admin' where email = 'admin@example.com';
+--   update public.profiles set role = 'admin' where email = 'admin@example.com';
 --
--- Supabase app_metadata ile de yapılabilir (JWT'de taşınır, daha güvenli):
--- update auth.users set raw_app_meta_data = raw_app_meta_data || '{"role":"admin"}'
--- where email = 'admin@example.com';
+-- Veya JWT app_metadata ile (daha güvenli):
+--   update auth.users
+--   set raw_app_meta_data = raw_app_meta_data || '{"role":"admin"}'
+--   where email = 'admin@example.com';
+
+-- ── Stripe webhook'un güncelleyeceği yardımcı fonksiyon ──────────────────────
+-- Backend'deki stripe.py bu fonksiyonu doğrudan çağırmak yerine Supabase
+-- service key ile REST API üzerinden günceller; bu fonksiyon referans içindir.
+create or replace function public.apply_subscription(
+  p_user_id uuid,
+  p_plan text,
+  p_credits int,
+  p_stripe_customer_id text default null,
+  p_stripe_subscription_id text default null
+)
+returns void language plpgsql security definer as $$
+begin
+  update public.profiles
+  set
+    plan = p_plan,
+    credits = credits + p_credits,
+    stripe_customer_id = coalesce(p_stripe_customer_id, stripe_customer_id),
+    stripe_subscription_id = coalesce(p_stripe_subscription_id, stripe_subscription_id)
+  where id = p_user_id;
+end;
+$$;

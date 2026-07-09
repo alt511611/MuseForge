@@ -89,8 +89,13 @@ export default function HomePage() {
         )}
         <IdeaForm onSubmit={handleSubmit} isSubmitting={isSubmitting} />
       </div>
-      <footer className="text-center pb-8 text-sm" style={{ color: "#374151" }}>
-        MuseForge &mdash; Built on MuAPI generative media infrastructure
+      <footer className="text-center pb-8 text-sm space-y-2" style={{ color: "#374151" }}>
+        <p>MuseForge &mdash; Built on MuAPI generative media infrastructure</p>
+        <div className="flex justify-center gap-4 text-xs">
+          <a href="/pricing" className="hover:text-purple-400 transition-colors">Fiyatlar</a>
+          <a href="/legal/privacy" className="hover:text-purple-400 transition-colors">Gizlilik</a>
+          <a href="/legal/terms" className="hover:text-purple-400 transition-colors">Koşullar</a>
+        </div>
       </footer>
     </main>
   );
