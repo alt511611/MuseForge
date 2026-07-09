@@ -42,30 +42,6 @@ body {
   background-clip: text;
 }
 
-.glass {
-  background: rgba(18, 18, 26, 0.8);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(124, 58, 237, 0.15);
-}
-
-.border-glow {
-  position: relative;
-}
-.border-glow::before {
-  content: "";
-  position: absolute;
-  inset: -1px;
-  background: linear-gradient(135deg, #7c3aed, #a78bfa, #7c3aed);
-  border-radius: inherit;
-  z-index: -1;
-  opacity: 0;
-  transition: opacity 0.3s;
-}
-.border-glow:focus-within::before {
-  opacity: 1;
-}
-
 @media (max-width: 640px) {
   .grid-cols-5 {
     grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
