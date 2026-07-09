@@ -1,65 +1,72 @@
 """
-Regression test for:
-  1) the character-consistency lock (portrait generated once per drama, not
-     once per scene)
-  2) director_style propagation into the storyboard artist
-  3) background music added exactly once, on the final concatenated video
+Regression tests for the MuseForge cinema pipeline invariants:
 
-All MuAPI network calls are monkey-patched — no API key or network access
-required.
+  1) character-consistency lock — the portrait is generated once per drama,
+     not once per scene;
+  2) director_style propagation into the storyboard artist;
+  3) background music added exactly once, on the final concatenated video;
+  4) demo mode runs the full pipeline offline with placeholder assets.
+
+All MuAPI/Claude network calls are monkey-patched — no API key or network
+access required.
 """
-import asyncio
 import os
 import sys
-from unittest.mock import patch
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("MUAPI_KEY", "test-key-not-real")
 
-from interfaces.camera import DIRECTOR_STYLES, get_director_style
-from interfaces.character import CharacterInScene
+from interfaces.camera import DIRECTOR_STYLES, get_director_style  # noqa: E402
+from interfaces.character import CharacterInScene, CharacterProfile, DramaScript  # noqa: E402
 
 
-async def main():
-    # ---- Camera presets sanity check ----
+class FakeShot:
+    def __init__(self, idx):
+        self.idx = idx
+        self.visual_desc = "Maya walks through a corridor."
+        self.motion_desc = "steady tracking shot"
+        self.audio_desc = "ambient hum"
+        self.shot_type = "medium shot"
+        self.camera_movement = "slow push-in"
+        self.lens = "50mm"
+        self.duration_seconds = 5.0
+        self.frame_url = None
+        self.video_url = None
+
+    def model_dump(self, **kwargs):
+        return {
+            "idx": self.idx,
+            "visual_desc": self.visual_desc,
+            "motion_desc": self.motion_desc,
+            "audio_desc": self.audio_desc,
+            "shot_type": self.shot_type,
+            "camera_movement": self.camera_movement,
+            "lens": self.lens,
+            "duration_seconds": self.duration_seconds,
+            "frame_url": self.frame_url,
+            "video_url": self.video_url,
+        }
+
+
+def test_director_style_presets():
     assert "slow_cinematic" in DIRECTOR_STYLES
     preset = get_director_style("slow_cinematic")
     assert "slow" in preset.storyboard_guidance.lower()
-    print(f"[OK] Director style preset resolves: {preset.label} -> lens {preset.default_lens}")
+    assert get_director_style("does_not_exist").label  # falls back, never raises
 
-    fake_portrait_calls = []
-    music_call_count = 0
+
+@pytest.mark.asyncio
+async def test_pipeline_invariants(monkeypatch):
+    """Drive the full idea->video pipeline once and assert the three invariants."""
+    portrait_calls = []
+    storyboard_calls = []
+    music_calls = []
 
     async def fake_generate_image(self, prompt, aspect_ratio="1:1"):
-        fake_portrait_calls.append(prompt)
-        return f"https://fake.cdn/portrait_{len(fake_portrait_calls)}.png"
-
-    fake_storyboard_calls = []
-
-    class FakeShot:
-        def __init__(self, idx):
-            self.idx = idx
-            self.visual_desc = "Maya walks through a corridor."
-            self.motion_desc = "steady tracking shot"
-            self.audio_desc = "ambient hum"
-            self.shot_type = "medium shot"
-            self.camera_movement = "slow push-in"
-            self.lens = "50mm"
-
-        def model_dump(self):
-            return {
-                "idx": self.idx,
-                "visual_desc": self.visual_desc,
-                "motion_desc": self.motion_desc,
-                "audio_desc": self.audio_desc,
-                "shot_type": self.shot_type,
-                "camera_movement": self.camera_movement,
-                "lens": self.lens,
-            }
-
-    async def fake_design_storyboard(self, script, characters, user_requirement, director_style="cinematic_balanced"):
-        fake_storyboard_calls.append(director_style)
-        return [FakeShot(0)]
+        portrait_calls.append(prompt)
+        return f"https://fake.cdn/portrait_{len(portrait_calls)}.png"
 
     async def fake_generate_image_with_reference(self, prompt, reference_url, aspect_ratio="16:9"):
         return f"https://fake.cdn/frame_from_{reference_url.split('/')[-1]}"
@@ -67,85 +74,141 @@ async def main():
     async def fake_generate_video_from_image(self, prompt, image_url, duration=5, aspect_ratio="16:9"):
         return "https://fake.cdn/video.mp4"
 
+    async def fake_design_storyboard(self, script, characters, user_requirement="", director_style="cinematic_balanced"):
+        storyboard_calls.append(director_style)
+        return [FakeShot(0)]
+
+    async def fake_write_script(self, idea, style="Cinematic", num_scenes=3, user_requirement=""):
+        return DramaScript(
+            title="Maya",
+            logline=idea,
+            mood="cinematic",
+            estimated_duration_seconds=24,
+            characters=[CharacterProfile(name="Maya", description="30s woman, dark hair", role="protagonist")],
+            scenes=[f"Scene {i}: Maya walks." for i in range(num_scenes)],
+        )
+
     async def fake_download_video(url, path):
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "wb") as f:
             f.write(b"fake video bytes")
+        return path
 
     async def fake_concatenate_videos(paths, out_path):
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
         with open(out_path, "wb") as f:
             f.write(b"fake concatenated video")
+        return out_path
 
     async def fake_add_background_music(video_path, output_path, music_url=None):
-        nonlocal music_call_count
-        music_call_count += 1
+        music_calls.append(output_path)
         with open(output_path, "wb") as f:
             f.write(b"fake video with music")
         return output_path
 
-    with patch("tools.muapi_image_generator.MuAPIImageGenerator.generate_image", new=fake_generate_image), \
-         patch("tools.muapi_image_generator.MuAPIImageGenerator.generate_image_with_reference", new=fake_generate_image_with_reference), \
-         patch("tools.muapi_video_generator.MuAPIVideoGenerator.generate_video_from_image", new=fake_generate_video_from_image), \
-         patch("agents.storyboard_artist.StoryboardArtist.design_storyboard", new=fake_design_storyboard), \
-         patch("pipelines.script2video.download_video", new=fake_download_video), \
-         patch("pipelines.script2video.concatenate_videos", new=fake_concatenate_videos), \
-         patch("pipelines.idea2video.concatenate_videos", new=fake_concatenate_videos), \
-         patch("pipelines.idea2video.add_background_music", new=fake_add_background_music):
+    import agents.screenwriter as screenwriter_mod
+    import agents.storyboard_artist as storyboard_mod
+    import pipelines.idea2video as idea2video_mod
+    import pipelines.script2video as script2video_mod
+    import tools.muapi_image_generator as image_mod
+    import tools.muapi_video_generator as video_mod
 
-        from pipelines.idea2video import Idea2VideoPipeline
-        from pipelines.script2video import Script2VideoPipeline
+    monkeypatch.setattr(image_mod.MuAPIImageGenerator, "generate_image", fake_generate_image)
+    monkeypatch.setattr(image_mod.MuAPIImageGenerator, "generate_image_with_reference", fake_generate_image_with_reference)
+    monkeypatch.setattr(video_mod.MuAPIVideoGenerator, "generate_video_from_image", fake_generate_video_from_image)
+    monkeypatch.setattr(storyboard_mod.StoryboardArtist, "design_storyboard", fake_design_storyboard)
+    monkeypatch.setattr(screenwriter_mod.ScreenwriterAgent, "write_script", fake_write_script)
+    monkeypatch.setattr(script2video_mod, "download_video", fake_download_video)
+    monkeypatch.setattr(script2video_mod, "concatenate_videos", fake_concatenate_videos)
+    monkeypatch.setattr(idea2video_mod, "concatenate_videos", fake_concatenate_videos)
+    monkeypatch.setattr(idea2video_mod, "add_background_music", fake_add_background_music)
 
-        pipeline = Idea2VideoPipeline(api_key="test-key-not-real")
+    pipeline = idea2video_mod.Idea2VideoPipeline(api_key="test-key-not-real")
+    result = await pipeline.run(
+        idea="Maya walks through the frozen city.",
+        style="Cinematic",
+        director_style="slow_cinematic",
+        num_scenes=3,
+        working_dir="/tmp/_museforge_test_drama",
+    )
 
-        characters = [
-            CharacterInScene(
-                idx=0, name="Maya", static_features="30s woman, dark hair",
-                dynamic_features="arctic parka", is_visible=True,
-            )
-        ]
+    # 1) Character portrait locked exactly once for the whole drama.
+    assert len(portrait_calls) == 1, f"Portrait regenerated across scenes: {len(portrait_calls)}"
 
-        portraits = await pipeline._lock_character_portraits(characters, style="Cinematic")
-        assert "Maya" in portraits
-        assert len(fake_portrait_calls) == 1
-        print(f"[OK] Locked portrait generated once for Maya: {portraits['Maya']}")
+    # 2) director_style propagated to the storyboard artist on every scene.
+    assert storyboard_calls == ["slow_cinematic"] * 3, storyboard_calls
 
-        async def noop_progress(stage, message, progress, data=None):
-            pass
+    # 3) Background music added exactly once, on the final concatenated drama.
+    assert len(music_calls) == 1, f"Music added {len(music_calls)} times, expected 1"
 
-        s2v = Script2VideoPipeline(api_key="test-key-not-real")
+    assert result["scene_count"] == 3
+    assert result["video_path"] and os.path.exists(result["video_path"])
 
-        for scene_idx in (0, 1, 2):
-            video_path = await s2v.run(
-                script="Maya walks down the corridor.",
-                characters=characters,
-                user_requirement="",
-                style="Cinematic",
-                working_dir=f"/tmp/_smoke_scene_{scene_idx}",
-                progress_callback=noop_progress,
-                scene_idx=scene_idx,
-                character_portraits=portraits,
-                director_style="slow_cinematic",
-            )
-            assert os.path.exists(video_path)
 
-        assert len(fake_portrait_calls) == 1, (
-            f"Character portrait was regenerated across scenes! Expected 1, got {len(fake_portrait_calls)}"
-        )
-        print(f"[OK] Portrait NOT regenerated across 3 scenes — still {len(fake_portrait_calls)} call total")
+@pytest.mark.asyncio
+async def test_scene_pipeline_returns_shots(monkeypatch):
+    """A single scene returns a downloadable path plus per-shot metadata."""
+    import pipelines.script2video as script2video_mod
+    import tools.muapi_image_generator as image_mod
+    import tools.muapi_video_generator as video_mod
+    import agents.storyboard_artist as storyboard_mod
 
-        assert fake_storyboard_calls == ["slow_cinematic"] * 3
-        print(f"[OK] director_style propagated to storyboard artist every scene: {fake_storyboard_calls}")
+    async def fake_img(self, prompt, aspect_ratio="1:1"):
+        return "https://fake.cdn/img.png"
 
-        # CRITICAL: Background music must be added exactly ONCE, on the final
-        # concatenated drama, not per scene. This assertion guards against
-        # regressions where someone re-introduces per-scene music calls.
-        assert music_call_count == 1, (
-            f"Background music called {music_call_count} times, expected exactly 1 "
-            "(on the final concatenated video, not per scene)."
-        )
-        print(f"[OK] Background music called exactly once: {music_call_count}")
+    async def fake_img_ref(self, prompt, reference_url, aspect_ratio="16:9"):
+        return "https://fake.cdn/frame.png"
 
-    print("\nALL SMOKE TESTS PASSED ✅")
+    async def fake_vid(self, prompt, image_url, duration=5, aspect_ratio="16:9"):
+        return "https://fake.cdn/clip.mp4"
+
+    async def fake_storyboard(self, script, characters, user_requirement="", director_style="cinematic_balanced"):
+        return [FakeShot(0)]
+
+    async def fake_download(url, path):
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(b"x")
+        return path
+
+    monkeypatch.setattr(image_mod.MuAPIImageGenerator, "generate_image", fake_img)
+    monkeypatch.setattr(image_mod.MuAPIImageGenerator, "generate_image_with_reference", fake_img_ref)
+    monkeypatch.setattr(video_mod.MuAPIVideoGenerator, "generate_video_from_image", fake_vid)
+    monkeypatch.setattr(storyboard_mod.StoryboardArtist, "design_storyboard", fake_storyboard)
+    monkeypatch.setattr(script2video_mod, "download_video", fake_download)
+
+    s2v = script2video_mod.Script2VideoPipeline(api_key="test-key-not-real")
+    characters = [CharacterInScene(idx=0, name="Maya", static_features="30s woman", is_visible=True)]
+    result = await s2v.run(
+        script="Maya walks.",
+        characters=characters,
+        working_dir="/tmp/_museforge_test_scene",
+        character_portraits={"Maya": "https://fake.cdn/portrait.png"},
+        director_style="slow_cinematic",
+    )
+    assert result["path"] and os.path.exists(result["path"])
+    assert result["shots"] and result["shots"][0]["video_url"] == "https://fake.cdn/clip.mp4"
+
+
+@pytest.mark.asyncio
+async def test_demo_mode_runs_offline(monkeypatch):
+    """Demo mode produces a full result with placeholder assets and no network."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    from pipelines.idea2video import Idea2VideoPipeline
+
+    pipeline = Idea2VideoPipeline(api_key="", demo=True)
+    result = await pipeline.run(
+        idea="A lighthouse keeper meets a stranger at dawn.",
+        num_scenes=2,
+        working_dir="/tmp/_museforge_test_demo",
+    )
+
+    assert result["demo"] is True
+    assert result["video_url"], "demo should expose a playable video_url"
+    assert result["scene_count"] == 2
+    first_frame = result["scenes"][0]["shots"][0]["frame_url"]
+    assert first_frame.startswith("https://picsum.photos/")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(pytest.main([__file__, "-v"]))

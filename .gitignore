@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.pycache/
+*.egg-info/
+
+# Env / secrets
+.env
+.env.local
+server/.env
+client/.env
+client/.env.local
+
+# Node / Next.js
+node_modules/
+client/.next/
+client/out/
+npm-debug.log*
+yarn-error.log*
+
+# Generated media / job artifacts
+/tmp/museforge_jobs/
+server/jobs_output/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/

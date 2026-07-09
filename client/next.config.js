@@ -1,1 +1,17 @@
-module.exports = { async rewrites() { return process.env.NODE_ENV === "development" ? [{ source: "/api/:path*", destination: "http://localhost:8000/api/:path*" }] : []; } };
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  eslint: {
+    ignoreDuringBuilds: true,
+  },
+  async rewrites() {
+    const apiUrl = process.env.API_URL || "http://localhost:8000";
+    return [
+      {
+        source: "/api/:path*",
+        destination: `${apiUrl}/api/:path*`,
+      },
+    ];
+  },
+};
+
+module.exports = nextConfig;

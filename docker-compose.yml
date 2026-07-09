@@ -1,0 +1,25 @@
+services:
+  server:
+    build: ./server
+    ports:
+      - "8000:8000"
+    environment:
+      - MUAPI_KEY=${MUAPI_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - MUSEFORGE_DEMO=${MUSEFORGE_DEMO:-}
+      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+      - MUSEFORGE_JOBS_DIR=/data/jobs
+    volumes:
+      - museforge_jobs:/data/jobs
+
+  client:
+    build: ./client
+    ports:
+      - "3000:3000"
+    environment:
+      - API_URL=http://server:8000
+    depends_on:
+      - server
+
+volumes:
+  museforge_jobs:
