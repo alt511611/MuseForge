@@ -1,5 +1,4 @@
 import "../globals.css";
-
 export const metadata = {
   title: "MuseForge — AI Micro-Drama Studio",
   description: "Transform any idea into a complete cinematic video using a multi-agent AI pipeline.",
