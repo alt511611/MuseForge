@@ -4,7 +4,7 @@ import asyncio
 import os
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -26,7 +26,7 @@ class JobEvent:
     progress: float
     data: Optional[Dict[str, Any]] = None
     seq: int = 0
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> dict:
         return {
@@ -55,7 +55,7 @@ class Job:
     events: List[JobEvent] = field(default_factory=list)
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     _seq: int = 0
     _subscribers: List[asyncio.Queue] = field(default_factory=list, repr=False)
 

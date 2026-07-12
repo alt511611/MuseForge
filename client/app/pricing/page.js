@@ -1,7 +1,7 @@
 "use client";
 
 import { useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { Check, Zap, Film, Crown } from "lucide-react";
 import CheckoutButton from "../../components/CheckoutButton";
@@ -71,7 +71,7 @@ const PLANS = [
   },
 ];
 
-export default function PricingPage() {
+function PricingContent() {
   const { user } = useAuth();
   const searchParams = useSearchParams();
   const success = searchParams.get("success");
@@ -227,5 +227,13 @@ export default function PricingPage() {
         </div>
       </div>
     </main>
+  );
+}
+
+export default function PricingPage() {
+  return (
+    <Suspense fallback={null}>
+      <PricingContent />
+    </Suspense>
   );
 }

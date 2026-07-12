@@ -1,11 +1,11 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { Suspense, useState, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "../../contexts/AuthContext";
 import { Film, Mail, Lock, Loader2, Chrome } from "lucide-react";
 
-export default function LoginPage() {
+function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const next = searchParams.get("next") || "/";
@@ -173,5 +173,19 @@ export default function LoginPage() {
         </div>
       </div>
     </main>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: "#0a0a0f" }}>
+          <Loader2 className="animate-spin" size={32} style={{ color: "#7c3aed" }} />
+        </div>
+      }
+    >
+      <LoginForm />
+    </Suspense>
   );
 }

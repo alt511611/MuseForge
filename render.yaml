@@ -1,0 +1,38 @@
+# Render Blueprint — see https://render.com/docs/blueprint-spec
+#
+# IMPORTANT: the backend MUST be deployed with `env: docker` (not Render's
+# native Python runtime). moviepy needs the ffmpeg binary, which is only
+# guaranteed to be present via server/Dockerfile's `apt-get install ffmpeg`
+# step. If you create this service manually in the Render dashboard instead
+# of using this blueprint, make sure to pick "Docker" as the environment,
+# not "Python 3".
+services:
+  - type: web
+    name: museforge-api
+    env: docker
+    dockerfilePath: ./server/Dockerfile
+    dockerContext: ./server
+    plan: starter
+    envVars:
+      - key: MUAPI_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: MUSEFORGE_DEMO
+        value: ""
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICE_CREATOR
+        sync: false
+      - key: STRIPE_PRICE_PRO
+        sync: false
+      - key: ALLOWED_ORIGINS
+        value: "https://your-project.vercel.app"
+      - key: MUSEFORGE_JOBS_DIR
+        value: /tmp/museforge_jobs

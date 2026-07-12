@@ -83,18 +83,23 @@ create policy "users_update_own_profile"
 create policy "users_read_own_jobs"
   on public.jobs for select using (auth.uid() = user_id);
 
--- Adminler her şeyi yönetir
+-- Adminler her şeyi yönetir.
+--
+-- NOTE: this checks the JWT's app_metadata directly via auth.jwt(), NOT a
+-- subquery against public.profiles. A policy on public.profiles that itself
+-- queries public.profiles (`exists (select 1 from public.profiles where ...)`)
+-- is a well-known Supabase/Postgres footgun — it can trigger
+-- "infinite recursion detected in policy for relation profiles" at query
+-- time. Reading the role out of the JWT avoids the self-reference entirely.
+-- This requires setting the role in auth.users.raw_app_meta_data (see the
+-- "Admin atama" section below), not just in the profiles table.
 create policy "admins_all_profiles"
   on public.profiles for all
-  using (exists (
-    select 1 from public.profiles where id = auth.uid() and role = 'admin'
-  ));
+  using (coalesce(auth.jwt() -> 'app_metadata' ->> 'role', '') = 'admin');
 
 create policy "admins_all_jobs"
   on public.jobs for all
-  using (exists (
-    select 1 from public.profiles where id = auth.uid() and role = 'admin'
-  ));
+  using (coalesce(auth.jwt() -> 'app_metadata' ->> 'role', '') = 'admin');
 
 -- ── Plan limitleri yardımcı görünümü ──────────────────────────────────────────
 create or replace view public.plan_limits as
@@ -106,13 +111,18 @@ union all
 select 'pro',          150, 5, true;
 
 -- ── Admin atama ───────────────────────────────────────────────────────────────
--- Bir kullanıcıyı admin yapmak için:
---   update public.profiles set role = 'admin' where email = 'admin@example.com';
+-- IMPORTANT: after the RLS fix above, admin RLS access is granted via the JWT's
+-- app_metadata ONLY — updating public.profiles.role alone is NOT enough for
+-- RLS purposes (it's still fine to keep profiles.role in sync for display in
+-- the UI, but it doesn't grant any RLS bypass by itself).
 --
--- Veya JWT app_metadata ile (daha güvenli):
+-- To make a user an admin, run:
 --   update auth.users
 --   set raw_app_meta_data = raw_app_meta_data || '{"role":"admin"}'
 --   where email = 'admin@example.com';
+--
+-- Optionally also mirror it into profiles for UI display:
+--   update public.profiles set role = 'admin' where email = 'admin@example.com';
 
 -- ── Stripe webhook'un güncelleyeceği yardımcı fonksiyon ──────────────────────
 -- Backend'deki stripe.py bu fonksiyonu doğrudan çağırmak yerine Supabase

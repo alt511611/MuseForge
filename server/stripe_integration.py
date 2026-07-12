@@ -1,5 +1,6 @@
 """Stripe payment integration for MuseForge subscriptions."""
 
+import asyncio
 import os
 from typing import Optional
 
@@ -37,7 +38,10 @@ async def create_checkout_session(
     if not STRIPE_SECRET_KEY:
         raise ValueError("STRIPE_SECRET_KEY is not configured")
 
-    session = stripe.checkout.Session.create(
+    # stripe's SDK is synchronous under the hood; run it in a thread so it
+    # doesn't block the event loop for other concurrent requests.
+    session = await asyncio.to_thread(
+        stripe.checkout.Session.create,
         payment_method_types=["card"],
         mode="subscription",
         line_items=[{"price": price_id, "quantity": 1}],
@@ -102,7 +106,7 @@ async def handle_webhook(payload: bytes, sig_header: str) -> dict:
         plan = "creator"
         credits = PLAN_CREDITS["creator"]
         if subscription_id:
-            sub = stripe.Subscription.retrieve(subscription_id)
+            sub = await asyncio.to_thread(stripe.Subscription.retrieve, subscription_id)
             price_id = sub["items"]["data"][0]["price"]["id"]
             pro_price = os.environ.get("STRIPE_PRICE_PRO", "")
             if price_id == pro_price:
