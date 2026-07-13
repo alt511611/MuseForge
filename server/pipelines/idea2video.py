@@ -55,11 +55,23 @@ class Idea2VideoPipeline:
         self,
         characters: List[CharacterInScene],
         style: str = "Cinematic",
+        character_portraits_override: Optional[Dict[str, str]] = None,
     ) -> Dict[str, str]:
-        """Generate one portrait per character for the entire drama (consistency lock)."""
-        portraits: Dict[str, str] = {}
+        """Generate one portrait per character for the entire drama (consistency lock).
+
+        character_portraits_override: user-uploaded reference photo(s), keyed
+        by character name. These are used as-is instead of generating a
+        fresh AI portrait for that character — this is what lets a user
+        upload their own face/character photo and have it appear consistently
+        across every scene.
+        """
+        portraits: Dict[str, str] = dict(character_portraits_override or {})
         for char in characters:
             if not char.is_visible:
+                continue
+            if char.name in portraits:
+                # Already supplied by the user — skip AI generation for this one.
+                char.portrait_url = portraits[char.name]
                 continue
             prompt = (
                 f"Character portrait, {style} style. "
@@ -118,6 +130,7 @@ class Idea2VideoPipeline:
         progress_callback: Optional[Callable] = None,
         music_url: Optional[str] = None,
         is_cancelled: Optional[Callable[[], bool]] = None,
+        character_portraits_override: Optional[Dict[str, str]] = None,
     ) -> dict:
         os.makedirs(working_dir, exist_ok=True)
 
@@ -142,9 +155,26 @@ class Idea2VideoPipeline:
                 )
             ]
 
+        # If the user uploaded a reference photo under a name that doesn't
+        # match any character the screenwriter came up with, add it as its
+        # own character rather than silently dropping the upload.
+        if character_portraits_override:
+            existing_names = {c.name for c in characters}
+            for name in character_portraits_override:
+                if name not in existing_names:
+                    characters.append(
+                        CharacterInScene(
+                            idx=len(characters), name=name,
+                            static_features="uploaded reference photo",
+                            dynamic_features="", is_visible=True,
+                        )
+                    )
+
         _check_cancel()
         await progress("portraits", "Locking character portraits for consistency", 10)
-        portraits = await self._lock_character_portraits(characters, style)
+        portraits = await self._lock_character_portraits(
+            characters, style, character_portraits_override=character_portraits_override
+        )
 
         scene_paths: List[str] = []
         scene_results: List[Dict[str, Any]] = []

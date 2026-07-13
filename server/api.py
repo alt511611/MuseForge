@@ -56,6 +56,8 @@ class GenerateRequest(BaseModel):
     aspect_ratio: str = "16:9"
     num_scenes: int = Field(default=3, ge=2, le=5)
     user_requirement: str = ""
+    character_image: Optional[str] = None   # base64 data URI, e.g. "data:image/png;base64,..."
+    character_name: str = ""                # required alongside character_image
 
 
 class GenerateResponse(BaseModel):
@@ -136,6 +138,8 @@ async def generate(
         demo=demo,
         user_id=current_user.user_id if current_user else None,
         user_email=current_user.email if current_user else None,
+        character_image=req.character_image,
+        character_name=req.character_name,
     )
 
     background_tasks.add_task(run_generation_job, job, api_key)

@@ -10,7 +10,11 @@ import {
   Loader2,
   Clock,
   FlaskConical,
+  Upload,
+  X,
 } from "lucide-react";
+
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024; // 5MB — keep in sync with server/constants.py
 
 const STYLES = [
   "Cinematic",
@@ -38,7 +42,7 @@ const ASPECT_RATIOS = [
   { id: "1:1", label: "Square 1:1", icon: Clapperboard },
 ];
 
-export default function IdeaForm({ onSubmit, isSubmitting }) {
+export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
   const [idea, setIdea] = useState("");
   const [style, setStyle] = useState("Cinematic");
   const [directorStyle, setDirectorStyle] = useState("cinematic_balanced");
@@ -49,6 +53,18 @@ export default function IdeaForm({ onSubmit, isSubmitting }) {
   const [charCount, setCharCount] = useState(0);
   const [estimate, setEstimate] = useState(null);
   const [demoMode, setDemoMode] = useState(false);
+  const [characterImage, setCharacterImage] = useState(null);
+  const [characterName, setCharacterName] = useState("");
+  const [uploadError, setUploadError] = useState(null);
+
+  // Allows landing-page example cards to pre-fill idea + style, and
+  // scrolls the form into view so the click feels responsive.
+  useEffect(() => {
+    if (!prefill) return;
+    if (prefill.idea) setIdea(prefill.idea);
+    if (prefill.style) setStyle(prefill.style);
+    if (prefill.directorStyle) setDirectorStyle(prefill.directorStyle);
+  }, [prefill]);
 
   useEffect(() => {
     setCharCount(idea.length);
@@ -76,6 +92,31 @@ export default function IdeaForm({ onSubmit, isSubmitting }) {
     };
   }, [numScenes]);
 
+  const handlePhotoUpload = (e) => {
+    const file = e.target.files?.[0];
+    setUploadError(null);
+    if (!file) return;
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setUploadError("Fotoğraf 5MB'dan küçük olmalı.");
+      e.target.value = "";
+      return;
+    }
+    if (!file.type.startsWith("image/")) {
+      setUploadError("Lütfen bir görsel dosyası seçin.");
+      e.target.value = "";
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (ev) => setCharacterImage(ev.target.result);
+    reader.readAsDataURL(file);
+  };
+
+  const clearPhoto = () => {
+    setCharacterImage(null);
+    setCharacterName("");
+    setUploadError(null);
+  };
+
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!idea.trim() || isSubmitting) return;
@@ -86,6 +127,8 @@ export default function IdeaForm({ onSubmit, isSubmitting }) {
       aspect_ratio: aspectRatio,
       num_scenes: numScenes,
       user_requirement: userRequirement.trim(),
+      character_image: characterImage,
+      character_name: characterImage ? characterName.trim() : "",
     });
   };
 
@@ -192,6 +235,74 @@ export default function IdeaForm({ onSubmit, isSubmitting }) {
             </button>
           ))}
         </div>
+      </div>
+
+      <div className="mb-6">
+        <label className="text-sm font-medium mb-2 block" style={{ color: "#94a3b8" }}>
+          Karakter Fotoğrafı{" "}
+          <span style={{ color: "#4b5563", fontWeight: 400 }}>(opsiyonel — tutarlılık için)</span>
+        </label>
+        <p className="text-xs mb-3" style={{ color: "#64748b" }}>
+          Bir yüz fotoğrafı yükleyip karakter adını yazarsanız, o karakter tüm sahnelerde
+          bu fotoğrafla kilitlenir — her seferinde farklı bir yüzle üretilmez.
+        </p>
+        {!characterImage ? (
+          <>
+            <input
+              type="file"
+              accept="image/*"
+              onChange={handlePhotoUpload}
+              className="hidden"
+              id="character-photo-upload"
+              disabled={isSubmitting}
+            />
+            <label
+              htmlFor="character-photo-upload"
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm cursor-pointer transition-all"
+              style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#94a3b8" }}
+            >
+              <Upload size={15} />
+              Fotoğraf seç
+            </label>
+          </>
+        ) : (
+          <div className="flex items-center gap-3">
+            <img
+              src={characterImage}
+              alt="Karakter önizleme"
+              className="w-12 h-12 rounded-full object-cover"
+              style={{ border: "2px solid #7c3aed" }}
+            />
+            <input
+              type="text"
+              value={characterName}
+              onChange={(e) => setCharacterName(e.target.value)}
+              placeholder="Karakterin adı (zorunlu)"
+              maxLength={60}
+              className="flex-1 px-4 py-2.5 rounded-xl text-sm focus:outline-none"
+              style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#e2e8f0" }}
+              disabled={isSubmitting}
+            />
+            <button
+              type="button"
+              onClick={clearPhoto}
+              className="p-2 rounded-lg transition-colors"
+              style={{ color: "#64748b" }}
+              disabled={isSubmitting}
+              aria-label="Fotoğrafı kaldır"
+            >
+              <X size={16} />
+            </button>
+          </div>
+        )}
+        {uploadError && (
+          <p className="text-xs mt-2" style={{ color: "#fca5a5" }}>{uploadError}</p>
+        )}
+        {characterImage && !characterName.trim() && (
+          <p className="text-xs mt-2" style={{ color: "#fde047" }}>
+            Senaryonun bu fotoğrafı doğru karakterle eşleştirebilmesi için karakter adını yazın.
+          </p>
+        )}
       </div>
 
       <button

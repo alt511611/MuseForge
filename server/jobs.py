@@ -52,6 +52,8 @@ class Job:
     demo: bool = False
     user_id: Optional[str] = None
     user_email: Optional[str] = None
+    character_image: Optional[str] = None   # base64 data URI from file upload
+    character_name: str = ""                # required alongside character_image
     events: List[JobEvent] = field(default_factory=list)
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
@@ -140,6 +142,7 @@ JOBS_DIR = os.environ.get("MUSEFORGE_JOBS_DIR", "/tmp/museforge_jobs")
 async def run_generation_job(job: Job, api_key: str):
     from pipelines.idea2video import Idea2VideoPipeline
     from pipelines.script2video import PipelineCancelled
+    from tools.muapi_uploader import InvalidCharacterPhoto, upload_base64_image
 
     job.status = JobStatus.RUNNING
     working_dir = os.path.join(JOBS_DIR, job.id)
@@ -149,6 +152,28 @@ async def run_generation_job(job: Job, api_key: str):
 
     async def progress_callback(stage, message, progress, data=None):
         await job_store.emit(job, stage, message, progress, data)
+
+    character_portraits_override: Dict[str, str] = {}
+    if job.character_image and job.character_name.strip():
+        try:
+            await progress_callback(
+                "portraits", f"Uploading reference photo for {job.character_name}...", 3
+            )
+            uploaded_url = await upload_base64_image(
+                job.character_image, api_key, demo=job.demo
+            )
+            character_portraits_override[job.character_name.strip()] = uploaded_url
+        except InvalidCharacterPhoto as exc:
+            job.error = str(exc)
+            job.status = JobStatus.FAILED
+            await job_store.emit(job, "error", str(exc), 0)
+            return
+        except Exception as exc:
+            # Non-fatal: continue without the uploaded reference rather than
+            # failing the whole generation over an upload hiccup.
+            await job_store.emit(
+                job, "portraits", f"Could not use uploaded photo, generating one instead: {exc}", 3
+            )
 
     try:
         pipeline = Idea2VideoPipeline(api_key=api_key, demo=job.demo)
@@ -162,6 +187,7 @@ async def run_generation_job(job: Job, api_key: str):
             working_dir=working_dir,
             progress_callback=progress_callback,
             is_cancelled=is_cancelled,
+            character_portraits_override=character_portraits_override or None,
         )
         if is_cancelled():
             await job_store.emit(job, "cancelled", "Generation cancelled", 100)
