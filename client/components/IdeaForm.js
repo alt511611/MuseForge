@@ -13,6 +13,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
+import { useLanguage } from "../contexts/LanguageContext";
 
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024; // 5MB — keep in sync with server/constants.py
 
@@ -43,6 +44,7 @@ const ASPECT_RATIOS = [
 ];
 
 export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
+  const { t } = useLanguage();
   const [idea, setIdea] = useState("");
   const [style, setStyle] = useState("Cinematic");
   const [directorStyle, setDirectorStyle] = useState("cinematic_balanced");
@@ -97,12 +99,12 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
     setUploadError(null);
     if (!file) return;
     if (file.size > MAX_UPLOAD_BYTES) {
-      setUploadError("Fotoğraf 5MB'dan küçük olmalı.");
+      setUploadError(t("form_photo_size_error") || "Photo must be smaller than 5MB.");
       e.target.value = "";
       return;
     }
     if (!file.type.startsWith("image/")) {
-      setUploadError("Lütfen bir görsel dosyası seçin.");
+      setUploadError(t("form_photo_type_error") || "Please select an image file.");
       e.target.value = "";
       return;
     }
@@ -141,13 +143,13 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
           style={{ color: "#a78bfa" }}
         >
           <Sparkles size={16} />
-          Your Idea
+          {t("form_idea_label")}
         </label>
         <textarea
           id="idea"
           value={idea}
           onChange={(e) => setIdea(e.target.value)}
-          placeholder="A lone astronaut discovers a garden growing inside a derelict space station..."
+          placeholder={t("form_idea_hint")}
           rows={4}
           maxLength={2000}
           className="w-full px-4 py-3 rounded-xl text-base resize-none transition-all focus:outline-none"
@@ -159,7 +161,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
           disabled={isSubmitting}
         />
         <div className="flex justify-between mt-2 text-xs" style={{ color: "#64748b" }}>
-          <span>Describe your micro-drama in 1-3 sentences</span>
+          <span>{t("form_idea_hint")}</span>
           <span>{charCount}/2000</span>
         </div>
       </div>
@@ -167,7 +169,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
         <div>
           <label className="text-sm font-medium mb-2 block" style={{ color: "#94a3b8" }}>
-            Visual Style
+            {t("form_style_label")}
           </label>
           <select
             value={style}
@@ -190,7 +192,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
 
         <div>
           <label className="text-sm font-medium mb-2 block" style={{ color: "#94a3b8" }}>
-            Director Preset
+            {t("form_director_label")}
           </label>
           <select
             value={directorStyle}
@@ -214,7 +216,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
 
       <div className="mb-6">
         <label className="text-sm font-medium mb-3 block" style={{ color: "#94a3b8" }}>
-          Aspect Ratio
+          {t("form_ratio_label")}
         </label>
         <div className="grid grid-cols-3 gap-3">
           {ASPECT_RATIOS.map(({ id, label, icon: Icon }) => (
@@ -239,12 +241,11 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
 
       <div className="mb-6">
         <label className="text-sm font-medium mb-2 block" style={{ color: "#94a3b8" }}>
-          Karakter Fotoğrafı{" "}
-          <span style={{ color: "#4b5563", fontWeight: 400 }}>(opsiyonel — tutarlılık için)</span>
+          {t("form_char_label")}{" "}
+          <span style={{ color: "#4b5563", fontWeight: 400 }}>{t("form_char_optional")}</span>
         </label>
         <p className="text-xs mb-3" style={{ color: "#64748b" }}>
-          Bir yüz fotoğrafı yükleyip karakter adını yazarsanız, o karakter tüm sahnelerde
-          bu fotoğrafla kilitlenir — her seferinde farklı bir yüzle üretilmez.
+          {t("form_char_desc")}
         </p>
         {!characterImage ? (
           <>
@@ -262,7 +263,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
               style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#94a3b8" }}
             >
               <Upload size={15} />
-              Fotoğraf seç
+              {t("form_upload_btn")}
             </label>
           </>
         ) : (
@@ -277,7 +278,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
               type="text"
               value={characterName}
               onChange={(e) => setCharacterName(e.target.value)}
-              placeholder="Karakterin adı (zorunlu)"
+              placeholder={t("form_char_name_ph")}
               maxLength={60}
               className="flex-1 px-4 py-2.5 rounded-xl text-sm focus:outline-none"
               style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#e2e8f0" }}
@@ -300,7 +301,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
         )}
         {characterImage && !characterName.trim() && (
           <p className="text-xs mt-2" style={{ color: "#fde047" }}>
-            Senaryonun bu fotoğrafı doğru karakterle eşleştirebilmesi için karakter adını yazın.
+            {t("form_char_name_warning") || "Enter the character name so the script can match this photo to the right character."}
           </p>
         )}
       </div>
@@ -315,14 +316,14 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
           size={16}
           className={`transition-transform ${showAdvanced ? "rotate-180" : ""}`}
         />
-        Advanced Options
+        {t("form_advanced")}
       </button>
 
       {showAdvanced && (
         <div className="mb-6 space-y-4 animate-fade-in">
           <div>
             <label className="text-sm font-medium mb-2 block" style={{ color: "#94a3b8" }}>
-              Number of Scenes ({numScenes})
+              {t("form_scenes_label")} ({numScenes})
             </label>
             <input
               type="range"
@@ -340,13 +341,13 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
           </div>
           <div>
             <label className="text-sm font-medium mb-2 block" style={{ color: "#94a3b8" }}>
-              Additional Requirements
+              {t("form_req_label")}
             </label>
             <input
               type="text"
               value={userRequirement}
               onChange={(e) => setUserRequirement(e.target.value)}
-              placeholder="e.g. rainy atmosphere, no dialogue, warm color palette"
+              placeholder={t("form_req_ph")}
               className="w-full px-4 py-2.5 rounded-xl text-sm focus:outline-none"
               style={{
                 backgroundColor: "#0a0a0f",
@@ -392,12 +393,12 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
         {isSubmitting ? (
           <>
             <Loader2 size={20} className="animate-spin" />
-            Starting Pipeline...
+            {t("form_generating")}
           </>
         ) : (
           <>
             <Clapperboard size={20} />
-            Generate Cinematic Video
+            {t("form_generate")}
           </>
         )}
       </button>

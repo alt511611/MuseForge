@@ -1,5 +1,6 @@
 import "../globals.css";
 import { AuthProvider } from "../contexts/AuthContext";
+import { LanguageProvider } from "../contexts/LanguageContext";
 import Navbar from "../components/Navbar";
 import CookieConsent from "../components/CookieConsent";
 
@@ -12,26 +13,27 @@ export const metadata = {
     template: "%s | MuseForge",
   },
   description:
-    "Fikirlerinizi yapay zeka ile sinemaya dönüştürün. Çok-etmenli AI pipeline ile saniyeler içinde sinematik video üretin.",
+    "Turn your ideas into cinematic videos with AI. Generate stunning micro-dramas with a multi-agent AI pipeline in minutes.",
   keywords: [
-    "AI video üretimi",
-    "yapay zeka video",
-    "sinematik video",
+    "AI video generation",
+    "artificial intelligence video",
+    "cinematic video",
     "MuseForge",
     "agentic AI",
     "video studio",
+    "AI filmmaking",
+    "text to video",
   ],
   authors: [{ name: "MuseForge", url: BASE_URL }],
   creator: "MuseForge",
   openGraph: {
     type: "website",
-    locale: "tr_TR",
-    alternateLocale: "en_US",
+    locale: "en_US",
     url: BASE_URL,
     siteName: "MuseForge",
     title: "MuseForge — Agentic AI Video Studio",
     description:
-      "Fikirlerinizi yapay zeka ile sinemaya dönüştürün. Çok-etmenli AI pipeline ile saniyeler içinde sinematik video üretin.",
+      "Turn your ideas into cinematic videos with AI. Generate stunning micro-dramas with a multi-agent AI pipeline in minutes.",
     images: [
       {
         url: "/og-image.png",
@@ -44,7 +46,7 @@ export const metadata = {
   twitter: {
     card: "summary_large_image",
     title: "MuseForge — Agentic AI Video Studio",
-    description: "Fikirlerinizi yapay zeka ile sinemaya dönüştürün.",
+    description: "Turn your ideas into cinematic videos with AI.",
     images: ["/og-image.png"],
     creator: "@museforge_ai",
     site: "@museforge_ai",
@@ -68,12 +70,14 @@ export const metadata = {
 
 export default function RootLayout({ children }) {
   return (
-    <html lang="tr">
+    <html lang="en" dir="ltr">
       <body className="antialiased min-h-screen" style={{ backgroundColor: "#0a0a0f" }}>
         <AuthProvider>
-          <Navbar />
-          {children}
-          <CookieConsent />
+          <LanguageProvider>
+            <Navbar />
+            {children}
+            <CookieConsent />
+          </LanguageProvider>
         </AuthProvider>
       </body>
     </html>

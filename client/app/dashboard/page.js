@@ -5,33 +5,35 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Film, Plus, ExternalLink, AlertCircle, Clock, CheckCircle2, XCircle, Loader2, Video, RefreshCw, CreditCard } from "lucide-react";
 import { useAuth } from "../../contexts/AuthContext";
+import { useLanguage } from "../../contexts/LanguageContext";
 import { createClient } from "../../lib/supabase";
 
 const PAGE_SIZE = 12;
 
-const STATUS_META = {
-  completed:  { label: "Tamamlandı", color: "#22c55e", Icon: CheckCircle2 },
-  failed:     { label: "Başarısız",  color: "#ef4444", Icon: XCircle },
-  running:    { label: "Üretiliyor", color: "#60a5fa", Icon: Loader2,  pulse: true },
-  queued:     { label: "Kuyrukta",   color: "#94a3b8", Icon: Clock },
-  cancelled:  { label: "İptal",      color: "#f59e0b", Icon: XCircle },
-};
-
 function StatusBadge({ status }) {
-  const meta = STATUS_META[status] || STATUS_META.queued;
-  const { label, color, Icon, pulse } = meta;
+  const { t } = useLanguage();
+  const META = {
+    completed: { key: "status_completed", color: "#22c55e", Icon: CheckCircle2 },
+    failed:    { key: "status_failed",    color: "#ef4444", Icon: XCircle },
+    running:   { key: "status_running",   color: "#60a5fa", Icon: Loader2, pulse: true },
+    queued:    { key: "status_queued",    color: "#94a3b8", Icon: Clock },
+    cancelled: { key: "status_cancelled", color: "#f59e0b", Icon: XCircle },
+  };
+  const meta = META[status] || META.queued;
+  const { key, color, Icon, pulse } = meta;
   return (
     <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium" style={{ backgroundColor: `${color}18`, color }}>
       <Icon size={11} className={pulse ? "animate-spin" : ""} />
-      {label}
+      {t(key)}
     </span>
   );
 }
 
-function JobCard({ job, apiBase }) {
+function JobCard({ job }) {
+  const { t } = useLanguage();
   const idea = job.idea?.length > 90 ? job.idea.slice(0, 90) + "…" : job.idea;
   const date = job.created_at
-    ? new Date(job.created_at).toLocaleDateString("tr-TR", { day: "2-digit", month: "short", year: "numeric" })
+    ? new Date(job.created_at).toLocaleDateString("en-US", { day: "2-digit", month: "short", year: "numeric" })
     : "-";
   const videoUrl = job.result?.video_url;
   const isActive = ["queued", "running"].includes(job.status);
@@ -39,7 +41,6 @@ function JobCard({ job, apiBase }) {
   return (
     <div className="glass rounded-2xl p-5 flex flex-col gap-3 hover:border-purple-600/40 transition-all"
       style={{ border: "1px solid rgba(124,58,237,0.1)" }}>
-
       <div className="flex items-start justify-between gap-2">
         <StatusBadge status={job.status} />
         {job.demo && (
@@ -48,11 +49,9 @@ function JobCard({ job, apiBase }) {
           </span>
         )}
       </div>
-
       <p className="text-sm leading-relaxed flex-1" style={{ color: "#cbd5e1" }}>
         {idea || <span style={{ color: "#475569" }}>—</span>}
       </p>
-
       <div className="flex items-center justify-between mt-auto pt-2 border-t" style={{ borderColor: "#1a1a26" }}>
         <span className="text-xs" style={{ color: "#475569" }}>{date}</span>
         <div className="flex items-center gap-2">
@@ -61,7 +60,7 @@ function JobCard({ job, apiBase }) {
               className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg transition-colors"
               style={{ backgroundColor: "rgba(96,165,250,0.12)", color: "#60a5fa" }}>
               <Loader2 size={11} className="animate-spin" />
-              İzle
+              {t("dash_watch")}
             </Link>
           )}
           {job.status === "completed" && (
@@ -71,14 +70,14 @@ function JobCard({ job, apiBase }) {
                   className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg transition-colors"
                   style={{ backgroundColor: "rgba(34,197,94,0.12)", color: "#22c55e" }}>
                   <Video size={11} />
-                  İzle
+                  {t("dash_watch")}
                 </a>
               )}
               <Link href={`/generate/${job.id}`}
                 className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg transition-colors"
                 style={{ backgroundColor: "#1a1a26", color: "#94a3b8", border: "1px solid #22223a" }}>
                 <ExternalLink size={11} />
-                Detay
+                {t("dash_detail")}
               </Link>
             </>
           )}
@@ -87,7 +86,7 @@ function JobCard({ job, apiBase }) {
               className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg transition-colors"
               style={{ backgroundColor: "rgba(239,68,68,0.12)", color: "#fca5a5" }}>
               <RefreshCw size={11} />
-              Tekrar
+              {t("dash_retry")}
             </Link>
           )}
         </div>
@@ -107,13 +106,13 @@ function SkeletonCard() {
   );
 }
 
-function ManageSubscriptionButton({ user, getAccessToken }) {
+function ManageSubscriptionButton({ getAccessToken }) {
+  const { t } = useLanguage();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
   const handleClick = async () => {
-    setLoading(true);
-    setError(null);
+    setLoading(true); setError(null);
     try {
       const token = await getAccessToken();
       const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || ""}/api/stripe-portal`, {
@@ -121,16 +120,10 @@ function ManageSubscriptionButton({ user, getAccessToken }) {
         headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify({ return_url: window.location.href }),
       });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.detail || "Portal başlatılamadı");
-      }
+      if (!res.ok) { const err = await res.json(); throw new Error(err.detail || "Portal unavailable"); }
       const { url } = await res.json();
       window.location.href = url;
-    } catch (err) {
-      setError(err.message);
-      setLoading(false);
-    }
+    } catch (err) { setError(err.message); setLoading(false); }
   };
 
   return (
@@ -139,7 +132,7 @@ function ManageSubscriptionButton({ user, getAccessToken }) {
         className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all"
         style={{ backgroundColor: "#12121a", border: "1px solid #22223a", color: "#94a3b8", opacity: loading ? 0.6 : 1 }}>
         {loading ? <Loader2 size={14} className="animate-spin" /> : <CreditCard size={14} />}
-        Aboneliğimi Yönet
+        {t("dash_manage_sub")}
       </button>
       {error && <p className="text-xs mt-1" style={{ color: "#fca5a5" }}>{error}</p>}
     </div>
@@ -148,6 +141,7 @@ function ManageSubscriptionButton({ user, getAccessToken }) {
 
 export default function DashboardPage() {
   const { user, loading: authLoading, getAccessToken } = useAuth();
+  const { t } = useLanguage();
   const router = useRouter();
 
   const [jobs, setJobs] = useState([]);
@@ -157,8 +151,6 @@ export default function DashboardPage() {
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(false);
 
-  const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
-
   useEffect(() => {
     if (!authLoading && !user) router.replace("/login?next=/dashboard");
   }, [user, authLoading, router]);
@@ -166,25 +158,18 @@ export default function DashboardPage() {
   const fetchJobs = useCallback(async (pageNum = 0) => {
     const supabase = createClient();
     if (!supabase) return;
-
-    setFetching(true);
-    setError(null);
-
+    setFetching(true); setError(null);
     try {
       const from = pageNum * PAGE_SIZE;
       const to = from + PAGE_SIZE - 1;
-
       const { data, error: err } = await supabase
         .from("jobs")
         .select("id, idea, status, demo, result, error, created_at, style")
         .order("created_at", { ascending: false })
         .range(from, to + 1);
-
       if (err) throw err;
-
       const slice = (data || []).slice(0, PAGE_SIZE);
       setHasMore((data || []).length > PAGE_SIZE);
-
       if (pageNum === 0) setJobs(slice);
       else setJobs((prev) => [...prev, ...slice]);
     } catch (err) {
@@ -197,26 +182,15 @@ export default function DashboardPage() {
   const fetchProfile = useCallback(async () => {
     const supabase = createClient();
     if (!supabase || !user) return;
-    const { data } = await supabase
-      .from("profiles")
-      .select("plan, credits, role")
-      .eq("id", user.id)
-      .single();
+    const { data } = await supabase.from("profiles").select("plan, credits, role").eq("id", user.id).single();
     if (data) setProfile(data);
   }, [user]);
 
   useEffect(() => {
-    if (user) {
-      fetchJobs(0);
-      fetchProfile();
-    }
+    if (user) { fetchJobs(0); fetchProfile(); }
   }, [user, fetchJobs, fetchProfile]);
 
-  const loadMore = () => {
-    const nextPage = page + 1;
-    setPage(nextPage);
-    fetchJobs(nextPage);
-  };
+  const loadMore = () => { const next = page + 1; setPage(next); fetchJobs(next); };
 
   if (authLoading) {
     return (
@@ -225,7 +199,6 @@ export default function DashboardPage() {
       </div>
     );
   }
-
   if (!user) return null;
 
   const stats = {
@@ -235,25 +208,24 @@ export default function DashboardPage() {
     failed: jobs.filter(j => j.status === "failed").length,
   };
 
-  const PLAN_LABELS = { free: "Ücretsiz", creator: "Creator", pro: "Pro" };
+  const PLAN_LABEL_KEYS = { free: "dash_plan_free", creator: "dash_plan_creator", pro: "dash_plan_pro" };
 
   return (
     <main className="min-h-screen" style={{ backgroundColor: "#0a0a0f" }}>
       <div className="max-w-5xl mx-auto px-6 py-12">
-
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-10">
           <div>
-            <h1 className="text-3xl font-black gradient-text">Video Geçmişim</h1>
+            <h1 className="text-3xl font-black gradient-text">{t("dash_title")}</h1>
             <p className="text-sm mt-1" style={{ color: "#64748b" }}>{user.email}</p>
           </div>
           <div className="flex items-center gap-3 flex-wrap">
-            <ManageSubscriptionButton user={user} getAccessToken={getAccessToken} />
+            <ManageSubscriptionButton getAccessToken={getAccessToken} />
             <Link href="/"
               className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold"
               style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}>
               <Plus size={15} />
-              Yeni Video
+              {t("dash_new")}
             </Link>
           </div>
         </div>
@@ -263,20 +235,20 @@ export default function DashboardPage() {
           <div className="glass rounded-2xl p-5 mb-8 flex flex-wrap gap-6 items-center"
             style={{ border: "1px solid rgba(124,58,237,0.15)" }}>
             <div>
-              <p className="text-xs mb-0.5" style={{ color: "#64748b" }}>Plan</p>
+              <p className="text-xs mb-0.5" style={{ color: "#64748b" }}>{t("dash_plan")}</p>
               <p className="text-base font-bold" style={{ color: "#a78bfa" }}>
-                {PLAN_LABELS[profile.plan] || profile.plan}
+                {t(PLAN_LABEL_KEYS[profile.plan] || "dash_plan_free")}
               </p>
             </div>
             <div>
-              <p className="text-xs mb-0.5" style={{ color: "#64748b" }}>Kalan Kredit</p>
+              <p className="text-xs mb-0.5" style={{ color: "#64748b" }}>{t("dash_credits")}</p>
               <p className="text-base font-bold" style={{ color: "#e2e8f0" }}>{profile.credits ?? "—"}</p>
             </div>
             {profile.plan === "free" && (
               <Link href="/pricing"
                 className="ml-auto text-xs px-3 py-1.5 rounded-xl font-medium"
                 style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}>
-                Planı Yükselt →
+                {t("dash_upgrade")}
               </Link>
             )}
           </div>
@@ -285,15 +257,15 @@ export default function DashboardPage() {
         {/* Stats bar */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-8">
           {[
-            { label: "Toplam",      value: stats.total,     color: "#a78bfa" },
-            { label: "Tamamlanan",  value: stats.completed, color: "#22c55e" },
-            { label: "Üretiliyor",  value: stats.running,   color: "#60a5fa" },
-            { label: "Başarısız",   value: stats.failed,    color: "#ef4444" },
-          ].map(({ label, value, color }) => (
-            <div key={label} className="glass rounded-xl p-4 text-center"
+            { key: "dash_total",          value: stats.total,     color: "#a78bfa" },
+            { key: "dash_completed_stat", value: stats.completed, color: "#22c55e" },
+            { key: "dash_generating_stat",value: stats.running,   color: "#60a5fa" },
+            { key: "dash_failed_stat",    value: stats.failed,    color: "#ef4444" },
+          ].map(({ key, value, color }) => (
+            <div key={key} className="glass rounded-xl p-4 text-center"
               style={{ border: "1px solid rgba(124,58,237,0.08)" }}>
               <p className="text-2xl font-black" style={{ color }}>{value}</p>
-              <p className="text-xs mt-0.5" style={{ color: "#64748b" }}>{label}</p>
+              <p className="text-xs mt-0.5" style={{ color: "#64748b" }}>{t(key)}</p>
             </div>
           ))}
         </div>
@@ -318,30 +290,27 @@ export default function DashboardPage() {
               style={{ background: "rgba(124,58,237,0.12)", border: "1px solid rgba(124,58,237,0.2)" }}>
               <Film size={28} style={{ color: "#7c3aed" }} />
             </div>
-            <h2 className="text-xl font-bold mb-2" style={{ color: "#e2e8f0" }}>Henüz video yok</h2>
-            <p className="text-sm mb-6" style={{ color: "#475569" }}>İlk videonuzu oluşturarak başlayın.</p>
+            <h2 className="text-xl font-bold mb-2" style={{ color: "#e2e8f0" }}>{t("dash_empty_title")}</h2>
+            <p className="text-sm mb-6" style={{ color: "#475569" }}>{t("dash_empty_desc")}</p>
             <Link href="/"
               className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold"
               style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}>
               <Plus size={15} />
-              Video Oluştur
+              {t("dash_create")}
             </Link>
           </div>
         ) : (
           <>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {jobs.map(job => (
-                <JobCard key={job.id} job={job} apiBase={apiBase} />
-              ))}
+              {jobs.map(job => <JobCard key={job.id} job={job} />)}
               {fetching && Array.from({ length: 3 }).map((_, i) => <SkeletonCard key={`sk-${i}`} />)}
             </div>
-
             {hasMore && !fetching && (
               <div className="text-center mt-8">
                 <button onClick={loadMore}
                   className="px-6 py-2.5 rounded-xl text-sm font-medium transition-all"
                   style={{ backgroundColor: "#12121a", border: "1px solid #22223a", color: "#94a3b8" }}>
-                  Daha Fazla Yükle
+                  {t("dash_load_more")}
                 </button>
               </div>
             )}

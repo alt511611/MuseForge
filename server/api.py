@@ -124,6 +124,49 @@ async def health():
     }
 
 
+@app.get("/api/stats")
+async def public_stats():
+    """Return public job counts for the live counter on the homepage."""
+    total = 0
+    monthly = 0
+    if SUPABASE_URL and SUPABASE_SERVICE_KEY:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                now = time.time()
+                import datetime
+                first_of_month = datetime.datetime.utcnow().replace(
+                    day=1, hour=0, minute=0, second=0, microsecond=0
+                ).isoformat() + "Z"
+                headers = {
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    "Prefer": "count=exact",
+                    "Range": "0-0",
+                }
+                r_total = await client.get(
+                    f"{SUPABASE_URL}/rest/v1/jobs?select=id&status=eq.completed",
+                    headers=headers,
+                )
+                r_monthly = await client.get(
+                    f"{SUPABASE_URL}/rest/v1/jobs?select=id&status=eq.completed&created_at=gte.{first_of_month}",
+                    headers=headers,
+                )
+                if r_total.status_code == 206:
+                    cr = r_total.headers.get("Content-Range", "")
+                    total = int(cr.split("/")[-1]) if "/" in cr else 0
+                if r_monthly.status_code == 206:
+                    cr = r_monthly.headers.get("Content-Range", "")
+                    monthly = int(cr.split("/")[-1]) if "/" in cr else 0
+        except Exception:
+            pass
+    # Fall back to in-memory count when Supabase not configured
+    if total == 0 and monthly == 0:
+        jobs = list(job_store._jobs.values())
+        total = sum(1 for j in jobs if j.status == JobStatus.COMPLETED)
+        monthly = total
+    return {"total_completed": total, "monthly_completed": monthly}
+
+
 @app.get("/api/director-styles")
 async def director_styles():
     return {

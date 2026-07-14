@@ -13,19 +13,20 @@ import VideoResult from "../../../components/VideoResult";
 import { getStageMessage, getInspirationMessage } from "../../../utils/pipelineMessages";
 import { friendlyError } from "../../../utils/errorMessages";
 import { useAuth } from "../../../contexts/AuthContext";
+import { useLanguage } from "../../../contexts/LanguageContext";
 
 const STAGE_CONFIG = {
-  screenwriting: { icon: Pen, label: "Senarist", color: "#a78bfa" },
-  portraits: { icon: ImageIcon, label: "Karakter Kilidi", color: "#c084fc" },
+  screenwriting: { icon: Pen, label: "Screenwriter", color: "#a78bfa" },
+  portraits: { icon: ImageIcon, label: "Character Lock", color: "#c084fc" },
   storyboard: { icon: Layout, label: "Storyboard", color: "#818cf8" },
-  frames: { icon: ImageIcon, label: "Kare Üretimi", color: "#60a5fa" },
+  frames: { icon: ImageIcon, label: "Frame Gen", color: "#60a5fa" },
   video: { icon: Video, label: "Video Gen", color: "#34d399" },
-  assembly: { icon: Film, label: "Birleştirme", color: "#fbbf24" },
-  music: { icon: Music, label: "Müzik", color: "#f472b6" },
-  scene_complete: { icon: CheckCircle2, label: "Sahne Tamam", color: "#4ade80" },
-  complete: { icon: CheckCircle2, label: "Tamamlandı", color: "#22c55e" },
-  cancelled: { icon: Ban, label: "İptal", color: "#f59e0b" },
-  error: { icon: XCircle, label: "Hata", color: "#ef4444" },
+  assembly: { icon: Film, label: "Assembly", color: "#fbbf24" },
+  music: { icon: Music, label: "Music", color: "#f472b6" },
+  scene_complete: { icon: CheckCircle2, label: "Scene Done", color: "#4ade80" },
+  complete: { icon: CheckCircle2, label: "Complete", color: "#22c55e" },
+  cancelled: { icon: Ban, label: "Cancelled", color: "#f59e0b" },
+  error: { icon: XCircle, label: "Error", color: "#ef4444" },
 };
 
 const PIPELINE_STAGES = ["screenwriting", "portraits", "storyboard", "frames", "video", "assembly", "music", "complete"];
@@ -46,7 +47,7 @@ function LiveGallery({ events }) {
   if (!frames.length) return null;
   return (
     <div className="glass rounded-2xl p-4 mb-5 animate-fade-in">
-      <p className="text-xs font-medium mb-3" style={{ color: "#64748b" }}>Canlı Çıktılar</p>
+      <p className="text-xs font-medium mb-3" style={{ color: "#64748b" }}>Live Outputs</p>
       <div className="grid grid-cols-3 gap-2">
         {frames.map((url, i) => (
           // eslint-disable-next-line @next/next/no-img-element

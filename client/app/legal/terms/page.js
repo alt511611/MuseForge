@@ -1,16 +1,14 @@
 import Link from "next/link";
 
 export const metadata = {
-  title: "Kullanım Koşulları — MuseForge",
-  description: "MuseForge hizmetini kullanmadan önce lütfen kullanım koşullarını okuyunuz.",
+  title: "Terms of Service — MuseForge",
+  description: "Please read MuseForge's terms of service before using the platform.",
 };
 
 const Section = ({ title, children }) => (
   <section className="mb-8">
     <h2 className="text-lg font-semibold mb-3" style={{ color: "#a78bfa" }}>{title}</h2>
-    <div className="text-sm leading-relaxed space-y-2" style={{ color: "#94a3b8" }}>
-      {children}
-    </div>
+    <div className="text-sm leading-relaxed space-y-2" style={{ color: "#94a3b8" }}>{children}</div>
   </section>
 );
 
@@ -19,91 +17,91 @@ export default function TermsPage() {
     <main className="min-h-screen" style={{ backgroundColor: "#0a0a0f" }}>
       <div className="max-w-3xl mx-auto px-6 py-16">
         <Link href="/" className="text-sm mb-8 inline-block hover:text-purple-400 transition-colors" style={{ color: "#64748b" }}>
-          ← Ana Sayfa
+          ← Home
         </Link>
 
-        <h1 className="text-3xl font-black gradient-text mb-2">Kullanım Koşulları</h1>
-        <p className="text-xs mb-10" style={{ color: "#475569" }}>Son güncelleme: {new Date().toLocaleDateString("tr-TR")}</p>
+        <h1 className="text-3xl font-black gradient-text mb-2">Terms of Service</h1>
+        <p className="text-xs mb-10" style={{ color: "#475569" }}>Last updated: {new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}</p>
 
         <div className="glass rounded-2xl p-8">
-          <Section title="1. Hizmetin Tanımı">
+          <Section title="1. Description of Service">
             <p>
-              MuseForge, yapay zeka destekli video oluşturma hizmeti sunan bir platformdur. Hizmete
-              erişim sağlayarak bu koşulları kabul etmiş sayılırsınız.
+              MuseForge is an AI-powered video generation platform. By accessing the service,
+              you agree to these terms.
             </p>
           </Section>
 
-          <Section title="2. Hesap Oluşturma ve Güvenlik">
+          <Section title="2. Account Creation and Security">
             <ul className="list-disc list-inside space-y-1">
-              <li>Hesap açmak için 18 yaşını doldurmuş olmanız gerekir.</li>
-              <li>Hesap bilgilerinizin gizliliğini korumak sizin sorumluluğunuzdadır.</li>
-              <li>Hesabınız üzerinden gerçekleştirilen tüm işlemlerden siz sorumlusunuzdur.</li>
-              <li>Şüpheli aktivite durumunda derhal bizimle iletişime geçiniz.</li>
+              <li>You must be at least 18 years old to create an account.</li>
+              <li>You are responsible for maintaining the confidentiality of your account credentials.</li>
+              <li>You are responsible for all actions taken from your account.</li>
+              <li>Contact us immediately if you notice any suspicious activity.</li>
             </ul>
           </Section>
 
-          <Section title="3. Kabul Edilemez Kullanım">
-            <p>Şu amaçlarla kullanım kesinlikle yasaktır:</p>
+          <Section title="3. Prohibited Uses">
+            <p>The following uses are strictly forbidden:</p>
             <ul className="list-disc list-inside space-y-1">
-              <li>Yasa dışı, aldatıcı veya zarar verici içerik üretmek.</li>
-              <li>Deepfake veya kimlik sahteciliğine yönelik içerik oluşturmak.</li>
-              <li>Telif hakkı veya fikri mülkiyet ihlali.</li>
-              <li>Sisteme yetkisiz erişim veya servis aksamasına yol açmak.</li>
-              <li>18 yaş altı için uygunsuz içerik üretmek.</li>
+              <li>Generating illegal, deceptive, or harmful content.</li>
+              <li>Creating deepfakes or content intended for identity fraud.</li>
+              <li>Infringing copyright or intellectual property rights.</li>
+              <li>Unauthorized access to systems or causing service disruptions.</li>
+              <li>Generating content inappropriate for minors.</li>
             </ul>
           </Section>
 
-          <Section title="4. Fikri Mülkiyet">
+          <Section title="4. Intellectual Property">
             <ul className="list-disc list-inside space-y-1">
-              <li><strong style={{ color: "#e2e8f0" }}>Sizin içeriğiniz:</strong> Platforma yüklediğiniz fikir ve metin girdilerinin fikri mülkiyeti size aittir.</li>
-              <li><strong style={{ color: "#e2e8f0" }}>Üretilen içerik:</strong> Abonelik kapsamında oluşturulan videolar kişisel ve ticari kullanım için size lisanslanır. Üçüncü taraf AI sağlayıcı koşulları saklıdır.</li>
-              <li><strong style={{ color: "#e2e8f0" }}>Platform:</strong> MuseForge markası, yazılımı ve arayüzü şirkete aittir; çoğaltılamaz.</li>
+              <li><strong style={{ color: "#e2e8f0" }}>Your content:</strong> You retain ownership of the ideas and text inputs you provide to the platform.</li>
+              <li><strong style={{ color: "#e2e8f0" }}>Generated content:</strong> Videos produced under your subscription are licensed to you for personal and commercial use. Third-party AI provider terms apply.</li>
+              <li><strong style={{ color: "#e2e8f0" }}>Platform:</strong> The MuseForge brand, software, and interface are owned by the company and may not be reproduced.</li>
             </ul>
           </Section>
 
-          <Section title="5. Ödeme ve Abonelik">
+          <Section title="5. Payment and Subscriptions">
             <ul className="list-disc list-inside space-y-1">
-              <li>Ücretli planlar aylık veya yıllık faturalandırılır.</li>
-              <li>İptal, bir sonraki fatura döneminden itibaren geçerlidir; kıst iade yapılmaz.</li>
-              <li>Ödemeler Stripe altyapısıyla güvenle işlenir.</li>
-              <li>Fiyat değişikliklerinde 30 gün öncesinden bildirim yapılır.</li>
-              <li>Ücretsiz plandaki krediler aylık sıfırlanmaz; biter, yenilenmez.</li>
+              <li>Paid plans are billed monthly or annually.</li>
+              <li>Cancellation takes effect at the next billing date; no prorated refunds are issued.</li>
+              <li>Payments are processed securely via Stripe.</li>
+              <li>Price changes will be communicated 30 days in advance.</li>
+              <li>Free plan credits reset monthly based on plan terms.</li>
             </ul>
           </Section>
 
-          <Section title="6. Sorumluluk Sınırlandırması">
+          <Section title="6. Limitation of Liability">
             <p>
-              MuseForge, yürürlükteki mevzuatın izin verdiği azami ölçüde; dolaylı, arızi veya
-              sonuçsal zararlardan sorumlu değildir. Hizmet "olduğu gibi" sunulmaktadır ve %100 kesintisiz
-              çalışma garantisi verilmemektedir.
+              To the maximum extent permitted by applicable law, MuseForge is not liable for indirect,
+              incidental, or consequential damages. The service is provided &quot;as is&quot; and no
+              guarantee of 100% uptime is made.
             </p>
           </Section>
 
-          <Section title="7. Hesap Kapatma">
+          <Section title="7. Account Termination">
             <ul className="list-disc list-inside space-y-1">
-              <li>Hesabınızı dilediğiniz zaman ayarlar üzerinden kapatabilirsiniz.</li>
-              <li>Bu Koşullar'ı ihlal etmeniz halinde hesabınız askıya alınabilir veya kapatılabilir.</li>
-              <li>Hesap kapatılması halinde veriler Gizlilik Politikası'nda belirtilen saklama süresi kadar tutulur.</li>
+              <li>You may close your account at any time through your account settings.</li>
+              <li>Violation of these Terms may result in account suspension or termination.</li>
+              <li>Upon closure, data is retained for the period specified in the Privacy Policy.</li>
             </ul>
           </Section>
 
-          <Section title="8. Geçerli Hukuk ve Uyuşmazlık Çözümü">
+          <Section title="8. Governing Law and Dispute Resolution">
             <p>
-              Bu Koşullar Türk Hukuku'na tabidir. Uyuşmazlıklarda İstanbul Mahkemeleri ve
-              İcra Daireleri yetkilidir.
+              These Terms are governed by applicable law. Disputes will be resolved through
+              binding arbitration or the courts of the jurisdiction in which MuseForge operates.
             </p>
           </Section>
 
-          <Section title="9. Değişiklikler">
+          <Section title="9. Changes">
             <p>
-              Koşullar güncellenebilir. Önemli değişiklikler e-posta ile bildirilecek;
-              değişiklik sonrası kullanımınız devam etmesi yeni koşulları kabul anlamına gelir.
+              Terms may be updated. Material changes will be communicated by email.
+              Continued use after changes constitutes acceptance of the updated terms.
             </p>
           </Section>
 
-          <Section title="10. İletişim">
+          <Section title="10. Contact">
             <p>
-              Sorularınız için:{" "}
+              For questions:{" "}
               <a href="mailto:legal@museforge.ai" className="underline" style={{ color: "#a78bfa" }}>
                 legal@museforge.ai
               </a>
@@ -112,8 +110,8 @@ export default function TermsPage() {
         </div>
 
         <div className="mt-6 flex gap-4 text-xs" style={{ color: "#475569" }}>
-          <Link href="/legal/privacy" className="underline hover:text-purple-400">Gizlilik Politikası</Link>
-          <Link href="/" className="underline hover:text-purple-400">Ana Sayfa</Link>
+          <Link href="/legal/privacy" className="underline hover:text-purple-400">Privacy Policy</Link>
+          <Link href="/" className="underline hover:text-purple-400">Home</Link>
         </div>
       </div>
     </main>
