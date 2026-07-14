@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Check, ArrowRight } from "lucide-react";
+import { Check, ArrowRight, Film } from "lucide-react";
 
 /**
  * Shared layout for all /solutions/* segment pages.
@@ -38,7 +38,7 @@ export default function SolutionPage({
           {badge && (
             <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium mb-6"
               style={{ backgroundColor: `${accentColor}20`, border: `1px solid ${accentColor}40`, color: accentColor }}>
-              {HeadlineIcon && <HeadlineIcon size={12} />}
+              {HeadlineIcon}
               {badge}
             </div>
           )}
@@ -53,12 +53,12 @@ export default function SolutionPage({
       {useCases.length > 0 && (
         <section className="max-w-5xl mx-auto px-6 py-14">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-            {useCases.map(({ icon: Icon, title, desc, sample }, i) => (
+            {useCases.map(({ icon, title, desc, sample }, i) => (
               <div key={i} className="glass rounded-2xl p-6 group hover:border-purple-600/30 transition-all"
                 style={{ border: "1px solid rgba(124,58,237,0.1)" }}>
                 <div className="w-10 h-10 rounded-xl flex items-center justify-center mb-4"
                   style={{ backgroundColor: `${accentColor}18` }}>
-                  <Icon size={20} style={{ color: accentColor }} />
+                  {icon}
                 </div>
                 <h3 className="text-base font-bold mb-2" style={{ color: "#e2e8f0" }}>{title}</h3>
                 <p className="text-sm leading-relaxed" style={{ color: "#64748b" }}>{desc}</p>
@@ -68,7 +68,7 @@ export default function SolutionPage({
                     <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
                       <div className="w-12 h-12 rounded-full flex items-center justify-center"
                         style={{ backgroundColor: `${accentColor}25`, border: `1px solid ${accentColor}40` }}>
-                        <Icon size={20} style={{ color: accentColor }} />
+                        <Film size={20} style={{ color: accentColor }} />
                       </div>
                       <span className="text-xs px-2.5 py-1 rounded-full font-medium"
                         style={{ backgroundColor: `${accentColor}20`, color: accentColor }}>

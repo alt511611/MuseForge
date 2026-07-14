@@ -9,32 +9,32 @@ export const metadata = {
 export default function CreatorsPage() {
   return (
     <SolutionPage
-      icon={Users}
+      icon={<Users size={12} />}
       accentColor="#6d28d9"
       badge="Content Creators & Solo Filmmakers"
       heading={<><span className="gradient-text">Your Entire Studio,</span><br /><span style={{ color: "#e2e8f0" }}>In One Prompt</span></>}
       subheading="Write an idea. MuseForge builds the script, designs the storyboard, generates every frame, and stitches a cinematic video — all in a few minutes."
       useCases={[
         {
-          icon: Film,
+          icon: <Film size={20} style={{ color: "#6d28d9" }} />,
           title: "Micro-Drama Series",
           desc: "Ship a new episode every day. Each run produces a complete short film — consistent characters, coherent plot, cinematic look.",
           sample: "Episode 3: A detective discovers a hidden room — noir mystery preset, 9:16 vertical",
         },
         {
-          icon: Sparkles,
+          icon: <Sparkles size={20} style={{ color: "#6d28d9" }} />,
           title: "Social Media Story Arcs",
           desc: "Turn a trending topic or personal story into a shareable cinematic reel optimised for Instagram, TikTok, or YouTube Shorts.",
           sample: "Inspirational athlete journey — dynamic action preset, 1:1 square format",
         },
         {
-          icon: Zap,
+          icon: <Zap size={20} style={{ color: "#6d28d9" }} />,
           title: "Rapid Concept Prototyping",
           desc: "Test 10 story ideas in the time it used to take to shoot 1. Validate audience hooks before investing in real production.",
           sample: "3 different romantic drama opening scenes — compare audience response",
         },
         {
-          icon: Users,
+          icon: <Users size={20} style={{ color: "#6d28d9" }} />,
           title: "Consistent Characters Across Episodes",
           desc: "Upload a single reference photo and MuseForge maintains that character's appearance in every scene of every episode.",
           sample: "Recurring protagonist across 5-episode arc — character lock active",

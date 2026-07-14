@@ -1,11 +1,14 @@
 """MuseForge FastAPI backend."""
 
 import json
+import logging
 import os
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 import httpx
 from dotenv import load_dotenv
@@ -219,41 +222,42 @@ async def _get_user_credits(user_id: str) -> int:
 
 
 async def _deduct_credits(user_id: str, amount: int, reason: str = "video_generation", job_id: str = "") -> bool:
-    """Deduct `amount` credits from the user's profile. Returns False if insufficient."""
+    """Atomically deduct `amount` credits via Supabase RPC. Returns False if insufficient.
+
+    Uses a PostgreSQL function that performs a single conditional UPDATE, preventing
+    race conditions from the old read-then-write pattern.
+    """
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         return True
-    current = await _get_user_credits(user_id)
-    if current < amount:
-        return False
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
-            await client.patch(
-                f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{user_id}",
-                json={"credits": max(0, current - amount)},
-                headers={
-                    "apikey": SUPABASE_SERVICE_KEY,
-                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                    "Content-Type": "application/json",
-                    "Prefer": "return=minimal",
-                },
+            sb_headers = {
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Content-Type": "application/json",
+            }
+            # Atomic deduction via RPC — returns new balance, or -1 if insufficient
+            rpc_resp = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/deduct_credits",
+                json={"p_user_id": user_id, "p_amount": amount},
+                headers=sb_headers,
             )
-            # ledger entry (fire-and-forget)
-            payload = {"user_id": user_id, "amount": -amount, "reason": reason}
+            new_balance = rpc_resp.json()
+            if new_balance == -1:
+                return False  # insufficient credits
+            # Fire-and-forget ledger entry
+            ledger_payload = {"user_id": user_id, "amount": -amount, "reason": reason}
             if job_id:
-                payload["job_id"] = job_id
+                ledger_payload["job_id"] = job_id
             await client.post(
                 f"{SUPABASE_URL}/rest/v1/credit_ledger",
-                json=payload,
-                headers={
-                    "apikey": SUPABASE_SERVICE_KEY,
-                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                    "Content-Type": "application/json",
-                    "Prefer": "return=minimal",
-                },
+                json=ledger_payload,
+                headers={**sb_headers, "Prefer": "return=minimal"},
             )
         return True
-    except Exception:
-        return True  # fail-open: don't block generation on Supabase issues
+    except Exception as exc:
+        logger.error("_deduct_credits failed for user %s: %s", user_id, exc)
+        return True  # fail-open: don't block generation on Supabase outages
 
 
 # ── Generation (rate-limited; auth optional for demo mode) ───────────────────
@@ -283,6 +287,13 @@ async def generate(
 
     demo = _is_demo()
     api_key = os.environ.get("MUAPI_KEY", "")
+
+    # Block unauthenticated users outside demo mode
+    if not demo and current_user is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required. Please sign in to generate videos.",
+        )
 
     # Credit check — only for authenticated non-demo requests
     if current_user and not demo:

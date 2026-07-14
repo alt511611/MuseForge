@@ -9,32 +9,32 @@ export const metadata = {
 export default function AgenciesPage() {
   return (
     <SolutionPage
-      icon={Building2}
+      icon={<Building2 size={12} />}
       accentColor="#7c3aed"
       badge="Ad Agencies & Corporate Comms"
       heading={<><span className="gradient-text">Pitch-Ready Video,</span><br /><span style={{ color: "#e2e8f0" }}>Generated in Minutes</span></>}
       subheading="From brand brief to cinematic storyboard — MuseForge's multi-agent pipeline handles scripting, visual design, and production so your team can focus on strategy."
       useCases={[
         {
-          icon: Megaphone,
+          icon: <Megaphone size={20} style={{ color: "#7c3aed" }} />,
           title: "Product Launch Videos",
           desc: "Turn a product brief into a cinematic reveal — complete script, shot list, and assembled video ready for client review.",
           sample: "A luxury car emerges from desert dust at golden hour — slow cinematic preset, 16:9",
         },
         {
-          icon: Building2,
+          icon: <Building2 size={20} style={{ color: "#7c3aed" }} />,
           title: "Corporate Brand Films",
           desc: "Produce polished brand identity videos for pitches and investor decks without scheduling a full production crew.",
           sample: "Tech company headquarters montage — handheld kinetic preset, dynamic pacing",
         },
         {
-          icon: Film,
+          icon: <Film size={20} style={{ color: "#7c3aed" }} />,
           title: "Campaign Concept Reels",
           desc: "Visualise multiple creative directions in parallel — present 3 concepts in the time it used to take to storyboard 1.",
           sample: "Seasonal campaign — warm color grade, character locked across all 5 scenes",
         },
         {
-          icon: Globe,
+          icon: <Globe size={20} style={{ color: "#7c3aed" }} />,
           title: "Multi-Market Localisation",
           desc: "Generate region-specific visual concepts with different cultural contexts — same brief, different executions.",
           sample: "Same product story adapted for 3 different visual markets",

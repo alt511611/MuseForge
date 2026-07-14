@@ -172,3 +172,39 @@ begin
   where id = p_user_id;
 end;
 $$;
+
+-- ── Atomic credit deduction (prevents race conditions) ───────────────────────
+-- Called by server/api.py:_deduct_credits via POST /rest/v1/rpc/deduct_credits
+-- Returns the new credit balance on success, or -1 if insufficient credits.
+create or replace function public.deduct_credits(p_user_id uuid, p_amount int)
+returns int language plpgsql security definer as $$
+declare
+  v_new int;
+begin
+  update public.profiles
+  set credits = credits - p_amount
+  where id = p_user_id and credits >= p_amount
+  returning credits into v_new;
+
+  if v_new is null then
+    return -1;  -- insufficient balance
+  end if;
+
+  return v_new;
+end;
+$$;
+
+-- ── Stripe event idempotency table ───────────────────────────────────────────
+-- Prevents duplicate credit allocation if Stripe retries the same webhook event.
+create table if not exists public.processed_stripe_events (
+  event_id    text primary key,
+  processed_at timestamptz default now()
+);
+
+-- Only the service role needs to read/write this table
+alter table public.processed_stripe_events enable row level security;
+
+create policy "service_manage_stripe_events"
+  on public.processed_stripe_events for all
+  using (false)     -- no direct user access
+  with check (false);

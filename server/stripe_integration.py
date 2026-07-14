@@ -151,6 +151,29 @@ async def create_checkout_session(
     return session.url
 
 
+async def _mark_event_processed(event_id: str) -> bool:
+    """Insert event_id into processed_stripe_events. Returns True if newly inserted,
+    False if it already existed (duplicate event — skip processing)."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return True  # dev mode: always proceed
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            resp = await client.post(
+                f"{SUPABASE_URL}/rest/v1/processed_stripe_events",
+                json={"event_id": event_id},
+                headers={
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    "Content-Type": "application/json",
+                    "Prefer": "resolution=ignore-duplicates,return=minimal",
+                },
+            )
+            # 201 = inserted (new event); 200/204 with ignore-duplicates = already existed
+            return resp.status_code == 201
+    except Exception:
+        return True  # fail-open on Supabase issues
+
+
 async def handle_webhook(payload: bytes, sig_header: str) -> dict:
     """Verify Stripe webhook signature and process supported events."""
     if not STRIPE_WEBHOOK_SECRET:
@@ -161,8 +184,14 @@ async def handle_webhook(payload: bytes, sig_header: str) -> dict:
     except stripe.error.SignatureVerificationError as exc:
         raise ValueError(f"Invalid webhook signature: {exc}") from exc
 
+    event_id = event["id"]
     event_type = event["type"]
     data = event["data"]["object"]
+
+    # Idempotency guard: skip already-processed events
+    is_new = await _mark_event_processed(event_id)
+    if not is_new:
+        return {"status": "already_processed", "event_id": event_id}
 
     # ── Subscription checkout completed ──────────────────────────────────────
     if event_type == "checkout.session.completed":

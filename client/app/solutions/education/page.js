@@ -9,32 +9,32 @@ export const metadata = {
 export default function EducationPage() {
   return (
     <SolutionPage
-      icon={BookOpen}
+      icon={<BookOpen size={12} />}
       accentColor="#0891b2"
       badge="Educational Institutions"
-      heading={<><span style={{ color: "#e2e8f0" }}>AI Video for</span><br /><span className="gradient-text">Classrooms & Campuses</span></>}
+      heading={<><span style={{ color: "#e2e8f0" }}>AI Video for</span><br /><span className="gradient-text">Classrooms &amp; Campuses</span></>}
       subheading="Give students a professional-grade AI studio for their projects. Create institutional promotional content without a production budget. MuseForge scales from a single teacher to an entire university."
       useCases={[
         {
-          icon: GraduationCap,
+          icon: <GraduationCap size={20} style={{ color: "#0891b2" }} />,
           title: "Student Film Projects",
           desc: "Students write a story idea; MuseForge generates a complete short film — a powerful introduction to AI-assisted storytelling and production.",
           sample: "Student sci-fi short: 'The Last Signal' — 3 scenes, cinematic preset",
         },
         {
-          icon: BookOpen,
+          icon: <BookOpen size={20} style={{ color: "#0891b2" }} />,
           title: "Educational Explainer Videos",
           desc: "Instructors generate visual explainers for complex topics — history re-enactments, scientific concepts, or literature adaptations.",
           sample: "History lesson visualization: Roman Senate chamber — slow cinematic, 16:9",
         },
         {
-          icon: Users,
+          icon: <Users size={20} style={{ color: "#0891b2" }} />,
           title: "Campus Promotional Content",
           desc: "Produce campus tour teasers, department showcases, and recruitment videos without booking a film crew.",
           sample: "University open day promo — warm cinematic look, campus characters",
         },
         {
-          icon: Lightbulb,
+          icon: <Lightbulb size={20} style={{ color: "#0891b2" }} />,
           title: "Creative Media Curriculum",
           desc: "Use MuseForge as a hands-on tool in digital media, film studies, or creative writing classes — students learn AI pipeline fundamentals by doing.",
           sample: "Class exercise: 20 students each generate a different genre short in one session",

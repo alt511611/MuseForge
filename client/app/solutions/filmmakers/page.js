@@ -9,32 +9,32 @@ export const metadata = {
 export default function FilmmakersPage() {
   return (
     <SolutionPage
-      icon={Clapperboard}
+      icon={<Clapperboard size={12} />}
       accentColor="#4f46e5"
       badge="Independent Filmmakers"
       heading={<><span className="gradient-text">Previsualize Any Scene</span><br /><span style={{ color: "#e2e8f0" }}>Before You Shoot It</span></>}
       subheading="Use MuseForge as your pre-production previsualization engine — generate shot-accurate storyboards and animatic-quality frame sequences without hiring a storyboard artist."
       useCases={[
         {
-          icon: Eye,
+          icon: <Eye size={20} style={{ color: "#4f46e5" }} />,
           title: "Shot Previsualization",
           desc: "Translate a scene description into a multi-shot sequence with defined camera angles, lenses, and pacing — before a single real frame is captured.",
           sample: "Opening chase sequence — 5 shots, handheld kinetic preset, 2.39:1 anamorphic feel",
         },
         {
-          icon: Layers,
+          icon: <Layers size={20} style={{ color: "#4f46e5" }} />,
           title: "Storyboard Generation",
           desc: "Get frame-by-frame visual reference for any scene. Share with your DP, production designer, or VFX supervisor in minutes.",
           sample: "Climactic confrontation scene — 4 shots, dramatic lighting, slow cinematic preset",
         },
         {
-          icon: Clapperboard,
+          icon: <Clapperboard size={20} style={{ color: "#4f46e5" }} />,
           title: "Short Film Concept Proof",
           desc: "Present a fully visualised 90-second short film concept to funders, festival selectors, or collaborators — long before production day.",
           sample: "Festival submission proof-of-concept — complete 3-scene short, noir mystery look",
         },
         {
-          icon: Film,
+          icon: <Film size={20} style={{ color: "#4f46e5" }} />,
           title: "Test Multiple Visual Styles",
           desc: "Generate the same scene in 3 different director presets and compare before committing to a visual language for your entire film.",
           sample: "Same scene in Slow Cinematic vs. Handheld Kinetic vs. Noir Mystery",
@@ -65,7 +65,7 @@ export default function FilmmakersPage() {
         credits: null,
         highlight: false,
         cta: "Buy Credits",
-        ctaHref: "/pricing#credits",
+        ctaHref: "/pricing",
         features: ["No subscription", "Credits never expire", "20 / 60 / 150 credit options", "Use any time, any project", "All director presets included"],
       }}
       ctaBanner={{
