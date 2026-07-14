@@ -69,6 +69,17 @@ export function AuthProvider({ children }) {
     return data?.session?.access_token ?? null;
   };
 
+  const resetPasswordForEmail = async (email) => {
+    const client = requireAuth();
+    return client.auth.resetPasswordForEmail(email, {
+      redirectTo: `${window.location.origin}/auth/reset-password`,
+    });
+  };
+
+  const updatePassword = async (newPassword) => {
+    return requireAuth().auth.updateUser({ password: newPassword });
+  };
+
   const isAdmin =
     user?.app_metadata?.role === "admin" ||
     user?.user_metadata?.role === "admin";
@@ -86,6 +97,8 @@ export function AuthProvider({ children }) {
         signInWithGoogle,
         signOut,
         getAccessToken,
+        resetPasswordForEmail,
+        updatePassword,
       }}
     >
       {children}

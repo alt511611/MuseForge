@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Film, LogOut, Shield, ChevronDown, User } from "lucide-react";
+import { Film, LogOut, Shield, ChevronDown, User, LayoutDashboard } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 
 export default function Navbar() {
@@ -71,6 +71,15 @@ export default function Navbar() {
                       <p className="text-[10px] mt-0.5" style={{ color: "#a78bfa" }}>Admin</p>
                     )}
                   </div>
+                  <Link
+                    href="/dashboard"
+                    onClick={() => setOpen(false)}
+                    className="flex items-center gap-2 px-4 py-2 text-sm transition-colors hover:bg-white/5"
+                    style={{ color: "#94a3b8" }}
+                  >
+                    <LayoutDashboard size={14} />
+                    Video Geçmişim
+                  </Link>
                   {isAdmin && (
                     <Link
                       href="/admin"

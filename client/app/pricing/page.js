@@ -3,7 +3,7 @@
 import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
-import { Check, Zap, Film, Crown } from "lucide-react";
+import { Check, Zap, Film, Crown, Loader2, Settings } from "lucide-react";
 import CheckoutButton from "../../components/CheckoutButton";
 import { useAuth } from "../../contexts/AuthContext";
 import Confetti from "../../components/Confetti";
@@ -71,8 +71,39 @@ const PLANS = [
   },
 ];
 
+function ManagePortalButton({ getAccessToken }) {
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState(null);
+  const handle = async () => {
+    setLoading(true); setErr(null);
+    try {
+      const token = await getAccessToken();
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || ""}/api/stripe-portal`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ return_url: window.location.href }),
+      });
+      if (!res.ok) { const e = await res.json(); throw new Error(e.detail || "Hata oluştu"); }
+      const { url } = await res.json();
+      window.location.href = url;
+    } catch (e) { setErr(e.message); setLoading(false); }
+  };
+  return (
+    <div className="text-center mt-8">
+      <button onClick={handle} disabled={loading}
+        className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-medium transition-all"
+        style={{ backgroundColor: "#12121a", border: "1px solid #22223a", color: "#94a3b8", opacity: loading ? 0.6 : 1 }}>
+        {loading ? <Loader2 size={14} className="animate-spin" /> : <Settings size={14} />}
+        Aboneliğimi Yönet / Faturalar
+      </button>
+      {err && <p className="text-xs mt-2 text-center" style={{ color: "#fca5a5" }}>{err}</p>}
+      <p className="text-xs mt-2" style={{ color: "#374151" }}>Mevcut aboneliğinizi, faturalarınızı ve ödeme yönteminizi burada yönetebilirsiniz.</p>
+    </div>
+  );
+}
+
 function PricingContent() {
-  const { user } = useAuth();
+  const { user, getAccessToken } = useAuth();
   const searchParams = useSearchParams();
   const success = searchParams.get("success");
   const successPlan = searchParams.get("plan");
@@ -219,6 +250,9 @@ function PricingContent() {
             </div>
           ))}
         </div>
+
+        {/* Stripe customer portal (visible when logged in) */}
+        {user && <ManagePortalButton getAccessToken={getAccessToken} />}
 
         {/* Legal links */}
         <div className="text-center mt-12 text-xs space-x-4" style={{ color: "#374151" }}>

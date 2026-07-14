@@ -9,9 +9,9 @@ function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const next = searchParams.get("next") || "/";
-  const { user, loading, signInWithEmail, signUpWithEmail, signInWithGoogle } = useAuth();
+  const { user, loading, signInWithEmail, signUpWithEmail, signInWithGoogle, resetPasswordForEmail } = useAuth();
 
-  const [mode, setMode] = useState("login"); // "login" | "signup"
+  const [mode, setMode] = useState("login"); // "login" | "signup" | "forgot"
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState(null);
@@ -28,6 +28,17 @@ function LoginForm() {
     setInfo(null);
     setBusy(true);
     try {
+      if (mode === "forgot") {
+        const { error: err } = await resetPasswordForEmail(email);
+        if (err) {
+          setError(err.message);
+        } else {
+          setInfo("Şifre sıfırlama bağlantısı e-postanıza gönderildi. Gelen kutunuzu kontrol edin.");
+          setMode("login");
+        }
+        return;
+      }
+
       const { error: err } =
         mode === "login"
           ? await signInWithEmail(email, password)
@@ -56,6 +67,12 @@ function LoginForm() {
     }
   };
 
+  const switchMode = (newMode) => {
+    setMode(newMode);
+    setError(null);
+    setInfo(null);
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: "#0a0a0f" }}>
@@ -80,25 +97,29 @@ function LoginForm() {
         {/* Card */}
         <div className="glass rounded-2xl p-8">
           <h2 className="text-xl font-semibold mb-6 text-center" style={{ color: "#e2e8f0" }}>
-            {mode === "login" ? "Giriş Yap" : "Hesap Oluştur"}
+            {mode === "login" ? "Giriş Yap" : mode === "signup" ? "Hesap Oluştur" : "Şifremi Sıfırla"}
           </h2>
 
-          {/* Google */}
-          <button
-            onClick={handleGoogle}
-            disabled={busy}
-            className="w-full flex items-center justify-center gap-3 py-3 rounded-xl text-sm font-medium mb-4 transition-all"
-            style={{ backgroundColor: "#1a1a26", border: "1px solid #22223a", color: "#e2e8f0" }}
-          >
-            <Chrome size={18} />
-            Google ile {mode === "login" ? "giriş yap" : "kaydol"}
-          </button>
+          {/* Google — only for login/signup */}
+          {mode !== "forgot" && (
+            <>
+              <button
+                onClick={handleGoogle}
+                disabled={busy}
+                className="w-full flex items-center justify-center gap-3 py-3 rounded-xl text-sm font-medium mb-4 transition-all"
+                style={{ backgroundColor: "#1a1a26", border: "1px solid #22223a", color: "#e2e8f0" }}
+              >
+                <Chrome size={18} />
+                Google ile {mode === "login" ? "giriş yap" : "kaydol"}
+              </button>
 
-          <div className="flex items-center gap-3 mb-4">
-            <div className="flex-1 h-px" style={{ backgroundColor: "#22223a" }} />
-            <span className="text-xs" style={{ color: "#475569" }}>veya</span>
-            <div className="flex-1 h-px" style={{ backgroundColor: "#22223a" }} />
-          </div>
+              <div className="flex items-center gap-3 mb-4">
+                <div className="flex-1 h-px" style={{ backgroundColor: "#22223a" }} />
+                <span className="text-xs" style={{ color: "#475569" }}>veya</span>
+                <div className="flex-1 h-px" style={{ backgroundColor: "#22223a" }} />
+              </div>
+            </>
+          )}
 
           {/* Email form */}
           <form onSubmit={handleEmailAuth} className="space-y-4">
@@ -119,24 +140,39 @@ function LoginForm() {
                 />
               </div>
             </div>
-            <div>
-              <label className="text-xs font-medium block mb-1.5" style={{ color: "#94a3b8" }}>
-                Şifre
-              </label>
-              <div className="relative">
-                <Lock size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: "#475569" }} />
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                  required
-                  minLength={6}
-                  className="w-full pl-9 pr-4 py-2.5 rounded-xl text-sm focus:outline-none"
-                  style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#e2e8f0" }}
-                />
+
+            {mode !== "forgot" && (
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-medium" style={{ color: "#94a3b8" }}>Şifre</label>
+                  {mode === "login" && (
+                    <button type="button" onClick={() => switchMode("forgot")}
+                      className="text-xs underline" style={{ color: "#a78bfa" }}>
+                      Şifremi unuttum
+                    </button>
+                  )}
+                </div>
+                <div className="relative">
+                  <Lock size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: "#475569" }} />
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••"
+                    required
+                    minLength={6}
+                    className="w-full pl-9 pr-4 py-2.5 rounded-xl text-sm focus:outline-none"
+                    style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#e2e8f0" }}
+                  />
+                </div>
               </div>
-            </div>
+            )}
+
+            {mode === "forgot" && (
+              <p className="text-xs" style={{ color: "#64748b" }}>
+                E-postanızı girin; şifre sıfırlama bağlantısını göndereceğiz.
+              </p>
+            )}
 
             {error && (
               <div className="text-xs px-3 py-2 rounded-lg" style={{ backgroundColor: "rgba(239,68,68,0.1)", color: "#fca5a5" }}>
@@ -156,19 +192,26 @@ function LoginForm() {
               style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff", opacity: busy ? 0.7 : 1 }}
             >
               {busy ? <Loader2 size={16} className="animate-spin" /> : null}
-              {mode === "login" ? "Giriş Yap" : "Hesap Oluştur"}
+              {mode === "login" ? "Giriş Yap" : mode === "signup" ? "Hesap Oluştur" : "Bağlantı Gönder"}
             </button>
           </form>
 
           <p className="text-center text-xs mt-5" style={{ color: "#64748b" }}>
-            {mode === "login" ? "Hesabın yok mu?" : "Zaten hesabın var mı?"}{" "}
-            <button
-              onClick={() => { setMode(mode === "login" ? "signup" : "login"); setError(null); setInfo(null); }}
-              className="underline"
-              style={{ color: "#a78bfa" }}
-            >
-              {mode === "login" ? "Kaydol" : "Giriş yap"}
-            </button>
+            {mode === "forgot" ? (
+              <>
+                <button onClick={() => switchMode("login")} className="underline" style={{ color: "#a78bfa" }}>
+                  ← Giriş sayfasına dön
+                </button>
+              </>
+            ) : (
+              <>
+                {mode === "login" ? "Hesabın yok mu?" : "Zaten hesabın var mı?"}{" "}
+                <button onClick={() => switchMode(mode === "login" ? "signup" : "login")}
+                  className="underline" style={{ color: "#a78bfa" }}>
+                  {mode === "login" ? "Kaydol" : "Giriş yap"}
+                </button>
+              </>
+            )}
           </p>
         </div>
       </div>

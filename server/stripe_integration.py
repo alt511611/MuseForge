@@ -27,6 +27,19 @@ def get_price_id(plan: str) -> Optional[str]:
     return os.environ.get(env_key)
 
 
+async def create_portal_session(customer_id: str, return_url: str) -> str:
+    """Create a Stripe Billing Portal session and return the session URL."""
+    if not STRIPE_SECRET_KEY:
+        raise ValueError("STRIPE_SECRET_KEY is not configured")
+
+    session = await asyncio.to_thread(
+        stripe.billing_portal.Session.create,
+        customer=customer_id,
+        return_url=return_url,
+    )
+    return session.url
+
+
 async def create_checkout_session(
     price_id: str,
     user_id: str,

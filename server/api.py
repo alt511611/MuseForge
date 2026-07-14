@@ -2,16 +2,26 @@
 
 import json
 import os
+import time
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from typing import Optional
 
+import httpx
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from auth import AuthUser, get_current_admin, get_current_user, get_optional_user
+from auth import (
+    SUPABASE_SERVICE_KEY,
+    SUPABASE_URL,
+    AuthUser,
+    get_current_admin,
+    get_current_user,
+    get_optional_user,
+)
 from interfaces.camera import DIRECTOR_STYLES
 from jobs import JobStatus, job_store, run_generation_job
 
@@ -30,13 +40,43 @@ def _is_demo() -> bool:
     return DEMO_FLAG or not bool(os.environ.get("MUAPI_KEY"))
 
 
+# ── Rate limiter (sliding-window, no external dependencies) ───────────────────
+
+class _SlidingWindowRateLimiter:
+    """Per-key sliding-window rate limiter using monotonic clock.
+
+    Keeps a list of hit timestamps per key and trims them on every check.
+    The memory footprint is bounded by limit * number_of_unique_keys.
+    """
+
+    def __init__(self, limit: int = 5, window: float = 60.0):
+        self._limit = limit
+        self._window = window
+        self._hits: dict[str, list[float]] = defaultdict(list)
+
+    def allow(self, key: str) -> bool:
+        now = time.monotonic()
+        cutoff = now - self._window
+        hits = [t for t in self._hits[key] if t > cutoff]
+        if len(hits) >= self._limit:
+            self._hits[key] = hits
+            return False
+        hits.append(now)
+        self._hits[key] = hits
+        return True
+
+
+# 5 generate requests per 60 s per authenticated user / IP
+_rate_limiter = _SlidingWindowRateLimiter(limit=5, window=60.0)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     os.makedirs(os.environ.get("MUSEFORGE_JOBS_DIR", "/tmp/museforge_jobs"), exist_ok=True)
     yield
 
 
-app = FastAPI(title="MuseForge API", version="2.2.0", lifespan=lifespan)
+app = FastAPI(title="MuseForge API", version="2.3.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -56,8 +96,8 @@ class GenerateRequest(BaseModel):
     aspect_ratio: str = "16:9"
     num_scenes: int = Field(default=3, ge=2, le=5)
     user_requirement: str = ""
-    character_image: Optional[str] = None   # base64 data URI, e.g. "data:image/png;base64,..."
-    character_name: str = ""                # required alongside character_image
+    character_image: Optional[str] = None
+    character_name: str = ""
 
 
 class GenerateResponse(BaseModel):
@@ -76,11 +116,11 @@ async def health():
     return {
         "status": "ok",
         "service": "museforge-api",
-        "version": "2.2.0",
+        "version": "2.3.0",
         "demo_mode": _is_demo(),
         "muapi_configured": bool(os.environ.get("MUAPI_KEY")),
         "claude_configured": bool(os.environ.get("ANTHROPIC_API_KEY")),
-        "auth_configured": bool(os.environ.get("SUPABASE_URL")),
+        "auth_configured": bool(SUPABASE_URL),
     }
 
 
@@ -114,16 +154,30 @@ async def estimate(req: EstimateRequest):
     }
 
 
-# ── Generation (auth optional — works in demo mode without token) ─────────────
+# ── Generation (rate-limited; auth optional for demo mode) ───────────────────
 
 @app.post("/api/generate", response_model=GenerateResponse)
 async def generate(
     req: GenerateRequest,
+    request: Request,
     background_tasks: BackgroundTasks,
     current_user: Optional[AuthUser] = Depends(get_optional_user),
 ):
     if req.director_style not in DIRECTOR_STYLES:
         raise HTTPException(status_code=400, detail=f"Unknown director style: {req.director_style}")
+
+    # Rate-limit key: authenticated user_id preferred; fallback to client IP
+    rl_key = (
+        current_user.user_id
+        if current_user
+        else (request.client.host if request.client else "anon")
+    )
+    if not _rate_limiter.allow(rl_key):
+        raise HTTPException(
+            status_code=429,
+            detail="Çok fazla istek. Lütfen 1 dakika bekleyin ve tekrar deneyin.",
+            headers={"Retry-After": "60"},
+        )
 
     demo = _is_demo()
     api_key = os.environ.get("MUAPI_KEY", "")
@@ -154,28 +208,43 @@ async def get_job(
     current_user: Optional[AuthUser] = Depends(get_optional_user),
 ):
     job = job_store.get(job_id)
-    if not job:
+    if job:
+        # Auth guard for in-memory jobs
+        if current_user and job.user_id and job.user_id != current_user.user_id:
+            if not current_user.is_admin:
+                raise HTTPException(status_code=403, detail="Access denied")
+        return job.to_dict()
+
+    # Cache miss (post-restart): try Supabase
+    data = await job_store.get_or_fetch_dict(job_id)
+    if not data:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    # Authenticated users can only see their own jobs (admins see all).
-    if current_user and job.user_id and job.user_id != current_user.user_id:
+    if current_user and data.get("user_id") and data["user_id"] != current_user.user_id:
         if not current_user.is_admin:
             raise HTTPException(status_code=403, detail="Access denied")
-
-    return job.to_dict()
+    return data
 
 
 @app.get("/api/jobs/{job_id}/video")
 async def get_job_video(job_id: str):
     job = job_store.get(job_id)
-    if not job or not job.result:
+
+    if job:
+        result = job.result
+    else:
+        # Post-restart fallback
+        data = await job_store.get_or_fetch_dict(job_id)
+        result = data.get("result") if data else None
+
+    if not result:
         raise HTTPException(status_code=404, detail="Video not ready")
 
-    path = job.result.get("video_path")
+    path = result.get("video_path")
     if path and os.path.exists(path):
         return FileResponse(path, media_type="video/mp4", filename=f"museforge_{job_id}.mp4")
 
-    url = job.result.get("video_url")
+    url = result.get("video_url")
     if url:
         return RedirectResponse(url)
 
@@ -216,10 +285,11 @@ async def cancel_job(
         if not current_user.is_admin:
             raise HTTPException(status_code=403, detail="Access denied")
     job.status = JobStatus.CANCELLED
+    await job_store.persist(job)
     return {"status": "cancelled"}
 
 
-# ── Auth helper (frontend uses Supabase client directly; this just exposes me) ─
+# ── Auth helper ───────────────────────────────────────────────────────────────
 
 @app.get("/api/me")
 async def me(current_user: AuthUser = Depends(get_current_user)):
@@ -231,20 +301,17 @@ async def me(current_user: AuthUser = Depends(get_current_user)):
     }
 
 
-# ── Admin endpoints ────────────────────────────────────────────────────────────
+# ── Admin endpoints ───────────────────────────────────────────────────────────
 
 @app.get("/api/admin/stats")
 async def admin_stats(_admin: AuthUser = Depends(get_current_admin)):
     jobs = list(job_store._jobs.values())
     total = len(jobs)
-    completed = sum(1 for j in jobs if j.status == JobStatus.COMPLETED)
-    failed = sum(1 for j in jobs if j.status == JobStatus.FAILED)
-    running = sum(1 for j in jobs if j.status == JobStatus.RUNNING)
     return {
         "total": total,
-        "completed": completed,
-        "failed": failed,
-        "running": running,
+        "completed": sum(1 for j in jobs if j.status == JobStatus.COMPLETED),
+        "failed": sum(1 for j in jobs if j.status == JobStatus.FAILED),
+        "running": sum(1 for j in jobs if j.status == JobStatus.RUNNING),
         "queued": sum(1 for j in jobs if j.status == JobStatus.QUEUED),
         "cancelled": sum(1 for j in jobs if j.status == JobStatus.CANCELLED),
     }
@@ -267,9 +334,12 @@ async def admin_list_jobs(
 @app.get("/api/admin/jobs/{job_id}")
 async def admin_get_job(job_id: str, _admin: AuthUser = Depends(get_current_admin)):
     job = job_store.get(job_id)
-    if not job:
+    if job:
+        return job.to_dict(include_events=True)
+    data = await job_store.get_or_fetch_dict(job_id)
+    if not data:
         raise HTTPException(status_code=404, detail="Job not found")
-    return job.to_dict(include_events=True)
+    return data
 
 
 @app.post("/api/admin/jobs/{job_id}/retry")
@@ -307,16 +377,20 @@ async def admin_delete_job(job_id: str, _admin: AuthUser = Depends(get_current_a
         raise HTTPException(status_code=404, detail="Job not found")
     if job.status == JobStatus.RUNNING:
         job.status = JobStatus.CANCELLED
-    del job_store._jobs[job_id]
+    await job_store.delete(job_id)
     return {"deleted": job_id}
 
 
 # ── Stripe endpoints ──────────────────────────────────────────────────────────
 
 class CheckoutRequest(BaseModel):
-    plan: str  # "creator" | "pro"
+    plan: str
     success_url: str
     cancel_url: str
+
+
+class PortalRequest(BaseModel):
+    return_url: str
 
 
 @app.post("/api/create-checkout-session")
@@ -330,7 +404,7 @@ async def create_checkout_session(
     if not price_id:
         raise HTTPException(
             status_code=400,
-            detail=f"No Stripe price configured for plan '{req.plan}'. Set STRIPE_PRICE_{req.plan.upper()} env var.",
+            detail=f"No Stripe price configured for plan '{req.plan}'.",
         )
     try:
         url = await _create(
@@ -339,6 +413,52 @@ async def create_checkout_session(
             user_email=current_user.email,
             success_url=req.success_url,
             cancel_url=req.cancel_url,
+        )
+        return {"url": url}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/stripe-portal")
+async def stripe_portal(
+    req: PortalRequest,
+    current_user: AuthUser = Depends(get_current_user),
+):
+    """Create a Stripe Billing Portal session for the authenticated user."""
+    from stripe_integration import create_portal_session
+
+    customer_id: Optional[str] = None
+    if SUPABASE_URL and SUPABASE_SERVICE_KEY:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    f"{SUPABASE_URL}/rest/v1/profiles",
+                    params={
+                        "id": f"eq.{current_user.user_id}",
+                        "select": "stripe_customer_id",
+                        "limit": "1",
+                    },
+                    headers={
+                        "apikey": SUPABASE_SERVICE_KEY,
+                        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    },
+                )
+                data = resp.json()
+                if isinstance(data, list) and data:
+                    customer_id = data[0].get("stripe_customer_id")
+        except Exception:
+            pass
+
+    if not customer_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Bu hesap için Stripe müşteri kaydı bulunamadı. Önce bir abonelik başlatın.",
+        )
+
+    try:
+        url = await create_portal_session(
+            customer_id=customer_id,
+            return_url=req.return_url,
         )
         return {"url": url}
     except Exception as exc:

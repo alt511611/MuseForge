@@ -1,6 +1,17 @@
-"""In-memory job store with SSE progress streaming."""
+"""In-memory job store with SSE progress streaming + Supabase persistence.
+
+Design intent
+─────────────
+• In-memory dict → source-of-truth for live SSE streams (zero latency).
+• Supabase public.jobs table → source-of-truth for durable history.
+• All Supabase writes are fire-and-forget (asyncio.create_task), so a
+  Supabase outage never stalls the generation pipeline.
+• On GET cache-miss (post-restart) the store transparently falls back to
+  a single Supabase row read.
+"""
 
 import asyncio
+import logging
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -8,8 +19,123 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
+import httpx
+
+logger = logging.getLogger(__name__)
+
 HEARTBEAT_INTERVAL = 15.0
 
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+
+# ── Supabase helpers ───────────────────────────────────────────────────────────
+
+def _sb_headers() -> dict:
+    return {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates,return=minimal",
+    }
+
+
+def _sb_row(job: "Job") -> dict:
+    return {
+        "id": job.id,
+        "user_id": job.user_id,
+        "user_email": job.user_email,
+        "idea": job.idea,
+        "style": job.style,
+        "director_style": job.director_style,
+        "aspect_ratio": job.aspect_ratio,
+        "num_scenes": job.num_scenes,
+        "user_requirement": job.user_requirement,
+        "demo": job.demo,
+        "status": job.status.value,
+        "result": job.result,
+        "error": job.error,
+        "created_at": job.created_at,
+    }
+
+
+def _sb_row_to_dict(row: dict) -> dict:
+    """Normalise a Supabase jobs row to the same shape as Job.to_dict()."""
+    status = row.get("status", "unknown")
+    return {
+        "id": row.get("id"),
+        "status": status,
+        "idea": row.get("idea", ""),
+        "style": row.get("style", "Cinematic"),
+        "director_style": row.get("director_style", "cinematic_balanced"),
+        "aspect_ratio": row.get("aspect_ratio", "16:9"),
+        "num_scenes": row.get("num_scenes", 3),
+        "demo": row.get("demo", False),
+        "user_id": row.get("user_id"),
+        "user_email": row.get("user_email"),
+        "events": [],  # events are not persisted to DB
+        "result": row.get("result"),
+        "error": row.get("error"),
+        "created_at": row.get("created_at"),
+        "progress": 100 if status in ("completed", "failed", "cancelled") else 0,
+    }
+
+
+async def _sb_upsert(job: "Job") -> None:
+    """Upsert job row into Supabase. Silently swallows all errors."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            await client.post(
+                f"{SUPABASE_URL}/rest/v1/jobs",
+                json=_sb_row(job),
+                headers=_sb_headers(),
+            )
+    except Exception as exc:
+        logger.debug("Supabase upsert failed (non-fatal): %s", exc)
+
+
+async def _sb_get(job_id: str) -> Optional[dict]:
+    """Fetch a single job row from Supabase. Returns None on any error."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/jobs",
+                params={"id": f"eq.{job_id}", "limit": "1"},
+                headers={
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                },
+            )
+        data = resp.json()
+        return data[0] if isinstance(data, list) and data else None
+    except Exception as exc:
+        logger.debug("Supabase get failed (non-fatal): %s", exc)
+        return None
+
+
+async def _sb_delete(job_id: str) -> None:
+    """Delete a job row from Supabase. Silently swallows all errors."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            await client.delete(
+                f"{SUPABASE_URL}/rest/v1/jobs",
+                params={"id": f"eq.{job_id}"},
+                headers={
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    "Prefer": "return=minimal",
+                },
+            )
+    except Exception as exc:
+        logger.debug("Supabase delete failed (non-fatal): %s", exc)
+
+
+# ── Domain models ──────────────────────────────────────────────────────────────
 
 class JobStatus(str, Enum):
     QUEUED = "queued"
@@ -52,8 +178,8 @@ class Job:
     demo: bool = False
     user_id: Optional[str] = None
     user_email: Optional[str] = None
-    character_image: Optional[str] = None   # base64 data URI from file upload
-    character_name: str = ""                # required alongside character_image
+    character_image: Optional[str] = None
+    character_name: str = ""
     events: List[JobEvent] = field(default_factory=list)
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
@@ -81,6 +207,8 @@ class Job:
         }
 
 
+# ── JobStore ───────────────────────────────────────────────────────────────────
+
 class JobStore:
     def __init__(self, max_jobs: int = 100):
         self._jobs: Dict[str, Job] = {}
@@ -96,10 +224,32 @@ class JobStore:
             job_id = str(uuid.uuid4())[:12]
             job = Job(id=job_id, **kwargs)
             self._jobs[job_id] = job
-            return job
+
+        # Fire-and-forget initial row insert (queued state)
+        asyncio.create_task(_sb_upsert(job))
+        return job
 
     def get(self, job_id: str) -> Optional[Job]:
         return self._jobs.get(job_id)
+
+    async def persist(self, job: Job) -> None:
+        """Fire-and-forget upsert of the current job state to Supabase.
+        Call at every status transition; never awaited in a blocking sense."""
+        asyncio.create_task(_sb_upsert(job))
+
+    async def get_or_fetch_dict(self, job_id: str) -> Optional[dict]:
+        """Return job dict from memory first; fall back to Supabase on miss.
+        Used by REST endpoints after a server restart to serve historical jobs."""
+        job = self._jobs.get(job_id)
+        if job:
+            return job.to_dict()
+        row = await _sb_get(job_id)
+        return _sb_row_to_dict(row) if row else None
+
+    async def delete(self, job_id: str) -> None:
+        """Remove from memory and fire-and-forget delete from Supabase."""
+        self._jobs.pop(job_id, None)
+        asyncio.create_task(_sb_delete(job_id))
 
     async def emit(self, job: Job, stage: str, message: str, progress: float, data=None):
         job._seq += 1
@@ -125,8 +275,6 @@ class JobStore:
                     event = await asyncio.wait_for(queue.get(), timeout=HEARTBEAT_INTERVAL)
                     yield event
                 except asyncio.TimeoutError:
-                    # Keep the connection alive during long generation stages
-                    # instead of terminating the stream after one idle window.
                     last = job.events[-1].progress if job.events else 0
                     yield JobEvent(stage="heartbeat", message="", progress=last, seq=-1)
         finally:
@@ -139,12 +287,16 @@ job_store = JobStore()
 JOBS_DIR = os.environ.get("MUSEFORGE_JOBS_DIR", "/tmp/museforge_jobs")
 
 
+# ── Generation runner ──────────────────────────────────────────────────────────
+
 async def run_generation_job(job: Job, api_key: str):
     from pipelines.idea2video import Idea2VideoPipeline
     from pipelines.script2video import PipelineCancelled
     from tools.muapi_uploader import InvalidCharacterPhoto, upload_base64_image
 
     job.status = JobStatus.RUNNING
+    await job_store.persist(job)  # persist RUNNING state
+
     working_dir = os.path.join(JOBS_DIR, job.id)
 
     def is_cancelled() -> bool:
@@ -167,10 +319,9 @@ async def run_generation_job(job: Job, api_key: str):
             job.error = str(exc)
             job.status = JobStatus.FAILED
             await job_store.emit(job, "error", str(exc), 0)
+            await job_store.persist(job)
             return
         except Exception as exc:
-            # Non-fatal: continue without the uploaded reference rather than
-            # failing the whole generation over an upload hiccup.
             await job_store.emit(
                 job, "portraits", f"Could not use uploaded photo, generating one instead: {exc}", 3
             )
@@ -190,17 +341,22 @@ async def run_generation_job(job: Job, api_key: str):
             character_portraits_override=character_portraits_override or None,
         )
         if is_cancelled():
+            job.status = JobStatus.CANCELLED
             await job_store.emit(job, "cancelled", "Generation cancelled", 100)
+            await job_store.persist(job)
             return
         job.result = result
         job.status = JobStatus.COMPLETED
+        await job_store.persist(job)  # persist COMPLETED + result
         await job_store.emit(job, "complete", "Generation finished", 100, result)
     except PipelineCancelled:
         job.status = JobStatus.CANCELLED
+        await job_store.persist(job)
         await job_store.emit(job, "cancelled", "Generation cancelled", 100)
     except Exception as exc:
         job.error = str(exc)
         job.status = JobStatus.FAILED
+        await job_store.persist(job)  # persist FAILED + error message
         await job_store.emit(
             job, "error", str(exc), job.events[-1].progress if job.events else 0
         )

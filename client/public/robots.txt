@@ -1,0 +1,13 @@
+User-agent: *
+Allow: /
+Allow: /pricing
+Allow: /legal/
+
+# Private areas — no indexing
+Disallow: /admin/
+Disallow: /dashboard/
+Disallow: /generate/
+Disallow: /auth/
+Disallow: /api/
+
+Sitemap: https://museforge.ai/sitemap.xml
