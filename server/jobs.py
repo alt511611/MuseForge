@@ -116,6 +116,44 @@ async def _sb_get(job_id: str) -> Optional[dict]:
         return None
 
 
+async def _sb_refund_credits(user_id: str, amount: int, job_id: str) -> None:
+    """Refund credits to user after a failed/cancelled job. Fire-and-forget safe."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            # Read current balance
+            resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/profiles",
+                params={"id": f"eq.{user_id}", "select": "credits", "limit": "1"},
+                headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+            )
+            data = resp.json()
+            current = data[0].get("credits", 0) if isinstance(data, list) and data else 0
+            await client.patch(
+                f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{user_id}",
+                json={"credits": current + amount},
+                headers={
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal",
+                },
+            )
+            await client.post(
+                f"{SUPABASE_URL}/rest/v1/credit_ledger",
+                json={"user_id": user_id, "amount": amount, "reason": "refund", "job_id": job_id},
+                headers={
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal",
+                },
+            )
+    except Exception as exc:
+        logger.debug("Credit refund failed (non-fatal): %s", exc)
+
+
 async def _sb_delete(job_id: str) -> None:
     """Delete a job row from Supabase. Silently swallows all errors."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
@@ -353,6 +391,9 @@ async def run_generation_job(job: Job, api_key: str):
         job.status = JobStatus.CANCELLED
         await job_store.persist(job)
         await job_store.emit(job, "cancelled", "Generation cancelled", 100)
+        # Refund credits on cancellation (user triggered)
+        if job.user_id and not job.demo:
+            asyncio.create_task(_sb_refund_credits(job.user_id, job.num_scenes, job.id))
     except Exception as exc:
         job.error = str(exc)
         job.status = JobStatus.FAILED
@@ -360,3 +401,6 @@ async def run_generation_job(job: Job, api_key: str):
         await job_store.emit(
             job, "error", str(exc), job.events[-1].progress if job.events else 0
         )
+        # Refund credits on failure so users aren't penalised for pipeline errors
+        if job.user_id and not job.demo:
+            asyncio.create_task(_sb_refund_credits(job.user_id, job.num_scenes, job.id))

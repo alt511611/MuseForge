@@ -197,6 +197,65 @@ async def estimate(req: EstimateRequest):
     }
 
 
+# ── Credit helpers ────────────────────────────────────────────────────────────
+
+async def _get_user_credits(user_id: str) -> int:
+    """Return the current credit balance for a user. Returns -1 on Supabase error."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return 9999  # unlimited in dev
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/profiles",
+                params={"id": f"eq.{user_id}", "select": "credits", "limit": "1"},
+                headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+            )
+            data = resp.json()
+            if isinstance(data, list) and data:
+                return data[0].get("credits", 0)
+    except Exception:
+        pass
+    return -1
+
+
+async def _deduct_credits(user_id: str, amount: int, reason: str = "video_generation", job_id: str = "") -> bool:
+    """Deduct `amount` credits from the user's profile. Returns False if insufficient."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return True
+    current = await _get_user_credits(user_id)
+    if current < amount:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            await client.patch(
+                f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{user_id}",
+                json={"credits": max(0, current - amount)},
+                headers={
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal",
+                },
+            )
+            # ledger entry (fire-and-forget)
+            payload = {"user_id": user_id, "amount": -amount, "reason": reason}
+            if job_id:
+                payload["job_id"] = job_id
+            await client.post(
+                f"{SUPABASE_URL}/rest/v1/credit_ledger",
+                json=payload,
+                headers={
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal",
+                },
+            )
+        return True
+    except Exception:
+        return True  # fail-open: don't block generation on Supabase issues
+
+
 # ── Generation (rate-limited; auth optional for demo mode) ───────────────────
 
 @app.post("/api/generate", response_model=GenerateResponse)
@@ -224,6 +283,15 @@ async def generate(
 
     demo = _is_demo()
     api_key = os.environ.get("MUAPI_KEY", "")
+
+    # Credit check — only for authenticated non-demo requests
+    if current_user and not demo:
+        ok = await _deduct_credits(current_user.user_id, req.num_scenes, "video_generation")
+        if not ok:
+            raise HTTPException(
+                status_code=402,
+                detail=f"Insufficient credits. You need {req.num_scenes} credits for this generation. Please top up your balance.",
+            )
 
     job = await job_store.create(
         idea=req.idea,
@@ -424,6 +492,32 @@ async def admin_delete_job(job_id: str, _admin: AuthUser = Depends(get_current_a
     return {"deleted": job_id}
 
 
+# ── Credits endpoints ─────────────────────────────────────────────────────────
+
+@app.get("/api/credits")
+async def get_credits(current_user: AuthUser = Depends(get_current_user)):
+    """Return current credit balance and recent ledger entries."""
+    credits = await _get_user_credits(current_user.user_id)
+    ledger = []
+    if SUPABASE_URL and SUPABASE_SERVICE_KEY:
+        try:
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                resp = await client.get(
+                    f"{SUPABASE_URL}/rest/v1/credit_ledger",
+                    params={
+                        "user_id": f"eq.{current_user.user_id}",
+                        "select": "amount,reason,job_id,created_at",
+                        "order": "created_at.desc",
+                        "limit": "20",
+                    },
+                    headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+                )
+                ledger = resp.json() if isinstance(resp.json(), list) else []
+        except Exception:
+            pass
+    return {"credits": credits, "ledger": ledger}
+
+
 # ── Stripe endpoints ──────────────────────────────────────────────────────────
 
 class CheckoutRequest(BaseModel):
@@ -458,6 +552,45 @@ async def create_checkout_session(
             cancel_url=req.cancel_url,
         )
         return {"url": url}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+class BuyCreditsRequest(BaseModel):
+    package: str  # SMALL | MEDIUM | LARGE
+    success_url: str
+    cancel_url: str
+
+
+@app.post("/api/buy-credits")
+async def buy_credits(
+    req: BuyCreditsRequest,
+    current_user: AuthUser = Depends(get_current_user),
+):
+    """Create a one-time Stripe Checkout session for a credit package."""
+    from stripe_integration import create_checkout_session as _create, get_credit_price_id, CREDIT_PACKAGES
+
+    pkg_key = req.package.upper()
+    if pkg_key not in CREDIT_PACKAGES:
+        raise HTTPException(status_code=400, detail=f"Unknown credit package: {req.package}")
+
+    price_id = get_credit_price_id(pkg_key)
+    if not price_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No Stripe price configured for credit package '{req.package}'. Set STRIPE_PRICE_CREDITS_{pkg_key} env var.",
+        )
+    try:
+        url = await _create(
+            price_id=price_id,
+            user_id=current_user.user_id,
+            user_email=current_user.email,
+            success_url=req.success_url,
+            cancel_url=req.cancel_url,
+            mode="payment",
+            metadata={"credit_package": pkg_key},
+        )
+        return {"url": url, "package": pkg_key, "credits": CREDIT_PACKAGES[pkg_key]["credits"]}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

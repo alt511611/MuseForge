@@ -110,6 +110,33 @@ select 'creator',       30, 5, false
 union all
 select 'pro',          150, 5, true;
 
+-- ── Credit Ledger (hareket geçmişi) ──────────────────────────────────────────
+create table if not exists public.credit_ledger (
+  id          bigserial primary key,
+  user_id     uuid references auth.users on delete cascade not null,
+  amount      int not null,              -- pozitif = ekleme, negatif = kullanım
+  reason      text not null default '',  -- 'video_generation' | 'subscription_renewal' | 'credit_purchase' | 'refund'
+  job_id      text,                      -- ilgili job (varsa)
+  created_at  timestamptz default now()
+);
+
+alter table public.credit_ledger enable row level security;
+
+create policy "users_read_own_ledger"
+  on public.credit_ledger for select using (auth.uid() = user_id);
+
+create policy "service_insert_ledger"
+  on public.credit_ledger for insert
+  with check (true);   -- service key ile insert, RLS bypass için service role kullanılır
+
+-- Plan limitleri görünümünü yeni değerlerle güncelle
+create or replace view public.plan_limits as
+select 'free'    as plan, 3   as monthly_credits, 3 as max_scenes, false as hd_export
+union all
+select 'creator',          120, 5, false
+union all
+select 'pro',              300, 5, true;
+
 -- ── Admin atama ───────────────────────────────────────────────────────────────
 -- IMPORTANT: after the RLS fix above, admin RLS access is granted via the JWT's
 -- app_metadata ONLY — updating public.profiles.role alone is NOT enough for

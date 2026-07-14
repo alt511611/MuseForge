@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Film, Plus, ExternalLink, AlertCircle, Clock, CheckCircle2, XCircle, Loader2, Video, RefreshCw, CreditCard } from "lucide-react";
+import { Film, Plus, ExternalLink, AlertCircle, Clock, CheckCircle2, XCircle, Loader2, Video, RefreshCw, CreditCard, Sparkles, X } from "lucide-react";
 import { useAuth } from "../../contexts/AuthContext";
 import { useLanguage } from "../../contexts/LanguageContext";
 import { createClient } from "../../lib/supabase";
@@ -106,6 +106,78 @@ function SkeletonCard() {
   );
 }
 
+function BuyCreditsModal({ onClose, getAccessToken }) {
+  const { t } = useLanguage();
+  const [loading, setLoading] = useState(null);
+  const [err, setErr] = useState(null);
+
+  const PACKAGES = [
+    { key: "SMALL",  label: "20 Credits", price: "$9",  highlight: false },
+    { key: "MEDIUM", label: "60 Credits", price: "$19", highlight: true },
+    { key: "LARGE",  label: "150 Credits",price: "$39", highlight: false },
+  ];
+
+  const buy = async (pkg) => {
+    setLoading(pkg); setErr(null);
+    try {
+      const token = await getAccessToken();
+      const base = process.env.NEXT_PUBLIC_API_URL || "";
+      const res = await fetch(`${base}/api/buy-credits`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({
+          package: pkg,
+          success_url: `${window.location.origin}/dashboard?credits=bought`,
+          cancel_url: `${window.location.origin}/dashboard`,
+        }),
+      });
+      if (!res.ok) { const e = await res.json(); throw new Error(e.detail || "Error"); }
+      const { url } = await res.json();
+      window.location.href = url;
+    } catch (e) { setErr(e.message); setLoading(null); }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center px-4"
+      style={{ backgroundColor: "rgba(0,0,0,0.7)" }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="w-full max-w-md glass rounded-2xl p-7" style={{ border: "1px solid rgba(124,58,237,0.3)" }}>
+        <div className="flex items-center justify-between mb-5">
+          <h3 className="text-lg font-bold" style={{ color: "#e2e8f0" }}>
+            <Sparkles size={16} className="inline mr-2" style={{ color: "#7c3aed" }} />
+            {t("dash_buy_credits")}
+          </h3>
+          <button onClick={onClose} style={{ color: "#64748b" }}><X size={18} /></button>
+        </div>
+        <p className="text-xs mb-5" style={{ color: "#64748b" }}>No subscription required. Credits never expire.</p>
+        <div className="space-y-3">
+          {PACKAGES.map((pkg) => (
+            <div key={pkg.key}
+              className="flex items-center justify-between p-4 rounded-xl"
+              style={{
+                backgroundColor: pkg.highlight ? "rgba(124,58,237,0.08)" : "#0d0d14",
+                border: pkg.highlight ? "1px solid rgba(124,58,237,0.35)" : "1px solid #1a1a26",
+              }}>
+              <div>
+                <p className="text-sm font-bold" style={{ color: "#e2e8f0" }}>{pkg.label}</p>
+                <p className="text-xl font-black" style={{ color: pkg.highlight ? "#a78bfa" : "#64748b" }}>{pkg.price}</p>
+              </div>
+              <button onClick={() => buy(pkg.key)} disabled={!!loading}
+                className="px-4 py-2 rounded-xl text-sm font-semibold transition-all"
+                style={pkg.highlight
+                  ? { background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff", opacity: loading ? 0.7 : 1 }
+                  : { backgroundColor: "#1a1a26", border: "1px solid #22223a", color: "#94a3b8", opacity: loading ? 0.7 : 1 }}>
+                {loading === pkg.key ? <Loader2 size={14} className="animate-spin inline" /> : t("pricing_credits_buy")}
+              </button>
+            </div>
+          ))}
+        </div>
+        {err && <p className="text-xs mt-3" style={{ color: "#fca5a5" }}>{err}</p>}
+      </div>
+    </div>
+  );
+}
+
 function ManageSubscriptionButton({ getAccessToken }) {
   const { t } = useLanguage();
   const [loading, setLoading] = useState(false);
@@ -150,6 +222,8 @@ export default function DashboardPage() {
   const [error, setError] = useState(null);
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(false);
+  const [showBuyModal, setShowBuyModal] = useState(false);
+  const [ledger, setLedger] = useState([]);
 
   useEffect(() => {
     if (!authLoading && !user) router.replace("/login?next=/dashboard");
@@ -186,9 +260,30 @@ export default function DashboardPage() {
     if (data) setProfile(data);
   }, [user]);
 
+  const fetchLedger = useCallback(async () => {
+    try {
+      const token = await getAccessToken();
+      const base = process.env.NEXT_PUBLIC_API_URL || "";
+      const res = await fetch(`${base}/api/credits`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setLedger(data.ledger || []);
+        if (data.credits !== undefined && profile) {
+          setProfile((p) => p ? { ...p, credits: data.credits } : p);
+        }
+      }
+    } catch {}
+  }, [getAccessToken, profile]);
+
   useEffect(() => {
     if (user) { fetchJobs(0); fetchProfile(); }
   }, [user, fetchJobs, fetchProfile]);
+
+  useEffect(() => {
+    if (user) fetchLedger();
+  }, [user, fetchLedger]);
 
   const loadMore = () => { const next = page + 1; setPage(next); fetchJobs(next); };
 
@@ -201,6 +296,13 @@ export default function DashboardPage() {
   }
   if (!user) return null;
 
+  const LEDGER_COLORS = {
+    video_generation: "#ef4444",
+    subscription_renewal: "#22c55e",
+    credit_purchase: "#a78bfa",
+    refund: "#60a5fa",
+  };
+
   const stats = {
     total: jobs.length,
     completed: jobs.filter(j => j.status === "completed").length,
@@ -212,6 +314,7 @@ export default function DashboardPage() {
 
   return (
     <main className="min-h-screen" style={{ backgroundColor: "#0a0a0f" }}>
+      {showBuyModal && <BuyCreditsModal onClose={() => setShowBuyModal(false)} getAccessToken={getAccessToken} />}
       <div className="max-w-5xl mx-auto px-6 py-12">
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-10">
@@ -244,13 +347,20 @@ export default function DashboardPage() {
               <p className="text-xs mb-0.5" style={{ color: "#64748b" }}>{t("dash_credits")}</p>
               <p className="text-base font-bold" style={{ color: "#e2e8f0" }}>{profile.credits ?? "—"}</p>
             </div>
-            {profile.plan === "free" && (
-              <Link href="/pricing"
-                className="ml-auto text-xs px-3 py-1.5 rounded-xl font-medium"
-                style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}>
-                {t("dash_upgrade")}
-              </Link>
-            )}
+            <div className="ml-auto flex items-center gap-2">
+              <button onClick={() => setShowBuyModal(true)}
+                className="text-xs px-3 py-1.5 rounded-xl font-medium inline-flex items-center gap-1.5 transition-all"
+                style={{ backgroundColor: "#12121a", border: "1px solid rgba(124,58,237,0.35)", color: "#a78bfa" }}>
+                <Sparkles size={11} /> {t("dash_buy_credits")}
+              </button>
+              {profile.plan === "free" && (
+                <Link href="/pricing"
+                  className="text-xs px-3 py-1.5 rounded-xl font-medium"
+                  style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}>
+                  {t("dash_upgrade")}
+                </Link>
+              )}
+            </div>
           </div>
         )}
 
@@ -269,6 +379,32 @@ export default function DashboardPage() {
             </div>
           ))}
         </div>
+
+        {/* Credit ledger */}
+        {ledger.length > 0 && (
+          <div className="glass rounded-2xl p-5 mb-8" style={{ border: "1px solid rgba(124,58,237,0.08)" }}>
+            <p className="text-sm font-semibold mb-4" style={{ color: "#e2e8f0" }}>{t("dash_credit_history")}</p>
+            <div className="space-y-2">
+              {ledger.slice(0, 8).map((entry, i) => {
+                const color = LEDGER_COLORS[entry.reason] || "#64748b";
+                const sign = entry.amount > 0 ? "+" : "";
+                const date = entry.created_at
+                  ? new Date(entry.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })
+                  : "";
+                return (
+                  <div key={i} className="flex items-center justify-between text-xs py-1.5 border-b last:border-0"
+                    style={{ borderColor: "#1a1a26" }}>
+                    <span style={{ color: "#94a3b8" }}>{entry.reason?.replace(/_/g, " ")}</span>
+                    <div className="flex items-center gap-3">
+                      <span style={{ color: "#475569" }}>{date}</span>
+                      <span className="font-bold" style={{ color }}>{sign}{entry.amount}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Error */}
         {error && (

@@ -9,7 +9,7 @@ import ExitIntent from "../components/ExitIntent";
 import StickyCtaButton from "../components/StickyCtaButton";
 import {
   Film, Zap, GitBranch, Layers, Sparkles, Users, Camera, Wand2,
-  ArrowRight, PlayCircle, Rocket, ShieldCheck,
+  ArrowRight, PlayCircle, Rocket, ShieldCheck, Check, X as XIcon,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { useLanguage } from "../contexts/LanguageContext";
@@ -282,6 +282,91 @@ export default function HomePage() {
             </div>
           ))}
         </div>
+      </section>
+
+      {/* ── Director Style Gallery ──────────────────────────────────────── */}
+      <section className="max-w-5xl mx-auto px-6 pb-20">
+        <div className="text-center mb-10">
+          <h2 className="text-2xl md:text-3xl font-bold mb-3" style={{ color: "#e2e8f0" }}>
+            {t("gallery_title")}
+          </h2>
+          <p className="text-sm max-w-xl mx-auto" style={{ color: "#64748b" }}>{t("gallery_sub")}</p>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+          {[
+            { style: "Slow Cinematic",    mood: "Dreamy & contemplative",  color: "#818cf8" },
+            { style: "Noir Mystery",      mood: "Dark & high contrast",    color: "#c084fc" },
+            { style: "Handheld Kinetic",  mood: "Gritty verité energy",    color: "#60a5fa" },
+            { style: "Dynamic Action",    mood: "Fast cuts, bold movement", color: "#34d399" },
+            { style: "Warm Nostalgia",    mood: "Golden tone, soft focus",  color: "#fbbf24" },
+          ].map(({ style, mood, color }) => (
+            <div key={style}
+              className="group relative rounded-2xl overflow-hidden cursor-pointer transition-all duration-300 hover:scale-[1.04]"
+              style={{ border: "1px solid #1a1a26", backgroundColor: "#0d0d14", aspectRatio: "9/16" }}
+              onClick={() => scrollToForm({ director_style: style.toLowerCase().replace(/\s+/g, "_"), _ts: Date.now() })}
+            >
+              {/* Gradient placeholder frame */}
+              <div className="absolute inset-0"
+                style={{ background: `radial-gradient(ellipse at 50% 30%, ${color}30 0%, #0a0a0f 70%)` }} />
+              <div className="absolute inset-0 flex flex-col justify-end p-3">
+                <span className="text-[10px] px-2 py-0.5 rounded-full mb-2 self-start font-medium"
+                  style={{ backgroundColor: `${color}20`, color, border: `1px solid ${color}40` }}>
+                  {t("gallery_demo_label")}
+                </span>
+                <p className="text-xs font-bold leading-tight" style={{ color: "#e2e8f0" }}>{style}</p>
+                <p className="text-[10px] mt-0.5" style={{ color: "#64748b" }}>{mood}</p>
+              </div>
+              <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                <div className="px-3 py-1.5 rounded-full text-xs font-semibold"
+                  style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}>
+                  Try this style →
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* ── Comparison Table ────────────────────────────────────────────────── */}
+      <section className="max-w-4xl mx-auto px-6 pb-20">
+        <div className="text-center mb-10">
+          <h2 className="text-2xl md:text-3xl font-bold mb-3" style={{ color: "#e2e8f0" }}>
+            {t("compare_title")}
+          </h2>
+          <p className="text-sm" style={{ color: "#64748b" }}>{t("compare_sub")}</p>
+        </div>
+        <div className="glass rounded-2xl overflow-hidden" style={{ border: "1px solid rgba(124,58,237,0.15)" }}>
+          {/* Header */}
+          <div className="grid grid-cols-3 px-6 py-4 border-b" style={{ borderColor: "#1a1a26", backgroundColor: "#0d0d14" }}>
+            <p className="text-xs font-semibold" style={{ color: "#64748b" }}>{t("compare_feature")}</p>
+            <p className="text-xs font-bold text-center gradient-text">MuseForge</p>
+            <p className="text-xs font-semibold text-center" style={{ color: "#475569" }}>{t("compare_generic")}</p>
+          </div>
+          {[
+            { label: t("compare_char_lock") },
+            { label: t("compare_pipeline") },
+            { label: t("compare_presets") },
+            { label: t("compare_credits") },
+            { label: t("compare_demo") },
+          ].map(({ label }, i) => (
+            <div key={i} className="grid grid-cols-3 px-6 py-4 border-b transition-colors hover:bg-white/[0.02]"
+              style={{ borderColor: "#1a1a26" }}>
+              <p className="text-sm" style={{ color: "#94a3b8" }}>{label}</p>
+              <div className="flex justify-center">
+                <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full"
+                  style={{ backgroundColor: "rgba(34,197,94,0.12)", color: "#22c55e" }}>
+                  <Check size={11} /> {t("compare_yes").replace("✓ ", "")}
+                </span>
+              </div>
+              <div className="flex justify-center">
+                <span className="text-xs" style={{ color: "#475569" }}>{t("compare_no")}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+        <p className="text-xs text-center mt-3" style={{ color: "#374151" }}>
+          * Comparison based on publicly available feature sets. Individual tools may vary.
+        </p>
       </section>
 
       {/* ── Generation form ─────────────────────────────────────────────── */}

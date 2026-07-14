@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Film, LogOut, Shield, ChevronDown, User, LayoutDashboard, Globe } from "lucide-react";
+import { Film, LogOut, Shield, ChevronDown, User, LayoutDashboard, Globe, Building2, Users, Clapperboard, BookOpen } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { useLanguage } from "../contexts/LanguageContext";
 
@@ -61,6 +61,53 @@ function LanguageSelector() {
   );
 }
 
+function SolutionsDropdown() {
+  const { t } = useLanguage();
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, []);
+
+  const LINKS = [
+    { icon: Building2,   key: "sol_agencies",   href: "/solutions/agencies" },
+    { icon: Users,       key: "sol_creators",   href: "/solutions/creators" },
+    { icon: Clapperboard,key: "sol_filmmakers", href: "/solutions/filmmakers" },
+    { icon: BookOpen,    key: "sol_education",  href: "/solutions/education" },
+  ];
+
+  return (
+    <div className="relative hidden sm:block" ref={ref}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1 text-sm transition-colors hover:text-purple-400"
+        style={{ color: "#64748b" }}
+      >
+        {t("nav_solutions")}
+        <ChevronDown size={13} className={open ? "rotate-180" : ""} style={{ transition: "transform 0.2s" }} />
+      </button>
+      {open && (
+        <div
+          className="absolute left-0 mt-2 w-52 rounded-xl py-1 z-50 animate-fade-in"
+          style={{ backgroundColor: "#12121a", border: "1px solid #22223a" }}
+        >
+          {LINKS.map(({ icon: Icon, key, href }) => (
+            <Link key={href} href={href} onClick={() => setOpen(false)}
+              className="flex items-center gap-2.5 px-4 py-2.5 text-sm transition-colors hover:bg-white/5"
+              style={{ color: "#94a3b8" }}>
+              <Icon size={14} style={{ color: "#7c3aed" }} />
+              {t(key)}
+            </Link>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Navbar() {
   const { user, isAdmin, signOut, loading } = useAuth();
   const { t } = useLanguage();
@@ -104,6 +151,8 @@ export default function Navbar() {
       </Link>
 
       <div className="flex items-center gap-3">
+        <SolutionsDropdown />
+
         <Link href="/pricing"
           className="hidden sm:inline-flex items-center text-sm transition-colors hover:text-purple-400"
           style={{ color: "#64748b" }}>
