@@ -1,5 +1,6 @@
 """MuseForge FastAPI backend."""
 
+import asyncio
 import json
 import logging
 import os
@@ -75,8 +76,20 @@ _rate_limiter = _SlidingWindowRateLimiter(limit=5, window=60.0)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    os.makedirs(os.environ.get("MUSEFORGE_JOBS_DIR", "/tmp/museforge_jobs"), exist_ok=True)
-    yield
+    jobs_dir = os.environ.get("MUSEFORGE_JOBS_DIR", "/tmp/museforge_jobs")
+    os.makedirs(jobs_dir, exist_ok=True)
+    # Background orphan-disk cleanup (no external scheduler)
+    from jobs import orphan_cleanup_loop
+
+    cleanup_task = asyncio.create_task(orphan_cleanup_loop())
+    try:
+        yield
+    finally:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(title="MuseForge API", version="2.3.0", lifespan=lifespan)
@@ -88,6 +101,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+    return response
 
 
 # ── Request / Response models ─────────────────────────────────────────────────

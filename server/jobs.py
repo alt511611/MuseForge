@@ -13,6 +13,8 @@ Design intent
 import asyncio
 import logging
 import os
+import shutil
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -24,9 +26,12 @@ import httpx
 logger = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL = 15.0
+ORPHAN_MAX_AGE_SECONDS = 24 * 3600
+ORPHAN_CLEANUP_INTERVAL_SECONDS = 3600
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+JOBS_DIR = os.environ.get("MUSEFORGE_JOBS_DIR", "/tmp/museforge_jobs")
 
 # ── Supabase helpers ───────────────────────────────────────────────────────────
 
@@ -322,7 +327,73 @@ class JobStore:
 
 job_store = JobStore()
 
-JOBS_DIR = os.environ.get("MUSEFORGE_JOBS_DIR", "/tmp/museforge_jobs")
+
+def _is_remote_storage_url(url: Optional[str]) -> bool:
+    """True when the result points at a hosted (Supabase Storage) URL."""
+    if not url or not isinstance(url, str):
+        return False
+    return url.startswith("http") and (
+        "/storage/v1/" in url or "/object/sign/" in url or "supabase" in url.lower()
+    )
+
+
+def cleanup_working_dir(working_dir: str) -> None:
+    """Remove a job's local working directory after successful remote upload."""
+    if not working_dir or not os.path.isdir(working_dir):
+        return
+    try:
+        shutil.rmtree(working_dir)
+        logger.info("Cleaned working dir: %s", working_dir)
+    except Exception as exc:
+        logger.error("Failed to clean working dir %s: %s", working_dir, exc)
+
+
+def cleanup_orphan_job_dirs() -> int:
+    """Delete job dirs older than 24h that are not in the in-memory job store.
+
+    Returns the number of directories removed.
+    """
+    if not os.path.isdir(JOBS_DIR):
+        return 0
+    active_ids = set(job_store._jobs.keys())
+    cutoff = time.time() - ORPHAN_MAX_AGE_SECONDS
+    removed = 0
+    try:
+        entries = os.listdir(JOBS_DIR)
+    except OSError as exc:
+        logger.error("Cannot list JOBS_DIR %s: %s", JOBS_DIR, exc)
+        return 0
+
+    for name in entries:
+        path = os.path.join(JOBS_DIR, name)
+        if not os.path.isdir(path):
+            continue
+        if name in active_ids:
+            continue
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if mtime < cutoff:
+            try:
+                shutil.rmtree(path)
+                removed += 1
+                logger.info("Removed orphan job dir: %s", path)
+            except Exception as exc:
+                logger.error("Failed to remove orphan dir %s: %s", path, exc)
+    return removed
+
+
+async def orphan_cleanup_loop() -> None:
+    """Background task: periodically remove stale local job directories."""
+    while True:
+        try:
+            n = cleanup_orphan_job_dirs()
+            if n:
+                logger.info("Orphan cleanup removed %d directories", n)
+        except Exception as exc:
+            logger.error("Orphan cleanup loop error: %s", exc)
+        await asyncio.sleep(ORPHAN_CLEANUP_INTERVAL_SECONDS)
 
 
 # ── Generation runner ──────────────────────────────────────────────────────────
@@ -385,8 +456,12 @@ async def run_generation_job(job: Job, api_key: str):
             return
         job.result = result
         job.status = JobStatus.COMPLETED
-        await job_store.persist(job)  # persist COMPLETED + result
+        # Persist COMPLETED + result (includes signed Storage URL when uploaded)
+        await job_store.persist(job)
         await job_store.emit(job, "complete", "Generation finished", 100, result)
+        # Disk cleanup only after a successful remote upload
+        if not job.demo and _is_remote_storage_url((result or {}).get("video_url")):
+            cleanup_working_dir(working_dir)
     except PipelineCancelled:
         job.status = JobStatus.CANCELLED
         await job_store.persist(job)

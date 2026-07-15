@@ -223,6 +223,23 @@ class Idea2VideoPipeline:
             final_path = await self._assemble_final_drama(
                 scene_paths, working_dir, progress_callback, music_url
             )
+            # Persist final video to Supabase Storage (signed URL) when available.
+            if final_path and os.path.isfile(final_path):
+                from tools.supabase_storage import upload_video
+
+                job_id = os.path.basename(os.path.normpath(working_dir))
+                stored = await upload_video(final_path, job_id)
+                if stored and stored != final_path and stored.startswith("http"):
+                    video_url = stored
+                    # Delete local final file only after a successful remote upload.
+                    try:
+                        os.unlink(final_path)
+                    except OSError:
+                        pass
+                    final_path = stored
+                else:
+                    # Fail-open / demo: keep serving the local path.
+                    video_url = video_url or final_path
 
         await progress(
             "complete",
