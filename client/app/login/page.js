@@ -16,6 +16,7 @@ function LoginForm() {
   const [mode, setMode] = useState("login"); // "login" | "signup" | "forgot"
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [error, setError] = useState(null);
   const [info, setInfo] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -66,7 +67,12 @@ function LoginForm() {
     if (err) { setError(err.message); setBusy(false); }
   };
 
-  const switchMode = (newMode) => { setMode(newMode); setError(null); setInfo(null); };
+  const switchMode = (newMode) => {
+    setMode(newMode);
+    setError(null);
+    setInfo(null);
+    setAcceptedTerms(false);
+  };
 
   if (loading) {
     return (
@@ -157,6 +163,28 @@ function LoginForm() {
               <p className="text-xs" style={{ color: "#64748b" }}>{t("login_forgot_desc")}</p>
             )}
 
+            {mode === "signup" && (
+              <label className="flex items-start gap-2.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={acceptedTerms}
+                  onChange={(e) => setAcceptedTerms(e.target.checked)}
+                  className="mt-0.5 rounded"
+                  style={{ accentColor: "#7c3aed" }}
+                />
+                <span className="text-xs leading-relaxed" style={{ color: "#94a3b8" }}>
+                  {t("login_accept_prefix")}{" "}
+                  <a href="/legal/terms" target="_blank" rel="noopener noreferrer" className="underline" style={{ color: "#a78bfa" }}>
+                    {t("login_accept_terms")}
+                  </a>
+                  {" "}{t("login_accept_and")}{" "}
+                  <a href="/legal/privacy" target="_blank" rel="noopener noreferrer" className="underline" style={{ color: "#a78bfa" }}>
+                    {t("login_accept_privacy")}
+                  </a>
+                </span>
+              </label>
+            )}
+
             {error && (
               <div className="text-xs px-3 py-2 rounded-lg" style={{ backgroundColor: "rgba(239,68,68,0.1)", color: "#fca5a5" }}>
                 {error}
@@ -169,9 +197,14 @@ function LoginForm() {
             )}
 
             <button
-              type="submit" disabled={busy}
+              type="submit"
+              disabled={busy || (mode === "signup" && !acceptedTerms)}
               className="w-full py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-all"
-              style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff", opacity: busy ? 0.7 : 1 }}
+              style={{
+                background: "linear-gradient(135deg,#7c3aed,#6d28d9)",
+                color: "#fff",
+                opacity: busy || (mode === "signup" && !acceptedTerms) ? 0.5 : 1,
+              }}
             >
               {busy ? <Loader2 size={16} className="animate-spin" /> : null}
               {mode === "login" ? t("login_submit_login") : mode === "signup" ? t("login_submit_signup") : t("login_submit_forgot")}
