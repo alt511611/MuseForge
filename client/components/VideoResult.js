@@ -13,10 +13,10 @@ function NextSteps({ jobId, videoUrl }) {
   const handleShare = async () => {
     const url = typeof window !== "undefined" ? window.location.href : "";
     if (navigator.share) {
-      try { await navigator.share({ title: "Made with MuseForge!", url }); } catch { /* cancelled */ }
+      try { await navigator.share({ title: t("result_share_title"), url }); } catch { /* cancelled */ }
     } else {
       await navigator.clipboard.writeText(url);
-      alert("Link copied to clipboard!");
+      alert(t("result_link_copied"));
     }
   };
 
@@ -65,10 +65,10 @@ export default function VideoResult({ job, jobId }) {
     const notifyTitle = t("result_ready");
     if ("Notification" in window && Notification.permission === "default") {
       Notification.requestPermission().then((perm) => {
-        if (perm === "granted") new Notification(notifyTitle, { body: result.title || "Your video is complete.", icon: "/favicon.ico" });
+        if (perm === "granted") new Notification(notifyTitle, { body: result.title || t("result_notify_body"), icon: "/favicon.ico" });
       });
     } else if (Notification.permission === "granted") {
-      new Notification(notifyTitle, { body: result.title || "Your video is complete.", icon: "/favicon.ico" });
+      new Notification(notifyTitle, { body: result.title || t("result_notify_body"), icon: "/favicon.ico" });
     }
 
     // Completion chime
@@ -101,7 +101,7 @@ export default function VideoResult({ job, jobId }) {
         <div className="text-4xl mb-2">🎉</div>
         <h2 className="text-2xl font-black gradient-text">{t("result_ready")}</h2>
         <p className="text-sm mt-1" style={{ color: "#64748b" }}>
-          {result.title} · {result.scene_count} scenes · {result.aspect_ratio}
+          {result.title} · {t("result_scenes_count", { n: result.scene_count })} · {result.aspect_ratio}
         </p>
       </div>
 
@@ -119,7 +119,7 @@ export default function VideoResult({ job, jobId }) {
             className="inline-flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg font-medium flex-shrink-0 ml-3"
             style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}>
             <Download size={13} />
-            Download
+            {t("result_download")}
           </a>
         </div>
       </div>
@@ -136,7 +136,7 @@ export default function VideoResult({ job, jobId }) {
           >
             <span className="text-sm font-medium flex items-center gap-2" style={{ color: "#a78bfa" }}>
               <Layout size={15} />
-              Storyboard & Characters
+              {t("result_storyboard")}
             </span>
             {storyboardOpen ? <ChevronUp size={15} style={{ color: "#64748b" }} /> : <ChevronDown size={15} style={{ color: "#64748b" }} />}
           </button>
@@ -145,7 +145,7 @@ export default function VideoResult({ job, jobId }) {
             <div className="px-5 pb-5 animate-fade-in">
               {Object.keys(portraits).length > 0 && (
                 <div className="mb-4">
-                  <p className="text-xs mb-2" style={{ color: "#64748b" }}>Locked Characters</p>
+                  <p className="text-xs mb-2" style={{ color: "#64748b" }}>{t("result_locked_chars")}</p>
                   <div className="flex flex-wrap gap-3">
                     {Object.entries(portraits).map(([name, url]) => (
                       <div key={name} className="flex flex-col items-center gap-1">

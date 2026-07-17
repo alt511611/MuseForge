@@ -29,12 +29,18 @@ function LoginForm() {
     e.preventDefault();
     setError(null);
     setInfo(null);
+
+    if (mode !== "forgot" && password.length < 6) {
+      setError(t("login_password_min"));
+      return;
+    }
+
     setBusy(true);
     try {
       if (mode === "forgot") {
         const { error: err } = await resetPasswordForEmail(email);
         if (err) {
-          setError(err.message);
+          setError(err.message || t("login_error_generic"));
         } else {
           setInfo(t("login_reset_sent"));
           setMode("login");
@@ -42,19 +48,39 @@ function LoginForm() {
         return;
       }
 
-      const { error: err } =
-        mode === "login"
-          ? await signInWithEmail(email, password)
-          : await signUpWithEmail(email, password);
+      if (mode === "login") {
+        const { error: err } = await signInWithEmail(email, password);
+        if (err) {
+          setError(err.message || t("login_error_generic"));
+        } else {
+          router.replace(next);
+        }
+        return;
+      }
 
+      // signup
+      const { data, error: err } = await signUpWithEmail(email, password);
       if (err) {
-        setError(err.message);
-      } else if (mode === "signup") {
+        setError(err.message || t("login_error_generic"));
+        return;
+      }
+      // Email confirmation pending: user object exists but no session yet
+      if (data?.user && !data?.session) {
         setInfo(t("login_registered"));
         setMode("login");
-      } else {
-        router.replace(next);
+        setAcceptedTerms(false);
+        return;
       }
+      if (data?.session) {
+        setInfo(t("login_registered"));
+        router.replace(next);
+        return;
+      }
+      // Unexpected empty response — still guide the user
+      setInfo(t("login_registered"));
+      setMode("login");
+    } catch (exc) {
+      setError(exc?.message || t("login_error_generic"));
     } finally {
       setBusy(false);
     }
@@ -93,7 +119,7 @@ function LoginForm() {
             <Film size={28} color="#fff" />
           </div>
           <h1 className="text-3xl font-black tracking-tight gradient-text">MuseForge</h1>
-          <p className="text-sm mt-1" style={{ color: "#64748b" }}>Agentic AI Video Studio</p>
+          <p className="text-sm mt-1" style={{ color: "#64748b" }}>{t("login_tagline")}</p>
         </div>
 
         <div className="glass rounded-2xl p-8">

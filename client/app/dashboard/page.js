@@ -7,6 +7,7 @@ import { Film, Plus, ExternalLink, AlertCircle, Clock, CheckCircle2, XCircle, Lo
 import { useAuth } from "../../contexts/AuthContext";
 import { useLanguage } from "../../contexts/LanguageContext";
 import { createClient } from "../../lib/supabase";
+import { isLowCredits } from "../../lib/credits";
 import { API_BASE } from "../../lib/apiBase";
 
 const PAGE_SIZE = 12;
@@ -46,7 +47,7 @@ function JobCard({ job }) {
         <StatusBadge status={job.status} />
         {job.demo && (
           <span className="text-[10px] px-2 py-0.5 rounded-full font-medium" style={{ backgroundColor: "rgba(251,191,36,0.15)", color: "#fbbf24" }}>
-            Demo
+            {t("dash_demo_badge")}
           </span>
         )}
       </div>
@@ -309,6 +310,8 @@ export default function DashboardPage() {
     failed: jobs.filter(j => j.status === "failed").length,
   };
 
+  const lowCredits = profile && isLowCredits(profile.credits, profile.plan);
+
   const PLAN_LABEL_KEYS = { free: "dash_plan_free", creator: "dash_plan_creator", pro: "dash_plan_pro" };
 
   return (
@@ -331,6 +334,26 @@ export default function DashboardPage() {
             </Link>
           </div>
         </div>
+
+        {lowCredits && (
+          <div
+            className="mb-6 px-5 py-4 rounded-xl flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+            style={{ backgroundColor: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.35)" }}
+          >
+            <p className="text-sm font-medium" style={{ color: "#fbbf24" }}>
+              {t("credits_low_banner", { n: profile.credits })}
+            </p>
+            <button
+              type="button"
+              onClick={() => setShowBuyModal(true)}
+              className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold"
+              style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}
+            >
+              <Sparkles size={13} />
+              {t("credits_low_buy")}
+            </button>
+          </div>
+        )}
 
         {/* Profile / plan card */}
         {profile && (

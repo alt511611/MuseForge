@@ -38,7 +38,7 @@ export default function CookieConsent() {
             <p className="text-xs leading-relaxed mb-3" style={{ color: "#64748b" }}>
               {t("cookie_body")}{" "}
               <Link href="/legal/privacy" className="underline" style={{ color: "#a78bfa" }}>
-                Privacy Policy
+                {t("cookie_privacy_link")}
               </Link>
             </p>
             <div className="flex gap-2">

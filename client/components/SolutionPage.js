@@ -2,12 +2,13 @@
 
 import Link from "next/link";
 import { Check, ArrowRight, Film } from "lucide-react";
+import { useLanguage } from "../contexts/LanguageContext";
 
 /**
  * Shared layout for all /solutions/* segment pages.
  *
  * Props:
- *   icon        — lucide component
+ *   icon        — pre-rendered JSX icon
  *   accentColor — e.g. "#7c3aed"
  *   badge       — small badge text above heading
  *   heading     — main h1 (can be JSX)
@@ -28,6 +29,7 @@ export default function SolutionPage({
   planCard,
   ctaBanner,
 }) {
+  const { t } = useLanguage();
   return (
     <main className="min-h-screen" style={{ backgroundColor: "#0a0a0f" }}>
       {/* Hero */}
@@ -72,7 +74,7 @@ export default function SolutionPage({
                       </div>
                       <span className="text-xs px-2.5 py-1 rounded-full font-medium"
                         style={{ backgroundColor: `${accentColor}20`, color: accentColor }}>
-                        Example Output
+                        {t("sol_example_output")}
                       </span>
                       <p className="text-xs text-center max-w-[180px]" style={{ color: "#475569" }}>{sample}</p>
                     </div>
@@ -88,7 +90,7 @@ export default function SolutionPage({
       {differentiators.length > 0 && (
         <section className="max-w-5xl mx-auto px-6 py-8">
           <div className="glass rounded-2xl p-8" style={{ border: "1px solid rgba(124,58,237,0.12)" }}>
-            <h2 className="text-2xl font-black mb-6 gradient-text">What makes MuseForge different</h2>
+            <h2 className="text-2xl font-black mb-6 gradient-text">{t("sol_diff_title")}</h2>
             <div className="space-y-4">
               {differentiators.map(({ title, desc }, i) => (
                 <div key={i} className="flex items-start gap-3">
@@ -107,7 +109,7 @@ export default function SolutionPage({
       {/* Plan card */}
       {planCard && (
         <section className="max-w-5xl mx-auto px-6 py-10">
-          <h2 className="text-xl font-bold mb-5" style={{ color: "#e2e8f0" }}>Recommended plan</h2>
+          <h2 className="text-xl font-bold mb-5" style={{ color: "#e2e8f0" }}>{t("sol_recommended_plan")}</h2>
           <div className="glass rounded-2xl p-7 max-w-sm"
             style={{
               border: planCard.highlight ? "1px solid rgba(124,58,237,0.4)" : "1px solid rgba(124,58,237,0.12)",
@@ -115,7 +117,9 @@ export default function SolutionPage({
             }}>
             <p className="text-xl font-black mb-1" style={{ color: "#e2e8f0" }}>{planCard.name}</p>
             {planCard.credits && (
-              <p className="text-xs font-medium mb-3" style={{ color: "#7c3aed" }}>{planCard.credits} credits / mo</p>
+              <p className="text-xs font-medium mb-3" style={{ color: "#7c3aed" }}>
+                {t("sol_credits_mo", { n: planCard.credits })}
+              </p>
             )}
             <div className="mb-4">
               <span className="text-3xl font-black" style={{ color: "#e2e8f0" }}>{planCard.price}</span>

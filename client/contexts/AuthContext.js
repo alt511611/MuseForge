@@ -53,7 +53,13 @@ export function AuthProvider({ children }) {
     requireAuth().auth.signInWithPassword({ email, password });
 
   const signUpWithEmail = (email, password) =>
-    requireAuth().auth.signUp({ email, password });
+    requireAuth().auth.signUp({
+      email,
+      password,
+      options: {
+        emailRedirectTo: `${window.location.origin}/auth/callback`,
+      },
+    });
 
   const signInWithGoogle = () =>
     requireAuth().auth.signInWithOAuth({

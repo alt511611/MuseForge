@@ -8,6 +8,7 @@ import {
   RefreshCw, Trash2, Eye, ArrowLeft, Activity,
 } from "lucide-react";
 import { useAuth } from "../../contexts/AuthContext";
+import { useLanguage } from "../../contexts/LanguageContext";
 
 const STATUS_COLOR = {
   completed: "#22c55e",
@@ -33,6 +34,7 @@ function StatCard({ icon: Icon, label, value, color }) {
 }
 
 function JobModal({ job, onClose, onRetry, onDelete }) {
+  const { t } = useLanguage();
   if (!job) return null;
   return (
     <div
@@ -59,12 +61,12 @@ function JobModal({ job, onClose, onRetry, onDelete }) {
         </p>
 
         <div className="grid grid-cols-2 gap-2 text-xs mb-4" style={{ color: "#64748b" }}>
-          <div>Stil: <span style={{ color: "#94a3b8" }}>{job.style}</span></div>
-          <div>Yönetmen: <span style={{ color: "#94a3b8" }}>{job.director_style}</span></div>
-          <div>Oran: <span style={{ color: "#94a3b8" }}>{job.aspect_ratio}</span></div>
-          <div>Sahneler: <span style={{ color: "#94a3b8" }}>{job.num_scenes}</span></div>
-          <div>Kullanıcı: <span style={{ color: "#94a3b8" }}>{job.user_email || "anonim"}</span></div>
-          <div>Demo: <span style={{ color: "#94a3b8" }}>{job.demo ? "evet" : "hayır"}</span></div>
+          <div>{t("admin_style")}: <span style={{ color: "#94a3b8" }}>{job.style}</span></div>
+          <div>{t("admin_director")}: <span style={{ color: "#94a3b8" }}>{job.director_style}</span></div>
+          <div>{t("admin_ratio")}: <span style={{ color: "#94a3b8" }}>{job.aspect_ratio}</span></div>
+          <div>{t("admin_scenes")}: <span style={{ color: "#94a3b8" }}>{job.num_scenes}</span></div>
+          <div>{t("admin_user")}: <span style={{ color: "#94a3b8" }}>{job.user_email || t("admin_anon")}</span></div>
+          <div>{t("admin_demo")}: <span style={{ color: "#94a3b8" }}>{job.demo ? t("admin_yes") : t("admin_no")}</span></div>
         </div>
 
         {job.error && (
@@ -75,7 +77,7 @@ function JobModal({ job, onClose, onRetry, onDelete }) {
 
         {job.events?.length > 0 && (
           <div>
-            <p className="text-xs font-medium mb-2" style={{ color: "#64748b" }}>Olay Günlüğü</p>
+            <p className="text-xs font-medium mb-2" style={{ color: "#64748b" }}>{t("admin_event_log")}</p>
             <div className="space-y-1 max-h-48 overflow-y-auto font-mono text-xs"
               style={{ backgroundColor: "#0a0a0f", borderRadius: 8, padding: "8px 12px" }}>
               {job.events.map((ev, i) => (
@@ -94,7 +96,7 @@ function JobModal({ job, onClose, onRetry, onDelete }) {
             <button onClick={() => onRetry(job.id)}
               className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium transition-all"
               style={{ backgroundColor: "rgba(124,58,237,0.15)", color: "#a78bfa", border: "1px solid rgba(124,58,237,0.3)" }}>
-              <RefreshCw size={14} /> Yeniden Dene
+              <RefreshCw size={14} /> {t("admin_retry")}
             </button>
           )}
           <button onClick={() => onDelete(job.id)}
@@ -115,6 +117,7 @@ function JobModal({ job, onClose, onRetry, onDelete }) {
 
 export default function AdminPage() {
   const { user, isAdmin, loading: authLoading, getAccessToken } = useAuth();
+  const { t } = useLanguage();
   const router = useRouter();
   const [stats, setStats] = useState(null);
   const [jobs, setJobs] = useState([]);
@@ -164,7 +167,7 @@ export default function AdminPage() {
   };
 
   const handleDelete = async (id) => {
-    if (!confirm("Bu job silinsin mi?")) return;
+    if (!confirm(t("admin_confirm_delete"))) return;
     const res = await apiFetch(`/api/admin/jobs/${id}`, { method: "DELETE" });
     if (res.ok) { setSelectedJob(null); loadData(); }
   };
@@ -185,26 +188,26 @@ export default function AdminPage() {
         <div className="flex items-center justify-between mb-8">
           <div className="flex items-center gap-3">
             <Link href="/" className="text-sm flex items-center gap-1.5 transition-colors hover:text-purple-400" style={{ color: "#64748b" }}>
-              <ArrowLeft size={14} /> Ana Sayfa
+              <ArrowLeft size={14} /> {t("admin_home")}
             </Link>
             <span style={{ color: "#22223a" }}>/</span>
-            <h1 className="text-xl font-bold gradient-text">Admin Paneli</h1>
+            <h1 className="text-xl font-bold gradient-text">{t("admin_title")}</h1>
           </div>
           <button onClick={loadData} disabled={fetching}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-all"
             style={{ color: "#64748b", border: "1px solid #22223a" }}>
             <RefreshCw size={14} className={fetching ? "animate-spin" : ""} />
-            Yenile
+            {t("admin_refresh")}
           </button>
         </div>
 
         {/* Stats */}
         {stats && (
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-            <StatCard icon={Film} label="Toplam Job" value={stats.total} color="#7c3aed" />
-            <StatCard icon={CheckCircle2} label="Tamamlandı" value={stats.completed} color="#22c55e" />
-            <StatCard icon={XCircle} label="Başarısız" value={stats.failed} color="#ef4444" />
-            <StatCard icon={Activity} label="Çalışıyor" value={stats.running} color="#a78bfa" />
+            <StatCard icon={Film} label={t("admin_stat_total")} value={stats.total} color="#7c3aed" />
+            <StatCard icon={CheckCircle2} label={t("admin_stat_completed")} value={stats.completed} color="#22c55e" />
+            <StatCard icon={XCircle} label={t("admin_stat_failed")} value={stats.failed} color="#ef4444" />
+            <StatCard icon={Activity} label={t("admin_stat_running")} value={stats.running} color="#a78bfa" />
           </div>
         )}
 
@@ -212,9 +215,9 @@ export default function AdminPage() {
         <div className="glass rounded-2xl overflow-hidden">
           <div className="flex items-center justify-between px-6 py-4" style={{ borderBottom: "1px solid #1a1a26" }}>
             <h2 className="text-sm font-medium flex items-center gap-2" style={{ color: "#a78bfa" }}>
-              <BarChart3 size={16} /> Tüm Job'lar
+              <BarChart3 size={16} /> {t("admin_jobs_title")}
             </h2>
-            <span className="text-xs" style={{ color: "#475569" }}>{total} kayıt</span>
+            <span className="text-xs" style={{ color: "#475569" }}>{t("admin_records", { n: total })}</span>
           </div>
 
           {fetching ? (
@@ -226,7 +229,7 @@ export default function AdminPage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr style={{ borderBottom: "1px solid #1a1a26" }}>
-                    {["ID", "Kullanıcı", "Fikir", "Durum", "Tarih", ""].map((h) => (
+                    {[t("admin_col_id"), t("admin_col_user"), t("admin_col_idea"), t("admin_col_status"), t("admin_col_date"), ""].map((h) => (
                       <th key={h} className="text-left px-4 py-3 text-xs font-medium" style={{ color: "#475569" }}>{h}</th>
                     ))}
                   </tr>
@@ -235,7 +238,7 @@ export default function AdminPage() {
                   {jobs.map((job) => (
                     <tr key={job.id} style={{ borderBottom: "1px solid #12121a" }} className="hover:bg-white/[0.02] transition-colors">
                       <td className="px-4 py-3 font-mono text-xs" style={{ color: "#94a3b8" }}>{job.id}</td>
-                      <td className="px-4 py-3 text-xs max-w-[140px] truncate" style={{ color: "#64748b" }}>{job.user_email || "anonim"}</td>
+                      <td className="px-4 py-3 text-xs max-w-[140px] truncate" style={{ color: "#64748b" }}>{job.user_email || t("admin_anon")}</td>
                       <td className="px-4 py-3 text-xs max-w-[200px] truncate" style={{ color: "#94a3b8" }}>{job.idea}</td>
                       <td className="px-4 py-3">
                         <span className="text-xs px-2 py-0.5 rounded-full" style={{ backgroundColor: `${STATUS_COLOR[job.status] || "#94a3b8"}15`, color: STATUS_COLOR[job.status] || "#94a3b8" }}>
@@ -247,7 +250,7 @@ export default function AdminPage() {
                         <button onClick={() => openJobDetail(job.id)}
                           className="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg transition-all"
                           style={{ backgroundColor: "rgba(124,58,237,0.1)", color: "#a78bfa" }}>
-                          <Eye size={12} /> Detay
+                          <Eye size={12} /> {t("admin_detail")}
                         </button>
                       </td>
                     </tr>
@@ -263,13 +266,13 @@ export default function AdminPage() {
               <button disabled={page === 0} onClick={() => setPage(p => p - 1)}
                 className="text-xs px-3 py-1.5 rounded-lg transition-all disabled:opacity-40"
                 style={{ color: "#94a3b8", border: "1px solid #22223a" }}>
-                Önceki
+                {t("admin_prev")}
               </button>
               <span className="text-xs" style={{ color: "#475569" }}>{page + 1} / {totalPages}</span>
               <button disabled={page >= totalPages - 1} onClick={() => setPage(p => p + 1)}
                 className="text-xs px-3 py-1.5 rounded-lg transition-all disabled:opacity-40"
                 style={{ color: "#94a3b8", border: "1px solid #22223a" }}>
-                Sonraki
+                {t("admin_next")}
               </button>
             </div>
           )}

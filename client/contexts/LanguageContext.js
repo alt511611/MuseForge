@@ -11,9 +11,6 @@ function detectLocale() {
   if (typeof window === "undefined") return DEFAULT_LOCALE;
   const stored = localStorage.getItem(LS_KEY);
   if (stored && LOCALE_CODES.includes(stored)) return stored;
-  // navigator.language e.g. "tr-TR" → "tr"
-  const navLang = navigator.language?.split("-")[0]?.toLowerCase();
-  if (navLang && LOCALE_CODES.includes(navLang)) return navLang;
   return DEFAULT_LOCALE;
 }
 
@@ -39,9 +36,15 @@ export function LanguageProvider({ children }) {
   }, []);
 
   const t = useCallback(
-    (key) => {
+    (key, vars) => {
       const dict = translations[locale] ?? translations[DEFAULT_LOCALE] ?? {};
-      return dict[key] ?? translations[DEFAULT_LOCALE]?.[key] ?? key;
+      let s = dict[key] ?? translations[DEFAULT_LOCALE]?.[key] ?? key;
+      if (vars && typeof s === "string") {
+        for (const [k, v] of Object.entries(vars)) {
+          s = s.replaceAll(`{${k}}`, String(v));
+        }
+      }
+      return s;
     },
     [locale]
   );
