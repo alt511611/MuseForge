@@ -8,6 +8,7 @@ import { useAuth } from "../../contexts/AuthContext";
 import { useLanguage } from "../../contexts/LanguageContext";
 import { createClient } from "../../lib/supabase";
 import { isLowCredits } from "../../lib/credits";
+import { API_BASE } from "../../lib/apiBase";
 
 const PAGE_SIZE = 12;
 
@@ -122,8 +123,7 @@ function BuyCreditsModal({ onClose, getAccessToken }) {
     setLoading(pkg); setErr(null);
     try {
       const token = await getAccessToken();
-      const base = process.env.NEXT_PUBLIC_API_URL || "";
-      const res = await fetch(`${base}/api/buy-credits`, {
+      const res = await fetch(`${API_BASE}/api/buy-credits`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify({
@@ -188,7 +188,7 @@ function ManageSubscriptionButton({ getAccessToken }) {
     setLoading(true); setError(null);
     try {
       const token = await getAccessToken();
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || ""}/api/stripe-portal`, {
+      const res = await fetch(`${API_BASE}/api/stripe-portal`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify({ return_url: window.location.href }),
@@ -264,8 +264,7 @@ export default function DashboardPage() {
   const fetchLedger = useCallback(async () => {
     try {
       const token = await getAccessToken();
-      const base = process.env.NEXT_PUBLIC_API_URL || "";
-      const res = await fetch(`${base}/api/credits`, {
+      const res = await fetch(`${API_BASE}/api/credits`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
       if (res.ok) {

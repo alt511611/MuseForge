@@ -13,7 +13,9 @@ import {
   Upload,
   X,
 } from "lucide-react";
+
 import { useLanguage } from "../contexts/LanguageContext";
+import { API_BASE } from "../lib/apiBase";
 
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024; // 5MB — keep in sync with server/constants.py
 
@@ -73,7 +75,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
   }, [idea]);
 
   useEffect(() => {
-    fetch("/api/health")
+    fetch(`${API_BASE}/api/health`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => d && setDemoMode(!!d.demo_mode))
       .catch(() => {});
@@ -81,7 +83,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/estimate", {
+    fetch(`${API_BASE}/api/estimate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ num_scenes: numScenes }),

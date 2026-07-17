@@ -36,6 +36,16 @@ ALLOWED_ORIGINS = os.environ.get(
     os.environ.get("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"),
 ).split(",")
 
+# Vercel gives every preview deployment its own random subdomain
+# (e.g. https://muse-forge-i3ah-1vo7vxdxh-alt-051.vercel.app), which can
+# never be fully enumerated in a static ALLOWED_ORIGINS list. Match any
+# *.vercel.app subdomain via regex so preview deployments work without
+# needing an env var update on every push. Override via
+# ALLOWED_ORIGIN_REGEX if you need something stricter/different.
+ALLOWED_ORIGIN_REGEX = os.environ.get(
+    "ALLOWED_ORIGIN_REGEX", r"https://.*\.vercel\.app"
+)
+
 DEMO_FLAG = os.environ.get("MUSEFORGE_DEMO", "").lower() in ("1", "true", "yes")
 SECONDS_PER_SCENE = float(os.environ.get("MUSEFORGE_SECONDS_PER_SCENE", "75"))
 
@@ -97,6 +107,7 @@ app = FastAPI(title="MuseForge API", version="2.3.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=ALLOWED_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

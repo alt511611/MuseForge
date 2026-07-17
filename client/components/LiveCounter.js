@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useLanguage } from "../contexts/LanguageContext";
+import { API_BASE } from "../lib/apiBase";
 
 export default function LiveCounter() {
   const { t } = useLanguage();
@@ -9,7 +10,7 @@ export default function LiveCounter() {
   const [displayed, setDisplayed] = useState(0);
 
   useEffect(() => {
-    fetch("/api/stats")
+    fetch(`${API_BASE}/api/stats`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => d && setCount(d.monthly_completed ?? d.total_completed ?? 0))
       .catch(() => {});

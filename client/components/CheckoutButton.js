@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useAuth } from "../contexts/AuthContext";
 import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
+import { API_BASE } from "../lib/apiBase";
 
 export default function CheckoutButton({ plan, children, className = "", style = {} }) {
   const { user, getAccessToken } = useAuth();
@@ -24,7 +25,7 @@ export default function CheckoutButton({ plan, children, className = "", style =
       const token = await getAccessToken();
       const origin = window.location.origin;
 
-      const res = await fetch("/api/create-checkout-session", {
+      const res = await fetch(`${API_BASE}/api/create-checkout-session`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

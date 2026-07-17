@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import IdeaForm from "../components/IdeaForm";
+import { API_BASE } from "../lib/apiBase";
 import LiveCounter from "../components/LiveCounter";
 import MiniDemo from "../components/MiniDemo";
 import ExitIntent from "../components/ExitIntent";
@@ -36,7 +37,7 @@ export default function HomePage() {
     setCreditsExhausted(false);
     try {
       const token = await getAccessToken();
-      const res = await fetch("/api/generate", {
+      const res = await fetch(`${API_BASE}/api/generate`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
