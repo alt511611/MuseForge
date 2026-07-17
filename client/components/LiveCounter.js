@@ -2,8 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useLanguage } from "../contexts/LanguageContext";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
+import { API_BASE } from "../lib/apiBase";
 
 export default function LiveCounter() {
   const { t } = useLanguage();

@@ -13,8 +13,7 @@ import VideoResult from "../../../components/VideoResult";
 import { getStageMessage, getInspirationMessage } from "../../../utils/pipelineMessages";
 import { friendlyError } from "../../../utils/errorMessages";
 import { useAuth } from "../../../contexts/AuthContext";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
+import { API_BASE } from "../../../lib/apiBase";
 import { useLanguage } from "../../../contexts/LanguageContext";
 
 const STAGE_CONFIG = {

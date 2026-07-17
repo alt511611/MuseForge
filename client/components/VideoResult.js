@@ -5,8 +5,7 @@ import Link from "next/link";
 import { Download, Share2, Plus, ExternalLink, Layout, ChevronDown, ChevronUp } from "lucide-react";
 import Confetti from "./Confetti";
 import { useLanguage } from "../contexts/LanguageContext";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
+import { API_BASE } from "../lib/apiBase";
 
 function NextSteps({ jobId, videoUrl }) {
   const { t } = useLanguage();

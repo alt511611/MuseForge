@@ -4,8 +4,7 @@ import { useState } from "react";
 import { useAuth } from "../contexts/AuthContext";
 import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
+import { API_BASE } from "../lib/apiBase";
 
 export default function CheckoutButton({ plan, children, className = "", style = {} }) {
   const { user, getAccessToken } = useAuth();

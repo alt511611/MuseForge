@@ -14,8 +14,8 @@ import {
   X,
 } from "lucide-react";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 import { useLanguage } from "../contexts/LanguageContext";
+import { API_BASE } from "../lib/apiBase";
 
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024; // 5MB — keep in sync with server/constants.py
 
