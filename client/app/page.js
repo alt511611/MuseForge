@@ -21,6 +21,7 @@ export default function HomePage() {
   const { t } = useLanguage();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  const [creditsExhausted, setCreditsExhausted] = useState(false);
   const [prefill, setPrefill] = useState(null);
   const formRef = useRef(null);
 
@@ -32,6 +33,7 @@ export default function HomePage() {
   const handleSubmit = async (formData) => {
     setIsSubmitting(true);
     setError(null);
+    setCreditsExhausted(false);
     try {
       const token = await getAccessToken();
       const res = await fetch("/api/generate", {
@@ -43,7 +45,13 @@ export default function HomePage() {
         body: JSON.stringify(formData),
       });
       if (!res.ok) {
-        const err = await res.json();
+        const err = await res.json().catch(() => ({}));
+        if (res.status === 402) {
+          setCreditsExhausted(true);
+          setError(null);
+          setIsSubmitting(false);
+          return;
+        }
         throw new Error(err.detail || "Failed to start generation");
       }
       const data = await res.json();
@@ -377,6 +385,24 @@ export default function HomePage() {
           </h2>
           <p className="text-sm" style={{ color: "#64748b" }}>{t("form_sub")}</p>
         </div>
+        {creditsExhausted && (
+          <div
+            className="mb-6 px-5 py-4 rounded-xl animate-fade-in flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+            style={{ backgroundColor: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.35)" }}
+          >
+            <div>
+              <p className="text-sm font-semibold" style={{ color: "#fbbf24" }}>{t("credits_exhausted_title")}</p>
+              <p className="text-xs mt-1" style={{ color: "#94a3b8" }}>{t("credits_exhausted_desc")}</p>
+            </div>
+            <a
+              href="/pricing"
+              className="inline-flex items-center justify-center px-4 py-2 rounded-lg text-sm font-semibold flex-shrink-0"
+              style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}
+            >
+              {t("credits_exhausted_cta")}
+            </a>
+          </div>
+        )}
         {error && (
           <div
             className="mb-6 px-4 py-3 rounded-xl text-sm animate-fade-in"

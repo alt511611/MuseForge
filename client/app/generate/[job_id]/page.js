@@ -16,17 +16,17 @@ import { useAuth } from "../../../contexts/AuthContext";
 import { useLanguage } from "../../../contexts/LanguageContext";
 
 const STAGE_CONFIG = {
-  screenwriting: { icon: Pen, label: "Screenwriter", color: "#a78bfa" },
-  portraits: { icon: ImageIcon, label: "Character Lock", color: "#c084fc" },
-  storyboard: { icon: Layout, label: "Storyboard", color: "#818cf8" },
-  frames: { icon: ImageIcon, label: "Frame Gen", color: "#60a5fa" },
-  video: { icon: Video, label: "Video Gen", color: "#34d399" },
-  assembly: { icon: Film, label: "Assembly", color: "#fbbf24" },
-  music: { icon: Music, label: "Music", color: "#f472b6" },
-  scene_complete: { icon: CheckCircle2, label: "Scene Done", color: "#4ade80" },
-  complete: { icon: CheckCircle2, label: "Complete", color: "#22c55e" },
-  cancelled: { icon: Ban, label: "Cancelled", color: "#f59e0b" },
-  error: { icon: XCircle, label: "Error", color: "#ef4444" },
+  screenwriting: { icon: Pen, labelKey: "stage_screenwriting", color: "#a78bfa" },
+  portraits: { icon: ImageIcon, labelKey: "stage_portraits", color: "#c084fc" },
+  storyboard: { icon: Layout, labelKey: "stage_storyboard", color: "#818cf8" },
+  frames: { icon: ImageIcon, labelKey: "stage_frames", color: "#60a5fa" },
+  video: { icon: Video, labelKey: "stage_video", color: "#34d399" },
+  assembly: { icon: Film, labelKey: "stage_assembly", color: "#fbbf24" },
+  music: { icon: Music, labelKey: "stage_music", color: "#f472b6" },
+  scene_complete: { icon: CheckCircle2, labelKey: "stage_scene_complete", color: "#4ade80" },
+  complete: { icon: CheckCircle2, labelKey: "stage_complete", color: "#22c55e" },
+  cancelled: { icon: Ban, labelKey: "stage_cancelled", color: "#f59e0b" },
+  error: { icon: XCircle, labelKey: "stage_error", color: "#ef4444" },
 };
 
 const PIPELINE_STAGES = ["screenwriting", "portraits", "storyboard", "frames", "video", "assembly", "music", "complete"];
@@ -39,6 +39,7 @@ function SkeletonBlock({ className = "" }) {
 }
 
 function LiveGallery({ events }) {
+  const { t } = useLanguage();
   const frames = events
     .filter((e) => e.data?.frame_url || e.data?.portrait_url)
     .map((e) => e.data?.frame_url || e.data?.portrait_url)
@@ -47,7 +48,7 @@ function LiveGallery({ events }) {
   if (!frames.length) return null;
   return (
     <div className="glass rounded-2xl p-4 mb-5 animate-fade-in">
-      <p className="text-xs font-medium mb-3" style={{ color: "#64748b" }}>Live Outputs</p>
+      <p className="text-xs font-medium mb-3" style={{ color: "#64748b" }}>{t("live_gallery")}</p>
       <div className="grid grid-cols-3 gap-2">
         {frames.map((url, i) => (
           // eslint-disable-next-line @next/next/no-img-element
@@ -63,6 +64,7 @@ function LiveGallery({ events }) {
 export default function GeneratePage() {
   const { job_id } = useParams();
   const { getAccessToken } = useAuth();
+  const { t } = useLanguage();
   const [job, setJob] = useState(null);
   const [events, setEvents] = useState([]);
   const [progress, setProgress] = useState(0);
@@ -178,14 +180,14 @@ export default function GeneratePage() {
         {/* Header */}
         <div className="flex items-center justify-between mb-8">
           <Link href="/" className="inline-flex items-center gap-2 text-sm transition-colors hover:text-purple-400" style={{ color: "#64748b" }}>
-            <ArrowLeft size={16} /> Ana Sayfa
+            <ArrowLeft size={16} /> {t("gen_home")}
           </Link>
           {isRunning && (
             <button onClick={handleCancel} disabled={cancelling}
               className="inline-flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg transition-colors"
               style={{ backgroundColor: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", color: "#fca5a5", cursor: cancelling ? "not-allowed" : "pointer" }}>
               <Ban size={14} />
-              {cancelling ? "İptal ediliyor..." : "İptal Et"}
+              {cancelling ? t("gen_cancelling") : t("gen_cancel")}
             </button>
           )}
         </div>
@@ -194,12 +196,12 @@ export default function GeneratePage() {
         <div className="text-center mb-10">
           <h1 className="text-3xl font-bold mb-2">
             {status === "completed" ? null
-              : status === "failed" ? <span style={{ color: "#ef4444" }}>İşlem Başarısız</span>
-              : status === "cancelled" ? <span style={{ color: "#f59e0b" }}>İptal Edildi</span>
-              : <span className="gradient-text">Drama Üretiliyor</span>}
+              : status === "failed" ? <span style={{ color: "#ef4444" }}>{t("gen_failed")}</span>
+              : status === "cancelled" ? <span style={{ color: "#f59e0b" }}>{t("gen_cancelled_title")}</span>
+              : <span className="gradient-text">{t("gen_running")}</span>}
           </h1>
           <p className="text-sm flex items-center justify-center gap-2" style={{ color: "#64748b" }}>
-            İş ID: {job_id}
+            {t("gen_job_id")}: {job_id}
             {job?.demo && (
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px]"
                 style={{ backgroundColor: "rgba(124,58,237,0.15)", color: "#a78bfa" }}>
@@ -230,7 +232,7 @@ export default function GeneratePage() {
               <div className="w-full max-w-md">
                 <div className="flex justify-between items-center mb-2">
                   <span className="text-sm" style={{ color: "#94a3b8" }}>
-                    {nonHB.length > 0 ? nonHB[nonHB.length - 1].message : "Başlatılıyor..."}
+                    {nonHB.length > 0 ? nonHB[nonHB.length - 1].message : t("gen_starting")}
                   </span>
                   <div className="flex items-center gap-2">
                     {etaLabel && <span className="text-xs" style={{ color: "#475569" }}>{etaLabel}</span>}
@@ -247,7 +249,7 @@ export default function GeneratePage() {
             {/* Pipeline timeline */}
             <div className="glass rounded-2xl p-5 mb-6">
               <h2 className="text-sm font-medium mb-4 flex items-center gap-2" style={{ color: "#a78bfa" }}>
-                <Sparkles size={15} /> Ajan Pipeline'ı
+                <Sparkles size={15} /> {t("gen_pipeline")}
               </h2>
               <div className="grid grid-cols-4 md:grid-cols-8 gap-2">
                 {PIPELINE_STAGES.map((stage, idx) => {
@@ -263,7 +265,7 @@ export default function GeneratePage() {
                       </div>
                       <span className="text-[10px] text-center leading-tight"
                         style={{ color: isDone ? "#22c55e" : isActive ? "#a78bfa" : "#64748b" }}>
-                        {config?.label || stage}
+                        {(config?.labelKey && t(config.labelKey)) || stage}
                       </span>
                     </div>
                   );
@@ -283,7 +285,7 @@ export default function GeneratePage() {
             <button onClick={handleRetry}
               className="flex-shrink-0 flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg"
               style={{ backgroundColor: "rgba(124,58,237,0.15)", color: "#a78bfa", border: "1px solid rgba(124,58,237,0.3)" }}>
-              <RefreshCw size={13} /> Yeniden Dene
+              <RefreshCw size={13} /> {t("gen_retry")}
             </button>
           </div>
         )}
@@ -291,7 +293,7 @@ export default function GeneratePage() {
         {/* Log (always shown while running, collapsible otherwise) */}
         {nonHB.length > 0 && (
           <div className="glass rounded-2xl p-5">
-            <h2 className="text-sm font-medium mb-3" style={{ color: "#64748b" }}>Canlı Ajan Günlüğü</h2>
+            <h2 className="text-sm font-medium mb-3" style={{ color: "#64748b" }}>{t("gen_live_log")}</h2>
             <div ref={logRef} className="space-y-1.5 max-h-48 overflow-y-auto font-mono text-xs">
               {nonHB.map((evt, i) => {
                 const config = STAGE_CONFIG[evt.stage] || {};

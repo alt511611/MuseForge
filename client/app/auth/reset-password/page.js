@@ -23,8 +23,8 @@ export default function ResetPasswordPage() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError(null);
-    if (password.length < 8) { setError("Password must be at least 8 characters."); return; }
-    if (password !== confirm) { setError("Passwords do not match."); return; }
+    if (password.length < 8) { setError(t("reset_pw_min")); return; }
+    if (password !== confirm) { setError(t("reset_pw_mismatch")); return; }
     setBusy(true);
     try {
       const { error: err } = await updatePassword(password);
