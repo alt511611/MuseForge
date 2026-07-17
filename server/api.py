@@ -33,17 +33,24 @@ load_dotenv()
 
 ALLOWED_ORIGINS = os.environ.get(
     "ALLOWED_ORIGINS",
-    os.environ.get("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"),
+    os.environ.get(
+        "CORS_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000,"
+        "https://museforge.studio,https://www.museforge.studio",
+    ),
 ).split(",")
 
 # Vercel gives every preview deployment its own random subdomain
 # (e.g. https://muse-forge-i3ah-1vo7vxdxh-alt-051.vercel.app), which can
-# never be fully enumerated in a static ALLOWED_ORIGINS list. Match any
-# *.vercel.app subdomain via regex so preview deployments work without
-# needing an env var update on every push. Override via
-# ALLOWED_ORIGIN_REGEX if you need something stricter/different.
+# never be fully enumerated in a static ALLOWED_ORIGINS list. Also cover
+# the production custom domain (with or without "www.") here too, as a
+# defense-in-depth fallback in case ALLOWED_ORIGINS ever gets overridden
+# on the hosting platform without the domain included. Match both via
+# regex so neither Vercel previews nor the custom domain break silently.
+# Override via ALLOWED_ORIGIN_REGEX if you need something stricter/different.
 ALLOWED_ORIGIN_REGEX = os.environ.get(
-    "ALLOWED_ORIGIN_REGEX", r"https://.*\.vercel\.app"
+    "ALLOWED_ORIGIN_REGEX",
+    r"https://(.*\.vercel\.app|(www\.)?museforge\.studio)",
 )
 
 DEMO_FLAG = os.environ.get("MUSEFORGE_DEMO", "").lower() in ("1", "true", "yes")
