@@ -33,8 +33,9 @@ export default function HomePage() {
     setIsSubmitting(true);
     setError(null);
     try {
+      const base = process.env.NEXT_PUBLIC_API_URL || "";
       const token = await getAccessToken();
-      const res = await fetch("/api/generate", {
+      const res = await fetch(`${base}/api/generate`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

@@ -13,6 +13,8 @@ import VideoResult from "../../../components/VideoResult";
 import { getStageMessage, getInspirationMessage } from "../../../utils/pipelineMessages";
 import { friendlyError } from "../../../utils/errorMessages";
 import { useAuth } from "../../../contexts/AuthContext";
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 import { useLanguage } from "../../../contexts/LanguageContext";
 
 const STAGE_CONFIG = {
@@ -98,7 +100,7 @@ export default function GeneratePage() {
   const fetchJob = useCallback(async () => {
     try {
       const headers = await authHeaders();
-      const res = await fetch(`/api/jobs/${job_id}`, { headers });
+      const res = await fetch(`${API_BASE}/api/jobs/${job_id}`, { headers });
       if (res.ok) {
         const data = await res.json();
         setJob(data);
@@ -115,7 +117,7 @@ export default function GeneratePage() {
   useEffect(() => {
     if (!job_id) return;
     fetchJob();
-    const source = new EventSource(`/api/jobs/${job_id}/stream`);
+    const source = new EventSource(`${API_BASE}/api/jobs/${job_id}/stream`);
     source.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
@@ -139,7 +141,7 @@ export default function GeneratePage() {
   const handleCancel = async () => {
     setCancelling(true);
     const headers = await authHeaders();
-    try { await fetch(`/api/jobs/${job_id}/cancel`, { method: "POST", headers }); } catch { /* ignore */ }
+    try { await fetch(`${API_BASE}/api/jobs/${job_id}/cancel`, { method: "POST", headers }); } catch { /* ignore */ }
   };
 
   const handleRetry = () => window.location.href = "/";
