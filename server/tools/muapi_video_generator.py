@@ -9,6 +9,23 @@ DEMO_VIDEO_URL = os.environ.get(
     "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
 )
 
+# CONFIRMED against MuAPI's own validation error response:
+#   {"detail":[{"type":"literal_error","loc":["body","duration"],
+#     "msg":"Input should be 5 or 10", ...}]}
+# The storyboard artist's LLM picks a creative duration_seconds value
+# (e.g. 14) with no awareness that Kling's API only accepts this exact
+# enum -- round to the nearest valid value defensively rather than
+# relying on prompt instructions the model might ignore.
+VALID_DURATIONS = (5, 10)
+
+
+def nearest_valid_duration(seconds) -> int:
+    try:
+        seconds = float(seconds)
+    except (TypeError, ValueError):
+        return VALID_DURATIONS[0]
+    return min(VALID_DURATIONS, key=lambda d: abs(d - seconds))
+
 
 class MuAPIVideoGenerator:
     # UPDATED based on finding MuAPI's own playground page at
@@ -38,7 +55,7 @@ class MuAPIVideoGenerator:
         payload = {
             "prompt": prompt,
             "image_url": image_url,
-            "duration": duration,
+            "duration": nearest_valid_duration(duration),
             "mode": "standard",
             # aspect_ratio removed: most Kling image-to-video APIs (across
             # several providers, consistently) derive the output aspect
