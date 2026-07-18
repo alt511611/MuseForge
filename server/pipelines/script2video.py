@@ -51,7 +51,7 @@ class Script2VideoPipeline:
         self.demo = demo
         self.image_gen = MuAPIImageGenerator(api_key, demo=demo)
         self.video_gen = MuAPIVideoGenerator(api_key, demo=demo)
-        self.storyboard_artist = StoryboardArtist()
+        self.storyboard_artist = StoryboardArtist(demo=demo)
 
     async def run(
         self,

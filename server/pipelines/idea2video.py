@@ -47,7 +47,7 @@ class Idea2VideoPipeline:
     def __init__(self, api_key: str, demo: bool = False):
         self.api_key = api_key
         self.demo = demo
-        self.screenwriter = ScreenwriterAgent()
+        self.screenwriter = ScreenwriterAgent(demo=demo)
         self.image_gen = MuAPIImageGenerator(api_key, demo=demo)
         self.script2video = Script2VideoPipeline(api_key, demo=demo)
 

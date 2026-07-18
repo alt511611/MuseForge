@@ -200,6 +200,14 @@ async def health():
         "demo_mode": _is_demo(),
         "muapi_configured": bool(os.environ.get("MUAPI_KEY")),
         "claude_configured": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        # True if the screenwriter/storyboard agents have ANY working LLM
+        # path (MuAPI's Claude route tried first, direct Anthropic as
+        # fallback) -- distinct from claude_configured, which only reflects
+        # the direct-Anthropic fallback and doesn't tell you if MuAPI alone
+        # is already covering it.
+        "creative_llm_available": bool(
+            os.environ.get("MUAPI_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+        ),
         "auth_configured": bool(SUPABASE_URL),
     }
 
