@@ -160,14 +160,30 @@ export default function GeneratePage() {
 
   const handleCancel = async () => {
     setCancelling(true);
-    const headers = await authHeaders();
     try {
+      const headers = await authHeaders();
       const res = await fetch(`${API_BASE}/api/jobs/${job_id}/cancel`, { method: "POST", headers });
       if (res.ok) {
         setStatus("cancelled");
-        setCancelling(false);
+      } else if (res.status === 400) {
+        // Job already finished (completed/failed/cancelled) by the time
+        // the click landed -- not really a failure, just re-sync the UI.
+        await fetchJob();
+      } else {
+        // Previously: any non-2xx response (404 -- job lost from memory
+        // after a server restart -- or 403, etc.) left `cancelling` stuck
+        // true forever with no feedback, since only the res.ok branch
+        // ever reset it. The button would show "Cancelling..." forever
+        // even though nothing was actually happening anymore.
+        setError(t("gen_cancel_failed"));
       }
-    } catch { /* ignore — SSE stream will still try to reconcile state */ }
+    } catch {
+      // Network-level failure (backend unreachable/mid-restart, CORS,
+      // etc.) -- same fix: don't leave the button stuck, tell the user.
+      setError(t("gen_cancel_failed"));
+    } finally {
+      setCancelling(false);
+    }
   };
 
   const handleRetry = () => window.location.href = "/";
