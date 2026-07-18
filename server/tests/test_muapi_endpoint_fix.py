@@ -70,3 +70,21 @@ def test_endpoints_are_env_overridable():
         del os.environ["MUAPI_VIDEO_MODEL"]
         importlib.reload(img_mod)
         importlib.reload(vid_mod)
+
+
+def test_video_payload_no_longer_sends_aspect_ratio():
+    """aspect_ratio removed as a likely cause of the reported 422 --
+    Kling image-to-video APIs typically derive aspect ratio from the
+    source image rather than accepting it as a parameter. Not a
+    first-party-confirmed fact (unlike the flux-dev-image fix), so this
+    test documents the current best-effort payload shape rather than an
+    assertion the endpoint is exactly correct."""
+    # We can't easily unit test the private payload dict without a real
+    # network call, so this test asserts on the source directly to catch
+    # any accidental re-introduction of aspect_ratio into the payload.
+    import inspect
+    import tools.muapi_video_generator as vid_mod
+
+    source = inspect.getsource(vid_mod.MuAPIVideoGenerator.generate_video_from_image)
+    assert '"aspect_ratio"' not in source
+    assert '"mode": "standard"' in source

@@ -11,13 +11,16 @@ DEMO_VIDEO_URL = os.environ.get(
 
 
 class MuAPIVideoGenerator:
-    # NOT independently confirmed against MuAPI's first-party docs (unlike
-    # flux-dev-image, which was). Some MuAPI tooling lists shorter curated
-    # aliases like "kling-master"/"kling-std"/"kling-pro" instead of this
-    # longer slug -- if this 404s the same way flux-dev did, check MuAPI's
-    # own playground/docs for the confirmed slug and set MUAPI_VIDEO_MODEL,
-    # no code change needed.
-    VIDEO_ENDPOINT = os.environ.get("MUAPI_VIDEO_MODEL", "kling-o1-standard-image-to-video")
+    # UPDATED based on finding MuAPI's own playground page at
+    # muapi.ai/playground/kling-o1-image-to-video -- suggesting "standard"
+    # is a *mode* parameter, not part of the URL slug (the previous
+    # "kling-o1-standard-image-to-video" 404'd... then this slug got a 422,
+    # meaning it's at least a real, reachable endpoint, unlike the 404 case).
+    # STILL NOT independently confirmed with an exact first-party curl
+    # example (unlike flux-dev-image, which was). If this 422s again,
+    # open https://muapi.ai/playground/kling-o1-image-to-video directly and
+    # check the exact parameter names/schema shown there.
+    VIDEO_ENDPOINT = os.environ.get("MUAPI_VIDEO_MODEL", "kling-o1-image-to-video")
 
     def __init__(self, api_key: str, demo: bool = False):
         self.demo = demo
@@ -36,7 +39,12 @@ class MuAPIVideoGenerator:
             "prompt": prompt,
             "image_url": image_url,
             "duration": duration,
-            "aspect_ratio": aspect_ratio,
+            "mode": "standard",
+            # aspect_ratio removed: most Kling image-to-video APIs (across
+            # several providers, consistently) derive the output aspect
+            # ratio from the source image itself rather than accepting it
+            # as a request parameter -- a likely candidate for the 422
+            # ("Unprocessable Entity" = reachable endpoint, invalid field).
         }
         return await self.client.generate(
             self.VIDEO_ENDPOINT,
