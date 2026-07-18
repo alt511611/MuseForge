@@ -66,7 +66,7 @@ export default function CreatorsPage() {
         highlight: true,
         cta: "Upgrade to Creator",
         ctaHref: "/pricing",
-        features: ["25 credits/mo", "Up to 5 scenes", "All director presets", "All aspect ratios", "Priority render"],
+        features: ["25 credits/mo", "Up to 3 scenes", "All director presets", "All aspect ratios", "No watermark"],
       }}
       ctaBanner={{
         title: "Start Creating Today",

@@ -1,7 +1,10 @@
 FROM python:3.11-slim
 
 # ffmpeg is required by moviepy for real (non-demo) video assembly.
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+# fonts-dejavu-core provides the TTF font used to render the Free-plan
+# watermark (server/pipelines/idea2video.py:add_watermark) — without it the
+# watermark step fails open (video ships unwatermarked) rather than erroring.
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

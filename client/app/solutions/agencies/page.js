@@ -66,7 +66,7 @@ export default function AgenciesPage() {
         highlight: true,
         cta: "Upgrade to Pro",
         ctaHref: "/pricing",
-        features: ["55 credits/mo", "Up to 5 scenes", "All director presets", "HD export", "3 team seats", "No watermark", "Priority render"],
+        features: ["55 credits/mo", "Up to 5 scenes", "All director presets", "HD export", "No watermark"],
       }}
       ctaBanner={{
         title: "Ready to Cut Production Time by 80%?",

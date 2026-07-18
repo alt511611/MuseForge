@@ -1,5 +1,6 @@
 """Full idea-to-video orchestration pipeline."""
 
+import logging
 import os
 from typing import Any, Callable, Dict, List, Optional
 
@@ -12,6 +13,35 @@ from pipelines.script2video import (
     download_video,
 )
 from tools.muapi_image_generator import MuAPIImageGenerator
+
+logger = logging.getLogger(__name__)
+
+# Watermark applies to the Free plan only — Creator and Pro are watermark-free.
+# This is the ONE real, enforced differentiator behind the "No watermark" /
+# "Watermarked" pricing copy (see client/lib/i18n plan_*_features).
+WATERMARK_PLANS = {"free"}
+WATERMARK_TEXT = "MuseForge"
+
+# moviepy's TextClip requires an explicit OpenType/TrueType font path (it has
+# no built-in default). We probe a handful of common install locations
+# instead of bundling a font file — the Dockerfile installs fonts-dejavu-core
+# for exactly this purpose. If none are found, add_watermark() fails open.
+_WATERMARK_FONT_CANDIDATES = [
+    os.environ.get("MUSEFORGE_WATERMARK_FONT", ""),
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+    "C:\\Windows\\Fonts\\arialbd.ttf",
+]
+
+
+def _find_watermark_font() -> Optional[str]:
+    for path in _WATERMARK_FONT_CANDIDATES:
+        if path and os.path.isfile(path):
+            return path
+    return None
 
 
 async def add_background_music(
@@ -40,6 +70,59 @@ async def add_background_music(
             data = src.read()
         with open(output_path, "wb") as dst:
             dst.write(data)
+    return output_path
+
+
+async def add_watermark(video_path: str, output_path: str) -> str:
+    """Burn a small, semi-transparent "MuseForge" text watermark into the
+    bottom-right corner. Free plan only (see WATERMARK_PLANS).
+
+    Fails open: if moviepy/ffmpeg text rendering isn't available (e.g. no
+    ImageMagick on the host), the original video is copied through
+    unwatermarked rather than failing the job.
+    """
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    font_path = _find_watermark_font()
+    if not font_path:
+        logger.warning("No usable font found for watermark, shipping unwatermarked video")
+        if os.path.abspath(video_path) != os.path.abspath(output_path):
+            with open(video_path, "rb") as src:
+                data = src.read()
+            with open(output_path, "wb") as dst:
+                dst.write(data)
+        return output_path
+    try:
+        from moviepy import CompositeVideoClip, TextClip, VideoFileClip
+
+        video = VideoFileClip(video_path)
+        margin = max(10, int(video.h * 0.02))
+        watermark = (
+            TextClip(
+                font=font_path,
+                text=WATERMARK_TEXT,
+                font_size=max(14, int(video.h * 0.035)),
+                color="white",
+                stroke_color="black",
+                stroke_width=1,
+            )
+            .with_opacity(0.55)
+            .with_duration(video.duration)
+        )
+        watermark = watermark.with_position(
+            (video.w - watermark.w - margin, video.h - watermark.h - margin)
+        )
+        final = CompositeVideoClip([video, watermark])
+        final.write_videofile(output_path, codec="libx264", audio_codec="aac", logger=None)
+        video.close()
+        watermark.close()
+        final.close()
+    except Exception as exc:
+        logger.warning("Watermark rendering failed, shipping unwatermarked video: %s", exc)
+        if os.path.abspath(video_path) != os.path.abspath(output_path):
+            with open(video_path, "rb") as src:
+                data = src.read()
+            with open(output_path, "wb") as dst:
+                dst.write(data)
     return output_path
 
 
@@ -101,8 +184,10 @@ class Idea2VideoPipeline:
         working_dir: str,
         progress_callback: Optional[Callable] = None,
         music_url: Optional[str] = None,
+        plan: str = "free",
     ) -> str:
-        """Concatenate all scene videos and add background music exactly once."""
+        """Concatenate all scene videos, add background music, then watermark
+        (Free plan only) — exactly once per drama."""
         os.makedirs(working_dir, exist_ok=True)
 
         if progress_callback:
@@ -112,10 +197,18 @@ class Idea2VideoPipeline:
         await concatenate_videos(scene_paths, concatenated_path)
 
         if progress_callback:
-            await progress_callback("music", "Adding background music", 95)
+            await progress_callback("music", "Adding background music", 93)
+
+        with_music_path = os.path.join(working_dir, "drama_with_music.mp4")
+        await add_background_music(concatenated_path, with_music_path, music_url)
 
         final_path = os.path.join(working_dir, "drama_final.mp4")
-        await add_background_music(concatenated_path, final_path, music_url)
+        if plan in WATERMARK_PLANS:
+            if progress_callback:
+                await progress_callback("music", "Applying watermark", 97)
+            await add_watermark(with_music_path, final_path)
+        else:
+            final_path = with_music_path
         return final_path
 
     async def run(
@@ -131,6 +224,8 @@ class Idea2VideoPipeline:
         music_url: Optional[str] = None,
         is_cancelled: Optional[Callable[[], bool]] = None,
         character_portraits_override: Optional[Dict[str, str]] = None,
+        music_enabled: bool = False,
+        plan: str = "free",
     ) -> dict:
         os.makedirs(working_dir, exist_ok=True)
 
@@ -212,6 +307,20 @@ class Idea2VideoPipeline:
         final_path: Optional[str] = None
         video_url: Optional[str] = None
 
+        # Optional instrumental background music (Creator/Pro only — gated
+        # server-side in api.py before music_enabled ever reaches here).
+        # Best-effort: any failure is logged and the job continues without
+        # music rather than crashing. Never triggered in demo mode.
+        if music_enabled and not self.demo and not music_url:
+            try:
+                from tools.muapi_music_generator import MuAPIMusicGenerator
+
+                music_gen = MuAPIMusicGenerator(self.api_key, demo=self.demo)
+                music_url = await music_gen.generate_instrumental(mood=script.mood or "cinematic")
+            except Exception as exc:
+                logger.warning("Background music generation failed, continuing without music: %s", exc)
+                music_url = None
+
         if self.demo or not scene_paths:
             await progress("assembly", "Assembling preview", 90)
             for scene in reversed(scene_results):
@@ -221,7 +330,7 @@ class Idea2VideoPipeline:
                     break
         else:
             final_path = await self._assemble_final_drama(
-                scene_paths, working_dir, progress_callback, music_url
+                scene_paths, working_dir, progress_callback, music_url, plan
             )
             # Persist final video to Supabase Storage (signed URL) when available.
             if final_path and os.path.isfile(final_path):
@@ -263,4 +372,6 @@ class Idea2VideoPipeline:
             "style": style,
             "aspect_ratio": aspect_ratio,
             "demo": self.demo,
+            "music_enabled": bool(music_url) if not self.demo else False,
+            "plan": plan,
         }
