@@ -3,6 +3,8 @@ export default {
   en: {
     form_demo_badge: 'Demo mode — preview only, no credits used',
     form_credit_cost: 'This generation will use {n} credits',
+    form_music_toggle: 'Add background music',
+    form_music_credit_note: '+1 credit (total {n} credits)',
     form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
     form_est_loading: 'Estimating render time...',
     footer_built: 'MuseForge — Built on advanced generative media infrastructure',
@@ -103,6 +105,8 @@ export default {
   tr: {
     form_demo_badge: 'Demo Modu — önizleme, kredi harcanmaz',
     form_credit_cost: 'Bu üretim {n} kredi harcayacak',
+    form_music_toggle: 'Arka plan müziği ekle',
+    form_music_credit_note: '+1 kredi (toplam {n} kredi)',
     form_est_render: 'Tahmini süre {label} · {frames} kare · {clips} klip',
     form_est_loading: 'Süre tahmin ediliyor...',
     footer_built: 'MuseForge — Gelişmiş üretken medya altyapısı üzerine kurulu',
@@ -203,6 +207,8 @@ export default {
   es: {
     form_demo_badge: 'Modo demo — vista previa, sin créditos',
     form_credit_cost: 'Esta generación usará {n} créditos',
+    form_music_toggle: 'Añadir música de fondo',
+    form_music_credit_note: '+1 crédito (total {n} créditos)',
     form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
     form_est_loading: 'Estimating render time...',
     footer_built: 'MuseForge — Built on advanced generative media infrastructure',
@@ -303,6 +309,8 @@ export default {
   fr: {
     form_demo_badge: 'Mode démo — aperçu, aucun crédit',
     form_credit_cost: 'Cette génération utilisera {n} crédits',
+    form_music_toggle: 'Ajouter une musique de fond',
+    form_music_credit_note: '+1 crédit (total {n} crédits)',
     form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
     form_est_loading: 'Estimating render time...',
     footer_built: 'MuseForge — Built on advanced generative media infrastructure',
@@ -403,6 +411,8 @@ export default {
   de: {
     form_demo_badge: 'Demo-Modus — Vorschau, keine Credits',
     form_credit_cost: 'Diese Generierung verbraucht {n} Credits',
+    form_music_toggle: 'Hintergrundmusik hinzufügen',
+    form_music_credit_note: '+1 Credit (insgesamt {n} Credits)',
     form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
     form_est_loading: 'Estimating render time...',
     footer_built: 'MuseForge — Built on advanced generative media infrastructure',
@@ -503,6 +513,8 @@ export default {
   pt: {
     form_demo_badge: 'Modo demo — prévia, sem créditos',
     form_credit_cost: 'Esta geração usará {n} créditos',
+    form_music_toggle: 'Adicionar música de fundo',
+    form_music_credit_note: '+1 crédito (total {n} créditos)',
     form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
     form_est_loading: 'Estimating render time...',
     footer_built: 'MuseForge — Built on advanced generative media infrastructure',
@@ -603,6 +615,8 @@ export default {
   it: {
     form_demo_badge: 'Modalità demo — anteprima, nessun credito',
     form_credit_cost: 'Questa generazione userà {n} crediti',
+    form_music_toggle: 'Aggiungi musica di sottofondo',
+    form_music_credit_note: '+1 credito (totale {n} crediti)',
     form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
     form_est_loading: 'Estimating render time...',
     footer_built: 'MuseForge — Built on advanced generative media infrastructure',
@@ -703,6 +717,8 @@ export default {
   nl: {
     form_demo_badge: 'Demomodus — voorbeeld, geen credits',
     form_credit_cost: 'Deze generatie gebruikt {n} credits',
+    form_music_toggle: 'Achtergrondmuziek toevoegen',
+    form_music_credit_note: '+1 credit (totaal {n} credits)',
     form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
     form_est_loading: 'Estimating render time...',
     footer_built: 'MuseForge — Built on advanced generative media infrastructure',
@@ -803,6 +819,8 @@ export default {
   pl: {
     form_demo_badge: 'Tryb demo — podgląd, bez kredytów',
     form_credit_cost: 'Ta generacja zużyje {n} kredytów',
+    form_music_toggle: 'Dodaj muzykę w tle',
+    form_music_credit_note: '+1 kredyt (razem {n} kredytów)',
     form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
     form_est_loading: 'Estimating render time...',
     footer_built: 'MuseForge — Built on advanced generative media infrastructure',
@@ -903,6 +921,8 @@ export default {
   uk: {
     form_demo_badge: 'Деморежим — попередній перегляд, без кредитів',
     form_credit_cost: 'Ця генерація використає {n} кредитів',
+    form_music_toggle: 'Додати фонову музику',
+    form_music_credit_note: '+1 кредит (всього {n} кредитів)',
     form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
     form_est_loading: 'Estimating render time...',
     footer_built: 'MuseForge — Built on advanced generative media infrastructure',
@@ -1003,6 +1023,8 @@ export default {
   ro: {
     form_demo_badge: 'Mod demo — previzualizare, fără credite',
     form_credit_cost: 'Această generare va folosi {n} credite',
+    form_music_toggle: 'Adaugă muzică de fundal',
+    form_music_credit_note: '+1 credit (total {n} credite)',
     form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
     form_est_loading: 'Estimating render time...',
     footer_built: 'MuseForge — Built on advanced generative media infrastructure',
@@ -1103,6 +1125,8 @@ export default {
   ru: {
     form_demo_badge: 'Деморежим — превью, без кредитов',
     form_credit_cost: 'Эта генерация потратит {n} кредитов',
+    form_music_toggle: 'Добавить фоновую музыку',
+    form_music_credit_note: '+1 кредит (всего {n} кредитов)',
     form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
     form_est_loading: 'Estimating render time...',
     footer_built: 'MuseForge — Built on advanced generative media infrastructure',
@@ -1203,6 +1227,8 @@ export default {
   ar: {
     form_demo_badge: 'وضع تجريبي — معاينة دون أرصدة',
     form_credit_cost: 'سيستخدم هذا التوليد {n} من الأرصدة',
+    form_music_toggle: 'إضافة موسيقى خلفية',
+    form_music_credit_note: '+1 رصيد (الإجمالي {n} أرصدة)',
     form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
     form_est_loading: 'Estimating render time...',
     footer_built: 'MuseForge — Built on advanced generative media infrastructure',
@@ -1303,6 +1329,8 @@ export default {
   hi: {
     form_demo_badge: 'डेमो मोड — पूर्वावलोकन, कोई क्रेडिट नहीं',
     form_credit_cost: 'यह जनरेशन {n} क्रेडिट उपयोग करेगी',
+    form_music_toggle: 'बैकग्राउंड म्यूज़िक जोड़ें',
+    form_music_credit_note: '+1 क्रेडिट (कुल {n} क्रेडिट)',
     form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
     form_est_loading: 'Estimating render time...',
     footer_built: 'MuseForge — Built on advanced generative media infrastructure',
@@ -1403,6 +1431,8 @@ export default {
   ja: {
     form_demo_badge: 'デモモード — プレビュー、クレジット消費なし',
     form_credit_cost: 'この生成は {n} クレジットを使用します',
+    form_music_toggle: 'BGMを追加',
+    form_music_credit_note: '+1クレジット（合計{n}クレジット）',
     form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
     form_est_loading: 'Estimating render time...',
     footer_built: 'MuseForge — Built on advanced generative media infrastructure',
@@ -1503,6 +1533,8 @@ export default {
   ko: {
     form_demo_badge: '데모 모드 — 미리보기, 크레딧 없음',
     form_credit_cost: '이번 생성은 {n}크레딧을 사용합니다',
+    form_music_toggle: '배경 음악 추가',
+    form_music_credit_note: '+1크레딧 (총 {n}크레딧)',
     form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
     form_est_loading: 'Estimating render time...',
     footer_built: 'MuseForge — Built on advanced generative media infrastructure',
@@ -1603,6 +1635,8 @@ export default {
   zh: {
     form_demo_badge: '演示模式 — 预览，不消耗积分',
     form_credit_cost: '本次生成将使用 {n} 积分',
+    form_music_toggle: '添加背景音乐',
+    form_music_credit_note: '+1 积分（共 {n} 积分）',
     form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
     form_est_loading: 'Estimating render time...',
     footer_built: 'MuseForge — Built on advanced generative media infrastructure',
@@ -1703,6 +1737,8 @@ export default {
   id: {
     form_demo_badge: 'Mode demo — pratinjau, tanpa kredit',
     form_credit_cost: 'Generasi ini akan memakai {n} kredit',
+    form_music_toggle: 'Tambahkan musik latar',
+    form_music_credit_note: '+1 kredit (total {n} kredit)',
     form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
     form_est_loading: 'Estimating render time...',
     footer_built: 'MuseForge — Built on advanced generative media infrastructure',
@@ -1803,6 +1839,8 @@ export default {
   vi: {
     form_demo_badge: 'Chế độ demo — xem trước, không tốn tín dụng',
     form_credit_cost: 'Lần tạo này sẽ dùng {n} tín dụng',
+    form_music_toggle: 'Thêm nhạc nền',
+    form_music_credit_note: '+1 tín dụng (tổng {n} tín dụng)',
     form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
     form_est_loading: 'Estimating render time...',
     footer_built: 'MuseForge — Built on advanced generative media infrastructure',
@@ -1903,6 +1941,8 @@ export default {
   th: {
     form_demo_badge: 'โหมดเดโม — ตัวอย่าง ไม่ใช้เครดิต',
     form_credit_cost: 'การสร้างนี้จะใช้ {n} เครดิต',
+    form_music_toggle: 'เพิ่มเพลงพื้นหลัง',
+    form_music_credit_note: '+1 เครดิต (รวม {n} เครดิต)',
     form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
     form_est_loading: 'Estimating render time...',
     footer_built: 'MuseForge — Built on advanced generative media infrastructure',

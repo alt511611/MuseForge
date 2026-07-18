@@ -135,6 +135,10 @@ class GenerateRequest(BaseModel):
     user_requirement: str = ""
     character_image: Optional[str] = None
     character_name: str = ""
+    # Optional instrumental background music. Only honoured for Creator/Pro
+    # plans (checked server-side against the caller's actual plan) — silently
+    # ignored for free/anonymous requests rather than erroring.
+    music_enabled: bool = False
 
 
 class GenerateResponse(BaseModel):
@@ -234,6 +238,40 @@ async def estimate(req: EstimateRequest):
     }
 
 
+# ── Plan helpers ──────────────────────────────────────────────────────────────
+
+# Real, currently-enforced plan differentiators. Keep in sync with
+# supabase_migration.sql's public.plan_limits view and client/lib/i18n
+# plan_*_features strings. Do NOT add a plan feature here (or to the pricing
+# copy) unless there's an actual enforcement mechanism behind it.
+PLAN_MAX_SCENES = {"free": 3, "creator": 3, "pro": 5}
+MUSIC_EXTRA_CREDIT_COST = 1  # flat surcharge on top of scene credits, Creator/Pro only
+
+
+async def _get_user_plan(user_id: str) -> str:
+    """Return the user's subscription plan ('free', 'creator', 'pro').
+
+    Returns 'pro' (unrestricted) when Supabase isn't configured, matching
+    _get_user_credits' dev-mode fallback. Returns 'free' on lookup failure —
+    the safest default since it's the most restrictive plan.
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return "pro"
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/profiles",
+                params={"id": f"eq.{user_id}", "select": "plan", "limit": "1"},
+                headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+            )
+            data = resp.json()
+            if isinstance(data, list) and data:
+                return data[0].get("plan") or "free"
+    except Exception as exc:
+        logger.error("_get_user_plan failed for user %s: %s", user_id, exc)
+    return "free"
+
+
 # ── Credit helpers ────────────────────────────────────────────────────────────
 
 async def _get_user_credits(user_id: str) -> int:
@@ -329,13 +367,32 @@ async def generate(
             detail="Authentication required. Please sign in to generate videos.",
         )
 
-    # Credit check — only for authenticated non-demo requests
+    # Plan lookup, scene-limit enforcement, credit check — only for
+    # authenticated non-demo requests. Demo/anonymous requests fall back to
+    # the free-tier defaults (no music, watermark applies) and only the
+    # Pydantic-level bounds on num_scenes.
+    plan = "free"
+    music_enabled = False
     if current_user and not demo:
-        ok = await _deduct_credits(current_user.user_id, req.num_scenes, "video_generation")
+        plan = await _get_user_plan(current_user.user_id)
+
+        max_scenes = PLAN_MAX_SCENES.get(plan, PLAN_MAX_SCENES["free"])
+        if req.num_scenes > max_scenes:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Your plan allows up to {max_scenes} scenes. Upgrade to generate longer videos.",
+            )
+
+        # Optional background music — Creator/Pro only. Free/anonymous requests
+        # that send music_enabled=True are silently ignored, not rejected.
+        music_enabled = bool(req.music_enabled) and plan in ("creator", "pro")
+
+        credit_cost = req.num_scenes + (MUSIC_EXTRA_CREDIT_COST if music_enabled else 0)
+        ok = await _deduct_credits(current_user.user_id, credit_cost, "video_generation")
         if not ok:
             raise HTTPException(
                 status_code=402,
-                detail=f"Insufficient credits. You need {req.num_scenes} credits for this generation. Please top up your balance.",
+                detail=f"Insufficient credits. You need {credit_cost} credits for this generation. Please top up your balance.",
             )
 
     job = await job_store.create(
@@ -350,6 +407,8 @@ async def generate(
         user_email=current_user.email if current_user else None,
         character_image=req.character_image,
         character_name=req.character_name,
+        music_enabled=music_enabled,
+        plan=plan,
     )
 
     background_tasks.add_task(run_generation_job, job, api_key)
@@ -520,6 +579,8 @@ async def admin_retry_job(
         demo=old.demo,
         user_id=old.user_id,
         user_email=old.user_email,
+        music_enabled=old.music_enabled,
+        plan=old.plan,
     )
     api_key = os.environ.get("MUAPI_KEY", "")
     background_tasks.add_task(run_generation_job, new_job, api_key)

@@ -142,7 +142,13 @@ export default function GeneratePage() {
   const handleCancel = async () => {
     setCancelling(true);
     const headers = await authHeaders();
-    try { await fetch(`${API_BASE}/api/jobs/${job_id}/cancel`, { method: "POST", headers }); } catch { /* ignore */ }
+    try {
+      const res = await fetch(`${API_BASE}/api/jobs/${job_id}/cancel`, { method: "POST", headers });
+      if (res.ok) {
+        setStatus("cancelled");
+        setCancelling(false);
+      }
+    } catch { /* ignore — SSE stream will still try to reconcile state */ }
   };
 
   const handleRetry = () => window.location.href = "/";

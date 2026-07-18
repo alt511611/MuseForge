@@ -208,3 +208,23 @@ create policy "service_manage_stripe_events"
   on public.processed_stripe_events for all
   using (false)     -- no direct user access
   with check (false);
+
+-- ── Optional background music + watermark bookkeeping ────────────────────────
+-- music_enabled: whether this job paid for + attempted background music
+-- (Creator/Pro only — enforced server-side in server/api.py).
+-- plan: snapshot of the user's plan at generation time, so the watermark
+-- decision (server/pipelines/idea2video.py: WATERMARK_PLANS) is reproducible
+-- even if the user later upgrades/downgrades.
+alter table public.jobs add column if not exists music_enabled boolean default false;
+alter table public.jobs add column if not exists plan text default 'free';
+
+-- Creator's real scene cap is 3 (was 5 — "Priority render" and "3 team
+-- seats" claims were removed since neither had a real enforcement mechanism;
+-- this scene-count difference plus the Free-plan-only watermark are the real,
+-- currently-enforced Creator/Pro differentiators).
+create or replace view public.plan_limits as
+select 'free'    as plan, 3   as monthly_credits, 3 as max_scenes, false as hd_export
+union all
+select 'creator',          25, 3, false
+union all
+select 'pro',              55, 5, true;

@@ -12,10 +12,22 @@ import {
   FlaskConical,
   Upload,
   X,
+  Music,
 } from "lucide-react";
 
 import { useLanguage } from "../contexts/LanguageContext";
+import { useAuth } from "../contexts/AuthContext";
+import { createClient } from "../lib/supabase";
 import { API_BASE } from "../lib/apiBase";
+
+// Plans allowed to attach optional background music. Kept in sync with the
+// server-side gate in server/api.py (music_enabled is silently ignored for
+// any other plan).
+const MUSIC_ELIGIBLE_PLANS = ["creator", "pro"];
+
+// Real, currently-enforced scene caps. Kept in sync with server/api.py's
+// PLAN_MAX_SCENES — this just avoids the user hitting a 400 after the fact.
+const PLAN_MAX_SCENES = { free: 3, creator: 3, pro: 5 };
 
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024; // 5MB — keep in sync with server/constants.py
 
@@ -47,6 +59,7 @@ const ASPECT_RATIOS = [
 
 export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
   const { t } = useLanguage();
+  const { user } = useAuth();
   const [idea, setIdea] = useState("");
   const [style, setStyle] = useState("Cinematic");
   const [directorStyle, setDirectorStyle] = useState("cinematic_balanced");
@@ -60,6 +73,43 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
   const [characterImage, setCharacterImage] = useState(null);
   const [characterName, setCharacterName] = useState("");
   const [uploadError, setUploadError] = useState(null);
+  const [plan, setPlan] = useState(null);
+  const [musicEnabled, setMusicEnabled] = useState(false);
+
+  // Look up the signed-in user's plan (Creator/Pro unlock optional music +
+  // a higher scene cap). Anonymous/free users simply never see the toggle.
+  useEffect(() => {
+    if (!user) {
+      setPlan(null);
+      return;
+    }
+    let cancelled = false;
+    const supabase = createClient();
+    if (!supabase) return;
+    supabase
+      .from("profiles")
+      .select("plan")
+      .eq("id", user.id)
+      .single()
+      .then(({ data }) => {
+        if (!cancelled && data) setPlan(data.plan);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
+
+  const musicEligible = MUSIC_ELIGIBLE_PLANS.includes(plan);
+  const maxScenes = PLAN_MAX_SCENES[plan] ?? 5;
+
+  useEffect(() => {
+    if (!musicEligible && musicEnabled) setMusicEnabled(false);
+  }, [musicEligible, musicEnabled]);
+
+  useEffect(() => {
+    if (numScenes > maxScenes) setNumScenes(maxScenes);
+  }, [maxScenes, numScenes]);
 
   // Allows landing-page example cards to pre-fill idea + style, and
   // scrolls the form into view so the click feels responsive.
@@ -133,6 +183,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
       user_requirement: userRequirement.trim(),
       character_image: characterImage,
       character_name: characterImage ? characterName.trim() : "",
+      music_enabled: musicEligible && musicEnabled,
     });
   };
 
@@ -330,15 +381,15 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
             <input
               type="range"
               min={2}
-              max={5}
-              value={numScenes}
+              max={maxScenes}
+              value={Math.min(numScenes, maxScenes)}
               onChange={(e) => setNumScenes(Number(e.target.value))}
               className="w-full accent-purple-500"
               disabled={isSubmitting}
             />
             <div className="flex justify-between text-xs mt-1" style={{ color: "#64748b" }}>
               <span>2 scenes (~16s)</span>
-              <span>5 scenes (~40s)</span>
+              <span>{maxScenes} scenes (~{maxScenes * 8}s)</span>
             </div>
           </div>
           <div>
@@ -358,6 +409,36 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
               }}
               disabled={isSubmitting}
             />
+          </div>
+        </div>
+      )}
+
+      {musicEligible && (
+        <div className="flex items-center justify-between gap-3 mb-4 px-4 py-3 rounded-xl" style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a" }}>
+          <label className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: "#94a3b8" }}>
+            <Music size={16} style={{ color: "#a78bfa" }} />
+            {t("form_music_toggle")}
+          </label>
+          <div className="flex items-center gap-3">
+            {musicEnabled && !demoMode && (
+              <span className="text-xs" style={{ color: "#fbbf24" }}>
+                {t("form_music_credit_note", { n: numScenes + 1 })}
+              </span>
+            )}
+            <button
+              type="button"
+              role="switch"
+              aria-checked={musicEnabled}
+              onClick={() => setMusicEnabled((v) => !v)}
+              disabled={isSubmitting}
+              className="relative inline-flex h-5 w-9 items-center rounded-full transition-colors"
+              style={{ backgroundColor: musicEnabled ? "#7c3aed" : "#22223a" }}
+            >
+              <span
+                className="inline-block h-4 w-4 transform rounded-full bg-white transition-transform"
+                style={{ transform: musicEnabled ? "translateX(18px)" : "translateX(2px)" }}
+              />
+            </button>
           </div>
         </div>
       )}
@@ -385,7 +466,10 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
             className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full"
             style={{ backgroundColor: "rgba(251,191,36,0.12)", color: "#fbbf24" }}
           >
-            <Sparkles size={11} /> {t("form_credit_cost", { n: numScenes })}
+            <Sparkles size={11} />{" "}
+            {musicEligible && musicEnabled
+              ? t("form_credit_cost", { n: numScenes + 1 })
+              : t("form_credit_cost", { n: numScenes })}
           </span>
         )}
       </div>

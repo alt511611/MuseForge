@@ -56,6 +56,8 @@ def _sb_row(job: "Job") -> dict:
         "num_scenes": job.num_scenes,
         "user_requirement": job.user_requirement,
         "demo": job.demo,
+        "music_enabled": job.music_enabled,
+        "plan": job.plan,
         "status": job.status.value,
         "result": job.result,
         "error": job.error,
@@ -75,6 +77,8 @@ def _sb_row_to_dict(row: dict) -> dict:
         "aspect_ratio": row.get("aspect_ratio", "16:9"),
         "num_scenes": row.get("num_scenes", 3),
         "demo": row.get("demo", False),
+        "music_enabled": row.get("music_enabled", False),
+        "plan": row.get("plan", "free"),
         "user_id": row.get("user_id"),
         "user_email": row.get("user_email"),
         "events": [],  # events are not persisted to DB
@@ -223,6 +227,8 @@ class Job:
     user_email: Optional[str] = None
     character_image: Optional[str] = None
     character_name: str = ""
+    music_enabled: bool = False
+    plan: str = "free"
     events: List[JobEvent] = field(default_factory=list)
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
@@ -242,6 +248,8 @@ class Job:
             "demo": self.demo,
             "user_id": self.user_id,
             "user_email": self.user_email,
+            "music_enabled": self.music_enabled,
+            "plan": self.plan,
             "events": [e.to_dict() for e in self.events] if include_events else [],
             "result": self.result,
             "error": self.error,
@@ -448,6 +456,8 @@ async def run_generation_job(job: Job, api_key: str):
             progress_callback=progress_callback,
             is_cancelled=is_cancelled,
             character_portraits_override=character_portraits_override or None,
+            music_enabled=job.music_enabled,
+            plan=job.plan,
         )
         if is_cancelled():
             job.status = JobStatus.CANCELLED
@@ -466,9 +476,11 @@ async def run_generation_job(job: Job, api_key: str):
         job.status = JobStatus.CANCELLED
         await job_store.persist(job)
         await job_store.emit(job, "cancelled", "Generation cancelled", 100)
-        # Refund credits on cancellation (user triggered)
+        # Refund credits on cancellation (user triggered) — include the music
+        # surcharge if it was charged at generation time.
         if job.user_id and not job.demo:
-            asyncio.create_task(_sb_refund_credits(job.user_id, job.num_scenes, job.id))
+            refund_amount = job.num_scenes + (1 if job.music_enabled else 0)
+            asyncio.create_task(_sb_refund_credits(job.user_id, refund_amount, job.id))
     except Exception as exc:
         job.error = str(exc)
         job.status = JobStatus.FAILED
@@ -478,4 +490,5 @@ async def run_generation_job(job: Job, api_key: str):
         )
         # Refund credits on failure so users aren't penalised for pipeline errors
         if job.user_id and not job.demo:
-            asyncio.create_task(_sb_refund_credits(job.user_id, job.num_scenes, job.id))
+            refund_amount = job.num_scenes + (1 if job.music_enabled else 0)
+            asyncio.create_task(_sb_refund_credits(job.user_id, refund_amount, job.id))
