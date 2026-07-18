@@ -55,7 +55,12 @@ Respond ONLY with valid JSON array containing a single shot object:
                 data = json.loads(re.search(r"\[[\s\S]*\]", content).group())
                 shots = [StoryboardShot(**s) for s in data]
                 if shots:
-                    return shots
+                    # Hard cap: never produce more than 1 shot per scene
+                    # (cost control) — this path was previously missing
+                    # the same cap already applied to the direct-Anthropic
+                    # fallback below, silently defeating the cost fix
+                    # since MuAPI is the PRIMARY path, tried first.
+                    return shots[:1]
             except Exception as exc:
                 logger.warning(f"MuAPI LLM call failed, falling back: {exc}")
 
