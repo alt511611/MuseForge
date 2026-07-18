@@ -45,7 +45,26 @@ class MuAPIClient:
                     break
                 backoff = min(2 ** attempt + random.uniform(0, 0.5), 10.0)
                 await asyncio.sleep(backoff)
-        raise MuAPIError(f"MuAPI request failed after {self.max_retries + 1} attempts: {last_exc}")
+        raise MuAPIError(
+            f"MuAPI request failed after {self.max_retries + 1} attempts: "
+            f"{last_exc}{self._response_detail(last_exc)}"
+        )
+
+    @staticmethod
+    def _response_detail(exc: Exception) -> str:
+        """httpx.HTTPStatusError's default str() only includes the status
+        code and URL, discarding the actual response body -- which for a
+        422 (or most 4xx) almost always contains the precise validation
+        error (e.g. 'field X is required' or 'Y is not a valid value for
+        Z'). Surface it so failures are diagnosable from logs alone
+        instead of requiring guesswork against third-party docs."""
+        response = getattr(exc, "response", None)
+        if response is None:
+            return ""
+        try:
+            return f" | Response body: {response.text[:1000]}"
+        except Exception:
+            return ""
 
     async def submit(self, endpoint: str, payload: Dict[str, Any]) -> str:
         if not self.api_key:
