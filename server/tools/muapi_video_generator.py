@@ -11,7 +11,13 @@ DEMO_VIDEO_URL = os.environ.get(
 
 
 class MuAPIVideoGenerator:
-    VIDEO_ENDPOINT = "kling-o1-standard-image-to-video"
+    # NOT independently confirmed against MuAPI's first-party docs (unlike
+    # flux-dev-image, which was). Some MuAPI tooling lists shorter curated
+    # aliases like "kling-master"/"kling-std"/"kling-pro" instead of this
+    # longer slug -- if this 404s the same way flux-dev did, check MuAPI's
+    # own playground/docs for the confirmed slug and set MUAPI_VIDEO_MODEL,
+    # no code change needed.
+    VIDEO_ENDPOINT = os.environ.get("MUAPI_VIDEO_MODEL", "kling-o1-standard-image-to-video")
 
     def __init__(self, api_key: str, demo: bool = False):
         self.demo = demo

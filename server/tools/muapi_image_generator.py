@@ -1,6 +1,7 @@
 """MuAPI image generation with reference support for character consistency."""
 
 import hashlib
+import os
 
 from tools.muapi_client import MuAPIClient
 
@@ -20,7 +21,11 @@ def _demo_image_url(prompt: str, aspect_ratio: str) -> str:
 
 
 class MuAPIImageGenerator:
-    IMAGE_ENDPOINT = "flux-dev"
+    # Confirmed against MuAPI's own docs page (muapi.ai/docs/flux-dev),
+    # which shows the real endpoint as "flux-dev-image", not "flux-dev" --
+    # the bare "flux-dev" slug 404s. Configurable via env var in case
+    # MuAPI's catalog changes again; no code change needed if so.
+    IMAGE_ENDPOINT = os.environ.get("MUAPI_IMAGE_MODEL", "flux-dev-image")
 
     def __init__(self, api_key: str, demo: bool = False):
         self.demo = demo
@@ -30,12 +35,22 @@ class MuAPIImageGenerator:
         dims = ASPECT_RATIO_MAP.get(aspect_ratio, ASPECT_RATIO_MAP["16:9"])
         payload = {
             "prompt": prompt,
-            "width": dims["width"],
-            "height": dims["height"],
+            # MuAPI's flux-dev-image docs show a combined "size" string
+            # (e.g. "1024*1024"), not separate width/height fields.
+            "size": f"{dims['width']}*{dims['height']}",
+            "num_inference_steps": 28,
+            "seed": -1,
+            "guidance_scale": 3.5,
+            "num_images": 1,
         }
         if reference_url:
-            payload["image_url"] = reference_url
-            payload["strength"] = 0.65
+            # NOTE: MuAPI's own example curl shows an "image" field for
+            # reference input, but leaves it empty in their sample --
+            # the exact expected value (URL vs base64) isn't confirmed
+            # from that doc alone. If character-reference generation
+            # fails, check MuAPI's flux-dev-image playground page for the
+            # confirmed reference-image parameter and adjust here.
+            payload["image"] = reference_url
         return payload
 
     async def generate_image(self, prompt: str, aspect_ratio: str = "1:1") -> str:
