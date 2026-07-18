@@ -62,7 +62,11 @@ Respond ONLY with valid JSON array containing a single shot object:
                     # since MuAPI is the PRIMARY path, tried first.
                     return shots[:1]
             except Exception as exc:
-                logger.warning(f"MuAPI LLM call failed, falling back: {exc}")
+                raw_snippet = locals().get("content", "<no content received>")
+                logger.warning(
+                    f"MuAPI LLM call failed, falling back: {exc} | "
+                    f"Raw response (first 500 chars): {str(raw_snippet)[:500]!r}"
+                )
 
         # 2) Fall back to a direct Anthropic call if a key is configured.
         if self.api_key:

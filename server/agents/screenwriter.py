@@ -56,7 +56,18 @@ Respond ONLY with valid JSON matching this schema:
                 content = await complete_via_muapi(self.SYSTEM_PROMPT, prompt)
                 return DramaScript(**self._parse_json(content))
             except Exception as exc:
-                logger.warning(f"MuAPI LLM call failed, falling back: {exc}")
+                # Include a snippet of the RAW MuAPI response so failures
+                # are diagnosable from logs alone -- the earlier version of
+                # this log line only showed the exception message ("No
+                # JSON found in response"), not what MuAPI actually
+                # returned, making it impossible to tell whether the
+                # response was empty, wrapped in markdown fences, JSON in
+                # a different field, an error message, etc.
+                raw_snippet = locals().get("content", "<no content received>")
+                logger.warning(
+                    f"MuAPI LLM call failed, falling back: {exc} | "
+                    f"Raw response (first 500 chars): {str(raw_snippet)[:500]!r}"
+                )
 
         # 2) Fall back to a direct Anthropic call if a key is configured.
         if self.api_key:
