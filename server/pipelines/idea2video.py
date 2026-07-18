@@ -51,6 +51,8 @@ async def add_background_music(
 ) -> str:
     """Add background music to the final concatenated video (called once per drama)."""
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    video = None
+    audio = None
     try:
         from moviepy import AudioFileClip, VideoFileClip
 
@@ -61,15 +63,31 @@ async def add_background_music(
         else:
             final = video
         final.write_videofile(output_path, codec="libx264", audio_codec="aac", logger=None)
-        video.close()
-        if music_url:
-            audio.close()
         final.close()
     except Exception:
         with open(video_path, "rb") as src:
             data = src.read()
         with open(output_path, "wb") as dst:
             dst.write(data)
+    finally:
+        # Found via a free (no-cost) audit: if VideoFileClip() opened
+        # successfully but AudioFileClip(music_url) then failed (invalid/
+        # expired music URL, network blip), the code previously jumped
+        # straight to the except block without ever closing `video` --
+        # leaking its underlying ffmpeg subprocess. Under sustained real
+        # usage with any nonzero music-generation failure rate, each such
+        # failure would leak one process/file handle, compounding over
+        # time -- directly relevant right after fixing an actual OOM crash.
+        if video is not None:
+            try:
+                video.close()
+            except Exception:
+                pass
+        if audio is not None:
+            try:
+                audio.close()
+            except Exception:
+                pass
     return output_path
 
 
