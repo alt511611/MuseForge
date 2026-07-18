@@ -184,7 +184,7 @@ export default function AdminPage() {
 
   return (
     <main className="min-h-screen" style={{ backgroundColor: "#0a0a0f" }}>
-      <div className="max-w-6xl mx-auto px-6 py-10">
+      <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8 sm:py-10">
         <div className="flex items-center justify-between mb-8">
           <div className="flex items-center gap-3">
             <Link href="/" className="text-sm flex items-center gap-1.5 transition-colors hover:text-purple-400" style={{ color: "#64748b" }}>
@@ -226,7 +226,7 @@ export default function AdminPage() {
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="w-full text-sm min-w-[640px]">
                 <thead>
                   <tr style={{ borderBottom: "1px solid #1a1a26" }}>
                     {[t("admin_col_id"), t("admin_col_user"), t("admin_col_idea"), t("admin_col_status"), t("admin_col_date"), ""].map((h) => (

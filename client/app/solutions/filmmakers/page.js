@@ -66,7 +66,7 @@ export default function FilmmakersPage() {
         highlight: false,
         cta: "Buy Credits",
         ctaHref: "/pricing",
-        features: ["No subscription", "Credits never expire", "20 / 60 / 150 credit options", "Use any time, any project", "All director presets included"],
+        features: ["No subscription", "Credits never expire", "4 / 12 / 30 credit options", "Use any time, any project", "All director presets included"],
       }}
       ctaBanner={{
         title: "Previsualize Your Next Scene for Free",

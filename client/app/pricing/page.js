@@ -114,6 +114,21 @@ function PricingContent() {
 
   const PLANS = [
     {
+      id: "free",
+      name: t("plan_free_name"),
+      icon: Film,
+      price: "$0",
+      description: t("plan_free_desc"),
+      forWho: t("plan_free_forwho"),
+      segHref: "/",
+      segIcon: Sparkles,
+      credits: 3,
+      features: t("plan_free_features").split(","),
+      unavailable: t("plan_free_unavailable").split(",").filter(Boolean),
+      cta: user ? t("plan_free_cta") : t("plan_free_cta_anon"),
+      highlight: false,
+    },
+    {
       id: "creator",
       name: t("plan_creator_name"),
       icon: Zap,
@@ -122,7 +137,7 @@ function PricingContent() {
       forWho: "Content creators, small businesses & educators",
       segHref: "/solutions/creators",
       segIcon: Users,
-      credits: 120,
+      credits: 25,
       features: t("plan_creator_features").split(","),
       unavailable: t("plan_creator_unavailable").split(",").filter(Boolean),
       cta: t("plan_creator_cta"),
@@ -137,7 +152,7 @@ function PricingContent() {
       forWho: "Agencies & corporate communications teams",
       segHref: "/solutions/agencies",
       segIcon: Building2,
-      credits: 300,
+      credits: 55,
       features: t("plan_pro_features").split(","),
       unavailable: t("plan_pro_unavailable").split(",").filter(Boolean),
       cta: t("plan_pro_cta"),
@@ -154,7 +169,7 @@ function PricingContent() {
       segHref: "/solutions/education",
       segIcon: BookOpen,
       credits: null,
-      features: ["Custom credit volume", "Dedicated support", "SLA & uptime guarantee", "SSO / team admin", "Custom onboarding"],
+      features: ["Custom credit volume", "Commercial use rights", "Dedicated support", "SLA & uptime guarantee", "SSO / team admin", "Cancel anytime"],
       unavailable: [],
       cta: t("pricing_enterprise_cta"),
       highlight: false,
@@ -163,9 +178,9 @@ function PricingContent() {
   ];
 
   const CREDIT_PACKAGES = [
-    { key: "SMALL",  label: t("pricing_credits_small"),  price: "$9",  credits: 20,  highlight: false },
-    { key: "MEDIUM", label: t("pricing_credits_medium"), price: "$19", credits: 60,  highlight: true },
-    { key: "LARGE",  label: t("pricing_credits_large"),  price: "$39", credits: 150, highlight: false },
+    { key: "SMALL",  label: t("pricing_credits_small"),  price: "$9",  credits: 4,  highlight: false },
+    { key: "MEDIUM", label: t("pricing_credits_medium"), price: "$19", credits: 12, highlight: true },
+    { key: "LARGE",  label: t("pricing_credits_large"),  price: "$39", credits: 30, highlight: false },
   ];
 
   const PRICING_FAQ = [
@@ -200,7 +215,8 @@ function PricingContent() {
           <h1 className="text-4xl md:text-5xl font-black tracking-tight mb-4">
             <span className="gradient-text">{t("pricing_header")}</span>
           </h1>
-          <p className="text-base max-w-xl mx-auto mb-8" style={{ color: "#64748b" }}>{t("pricing_sub")}</p>
+          <p className="text-base max-w-xl mx-auto mb-3" style={{ color: "#64748b" }}>{t("pricing_sub")}</p>
+          <p className="text-xs font-medium mb-8" style={{ color: "#a78bfa" }}>{t("pricing_cancel_anytime")}</p>
 
           {/* Segment links */}
           <div className="flex flex-wrap justify-center gap-2">
@@ -216,7 +232,7 @@ function PricingContent() {
         </div>
 
         {/* Plans grid */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-16">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-6 mb-16">
           {PLANS.map((plan) => {
             const Icon = plan.icon;
             const SegIcon = plan.segIcon;

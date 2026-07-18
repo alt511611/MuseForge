@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Film, LogOut, Shield, ChevronDown, User, LayoutDashboard, Globe, Building2, Users, Clapperboard, BookOpen, AlertTriangle } from "lucide-react";
+import { Film, LogOut, Shield, ChevronDown, User, LayoutDashboard, Globe, Building2, Users, Clapperboard, BookOpen, AlertTriangle, Menu, X } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { useLanguage } from "../contexts/LanguageContext";
 import { createClient } from "../lib/supabase";
@@ -115,6 +115,7 @@ export default function Navbar() {
   const { t } = useLanguage();
   const router = useRouter();
   const [open, setOpen] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
   const [lowCredits, setLowCredits] = useState(false);
   const [creditCount, setCreditCount] = useState(null);
@@ -168,7 +169,7 @@ export default function Navbar() {
 
   return (
     <nav
-      className="sticky top-0 z-50 flex items-center justify-between px-6 py-3 transition-all duration-300"
+      className="sticky top-0 z-50 transition-all duration-300"
       style={{
         backgroundColor: scrolled ? "rgba(10,10,15,0.95)" : "rgba(10,10,15,0.85)",
         backdropFilter: scrolled ? "blur(20px)" : "blur(12px)",
@@ -176,12 +177,13 @@ export default function Navbar() {
         boxShadow: scrolled ? "0 4px 24px rgba(0,0,0,0.4)" : "none",
       }}
     >
-      <Link href="/" className="flex items-center gap-2">
-        <Film size={20} style={{ color: "#7c3aed" }} />
-        <span className="font-black tracking-tight gradient-text text-lg">MuseForge</span>
+      <div className="flex items-center justify-between px-4 sm:px-6 py-3">
+      <Link href="/" className="flex items-center gap-2 min-w-0">
+        <Film size={20} style={{ color: "#7c3aed" }} className="flex-shrink-0" />
+        <span className="font-black tracking-tight gradient-text text-lg truncate">MuseForge</span>
       </Link>
 
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-2 sm:gap-3">
         <SolutionsDropdown />
 
         <Link href="/pricing"
@@ -204,8 +206,18 @@ export default function Navbar() {
 
         <LanguageSelector />
 
+        <button
+          type="button"
+          className="sm:hidden p-2 rounded-lg"
+          style={{ color: "#94a3b8", backgroundColor: "#12121a", border: "1px solid #22223a" }}
+          aria-label={mobileOpen ? "Close menu" : "Open menu"}
+          onClick={() => setMobileOpen((v) => !v)}
+        >
+          {mobileOpen ? <X size={18} /> : <Menu size={18} />}
+        </button>
+
         {!loading && (
-          <div>
+          <div className="hidden sm:block">
             {user ? (
               <div className="relative" ref={ref}>
                 <button
@@ -291,6 +303,57 @@ export default function Navbar() {
           </div>
         )}
       </div>
+      </div>
+
+      {mobileOpen && (
+        <div className="sm:hidden px-4 pb-4 space-y-1 border-t" style={{ borderColor: "#1a1a26" }}>
+          <Link href="/pricing" onClick={() => setMobileOpen(false)}
+            className="block px-3 py-2.5 rounded-lg text-sm" style={{ color: "#94a3b8" }}>
+            {t("nav_pricing")}
+          </Link>
+          <p className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide" style={{ color: "#475569" }}>{t("nav_solutions")}</p>
+          {[
+            { href: "/solutions/agencies", key: "sol_agencies" },
+            { href: "/solutions/creators", key: "sol_creators" },
+            { href: "/solutions/filmmakers", key: "sol_filmmakers" },
+            { href: "/solutions/education", key: "sol_education" },
+          ].map(({ href, key }) => (
+            <Link key={href} href={href} onClick={() => setMobileOpen(false)}
+              className="block px-3 py-2 rounded-lg text-sm" style={{ color: "#94a3b8" }}>
+              {t(key)}
+            </Link>
+          ))}
+          {user ? (
+            <>
+              <Link href="/dashboard" onClick={() => setMobileOpen(false)}
+                className="block px-3 py-2.5 rounded-lg text-sm" style={{ color: "#94a3b8" }}>
+                {t("nav_dashboard")}
+              </Link>
+              {isAdmin && (
+                <Link href="/admin" onClick={() => setMobileOpen(false)}
+                  className="block px-3 py-2.5 rounded-lg text-sm" style={{ color: "#a78bfa" }}>
+                  {t("nav_admin")}
+                </Link>
+              )}
+              {lowCredits && (
+                <Link href="/pricing" onClick={() => setMobileOpen(false)}
+                  className="block px-3 py-2 text-xs" style={{ color: "#fbbf24" }}>
+                  {t("credits_low_banner", { n: creditCount ?? 0 })}
+                </Link>
+              )}
+              <button type="button" onClick={() => { setMobileOpen(false); handleSignOut(); }}
+                className="w-full text-left px-3 py-2.5 rounded-lg text-sm" style={{ color: "#f87171" }}>
+                {t("nav_signout")}
+              </button>
+            </>
+          ) : (
+            <Link href="/login" onClick={() => setMobileOpen(false)}
+              className="block px-3 py-2.5 rounded-lg text-sm font-medium" style={{ color: "#a78bfa" }}>
+              {t("nav_signin")}
+            </Link>
+          )}
+        </div>
+      )}
     </nav>
   );
 }

@@ -458,7 +458,7 @@ export default function HomePage() {
       </section>
 
       <footer className="text-center pb-10 text-sm space-y-3" style={{ color: "#374151" }}>
-        <p>MuseForge &mdash; Built on MuAPI generative media infrastructure</p>
+        <p>{t("footer_built")}</p>
         <div className="flex justify-center gap-5 text-xs">
           <a href="/pricing" className="hover:text-purple-400 transition-colors">{t("footer_pricing")}</a>
           <a href="/legal/privacy" className="hover:text-purple-400 transition-colors">{t("footer_privacy")}</a>

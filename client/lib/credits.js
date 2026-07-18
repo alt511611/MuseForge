@@ -6,8 +6,8 @@
  */
 export const PLAN_MONTHLY_CREDITS = {
   free: 3,
-  creator: 120,
-  pro: 300,
+  creator: 25,
+  pro: 55,
 };
 
 /** True when remaining credits are below 20% of the plan's monthly allowance. */

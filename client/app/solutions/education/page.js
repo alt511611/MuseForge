@@ -47,7 +47,7 @@ export default function EducationPage() {
         },
         {
           title: "Creator Plan for Individual Teachers — $49/mo",
-          desc: "120 credits per month is enough for a full semester of student projects — 24 five-scene videos per cohort.",
+          desc: "25 credits per month is enough for a full semester of student projects — about five 5-scene videos per cohort.",
         },
         {
           title: "Enterprise Licence for Campus-Wide Deployment",
@@ -62,11 +62,11 @@ export default function EducationPage() {
         name: "Creator (Individual Educator)",
         price: "$49",
         period: "/ mo",
-        credits: 120,
+        credits: 25,
         highlight: false,
         cta: "Start with Creator",
         ctaHref: "/pricing",
-        features: ["120 videos/mo", "Up to 5 scenes", "All presets", "All ratios", "Priority render"],
+        features: ["25 credits/mo", "Up to 5 scenes", "All presets", "All ratios", "Priority render"],
       }}
       ctaBanner={{
         title: "Need a Campus-Wide Licence?",

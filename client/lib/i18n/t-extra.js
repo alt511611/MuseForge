@@ -1,6 +1,11 @@
 // Extra i18n keys (credits, signup, generate, admin, solutions chrome, legal titles)
 export default {
   en: {
+    form_demo_badge: 'Demo mode — preview only, no credits used',
+    form_credit_cost: 'This generation will use {n} credits',
+    form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
+    form_est_loading: 'Estimating render time...',
+    footer_built: 'MuseForge — Built on advanced generative media infrastructure',
     login_password_min: 'Password must be at least 6 characters.',
     login_error_generic: 'Something went wrong. Please try again.',
     login_tagline: 'Agentic AI Video Studio',
@@ -96,6 +101,11 @@ export default {
     pricing_welcome_credits: '{n} credits added to your account!'
   },
   tr: {
+    form_demo_badge: 'Demo Modu — önizleme, kredi harcanmaz',
+    form_credit_cost: 'Bu üretim {n} kredi harcayacak',
+    form_est_render: 'Tahmini süre {label} · {frames} kare · {clips} klip',
+    form_est_loading: 'Süre tahmin ediliyor...',
+    footer_built: 'MuseForge — Gelişmiş üretken medya altyapısı üzerine kurulu',
     login_password_min: 'Şifre en az 6 karakter olmalıdır.',
     login_error_generic: 'Bir şeyler ters gitti. Lütfen tekrar deneyin.',
     login_tagline: 'Agentic AI Video Stüdyosu',
@@ -191,6 +201,11 @@ export default {
     pricing_welcome_credits: 'Hesabınıza {n} kredi eklendi!'
   },
   es: {
+    form_demo_badge: 'Modo demo — vista previa, sin créditos',
+    form_credit_cost: 'Esta generación usará {n} créditos',
+    form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
+    form_est_loading: 'Estimating render time...',
+    footer_built: 'MuseForge — Built on advanced generative media infrastructure',
     login_password_min: 'La contraseña debe tener al menos 6 caracteres.',
     login_error_generic: 'Algo salió mal. Inténtalo de nuevo.',
     login_tagline: 'Estudio de vídeo con IA agéntica',
@@ -286,6 +301,11 @@ export default {
     pricing_welcome_credits: '¡{n} créditos añadidos a tu cuenta!'
   },
   fr: {
+    form_demo_badge: 'Mode démo — aperçu, aucun crédit',
+    form_credit_cost: 'Cette génération utilisera {n} crédits',
+    form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
+    form_est_loading: 'Estimating render time...',
+    footer_built: 'MuseForge — Built on advanced generative media infrastructure',
     login_password_min: 'Le mot de passe doit contenir au moins 6 caractères.',
     login_error_generic: 'Une erreur s\'est produite. Veuillez réessayer.',
     login_tagline: 'Studio vidéo IA agentique',
@@ -381,6 +401,11 @@ export default {
     pricing_welcome_credits: '{n} crédits ajoutés à votre compte !'
   },
   de: {
+    form_demo_badge: 'Demo-Modus — Vorschau, keine Credits',
+    form_credit_cost: 'Diese Generierung verbraucht {n} Credits',
+    form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
+    form_est_loading: 'Estimating render time...',
+    footer_built: 'MuseForge — Built on advanced generative media infrastructure',
     login_password_min: 'Passwort muss mindestens 6 Zeichen haben.',
     login_error_generic: 'Something went wrong. Please try again.',
     login_tagline: 'Agentic AI Video Studio',
@@ -476,6 +501,11 @@ export default {
     pricing_welcome_credits: '{n} credits added to your account!'
   },
   pt: {
+    form_demo_badge: 'Modo demo — prévia, sem créditos',
+    form_credit_cost: 'Esta geração usará {n} créditos',
+    form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
+    form_est_loading: 'Estimating render time...',
+    footer_built: 'MuseForge — Built on advanced generative media infrastructure',
     login_password_min: 'A senha deve ter pelo menos 6 caracteres.',
     login_error_generic: 'Something went wrong. Please try again.',
     login_tagline: 'Agentic AI Video Studio',
@@ -571,6 +601,11 @@ export default {
     pricing_welcome_credits: '{n} credits added to your account!'
   },
   it: {
+    form_demo_badge: 'Modalità demo — anteprima, nessun credito',
+    form_credit_cost: 'Questa generazione userà {n} crediti',
+    form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
+    form_est_loading: 'Estimating render time...',
+    footer_built: 'MuseForge — Built on advanced generative media infrastructure',
     login_password_min: 'La password deve avere almeno 6 caratteri.',
     login_error_generic: 'Something went wrong. Please try again.',
     login_tagline: 'Agentic AI Video Studio',
@@ -666,6 +701,11 @@ export default {
     pricing_welcome_credits: '{n} credits added to your account!'
   },
   nl: {
+    form_demo_badge: 'Demomodus — voorbeeld, geen credits',
+    form_credit_cost: 'Deze generatie gebruikt {n} credits',
+    form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
+    form_est_loading: 'Estimating render time...',
+    footer_built: 'MuseForge — Built on advanced generative media infrastructure',
     login_password_min: 'Wachtwoord moet minstens 6 tekens zijn.',
     login_error_generic: 'Something went wrong. Please try again.',
     login_tagline: 'Agentic AI Video Studio',
@@ -761,6 +801,11 @@ export default {
     pricing_welcome_credits: '{n} credits added to your account!'
   },
   pl: {
+    form_demo_badge: 'Tryb demo — podgląd, bez kredytów',
+    form_credit_cost: 'Ta generacja zużyje {n} kredytów',
+    form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
+    form_est_loading: 'Estimating render time...',
+    footer_built: 'MuseForge — Built on advanced generative media infrastructure',
     login_password_min: 'Hasło musi mieć co najmniej 6 znaków.',
     login_error_generic: 'Something went wrong. Please try again.',
     login_tagline: 'Agentic AI Video Studio',
@@ -856,6 +901,11 @@ export default {
     pricing_welcome_credits: '{n} credits added to your account!'
   },
   uk: {
+    form_demo_badge: 'Деморежим — попередній перегляд, без кредитів',
+    form_credit_cost: 'Ця генерація використає {n} кредитів',
+    form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
+    form_est_loading: 'Estimating render time...',
+    footer_built: 'MuseForge — Built on advanced generative media infrastructure',
     login_password_min: 'Пароль має містити щонайменше 6 символів.',
     login_error_generic: 'Something went wrong. Please try again.',
     login_tagline: 'Agentic AI Video Studio',
@@ -951,6 +1001,11 @@ export default {
     pricing_welcome_credits: '{n} credits added to your account!'
   },
   ro: {
+    form_demo_badge: 'Mod demo — previzualizare, fără credite',
+    form_credit_cost: 'Această generare va folosi {n} credite',
+    form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
+    form_est_loading: 'Estimating render time...',
+    footer_built: 'MuseForge — Built on advanced generative media infrastructure',
     login_password_min: 'Parola trebuie să aibă cel puțin 6 caractere.',
     login_error_generic: 'Something went wrong. Please try again.',
     login_tagline: 'Agentic AI Video Studio',
@@ -1046,6 +1101,11 @@ export default {
     pricing_welcome_credits: '{n} credits added to your account!'
   },
   ru: {
+    form_demo_badge: 'Деморежим — превью, без кредитов',
+    form_credit_cost: 'Эта генерация потратит {n} кредитов',
+    form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
+    form_est_loading: 'Estimating render time...',
+    footer_built: 'MuseForge — Built on advanced generative media infrastructure',
     login_password_min: 'Пароль должен содержать не менее 6 символов.',
     login_error_generic: 'Something went wrong. Please try again.',
     login_tagline: 'Agentic AI Video Studio',
@@ -1141,6 +1201,11 @@ export default {
     pricing_welcome_credits: '{n} credits added to your account!'
   },
   ar: {
+    form_demo_badge: 'وضع تجريبي — معاينة دون أرصدة',
+    form_credit_cost: 'سيستخدم هذا التوليد {n} من الأرصدة',
+    form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
+    form_est_loading: 'Estimating render time...',
+    footer_built: 'MuseForge — Built on advanced generative media infrastructure',
     login_password_min: 'يجب أن تكون كلمة المرور 6 أحرف على الأقل.',
     login_error_generic: 'Something went wrong. Please try again.',
     login_tagline: 'Agentic AI Video Studio',
@@ -1236,6 +1301,11 @@ export default {
     pricing_welcome_credits: '{n} credits added to your account!'
   },
   hi: {
+    form_demo_badge: 'डेमो मोड — पूर्वावलोकन, कोई क्रेडिट नहीं',
+    form_credit_cost: 'यह जनरेशन {n} क्रेडिट उपयोग करेगी',
+    form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
+    form_est_loading: 'Estimating render time...',
+    footer_built: 'MuseForge — Built on advanced generative media infrastructure',
     login_password_min: 'पासवर्ड कम से कम 6 अक्षर का होना चाहिए।',
     login_error_generic: 'Something went wrong. Please try again.',
     login_tagline: 'Agentic AI Video Studio',
@@ -1331,6 +1401,11 @@ export default {
     pricing_welcome_credits: '{n} credits added to your account!'
   },
   ja: {
+    form_demo_badge: 'デモモード — プレビュー、クレジット消費なし',
+    form_credit_cost: 'この生成は {n} クレジットを使用します',
+    form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
+    form_est_loading: 'Estimating render time...',
+    footer_built: 'MuseForge — Built on advanced generative media infrastructure',
     login_password_min: 'パスワードは6文字以上にしてください。',
     login_error_generic: 'Something went wrong. Please try again.',
     login_tagline: 'Agentic AI Video Studio',
@@ -1426,6 +1501,11 @@ export default {
     pricing_welcome_credits: '{n} credits added to your account!'
   },
   ko: {
+    form_demo_badge: '데모 모드 — 미리보기, 크레딧 없음',
+    form_credit_cost: '이번 생성은 {n}크레딧을 사용합니다',
+    form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
+    form_est_loading: 'Estimating render time...',
+    footer_built: 'MuseForge — Built on advanced generative media infrastructure',
     login_password_min: '비밀번호는 최소 6자여야 합니다.',
     login_error_generic: 'Something went wrong. Please try again.',
     login_tagline: 'Agentic AI Video Studio',
@@ -1521,6 +1601,11 @@ export default {
     pricing_welcome_credits: '{n} credits added to your account!'
   },
   zh: {
+    form_demo_badge: '演示模式 — 预览，不消耗积分',
+    form_credit_cost: '本次生成将使用 {n} 积分',
+    form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
+    form_est_loading: 'Estimating render time...',
+    footer_built: 'MuseForge — Built on advanced generative media infrastructure',
     login_password_min: '密码至少需要 6 个字符。',
     login_error_generic: 'Something went wrong. Please try again.',
     login_tagline: 'Agentic AI Video Studio',
@@ -1616,6 +1701,11 @@ export default {
     pricing_welcome_credits: '{n} credits added to your account!'
   },
   id: {
+    form_demo_badge: 'Mode demo — pratinjau, tanpa kredit',
+    form_credit_cost: 'Generasi ini akan memakai {n} kredit',
+    form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
+    form_est_loading: 'Estimating render time...',
+    footer_built: 'MuseForge — Built on advanced generative media infrastructure',
     login_password_min: 'Kata sandi minimal 6 karakter.',
     login_error_generic: 'Something went wrong. Please try again.',
     login_tagline: 'Agentic AI Video Studio',
@@ -1711,6 +1801,11 @@ export default {
     pricing_welcome_credits: '{n} credits added to your account!'
   },
   vi: {
+    form_demo_badge: 'Chế độ demo — xem trước, không tốn tín dụng',
+    form_credit_cost: 'Lần tạo này sẽ dùng {n} tín dụng',
+    form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
+    form_est_loading: 'Estimating render time...',
+    footer_built: 'MuseForge — Built on advanced generative media infrastructure',
     login_password_min: 'Mật khẩu phải có ít nhất 6 ký tự.',
     login_error_generic: 'Something went wrong. Please try again.',
     login_tagline: 'Agentic AI Video Studio',
@@ -1806,6 +1901,11 @@ export default {
     pricing_welcome_credits: '{n} credits added to your account!'
   },
   th: {
+    form_demo_badge: 'โหมดเดโม — ตัวอย่าง ไม่ใช้เครดิต',
+    form_credit_cost: 'การสร้างนี้จะใช้ {n} เครดิต',
+    form_est_render: 'Est. render {label} · {frames} frames · {clips} clips',
+    form_est_loading: 'Estimating render time...',
+    footer_built: 'MuseForge — Built on advanced generative media infrastructure',
     login_password_min: 'รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร',
     login_error_generic: 'Something went wrong. Please try again.',
     login_tagline: 'Agentic AI Video Studio',
