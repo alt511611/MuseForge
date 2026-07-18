@@ -7,6 +7,7 @@ rather than failing the whole job. See `Idea2VideoPipeline._assemble_final_drama
 """
 
 import logging
+import os
 
 from tools.muapi_client import MuAPIClient, MuAPIError
 
@@ -23,7 +24,16 @@ DEMO_MUSIC_URL = ""  # no audio track in demo mode — silent video is fine
 
 
 class MuAPIMusicGenerator:
-    MUSIC_ENDPOINT = "stable-audio-2"
+    # NOT independently confirmed against MuAPI's first-party docs (unlike
+    # flux-dev-image, which was via an exact curl example). "stable-audio-2"
+    # is a real Stability AI model (confirmed to exist on Replicate/
+    # Stability's own API), chosen because it's purpose-built for
+    # instrumental music/sound rather than vocal songs (unlike Suno, which
+    # MuAPI also lists but defaults to full songs with vocals). Whether
+    # MuAPI hosts it under this exact slug is unconfirmed -- if this fails
+    # consistently, check MuAPI's own playground/docs for the correct
+    # slug and set MUAPI_MUSIC_MODEL, no code change needed.
+    MUSIC_ENDPOINT = os.environ.get("MUAPI_MUSIC_MODEL", "stable-audio-2")
 
     def __init__(self, api_key: str, demo: bool = False):
         self.demo = demo
