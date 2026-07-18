@@ -3,7 +3,7 @@
 import asyncio
 import os
 import random
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 
@@ -16,6 +16,20 @@ RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 
 class MuAPIError(Exception):
     """Raised when a MuAPI request fails in a non-recoverable way."""
+
+
+class MuAPICancelled(MuAPIError):
+    """Raised when is_cancelled() flips true while waiting on a MuAPI job.
+
+    Found via a free (no-cost) audit of the cancellation path: a job
+    marked cancelled by the user previously only stopped shots that
+    hadn't STARTED their MuAPI call yet -- any request already in flight
+    (submitted, waiting on poll_result's sleep loop) ran to completion
+    regardless, silently spending real money on work the user had already
+    cancelled. Checking is_cancelled() between poll iterations lets a
+    cancel take effect within one poll_interval instead of the full
+    remaining generation time.
+    """
 
 
 class MuAPIClient:
@@ -85,10 +99,14 @@ class MuAPIClient:
         request_id: str,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         max_polls: int = DEFAULT_MAX_POLLS,
+        is_cancelled: Optional[Callable[[], bool]] = None,
     ) -> List[str]:
         url = f"{MUAPI_BASE}/predictions/{request_id}/result"
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             for _ in range(max_polls):
+                if is_cancelled and is_cancelled():
+                    raise MuAPICancelled(f"Job cancelled while polling {request_id}")
+
                 resp = await self._request_with_retry(client, "GET", url)
                 data = resp.json()
                 status = data.get("status", "")
@@ -102,6 +120,8 @@ class MuAPIClient:
                 if status in ("failed", "cancelled"):
                     raise MuAPIError(f"MuAPI job {status}: {data.get('error', data)}")
 
+                if is_cancelled and is_cancelled():
+                    raise MuAPICancelled(f"Job cancelled while polling {request_id}")
                 await asyncio.sleep(poll_interval)
 
         raise MuAPIError(f"MuAPI job timed out after {max_polls * poll_interval}s")
@@ -112,7 +132,8 @@ class MuAPIClient:
         payload: Dict[str, Any],
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         max_polls: int = DEFAULT_MAX_POLLS,
+        is_cancelled: Optional[Callable[[], bool]] = None,
     ) -> str:
         request_id = await self.submit(endpoint, payload)
-        outputs = await self.poll_result(request_id, poll_interval, max_polls)
+        outputs = await self.poll_result(request_id, poll_interval, max_polls, is_cancelled=is_cancelled)
         return outputs[0]

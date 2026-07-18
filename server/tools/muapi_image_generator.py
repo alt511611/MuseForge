@@ -53,19 +53,22 @@ class MuAPIImageGenerator:
             payload["image"] = reference_url
         return payload
 
-    async def generate_image(self, prompt: str, aspect_ratio: str = "1:1") -> str:
+    async def generate_image(
+        self, prompt: str, aspect_ratio: str = "1:1", is_cancelled=None
+    ) -> str:
         if self.demo:
             return _demo_image_url(prompt, aspect_ratio)
         payload = self._build_payload(prompt, aspect_ratio)
-        return await self.client.generate(self.IMAGE_ENDPOINT, payload)
+        return await self.client.generate(self.IMAGE_ENDPOINT, payload, is_cancelled=is_cancelled)
 
     async def generate_image_with_reference(
         self,
         prompt: str,
         reference_url: str,
         aspect_ratio: str = "16:9",
+        is_cancelled=None,
     ) -> str:
         if self.demo:
             return _demo_image_url(prompt + "|ref", aspect_ratio)
         payload = self._build_payload(prompt, aspect_ratio, reference_url)
-        return await self.client.generate(self.IMAGE_ENDPOINT, payload)
+        return await self.client.generate(self.IMAGE_ENDPOINT, payload, is_cancelled=is_cancelled)

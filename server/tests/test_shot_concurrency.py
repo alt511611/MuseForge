@@ -26,11 +26,11 @@ async def test_shots_run_concurrently_not_sequentially(monkeypatch, tmp_path):
             for i in range(3)
         ]
 
-    async def fake_generate_image(self, prompt, aspect_ratio):
+    async def fake_generate_image(self, prompt, aspect_ratio, is_cancelled=None):
         await asyncio.sleep(SIMULATED_DELAY)
         return "https://fake.cdn/frame.png"
 
-    async def fake_generate_video(self, prompt, image_url, duration, aspect_ratio):
+    async def fake_generate_video(self, prompt, image_url, duration, aspect_ratio, is_cancelled=None):
         await asyncio.sleep(SIMULATED_DELAY)
         return "https://fake.cdn/video.mp4"
 

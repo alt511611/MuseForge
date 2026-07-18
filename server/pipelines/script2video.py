@@ -10,6 +10,7 @@ from agents.storyboard_artist import StoryboardArtist
 from interfaces.character import CharacterInScene
 from tools.muapi_image_generator import MuAPIImageGenerator
 from tools.muapi_video_generator import MuAPIVideoGenerator
+from tools.muapi_client import MuAPICancelled
 
 
 class PipelineCancelled(Exception):
@@ -103,40 +104,50 @@ class Script2VideoPipeline:
         async def _process_shot(i: int, shot) -> None:
             nonlocal completed_count
             async with semaphore:
-                _check_cancel()
+                try:
+                    _check_cancel()
 
-                reference_url = None
-                visible_chars = [c for c in characters if c.is_visible]
-                if visible_chars and portraits.get(visible_chars[0].name):
-                    reference_url = portraits[visible_chars[0].name]
+                    reference_url = None
+                    visible_chars = [c for c in characters if c.is_visible]
+                    if visible_chars and portraits.get(visible_chars[0].name):
+                        reference_url = portraits[visible_chars[0].name]
 
-                frame_prompt = (
-                    f"{style} style. {shot.visual_desc}. "
-                    f"Shot type: {shot.shot_type}. Lens: {shot.lens}."
-                )
-
-                async with progress_lock:
-                    await progress("frames", f"Generating frame {i + 1}/{len(shots)}", 20 + i * 5)
-
-                if reference_url:
-                    frame_url = await self.image_gen.generate_image_with_reference(
-                        frame_prompt, reference_url, aspect_ratio
+                    frame_prompt = (
+                        f"{style} style. {shot.visual_desc}. "
+                        f"Shot type: {shot.shot_type}. Lens: {shot.lens}."
                     )
-                else:
-                    frame_url = await self.image_gen.generate_image(frame_prompt, aspect_ratio)
 
-                shot.frame_url = frame_url
+                    async with progress_lock:
+                        await progress("frames", f"Generating frame {i + 1}/{len(shots)}", 20 + i * 5)
 
-                _check_cancel()
-                async with progress_lock:
-                    await progress("video", f"Animating shot {i + 1}/{len(shots)}", 50 + i * 5)
+                    if reference_url:
+                        frame_url = await self.image_gen.generate_image_with_reference(
+                            frame_prompt, reference_url, aspect_ratio, is_cancelled=is_cancelled
+                        )
+                    else:
+                        frame_url = await self.image_gen.generate_image(
+                            frame_prompt, aspect_ratio, is_cancelled=is_cancelled
+                        )
 
-                video_url = await self.video_gen.generate_video_from_image(
-                    prompt=shot.motion_desc,
-                    image_url=frame_url,
-                    duration=int(getattr(shot, "duration_seconds", 5.0)),
-                    aspect_ratio=aspect_ratio,
-                )
+                    shot.frame_url = frame_url
+
+                    _check_cancel()
+                    async with progress_lock:
+                        await progress("video", f"Animating shot {i + 1}/{len(shots)}", 50 + i * 5)
+
+                    video_url = await self.video_gen.generate_video_from_image(
+                        prompt=shot.motion_desc,
+                        image_url=frame_url,
+                        duration=int(getattr(shot, "duration_seconds", 5.0)),
+                        aspect_ratio=aspect_ratio,
+                        is_cancelled=is_cancelled,
+                    )
+                except MuAPICancelled as exc:
+                    # Translate the low-level "stopped polling mid-wait"
+                    # signal into the pipeline-level cancellation exception
+                    # that jobs.py already knows how to handle cleanly (as
+                    # a clean "cancelled" job state, not a generic error).
+                    raise PipelineCancelled(str(exc)) from exc
                 shot.video_url = video_url
                 shot_meta[i] = shot.model_dump() if hasattr(shot, "model_dump") else dict(vars(shot))
 

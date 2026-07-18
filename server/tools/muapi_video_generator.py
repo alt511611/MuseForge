@@ -49,6 +49,7 @@ class MuAPIVideoGenerator:
         image_url: str,
         duration: int = 5,
         aspect_ratio: str = "16:9",
+        is_cancelled=None,
     ) -> str:
         if self.demo:
             return DEMO_VIDEO_URL
@@ -68,4 +69,5 @@ class MuAPIVideoGenerator:
             payload,
             poll_interval=3.0,
             max_polls=200,
+            is_cancelled=is_cancelled,
         )
