@@ -15,15 +15,15 @@ SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 
 # Plan definitions: plan name → credits granted per renewal cycle
 PLAN_CREDITS = {
-    "creator": 120,
-    "pro": 300,
+    "creator": 25,
+    "pro": 55,
 }
 
 # One-time credit packages: env var suffix → credit amount
 CREDIT_PACKAGES = {
-    "SMALL":  {"credits": 20,  "label": "20 Credits"},
-    "MEDIUM": {"credits": 60,  "label": "60 Credits"},
-    "LARGE":  {"credits": 150, "label": "150 Credits"},
+    "SMALL":  {"credits": 4,  "label": "4 Credits"},
+    "MEDIUM": {"credits": 12, "label": "12 Credits"},
+    "LARGE":  {"credits": 30, "label": "30 Credits"},
 }
 
 stripe.api_key = STRIPE_SECRET_KEY

@@ -133,9 +133,9 @@ create policy "service_insert_ledger"
 create or replace view public.plan_limits as
 select 'free'    as plan, 3   as monthly_credits, 3 as max_scenes, false as hd_export
 union all
-select 'creator',          120, 5, false
+select 'creator',          25, 5, false
 union all
-select 'pro',              300, 5, true;
+select 'pro',              55, 5, true;
 
 -- ── Admin atama ───────────────────────────────────────────────────────────────
 -- IMPORTANT: after the RLS fix above, admin RLS access is granted via the JWT's

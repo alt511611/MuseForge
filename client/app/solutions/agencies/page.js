@@ -54,7 +54,7 @@ export default function AgenciesPage() {
           desc: "Screenwriter, storyboard artist, frame generator, and video assembler — all agents collaborate end-to-end. No handoffs between tools.",
         },
         {
-          title: "300 Credits / Month on Pro",
+          title: "55 Credits / Month on Pro",
           desc: "Run 60+ full five-scene video projects per month for a flat $99. Ideal for agencies running multiple concurrent campaigns.",
         },
       ]}
@@ -62,11 +62,11 @@ export default function AgenciesPage() {
         name: "Pro",
         price: "$99",
         period: "/ mo",
-        credits: 300,
+        credits: 55,
         highlight: true,
         cta: "Upgrade to Pro",
         ctaHref: "/pricing",
-        features: ["300 videos/mo", "Up to 5 scenes", "All director presets", "HD export", "3 team seats", "No watermark", "Priority render"],
+        features: ["55 credits/mo", "Up to 5 scenes", "All director presets", "HD export", "3 team seats", "No watermark", "Priority render"],
       }}
       ctaBanner={{
         title: "Ready to Cut Production Time by 80%?",

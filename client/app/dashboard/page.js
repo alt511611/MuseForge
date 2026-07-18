@@ -114,9 +114,9 @@ function BuyCreditsModal({ onClose, getAccessToken }) {
   const [err, setErr] = useState(null);
 
   const PACKAGES = [
-    { key: "SMALL",  label: "20 Credits", price: "$9",  highlight: false },
-    { key: "MEDIUM", label: "60 Credits", price: "$19", highlight: true },
-    { key: "LARGE",  label: "150 Credits",price: "$39", highlight: false },
+    { key: "SMALL",  label: t("pricing_credits_small"), price: "$9",  highlight: false },
+    { key: "MEDIUM", label: t("pricing_credits_medium"), price: "$19", highlight: true },
+    { key: "LARGE",  label: t("pricing_credits_large"), price: "$39", highlight: false },
   ];
 
   const buy = async (pkg) => {

@@ -42,8 +42,8 @@ export default function CreatorsPage() {
       ]}
       differentiators={[
         {
-          title: "120 Credits / Month for $49",
-          desc: "Enough for 24 full 5-scene videos per month — more than one per day. That's $2/video all-in.",
+          title: "25 Credits / Month for $49",
+          desc: "Enough for about five full 5-scene videos per month — roughly $10/video all-in on Creator.",
         },
         {
           title: "Demo Mode — Try Before You Spend",
@@ -62,11 +62,11 @@ export default function CreatorsPage() {
         name: "Creator",
         price: "$49",
         period: "/ mo",
-        credits: 120,
+        credits: 25,
         highlight: true,
         cta: "Upgrade to Creator",
         ctaHref: "/pricing",
-        features: ["120 videos/mo", "Up to 5 scenes", "All director presets", "All aspect ratios", "Priority render"],
+        features: ["25 credits/mo", "Up to 5 scenes", "All director presets", "All aspect ratios", "Priority render"],
       }}
       ctaBanner={{
         title: "Start Creating Today",

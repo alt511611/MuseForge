@@ -176,7 +176,7 @@ export default function GeneratePage() {
 
   return (
     <main className="min-h-screen" style={{ backgroundColor: "#0a0a0f" }}>
-      <div className="max-w-4xl mx-auto px-6 py-12">
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 py-8 sm:py-12">
 
         {/* Header */}
         <div className="flex items-center justify-between mb-8">
@@ -252,7 +252,7 @@ export default function GeneratePage() {
               <h2 className="text-sm font-medium mb-4 flex items-center gap-2" style={{ color: "#a78bfa" }}>
                 <Sparkles size={15} /> {t("gen_pipeline")}
               </h2>
-              <div className="grid grid-cols-4 md:grid-cols-8 gap-2">
+              <div className="grid grid-cols-4 md:grid-cols-8 gap-1.5 sm:gap-2">
                 {PIPELINE_STAGES.map((stage, idx) => {
                   const config = STAGE_CONFIG[stage];
                   const Icon = config?.icon || Loader2;

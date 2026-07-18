@@ -362,19 +362,30 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
         </div>
       )}
 
-      <div className="flex items-center justify-between mb-4 text-xs" style={{ color: "#64748b" }}>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4 text-xs" style={{ color: "#64748b" }}>
         <span className="inline-flex items-center gap-1.5">
           <Clock size={13} />
           {estimate
-            ? `Est. render ${estimate.estimated_label} · ${estimate.asset_count.frames} frames · ${estimate.asset_count.clips} clips`
-            : "Estimating render time..."}
+            ? t("form_est_render", {
+                label: estimate.estimated_label,
+                frames: estimate.asset_count.frames,
+                clips: estimate.asset_count.clips,
+              })
+            : t("form_est_loading")}
         </span>
-        {demoMode && (
+        {demoMode ? (
           <span
             className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full"
             style={{ backgroundColor: "rgba(124,58,237,0.15)", color: "#a78bfa" }}
           >
-            <FlaskConical size={11} /> Demo mode — no API key needed
+            <FlaskConical size={11} /> {t("form_demo_badge")}
+          </span>
+        ) : (
+          <span
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full"
+            style={{ backgroundColor: "rgba(251,191,36,0.12)", color: "#fbbf24" }}
+          >
+            <Sparkles size={11} /> {t("form_credit_cost", { n: numScenes })}
           </span>
         )}
       </div>

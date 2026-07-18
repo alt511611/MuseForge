@@ -12,8 +12,8 @@ from interfaces.shot import StoryboardShot
 
 class StoryboardArtist:
     SYSTEM_PROMPT = """You are a master storyboard artist for cinematic productions.
-Design 1-3 shots for the given scene script. Apply the director's style guidance.
-Respond ONLY with valid JSON array:
+Design exactly 1 shot for the given scene script. Apply the director's style guidance.
+Respond ONLY with valid JSON array containing a single shot object:
 [{"idx": 0, "visual_desc": "...", "motion_desc": "...", "audio_desc": "...",
   "shot_type": "wide|medium|close-up", "camera_movement": "...", "lens": "50mm", "duration_seconds": 5}]"""
 
@@ -34,7 +34,8 @@ Respond ONLY with valid JSON array:
                 script, characters, user_requirement, preset.storyboard_guidance, preset.default_lens
             )
             if shots:
-                return shots
+                # Hard cap: never produce more than 1 shot per scene (cost control).
+                return shots[:1]
 
         return self._design_template(script, characters, preset)
 
