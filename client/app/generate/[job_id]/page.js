@@ -67,6 +67,7 @@ export default function GeneratePage() {
   const { getAccessToken } = useAuth();
   const { t } = useLanguage();
   const [job, setJob] = useState(null);
+  const [estimatedTotalSeconds, setEstimatedTotalSeconds] = useState(null);
   const [events, setEvents] = useState([]);
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState("running");
@@ -109,6 +110,24 @@ export default function GeneratePage() {
         if (data.progress) setProgress(data.progress);
         if (data.status) setStatus(data.status);
         if (data.error) setError(friendlyError(data.error));
+
+        // Fetch a stable, stage-aware total-duration estimate once we know
+        // num_scenes, instead of relying purely on the volatile
+        // elapsed/progress extrapolation below (which can spike upward
+        // whenever progress% stalls relative to wall-clock time -- e.g.
+        // during a slow video-generation stage).
+        if (estimatedTotalSeconds === null && typeof data.num_scenes === "number") {
+          fetch(`${API_BASE}/api/estimate`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ num_scenes: data.num_scenes }),
+          })
+            .then((r) => (r.ok ? r.json() : null))
+            .then((est) => {
+              if (est?.estimated_seconds) setEstimatedTotalSeconds(est.estimated_seconds);
+            })
+            .catch(() => {});
+        }
       }
     } finally {
       setInitialLoading(false);
@@ -154,7 +173,18 @@ export default function GeneratePage() {
 
   // ETA calculation
   const elapsed = Math.round((Date.now() - startTimeRef.current) / 1000);
-  const eta = progress > 5 ? Math.round((elapsed / progress) * (100 - progress)) : null;
+  // Prefer the stable, stage-aware estimate (total expected duration minus
+  // elapsed) over the volatile elapsed/progress extrapolation, which can
+  // spike upward whenever the progress percentage stalls relative to real
+  // time -- e.g. during a slow video-generation stage that stays at ~50%
+  // for several minutes. Fall back to the old formula only until the
+  // estimate has loaded.
+  const eta =
+    estimatedTotalSeconds !== null
+      ? Math.max(0, Math.round(estimatedTotalSeconds - elapsed))
+      : progress > 5
+      ? Math.round((elapsed / progress) * (100 - progress))
+      : null;
   const etaLabel = eta !== null ? (eta < 60 ? `~${eta}s kaldı` : `~${Math.round(eta / 60)}dk kaldı`) : null;
 
   // Stage-specific inspiration message
