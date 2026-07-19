@@ -1,16 +1,15 @@
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
+import { SUPABASE_URL, SUPABASE_ANON_KEY, hasSupabaseConfig } from "./supabaseEnv";
 
 // Same null-if-unconfigured guard as lib/supabase.js — see that file for why.
 export function createServerSupabaseClient() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!url || !anonKey) {
+  if (!hasSupabaseConfig()) {
     return null;
   }
 
   const cookieStore = cookies();
-  return createServerClient(url, anonKey, {
+  return createServerClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     cookies: {
       getAll() {
         return cookieStore.getAll();

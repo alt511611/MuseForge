@@ -1,5 +1,6 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse } from "next/server";
+import { SUPABASE_URL, SUPABASE_ANON_KEY, hasSupabaseConfig } from "./lib/supabaseEnv";
 
 // NOTE: "/" is intentionally NOT in this list. The landing page must stay
 // reachable by anonymous visitors (demo mode generates videos without an
@@ -11,9 +12,6 @@ export async function middleware(request) {
   const { pathname } = request.nextUrl;
   let response = NextResponse.next({ request });
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
   const isProtected = PROTECTED.some(
     (p) => pathname === p || pathname.startsWith(p + "/")
   );
@@ -24,11 +22,11 @@ export async function middleware(request) {
   // Auth isn't configured yet (e.g. local dev before Supabase is wired up,
   // or a preview deploy without env vars). Don't block anyone — just skip
   // auth-gating entirely rather than crashing every request.
-  if (!supabaseUrl || !supabaseAnonKey) {
+  if (!hasSupabaseConfig()) {
     return response;
   }
 
-  const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
+  const supabase = createServerClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     cookies: {
       getAll() {
         return request.cookies.getAll();

@@ -44,6 +44,35 @@ class MuAPIVideoGenerator:
     VIDEO_ENDPOINT = os.environ.get(
         "MUAPI_VIDEO_MODEL", "kling-o1-standard-image-to-video"
     )
+# CONFIRMED against MuAPI's own validation error response:
+#   {"detail":[{"type":"literal_error","loc":["body","duration"],
+#     "msg":"Input should be 5 or 10", ...}]}
+# The storyboard artist's LLM picks a creative duration_seconds value
+# (e.g. 14) with no awareness that Kling's API only accepts this exact
+# enum -- round to the nearest valid value defensively rather than
+# relying on prompt instructions the model might ignore.
+VALID_DURATIONS = (5, 10)
+
+
+def nearest_valid_duration(seconds) -> int:
+    try:
+        seconds = float(seconds)
+    except (TypeError, ValueError):
+        return VALID_DURATIONS[0]
+    return min(VALID_DURATIONS, key=lambda d: abs(d - seconds))
+
+
+class MuAPIVideoGenerator:
+    # UPDATED based on finding MuAPI's own playground page at
+    # muapi.ai/playground/kling-o1-image-to-video -- suggesting "standard"
+    # is a *mode* parameter, not part of the URL slug (the previous
+    # "kling-o1-standard-image-to-video" 404'd... then this slug got a 422,
+    # meaning it's at least a real, reachable endpoint, unlike the 404 case).
+    # STILL NOT independently confirmed with an exact first-party curl
+    # example (unlike flux-dev-image, which was). If this 422s again,
+    # open https://muapi.ai/playground/kling-o1-image-to-video directly and
+    # check the exact parameter names/schema shown there.
+    VIDEO_ENDPOINT = os.environ.get("MUAPI_VIDEO_MODEL", "kling-o1-image-to-video")
 
     def __init__(self, api_key: str, demo: bool = False):
         self.demo = demo
@@ -103,3 +132,25 @@ class MuAPIVideoGenerator:
                     max_polls=200,
                 )
             raise
+        is_cancelled=None,
+    ) -> str:
+        if self.demo:
+            return DEMO_VIDEO_URL
+        payload = {
+            "prompt": prompt,
+            "image_url": image_url,
+            "duration": nearest_valid_duration(duration),
+            "mode": "standard",
+            # aspect_ratio removed: most Kling image-to-video APIs (across
+            # several providers, consistently) derive the output aspect
+            # ratio from the source image itself rather than accepting it
+            # as a request parameter -- a likely candidate for the 422
+            # ("Unprocessable Entity" = reachable endpoint, invalid field).
+        }
+        return await self.client.generate(
+            self.VIDEO_ENDPOINT,
+            payload,
+            poll_interval=3.0,
+            max_polls=200,
+            is_cancelled=is_cancelled,
+        )

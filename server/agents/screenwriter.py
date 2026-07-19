@@ -1,11 +1,15 @@
 """Screenwriter agent — transforms an idea into a structured drama script."""
 
 import json
+import logging
 import os
 import re
 from typing import List, Optional
 
 from interfaces.character import CharacterProfile, DramaScript
+from tools.claude_via_muapi import complete_via_muapi
+
+logger = logging.getLogger(__name__)
 
 
 class ScreenwriterAgent:
@@ -22,8 +26,10 @@ Respond ONLY with valid JSON matching this schema:
   "scenes": ["scene 1 action...", "scene 2 action..."]
 }"""
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, demo: bool = False):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        self.muapi_key = os.environ.get("MUAPI_KEY", "")
+        self.demo = demo
 
     async def write_script(
         self,
@@ -32,8 +38,42 @@ Respond ONLY with valid JSON matching this schema:
         num_scenes: int = 3,
         user_requirement: str = "",
     ) -> DramaScript:
+        # Demo mode must stay fast and free of real network calls --
+        # matches MuAPIImageGenerator/MuAPIVideoGenerator's demo behavior.
+        if self.demo:
+            return self._write_template(idea, style, num_scenes)
+
+        prompt = (
+            f"Idea: {idea}\nStyle: {style}\nScenes: {num_scenes}\n"
+            f"Additional requirements: {user_requirement or 'none'}"
+        )
+
+        # 1) Prefer MuAPI (single existing key, no separate Anthropic
+        #    account needed) -- but its exact LLM endpoint/schema isn't
+        #    100% confirmed, so any failure here falls through silently.
+        if self.muapi_key:
+            try:
+                content = await complete_via_muapi(self.SYSTEM_PROMPT, prompt)
+                return DramaScript(**self._parse_json(content))
+            except Exception as exc:
+                # Include a snippet of the RAW MuAPI response so failures
+                # are diagnosable from logs alone -- the earlier version of
+                # this log line only showed the exception message ("No
+                # JSON found in response"), not what MuAPI actually
+                # returned, making it impossible to tell whether the
+                # response was empty, wrapped in markdown fences, JSON in
+                # a different field, an error message, etc.
+                raw_snippet = locals().get("content", "<no content received>")
+                logger.warning(
+                    f"MuAPI LLM call failed, falling back: {exc} | "
+                    f"Raw response (first 500 chars): {str(raw_snippet)[:500]!r}"
+                )
+
+        # 2) Fall back to a direct Anthropic call if a key is configured.
         if self.api_key:
             return await self._write_with_claude(idea, style, num_scenes, user_requirement)
+
+        # 3) Last resort: deterministic template, never crashes generation.
         return self._write_template(idea, style, num_scenes)
 
     async def _write_with_claude(

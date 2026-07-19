@@ -64,14 +64,15 @@ async def test_pipeline_invariants(monkeypatch):
     storyboard_calls = []
     music_calls = []
 
-    async def fake_generate_image(self, prompt, aspect_ratio="1:1"):
+    async def fake_generate_image(self, prompt, aspect_ratio="1:1", is_cancelled=None):
         portrait_calls.append(prompt)
         return f"https://fake.cdn/portrait_{len(portrait_calls)}.png"
 
-    async def fake_generate_image_with_reference(self, prompt, reference_url, aspect_ratio="16:9"):
+    async def fake_generate_image_with_reference(self, prompt, reference_url, aspect_ratio="16:9", is_cancelled=None):
         return f"https://fake.cdn/frame_from_{reference_url.split('/')[-1]}"
 
     async def fake_generate_video_from_image(self, prompt, image_url, duration=5, aspect_ratio="16:9", plan="free"):
+    async def fake_generate_video_from_image(self, prompt, image_url, duration=5, aspect_ratio="16:9", is_cancelled=None):
         return "https://fake.cdn/video.mp4"
 
     async def fake_design_storyboard(self, script, characters, user_requirement="", director_style="cinematic_balanced"):
@@ -153,13 +154,14 @@ async def test_scene_pipeline_returns_shots(monkeypatch):
     import tools.muapi_video_generator as video_mod
     import agents.storyboard_artist as storyboard_mod
 
-    async def fake_img(self, prompt, aspect_ratio="1:1"):
+    async def fake_img(self, prompt, aspect_ratio="1:1", is_cancelled=None):
         return "https://fake.cdn/img.png"
 
-    async def fake_img_ref(self, prompt, reference_url, aspect_ratio="16:9"):
+    async def fake_img_ref(self, prompt, reference_url, aspect_ratio="16:9", is_cancelled=None):
         return "https://fake.cdn/frame.png"
 
     async def fake_vid(self, prompt, image_url, duration=5, aspect_ratio="16:9", plan="free"):
+    async def fake_vid(self, prompt, image_url, duration=5, aspect_ratio="16:9", is_cancelled=None):
         return "https://fake.cdn/clip.mp4"
 
     async def fake_storyboard(self, script, characters, user_requirement="", director_style="cinematic_balanced"):

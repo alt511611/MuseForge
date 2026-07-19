@@ -91,10 +91,24 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
       .select("plan")
       .eq("id", user.id)
       .single()
-      .then(({ data }) => {
-        if (!cancelled && data) setPlan(data.plan);
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        if (error) {
+          // Supabase JS returns query errors (RLS denial, 0/2+ rows from
+          // .single(), etc.) as { data: null, error } -- it does NOT throw
+          // for these, so the .catch() below never fires for them. The
+          // previous code only checked `data`, meaning any such error
+          // silently left `plan` as null forever with zero visibility --
+          // indistinguishable from "you're on the free plan" in the UI,
+          // and nothing logged anywhere to diagnose it.
+          console.error("Failed to fetch user plan (music toggle will stay hidden):", error);
+          return;
+        }
+        if (data) setPlan(data.plan);
       })
-      .catch(() => {});
+      .catch((err) => {
+        if (!cancelled) console.error("Failed to fetch user plan (network/client error):", err);
+      });
     return () => {
       cancelled = true;
     };
