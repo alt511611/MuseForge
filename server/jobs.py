@@ -17,7 +17,7 @@ import shutil
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -29,9 +29,32 @@ HEARTBEAT_INTERVAL = 15.0
 ORPHAN_MAX_AGE_SECONDS = 24 * 3600
 ORPHAN_CLEANUP_INTERVAL_SECONDS = 3600
 
+# Stale job reaper: mark DB rows stuck in queued/running after a crash/timeout.
+# Independent of orphan_cleanup_loop (disk) — both run as parallel background tasks.
+STALE_JOB_REAPER_INTERVAL_SECONDS = 10 * 60  # ~10 minutes
+STALE_JOB_ERROR = "Orphaned (server restart or timeout)"
+
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 JOBS_DIR = os.environ.get("MUSEFORGE_JOBS_DIR", "/tmp/museforge_jobs")
+
+
+def _stale_timeout_minutes() -> int:
+    raw = os.environ.get("MUSEFORGE_STALE_JOB_TIMEOUT_MINUTES", "45")
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 45
+
+
+def _parse_ts(value: Any) -> Optional[datetime]:
+    """Parse a Supabase timestamptz (ISO-8601) into an aware UTC datetime."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 # ── Supabase helpers ───────────────────────────────────────────────────────────
 
@@ -402,6 +425,97 @@ async def orphan_cleanup_loop() -> None:
         except Exception as exc:
             logger.error("Orphan cleanup loop error: %s", exc)
         await asyncio.sleep(ORPHAN_CLEANUP_INTERVAL_SECONDS)
+
+
+async def reap_stale_jobs() -> int:
+    """Mark queued/running Supabase jobs whose updated_at is past the timeout as failed.
+
+    Skips jobs that are still actively progressing in this process (recent SSE
+    events in memory) so a long generation isn't killed just because we don't
+    bump updated_at on every emit. Returns the number of jobs reaped.
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return 0
+
+    timeout_min = _stale_timeout_minutes()
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=timeout_min)
+    reaped = 0
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            headers = {
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+            }
+            resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/jobs",
+                params={
+                    "status": "in.(queued,running)",
+                    "select": "id,status,updated_at",
+                },
+                headers=headers,
+            )
+            if resp.status_code >= 400:
+                logger.error("stale-job reaper list failed: %s %s", resp.status_code, resp.text[:200])
+                return 0
+            rows = resp.json()
+            if not isinstance(rows, list):
+                return 0
+
+            patch_headers = {
+                **headers,
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            }
+            for row in rows:
+                job_id = row.get("id")
+                updated = _parse_ts(row.get("updated_at"))
+                if not job_id or updated is None or updated >= cutoff:
+                    continue
+
+                # Live on this process with recent activity → leave alone.
+                mem = job_store.get(job_id)
+                if mem and mem.status in (JobStatus.QUEUED, JobStatus.RUNNING) and mem.events:
+                    last = _parse_ts(mem.events[-1].timestamp)
+                    if last is not None and last >= cutoff:
+                        continue
+
+                patch = await client.patch(
+                    f"{SUPABASE_URL}/rest/v1/jobs",
+                    params={"id": f"eq.{job_id}"},
+                    json={"status": "failed", "error": STALE_JOB_ERROR},
+                    headers=patch_headers,
+                )
+                if patch.status_code >= 400:
+                    logger.error(
+                        "stale-job reaper patch failed for %s: %s %s",
+                        job_id, patch.status_code, patch.text[:200],
+                    )
+                    continue
+
+                if mem and mem.status in (JobStatus.QUEUED, JobStatus.RUNNING):
+                    mem.status = JobStatus.FAILED
+                    mem.error = STALE_JOB_ERROR
+
+                reaped += 1
+                logger.info("Reaped stale job %s (updated_at=%s)", job_id, row.get("updated_at"))
+    except Exception as exc:
+        logger.error("stale-job reaper error: %s", exc)
+        return reaped
+
+    return reaped
+
+
+async def stale_job_reaper_loop() -> None:
+    """Background task: periodically fail orphaned queued/running jobs in Supabase."""
+    while True:
+        try:
+            n = await reap_stale_jobs()
+            if n:
+                logger.info("Stale job reaper marked %d job(s) failed", n)
+        except Exception as exc:
+            logger.error("Stale job reaper loop error: %s", exc)
+        await asyncio.sleep(STALE_JOB_REAPER_INTERVAL_SECONDS)
 
 
 # ── Generation runner ──────────────────────────────────────────────────────────

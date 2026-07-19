@@ -4,6 +4,14 @@ import { useEffect, useState } from "react";
 import { useLanguage } from "../contexts/LanguageContext";
 import { API_BASE } from "../lib/apiBase";
 
+// Hide the counter until total_completed clears this bar — a tiny number is
+// weak social proof. Override via NEXT_PUBLIC_COUNTER_THRESHOLD in .env.
+const COUNTER_THRESHOLD = (() => {
+  const raw = process.env.NEXT_PUBLIC_COUNTER_THRESHOLD;
+  const n = raw !== undefined && raw !== "" ? Number(raw) : 50;
+  return Number.isFinite(n) && n >= 0 ? n : 50;
+})();
+
 export default function LiveCounter() {
   const { t } = useLanguage();
   const [count, setCount] = useState(null);
@@ -12,7 +20,13 @@ export default function LiveCounter() {
   useEffect(() => {
     fetch(`${API_BASE}/api/stats`)
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => d && setCount(d.monthly_completed ?? d.total_completed ?? 0))
+      .then((d) => {
+        if (!d) return;
+        // Gate on all-time total; stay fully hidden below the threshold.
+        const total = d.total_completed ?? 0;
+        if (total < COUNTER_THRESHOLD) return;
+        setCount(d.monthly_completed ?? total);
+      })
       .catch(() => {});
   }, []);
 
