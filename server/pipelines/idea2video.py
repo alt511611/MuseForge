@@ -330,6 +330,7 @@ class Idea2VideoPipeline:
                 director_style=director_style,
                 aspect_ratio=aspect_ratio,
                 is_cancelled=is_cancelled,
+                plan=plan,
             )
             if scene_result.get("path"):
                 scene_paths.append(scene_result["path"])
@@ -391,8 +392,11 @@ class Idea2VideoPipeline:
                         pass
                     final_path = stored
                 else:
-                    # Fail-open / demo: keep serving the local path.
-                    video_url = video_url or final_path
+                    # Fail-open: never expose a raw disk path to the client —
+                    # serve via the authenticated streaming endpoint instead.
+                    # (A bare "/tmp/..." URL becomes "https://host/tmp/..." and 404s.)
+                    job_id = os.path.basename(os.path.normpath(working_dir))
+                    video_url = video_url or f"/api/jobs/{job_id}/video"
 
         await progress(
             "complete",

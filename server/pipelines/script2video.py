@@ -68,6 +68,7 @@ class Script2VideoPipeline:
         director_style: str = "cinematic_balanced",
         aspect_ratio: str = "16:9",
         is_cancelled: Optional[Callable[[], bool]] = None,
+        plan: str = "free",
     ) -> Dict[str, Any]:
         os.makedirs(working_dir, exist_ok=True)
         portraits = character_portraits or {}
@@ -86,6 +87,47 @@ class Script2VideoPipeline:
             script, characters, user_requirement, director_style
         )
 
+        shot_videos: List[str] = []
+        shot_meta: List[Dict[str, Any]] = []
+        for i, shot in enumerate(shots):
+            _check_cancel()
+            await progress("frames", f"Generating frame {i + 1}/{len(shots)}", 20 + i * 20)
+
+            reference_url = None
+            visible_chars = [c for c in characters if c.is_visible]
+            if visible_chars and portraits.get(visible_chars[0].name):
+                reference_url = portraits[visible_chars[0].name]
+
+            frame_prompt = (
+                f"{style} style. {shot.visual_desc}. "
+                f"Shot type: {shot.shot_type}. Lens: {shot.lens}."
+            )
+
+            if reference_url:
+                frame_url = await self.image_gen.generate_image_with_reference(
+                    frame_prompt, reference_url, aspect_ratio
+                )
+            else:
+                frame_url = await self.image_gen.generate_image(frame_prompt, aspect_ratio)
+
+            shot.frame_url = frame_url
+
+            _check_cancel()
+            await progress("video", f"Animating shot {i + 1}/{len(shots)}", 50 + i * 15)
+            video_url = await self.video_gen.generate_video_from_image(
+                prompt=shot.motion_desc,
+                image_url=frame_url,
+                duration=int(getattr(shot, "duration_seconds", 5.0)),
+                aspect_ratio=aspect_ratio,
+                plan=plan,
+            )
+            shot.video_url = video_url
+            shot_meta.append(shot.model_dump() if hasattr(shot, "model_dump") else dict(vars(shot)))
+
+            if not self.demo:
+                local_path = os.path.join(working_dir, f"shot_{i}.mp4")
+                await download_video(video_url, local_path)
+                shot_videos.append(local_path)
         shot_videos: List[Optional[str]] = [None] * len(shots)
         shot_meta: List[Optional[Dict[str, Any]]] = [None] * len(shots)
         completed_count = 0

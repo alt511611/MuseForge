@@ -9,3 +9,17 @@
 // one (e.g. both "https://api.example.com" and "https://api.example.com/"
 // work correctly).
 export const API_BASE = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/+$/, "");
+
+/**
+ * Resolve a job's video URL for the browser.
+ * - Absolute http(s) URLs (e.g. Supabase signed URLs) are used as-is.
+ * - Relative paths like `/api/jobs/{id}/video` are prefixed with API_BASE.
+ * - Disk paths (`/tmp/...`) or other junk fall back to the streaming endpoint.
+ */
+export function resolveJobVideoUrl(videoUrl, jobId) {
+  const fallback = `${API_BASE}/api/jobs/${jobId}/video`;
+  if (!videoUrl || typeof videoUrl !== "string") return fallback;
+  if (videoUrl.startsWith("http://") || videoUrl.startsWith("https://")) return videoUrl;
+  if (videoUrl.startsWith("/api/")) return `${API_BASE}${videoUrl}`;
+  return fallback;
+}

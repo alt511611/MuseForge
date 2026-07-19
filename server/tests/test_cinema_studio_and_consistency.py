@@ -71,6 +71,7 @@ async def test_pipeline_invariants(monkeypatch):
     async def fake_generate_image_with_reference(self, prompt, reference_url, aspect_ratio="16:9", is_cancelled=None):
         return f"https://fake.cdn/frame_from_{reference_url.split('/')[-1]}"
 
+    async def fake_generate_video_from_image(self, prompt, image_url, duration=5, aspect_ratio="16:9", plan="free"):
     async def fake_generate_video_from_image(self, prompt, image_url, duration=5, aspect_ratio="16:9", is_cancelled=None):
         return "https://fake.cdn/video.mp4"
 
@@ -159,6 +160,7 @@ async def test_scene_pipeline_returns_shots(monkeypatch):
     async def fake_img_ref(self, prompt, reference_url, aspect_ratio="16:9", is_cancelled=None):
         return "https://fake.cdn/frame.png"
 
+    async def fake_vid(self, prompt, image_url, duration=5, aspect_ratio="16:9", plan="free"):
     async def fake_vid(self, prompt, image_url, duration=5, aspect_ratio="16:9", is_cancelled=None):
         return "https://fake.cdn/clip.mp4"
 

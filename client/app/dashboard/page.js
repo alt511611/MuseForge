@@ -8,7 +8,8 @@ import { useAuth } from "../../contexts/AuthContext";
 import { useLanguage } from "../../contexts/LanguageContext";
 import { createClient } from "../../lib/supabase";
 import { isLowCredits } from "../../lib/credits";
-import { API_BASE } from "../../lib/apiBase";
+import { API_BASE, resolveJobVideoUrl } from "../../lib/apiBase";
+import VideoPlayerModal from "../../components/VideoPlayerModal";
 
 const PAGE_SIZE = 12;
 
@@ -31,13 +32,13 @@ function StatusBadge({ status }) {
   );
 }
 
-function JobCard({ job }) {
+function JobCard({ job, onPlayVideo }) {
   const { t } = useLanguage();
   const idea = job.idea?.length > 90 ? job.idea.slice(0, 90) + "…" : job.idea;
   const date = job.created_at
     ? new Date(job.created_at).toLocaleDateString("en-US", { day: "2-digit", month: "short", year: "numeric" })
     : "-";
-  const videoUrl = job.result?.video_url;
+  const videoUrl = resolveJobVideoUrl(job.result?.video_url, job.id);
   const isActive = ["queued", "running"].includes(job.status);
 
   return (
@@ -68,12 +69,15 @@ function JobCard({ job }) {
           {job.status === "completed" && (
             <>
               {videoUrl && (
-                <a href={videoUrl} target="_blank" rel="noopener noreferrer"
+                <button
+                  type="button"
+                  onClick={() => onPlayVideo?.(videoUrl)}
                   className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg transition-colors"
-                  style={{ backgroundColor: "rgba(34,197,94,0.12)", color: "#22c55e" }}>
+                  style={{ backgroundColor: "rgba(34,197,94,0.12)", color: "#22c55e" }}
+                >
                   <Video size={11} />
                   {t("dash_watch")}
-                </a>
+                </button>
               )}
               <Link href={`/generate/${job.id}`}
                 className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg transition-colors"
@@ -225,6 +229,7 @@ export default function DashboardPage() {
   const [hasMore, setHasMore] = useState(false);
   const [showBuyModal, setShowBuyModal] = useState(false);
   const [ledger, setLedger] = useState([]);
+  const [playingVideo, setPlayingVideo] = useState(null);
 
   useEffect(() => {
     if (!authLoading && !user) router.replace("/login?next=/dashboard");
@@ -460,7 +465,9 @@ export default function DashboardPage() {
         ) : (
           <>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {jobs.map(job => <JobCard key={job.id} job={job} />)}
+              {jobs.map(job => (
+                <JobCard key={job.id} job={job} onPlayVideo={setPlayingVideo} />
+              ))}
               {fetching && Array.from({ length: 3 }).map((_, i) => <SkeletonCard key={`sk-${i}`} />)}
             </div>
             {hasMore && !fetching && (
@@ -475,6 +482,10 @@ export default function DashboardPage() {
           </>
         )}
       </div>
+
+      {playingVideo && (
+        <VideoPlayerModal src={playingVideo} onClose={() => setPlayingVideo(null)} />
+      )}
     </main>
   );
 }
