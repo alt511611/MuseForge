@@ -34,6 +34,13 @@ ORPHAN_CLEANUP_INTERVAL_SECONDS = 3600
 STALE_JOB_REAPER_INTERVAL_SECONDS = 10 * 60  # ~10 minutes
 STALE_JOB_ERROR = "Orphaned (server restart or timeout)"
 
+# Hard upper bound for a single pipeline.run() call. Prevents silent hangs
+# where no exception is raised but generation never finishes.
+# Override with MUSEFORGE_PIPELINE_HARD_TIMEOUT (seconds). Default: 20 minutes.
+PIPELINE_HARD_TIMEOUT_SECONDS = int(
+    os.environ.get("MUSEFORGE_PIPELINE_HARD_TIMEOUT", "1200")
+)
+
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 JOBS_DIR = os.environ.get("MUSEFORGE_JOBS_DIR", "/tmp/museforge_jobs")
@@ -559,19 +566,22 @@ async def run_generation_job(job: Job, api_key: str):
 
     try:
         pipeline = Idea2VideoPipeline(api_key=api_key, demo=job.demo)
-        result = await pipeline.run(
-            idea=job.idea,
-            style=job.style,
-            director_style=job.director_style,
-            user_requirement=job.user_requirement,
-            num_scenes=job.num_scenes,
-            aspect_ratio=job.aspect_ratio,
-            working_dir=working_dir,
-            progress_callback=progress_callback,
-            is_cancelled=is_cancelled,
-            character_portraits_override=character_portraits_override or None,
-            music_enabled=job.music_enabled,
-            plan=job.plan,
+        result = await asyncio.wait_for(
+            pipeline.run(
+                idea=job.idea,
+                style=job.style,
+                director_style=job.director_style,
+                user_requirement=job.user_requirement,
+                num_scenes=job.num_scenes,
+                aspect_ratio=job.aspect_ratio,
+                working_dir=working_dir,
+                progress_callback=progress_callback,
+                is_cancelled=is_cancelled,
+                character_portraits_override=character_portraits_override or None,
+                music_enabled=job.music_enabled,
+                plan=job.plan,
+            ),
+            timeout=PIPELINE_HARD_TIMEOUT_SECONDS,
         )
         if is_cancelled():
             job.status = JobStatus.CANCELLED
@@ -595,6 +605,17 @@ async def run_generation_job(job: Job, api_key: str):
         if job.user_id and not job.demo:
             refund_amount = job.num_scenes + (1 if job.music_enabled else 0)
             asyncio.create_task(_sb_refund_credits(job.user_id, refund_amount, job.id))
+    except asyncio.TimeoutError:
+        job.status = JobStatus.FAILED
+        job.error = "Generation timed out — please try again."
+        await job_store.emit(job, "error", job.error, 100)
+        await job_store.persist(job)
+        # Refund credits — timeout is a system failure, not the user's fault.
+        if job.user_id and not job.demo:
+            refund_amount = job.num_scenes + (1 if job.music_enabled else 0)
+            asyncio.create_task(_sb_refund_credits(job.user_id, refund_amount, job.id))
+        cleanup_working_dir(working_dir)
+        return
     except Exception as exc:
         job.error = str(exc)
         job.status = JobStatus.FAILED
