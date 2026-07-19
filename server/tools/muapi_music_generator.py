@@ -27,11 +27,8 @@ class MuAPIMusicGenerator:
     # CONFIRMED via MuAPI's own playground page:
     # https://muapi.ai/playground/suno-create-music -- the earlier guess
     # ("stable-audio-2") 404'd in production; the user found the correct
-    # slug directly in MuAPI's playground URL. Kept env-overridable in
-    # case the payload/response shape still needs adjustment (Suno's
-    # default output is a full vocal song; whether this endpoint accepts
-    # an "instrumental"-only flag isn't independently confirmed the way
-    # the slug itself now is).
+    # slug directly in MuAPI's playground URL, and confirmed a real
+    # "instrumental" parameter exists on that same page (now used below).
     MUSIC_ENDPOINT = os.environ.get("MUAPI_MUSIC_MODEL", "suno-create-music")
 
     def __init__(self, api_key: str, demo: bool = False):
@@ -52,7 +49,7 @@ class MuAPIMusicGenerator:
         if self.demo:
             return DEMO_MUSIC_URL
         prompt = f"Instrumental background music, {mood} mood, cinematic, no vocals, no lyrics."
-        payload = {"prompt": prompt, "duration": duration}
+        payload = {"prompt": prompt, "duration": duration, "instrumental": True}
         try:
             return await self.client.generate(self.MUSIC_ENDPOINT, payload, poll_interval=3.0, max_polls=100)
         except MuAPIError as exc:
