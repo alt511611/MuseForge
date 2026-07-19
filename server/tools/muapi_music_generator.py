@@ -24,16 +24,15 @@ DEMO_MUSIC_URL = ""  # no audio track in demo mode — silent video is fine
 
 
 class MuAPIMusicGenerator:
-    # NOT independently confirmed against MuAPI's first-party docs (unlike
-    # flux-dev-image, which was via an exact curl example). "stable-audio-2"
-    # is a real Stability AI model (confirmed to exist on Replicate/
-    # Stability's own API), chosen because it's purpose-built for
-    # instrumental music/sound rather than vocal songs (unlike Suno, which
-    # MuAPI also lists but defaults to full songs with vocals). Whether
-    # MuAPI hosts it under this exact slug is unconfirmed -- if this fails
-    # consistently, check MuAPI's own playground/docs for the correct
-    # slug and set MUAPI_MUSIC_MODEL, no code change needed.
-    MUSIC_ENDPOINT = os.environ.get("MUAPI_MUSIC_MODEL", "stable-audio-2")
+    # CONFIRMED via MuAPI's own playground page:
+    # https://muapi.ai/playground/suno-create-music -- the earlier guess
+    # ("stable-audio-2") 404'd in production; the user found the correct
+    # slug directly in MuAPI's playground URL. Kept env-overridable in
+    # case the payload/response shape still needs adjustment (Suno's
+    # default output is a full vocal song; whether this endpoint accepts
+    # an "instrumental"-only flag isn't independently confirmed the way
+    # the slug itself now is).
+    MUSIC_ENDPOINT = os.environ.get("MUAPI_MUSIC_MODEL", "suno-create-music")
 
     def __init__(self, api_key: str, demo: bool = False):
         self.demo = demo
