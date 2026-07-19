@@ -96,18 +96,21 @@ _rate_limiter = _SlidingWindowRateLimiter(limit=5, window=60.0)
 async def lifespan(app: FastAPI):
     jobs_dir = os.environ.get("MUSEFORGE_JOBS_DIR", "/tmp/museforge_jobs")
     os.makedirs(jobs_dir, exist_ok=True)
-    # Background orphan-disk cleanup (no external scheduler)
-    from jobs import orphan_cleanup_loop
+    # Independent background tasks (disk orphans + stale DB job rows)
+    from jobs import orphan_cleanup_loop, stale_job_reaper_loop
 
     cleanup_task = asyncio.create_task(orphan_cleanup_loop())
+    reaper_task = asyncio.create_task(stale_job_reaper_loop())
     try:
         yield
     finally:
         cleanup_task.cancel()
-        try:
-            await cleanup_task
-        except asyncio.CancelledError:
-            pass
+        reaper_task.cancel()
+        for task in (cleanup_task, reaper_task):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(title="MuseForge API", version="2.3.0", lifespan=lifespan)
