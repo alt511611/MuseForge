@@ -163,9 +163,9 @@ export default function GeneratePage() {
   const eta = progress > 5 ? Math.round((elapsed / progress) * (100 - progress)) : null;
   const etaLabel = eta !== null ? (eta < 60 ? `~${eta}s kaldı` : `~${Math.round(eta / 60)}dk kaldı`) : null;
 
-  // Stage-specific inspiration message
+  // Stage-specific inspiration message (i18n via t())
   const msgCount = stageMsgCountRef.current[currentStage] || 0;
-  const stageMessage = isRunning ? getStageMessage(currentStage, msgCount) : "";
+  const stageMessage = isRunning ? getStageMessage(currentStage, msgCount, t) : "";
 
   if (initialLoading) {
     return (
@@ -229,7 +229,7 @@ export default function GeneratePage() {
             {/* Inspiration */}
             <div className="text-center mb-6">
               <p className="text-sm animate-pulse" style={{ color: "#7c3aed" }}>
-                {stageMessage || getInspirationMessage(inspoIdx)}
+                {stageMessage || getInspirationMessage(inspoIdx, t)}
               </p>
             </div>
 

@@ -185,17 +185,31 @@ class Idea2VideoPipeline:
         progress_callback: Optional[Callable] = None,
         music_url: Optional[str] = None,
         plan: str = "free",
+        is_cancelled: Optional[Callable[[], bool]] = None,
     ) -> str:
         """Concatenate all scene videos, add background music, then watermark
-        (Free plan only) — exactly once per drama."""
+        (Free plan only) — exactly once per drama.
+
+        Cancel is checked BEFORE each step starts (concat / music / watermark).
+        Once an ffmpeg/moviepy render has begun we intentionally do NOT abort
+        mid-write — that would leave a half-baked file on disk.
+        """
+        def _check_cancel():
+            if is_cancelled and is_cancelled():
+                raise PipelineCancelled("Job cancelled")
+
         os.makedirs(working_dir, exist_ok=True)
 
+        # Before concatenate
+        _check_cancel()
         if progress_callback:
             await progress_callback("assembly", "Concatenating scene videos", 85)
 
         concatenated_path = os.path.join(working_dir, "drama_concatenated.mp4")
         await concatenate_videos(scene_paths, concatenated_path)
 
+        # Before music mix
+        _check_cancel()
         if progress_callback:
             await progress_callback("music", "Adding background music", 93)
 
@@ -204,6 +218,8 @@ class Idea2VideoPipeline:
 
         final_path = os.path.join(working_dir, "drama_final.mp4")
         if plan in WATERMARK_PLANS:
+            # Before watermark render
+            _check_cancel()
             if progress_callback:
                 await progress_callback("music", "Applying watermark", 97)
             await add_watermark(with_music_path, final_path)
@@ -311,12 +327,17 @@ class Idea2VideoPipeline:
         # server-side in api.py before music_enabled ever reaches here).
         # Best-effort: any failure is logged and the job continues without
         # music rather than crashing. Never triggered in demo mode.
+        # Cancel is checked BEFORE the MuAPI call starts — once it has begun
+        # we let it finish (or fail) rather than orphan a half-written track.
         if music_enabled and not self.demo and not music_url:
+            _check_cancel()
             try:
                 from tools.muapi_music_generator import MuAPIMusicGenerator
 
                 music_gen = MuAPIMusicGenerator(self.api_key, demo=self.demo)
                 music_url = await music_gen.generate_instrumental(mood=script.mood or "cinematic")
+            except PipelineCancelled:
+                raise
             except Exception as exc:
                 logger.warning("Background music generation failed, continuing without music: %s", exc)
                 music_url = None
@@ -330,7 +351,12 @@ class Idea2VideoPipeline:
                     break
         else:
             final_path = await self._assemble_final_drama(
-                scene_paths, working_dir, progress_callback, music_url, plan
+                scene_paths,
+                working_dir,
+                progress_callback,
+                music_url,
+                plan,
+                is_cancelled=is_cancelled,
             )
             # Persist final video to Supabase Storage (signed URL) when available.
             if final_path and os.path.isfile(final_path):
