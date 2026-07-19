@@ -5,10 +5,11 @@ import Link from "next/link";
 import { Download, Share2, Plus, ExternalLink, Layout, ChevronDown, ChevronUp } from "lucide-react";
 import Confetti from "./Confetti";
 import { useLanguage } from "../contexts/LanguageContext";
-import { API_BASE } from "../lib/apiBase";
+import { resolveJobVideoUrl } from "../lib/apiBase";
 
 function NextSteps({ jobId, videoUrl }) {
   const { t } = useLanguage();
+  const openUrl = resolveJobVideoUrl(videoUrl, jobId);
 
   const handleShare = async () => {
     const url = typeof window !== "undefined" ? window.location.href : "";
@@ -30,7 +31,7 @@ function NextSteps({ jobId, videoUrl }) {
           <Plus size={16} />
           {t("result_new_video")}
         </Link>
-        <a href={videoUrl || `${API_BASE}/api/jobs/${jobId}/video`} target="_blank" rel="noopener noreferrer"
+        <a href={openUrl} target="_blank" rel="noopener noreferrer"
           className="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all hover:scale-[1.02]"
           style={{ backgroundColor: "#12121a", border: "1px solid #22223a", color: "#94a3b8" }}>
           <ExternalLink size={16} />
@@ -91,7 +92,7 @@ export default function VideoResult({ job, jobId }) {
 
   const scenes = result.scenes || [];
   const portraits = result.portraits || {};
-  const videoSrc = result.video_url || `${API_BASE}/api/jobs/${jobId}/video`;
+  const videoSrc = resolveJobVideoUrl(result.video_url, jobId);
 
   return (
     <>
@@ -115,7 +116,7 @@ export default function VideoResult({ job, jobId }) {
         />
         <div className="flex items-center justify-between mt-3">
           <p className="text-xs truncate" style={{ color: "#475569" }}>{result.logline}</p>
-          <a href={`${API_BASE}/api/jobs/${jobId}/video`} download
+          <a href={videoSrc} download
             className="inline-flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg font-medium flex-shrink-0 ml-3"
             style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}>
             <Download size={13} />

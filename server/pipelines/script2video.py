@@ -66,6 +66,7 @@ class Script2VideoPipeline:
         director_style: str = "cinematic_balanced",
         aspect_ratio: str = "16:9",
         is_cancelled: Optional[Callable[[], bool]] = None,
+        plan: str = "free",
     ) -> Dict[str, Any]:
         os.makedirs(working_dir, exist_ok=True)
         portraits = character_portraits or {}
@@ -116,6 +117,7 @@ class Script2VideoPipeline:
                 image_url=frame_url,
                 duration=int(getattr(shot, "duration_seconds", 5.0)),
                 aspect_ratio=aspect_ratio,
+                plan=plan,
             )
             shot.video_url = video_url
             shot_meta.append(shot.model_dump() if hasattr(shot, "model_dump") else dict(vars(shot)))

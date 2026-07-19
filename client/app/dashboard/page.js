@@ -8,7 +8,7 @@ import { useAuth } from "../../contexts/AuthContext";
 import { useLanguage } from "../../contexts/LanguageContext";
 import { createClient } from "../../lib/supabase";
 import { isLowCredits } from "../../lib/credits";
-import { API_BASE } from "../../lib/apiBase";
+import { API_BASE, resolveJobVideoUrl } from "../../lib/apiBase";
 
 const PAGE_SIZE = 12;
 
@@ -37,7 +37,7 @@ function JobCard({ job }) {
   const date = job.created_at
     ? new Date(job.created_at).toLocaleDateString("en-US", { day: "2-digit", month: "short", year: "numeric" })
     : "-";
-  const videoUrl = job.result?.video_url;
+  const videoUrl = resolveJobVideoUrl(job.result?.video_url, job.id);
   const isActive = ["queued", "running"].includes(job.status);
 
   return (
