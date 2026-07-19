@@ -1,67 +1,84 @@
-export const STAGE_MESSAGES = {
+/**
+ * Pipeline stage / inspiration message helpers.
+ *
+ * Keys live in client/lib/i18n/t-pipeline.js (20 locales). Callers pass the
+ * language `t` function from useLanguage() so this module stays free of React.
+ */
+
+export const STAGE_MESSAGE_KEYS = {
   screenwriting: [
-    "📝 Senarist fikrini şekle sokuyor...",
-    "✍️ Diyaloglar yazılıyor...",
-    "🎭 Karakterler hayat buluyor...",
-    "📖 Sahne yapısı oluşturuluyor...",
+    "pipeline_screenwriting_1",
+    "pipeline_screenwriting_2",
+    "pipeline_screenwriting_3",
+    "pipeline_screenwriting_4",
   ],
   portraits: [
-    "🎨 Karakter portreleri kilitleniyor...",
-    "👤 Tutarlılık için yüzler sabitleniyor...",
-    "🖼️ Görsel DNA oluşturuluyor...",
+    "pipeline_portraits_1",
+    "pipeline_portraits_2",
+    "pipeline_portraits_3",
   ],
   storyboard: [
-    "🎬 Yönetmen vizyonunu çiziyor...",
-    "📐 Kamera açıları planlanıyor...",
-    "🎞️ Storyboard kare kare tasarlanıyor...",
+    "pipeline_storyboard_1",
+    "pipeline_storyboard_2",
+    "pipeline_storyboard_3",
   ],
   frames: [
-    "🖼️ Sinematik kareler üretiliyor...",
-    "✨ Her piksel özenle yerleştiriliyor...",
-    "💡 Işık ve gölgeler ayarlanıyor...",
-    "🎭 Sahne canlandırılıyor...",
+    "pipeline_frames_1",
+    "pipeline_frames_2",
+    "pipeline_frames_3",
+    "pipeline_frames_4",
   ],
   video: [
-    "🎬 Kareler hareket kazanıyor...",
-    "🌀 Animasyon işleniyor...",
-    "⚡ Video klipler üretiliyor...",
-    "🎥 Sahne hayata geçiriliyor...",
+    "pipeline_video_1",
+    "pipeline_video_2",
+    "pipeline_video_3",
+    "pipeline_video_4",
   ],
   assembly: [
-    "🔗 Sahneler birleştiriliyor...",
-    "✂️ Son kurgu yapılıyor...",
-    "🎬 Dramatik akış oluşturuluyor...",
+    "pipeline_assembly_1",
+    "pipeline_assembly_2",
+    "pipeline_assembly_3",
   ],
   music: [
-    "🎵 Müzik dramaya ekleniyor...",
-    "🎼 Ses atmosferi yerleştiriliyor...",
-    "🔊 Final mix hazırlanıyor...",
+    "pipeline_music_1",
+    "pipeline_music_2",
+    "pipeline_music_3",
   ],
   complete: [
-    "🎉 Videonuz hazır!",
-    "✅ Tüm ajanlar görevini tamamladı!",
+    "pipeline_complete_1",
+    "pipeline_complete_2",
   ],
   error: [
-    "❌ Bir sorun oluştu.",
-    "⚠️ Pipeline beklenmedik bir durumla karşılaştı.",
+    "pipeline_error_1",
+    "pipeline_error_2",
   ],
 };
 
-const INSPIRATION = [
-  "✨ Yaratıcılığınızı konuşturuyorsunuz...",
-  "🌟 Her büyük film bir fikirle başlar...",
-  "🚀 Yapay zeka, hayalinizi gerçeğe dönüştürüyor...",
-  "🎨 Sanat + Teknoloji = Sınırsız Olasılık",
-  "🎭 Sizin hikayeniz, AI'ın fırçası...",
-  "⚡ Saniyeler içinde sinema tarihine geçin...",
+export const INSPIRATION_KEYS = [
+  "pipeline_inspo_1",
+  "pipeline_inspo_2",
+  "pipeline_inspo_3",
+  "pipeline_inspo_4",
+  "pipeline_inspo_5",
+  "pipeline_inspo_6",
 ];
 
-export function getStageMessage(stage, idx = 0) {
-  const msgs = STAGE_MESSAGES[stage];
-  if (!msgs) return "";
-  return msgs[idx % msgs.length];
+/**
+ * @param {string} stage
+ * @param {number} [idx]
+ * @param {(key: string) => string} t  language lookup from useLanguage()
+ */
+export function getStageMessage(stage, idx = 0, t) {
+  const keys = STAGE_MESSAGE_KEYS[stage];
+  if (!keys || typeof t !== "function") return "";
+  return t(keys[idx % keys.length]);
 }
 
-export function getInspirationMessage(seed = 0) {
-  return INSPIRATION[seed % INSPIRATION.length];
+/**
+ * @param {number} [seed]
+ * @param {(key: string) => string} t  language lookup from useLanguage()
+ */
+export function getInspirationMessage(seed = 0, t) {
+  if (typeof t !== "function") return "";
+  return t(INSPIRATION_KEYS[seed % INSPIRATION_KEYS.length]);
 }

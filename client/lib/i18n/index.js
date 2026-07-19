@@ -4,6 +4,7 @@ import tB from "./t-b";
 import tC from "./t-c";
 import tD from "./t-d";
 import tExtra from "./t-extra";
+import tPipeline from "./t-pipeline";
 
 export { LOCALES, LOCALE_CODES, DEFAULT_LOCALE };
 
@@ -17,7 +18,7 @@ function mergeLocales(...parts) {
   return out;
 }
 
-export const translations = mergeLocales(tA, tB, tC, tD, tExtra);
+export const translations = mergeLocales(tA, tB, tC, tD, tExtra, tPipeline);
 
 /**
  * Lookup a key in the given locale, falling back to English then the key itself.
