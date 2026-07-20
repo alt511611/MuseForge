@@ -2,7 +2,7 @@
 
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from tools.muapi_client import MuAPIClient, MuAPIError
 
@@ -98,6 +98,7 @@ class MuAPIVideoGenerator:
         duration: int = 5,
         aspect_ratio: str = "16:9",
         plan: str = "free",
+        is_cancelled=None,
         is_cancelled: Optional[Any] = None,
     ) -> str:
         # aspect_ratio kept in the signature for callers; not sent in payload.

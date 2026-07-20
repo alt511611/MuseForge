@@ -411,15 +411,26 @@ export default function GeneratePage() {
                 </ul>
               </div>
             )}
-            <button
-              type="button"
-              onClick={handleApproveScript}
-              disabled={approving}
-              className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-sm font-medium disabled:opacity-50"
-              style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}
-            >
-              {approving ? t("gen_approving") : t("gen_approve_produce")}
-            </button>
+            <div className="flex flex-col sm:flex-row gap-3">
+              <button
+                type="button"
+                onClick={handleApproveScript}
+                disabled={approving || cancelling}
+                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-sm font-medium disabled:opacity-50"
+                style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}
+              >
+                {approving ? t("gen_approving") : t("gen_approve_produce")}
+              </button>
+              <button
+                type="button"
+                onClick={handleCancel}
+                disabled={cancelling}
+                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-sm font-medium disabled:opacity-50"
+                style={{ backgroundColor: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", color: "#fca5a5" }}
+              >
+                {cancelling ? t("gen_cancelling") : t("gen_discard_script")}
+              </button>
+            </div>
           </div>
         )}
 
