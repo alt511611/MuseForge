@@ -2,7 +2,7 @@
 
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from tools.muapi_client import MuAPIClient, MuAPIError
 
@@ -57,26 +57,6 @@ def _is_mode_rejected(exc: Exception) -> bool:
 
 
 class MuAPIVideoGenerator:
-    # "standard" is a *mode* parameter, not part of the URL slug.
-# CONFIRMED against MuAPI's own validation error response:
-#   {"detail":[{"type":"literal_error","loc":["body","duration"],
-#     "msg":"Input should be 5 or 10", ...}]}
-# The storyboard artist's LLM picks a creative duration_seconds value
-# (e.g. 14) with no awareness that Kling's API only accepts this exact
-# enum -- round to the nearest valid value defensively rather than
-# relying on prompt instructions the model might ignore.
-VALID_DURATIONS = (5, 10)
-
-
-def nearest_valid_duration(seconds) -> int:
-    try:
-        seconds = float(seconds)
-    except (TypeError, ValueError):
-        return VALID_DURATIONS[0]
-    return min(VALID_DURATIONS, key=lambda d: abs(d - seconds))
-
-
-class MuAPIVideoGenerator:
     # UPDATED based on finding MuAPI's own playground page at
     # muapi.ai/playground/kling-o1-image-to-video -- "standard" is a
     # *mode* parameter, not part of the URL slug. STILL NOT independently
@@ -119,7 +99,6 @@ class MuAPIVideoGenerator:
         aspect_ratio: str = "16:9",
         plan: str = "free",
         is_cancelled=None,
-        is_cancelled: Optional[Any] = None,
     ) -> str:
         # aspect_ratio kept in the signature for callers; not sent in payload.
         _ = aspect_ratio

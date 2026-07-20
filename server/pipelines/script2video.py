@@ -1,7 +1,10 @@
 """Per-scene script-to-video pipeline."""
 
 import asyncio
+import logging
 import os
+import shutil
+import tempfile
 from typing import Any, Callable, Dict, List, Optional
 
 import httpx
@@ -16,6 +19,8 @@ from tools.character_qa import (
 from tools.muapi_image_generator import MuAPIImageGenerator
 from tools.muapi_video_generator import MuAPIVideoGenerator
 from tools.muapi_client import MuAPICancelled
+
+logger = logging.getLogger(__name__)
 
 
 class PipelineCancelled(Exception):
@@ -61,22 +66,117 @@ async def download_video(url: str, path: str) -> str:
 
 
 async def concatenate_videos(paths: List[str], out_path: str) -> str:
-    """Concatenate video clips using moviepy, with a byte-copy fallback."""
+    """Concatenate clips with low-memory fallbacks.
+
+    Fast path uses ffmpeg's concat demuxer and stream-copy, which does not
+    decode frames. If the clips are not codec-compatible, moviepy re-encodes
+    them with ``method="chain"``. Raw byte-copy remains the last-resort,
+    fail-open behavior.
+    """
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+
+    # 1) Native concat demuxer: near-zero memory because packets are copied
+    # without decoding/re-encoding. This requires matching codecs/streams.
+    concat_list_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".txt",
+            prefix="museforge_concat_",
+            dir=os.path.dirname(out_path) or ".",
+            delete=False,
+            encoding="utf-8",
+        ) as concat_file:
+            concat_list_path = concat_file.name
+            for path in paths:
+                # ffmpeg concat-demuxer escaping for single quotes.
+                escaped = os.path.abspath(path).replace("'", "'\\''")
+                concat_file.write(f"file '{escaped}'\n")
+
+        ffmpeg_binary = os.environ.get("MUSEFORGE_FFMPEG_BINARY") or shutil.which("ffmpeg")
+        if not ffmpeg_binary:
+            # Local dev/test environments may only have moviepy's bundled
+            # imageio-ffmpeg binary; production Docker installs ffmpeg.
+            try:
+                import imageio_ffmpeg
+
+                ffmpeg_binary = imageio_ffmpeg.get_ffmpeg_exe()
+            except Exception:
+                ffmpeg_binary = "ffmpeg"
+
+        process = await asyncio.create_subprocess_exec(
+            ffmpeg_binary,
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            concat_list_path,
+            "-c",
+            "copy",
+            "-an",
+            out_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode == 0 and os.path.isfile(out_path):
+            return out_path
+        logger.warning(
+            "ffmpeg concat stream-copy failed (exit=%s), using moviepy chain: %s",
+            process.returncode,
+            stderr.decode("utf-8", errors="replace")[-1000:],
+        )
+    except Exception as exc:
+        logger.warning("ffmpeg concat unavailable, using moviepy chain: %s", exc)
+    finally:
+        if concat_list_path:
+            try:
+                os.unlink(concat_list_path)
+            except OSError:
+                pass
+
+    # Remove a partial ffmpeg output before either fallback writes it.
+    try:
+        os.unlink(out_path)
+    except OSError:
+        pass
+
+    # 2) Re-encode fallback. All generated clips share dimensions/aspect ratio,
+    # so chain avoids compose's memory-heavy canvas/compositing behavior.
+    clips = []
+    final = None
     try:
         from moviepy import VideoFileClip, concatenate_videoclips
 
         clips = [VideoFileClip(p) for p in paths]
-        final = concatenate_videoclips(clips, method="compose")
+        final = concatenate_videoclips(clips, method="chain")
         final.write_videofile(out_path, codec="libx264", audio=False, logger=None)
+        return out_path
+    except Exception as exc:
+        logger.warning("moviepy chain concat failed, using raw byte-copy: %s", exc)
+    finally:
+        if final is not None:
+            try:
+                final.close()
+            except Exception:
+                pass
         for clip in clips:
-            clip.close()
-        final.close()
-    except Exception:
+            try:
+                clip.close()
+            except Exception:
+                pass
+
+    # 3) Preserve the existing last-resort raw byte-copy fallback.
+    try:
         with open(out_path, "wb") as f:
             for p in paths:
                 with open(p, "rb") as src:
                     f.write(src.read())
+    except Exception as exc:
+        # Keep the pipeline fail-open even if a source disappears mid-copy.
+        logger.error("raw concat fallback failed: %s", exc)
     return out_path
 
 
