@@ -2,7 +2,7 @@
 
 import logging
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from tools.muapi_client import MuAPIClient, MuAPIError
 
@@ -13,7 +13,8 @@ DEMO_VIDEO_URL = os.environ.get(
     "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
 )
 
-# Kling O1: "standard" ≈ 720p, "professional" ≈ 1080p (third-party docs).
+# Kling O1: "standard" ≈ 720p, "professional" ≈ 1080p (third-party docs,
+# not independently confirmed against MuAPI's own first-party docs).
 # Override via env if MuAPI's actual string differs (e.g. "pro").
 DEFAULT_PRO_MODE = "professional"
 
@@ -23,7 +24,7 @@ def _pro_mode_value() -> str:
 
 
 def mode_for_plan(plan: str) -> str:
-    """Return MuAPI `mode` for the caller's plan. Pro → HD; everyone else → standard."""
+    """Return MuAPI `mode` for the caller's plan. Pro -> HD; everyone else -> standard."""
     if (plan or "").lower() == "pro":
         return _pro_mode_value()
     return "standard"
@@ -34,16 +35,11 @@ def _is_mode_rejected(exc: Exception) -> bool:
     msg = str(exc).lower()
     if "404" in msg or "422" in msg:
         return True
-    # httpx.HTTPStatusError repr sometimes embeds status_code=
     if "status_code=404" in msg or "status_code=422" in msg:
         return True
     return False
 
 
-class MuAPIVideoGenerator:
-    VIDEO_ENDPOINT = os.environ.get(
-        "MUAPI_VIDEO_MODEL", "kling-o1-standard-image-to-video"
-    )
 # CONFIRMED against MuAPI's own validation error response:
 #   {"detail":[{"type":"literal_error","loc":["body","duration"],
 #     "msg":"Input should be 5 or 10", ...}]}
@@ -64,13 +60,11 @@ def nearest_valid_duration(seconds) -> int:
 
 class MuAPIVideoGenerator:
     # UPDATED based on finding MuAPI's own playground page at
-    # muapi.ai/playground/kling-o1-image-to-video -- suggesting "standard"
-    # is a *mode* parameter, not part of the URL slug (the previous
-    # "kling-o1-standard-image-to-video" 404'd... then this slug got a 422,
-    # meaning it's at least a real, reachable endpoint, unlike the 404 case).
-    # STILL NOT independently confirmed with an exact first-party curl
-    # example (unlike flux-dev-image, which was). If this 422s again,
-    # open https://muapi.ai/playground/kling-o1-image-to-video directly and
+    # muapi.ai/playground/kling-o1-image-to-video -- "standard" is a
+    # *mode* parameter, not part of the URL slug. STILL NOT independently
+    # confirmed with an exact first-party curl example (unlike
+    # flux-dev-image, which was). If this 404/422s again, open
+    # https://muapi.ai/playground/kling-o1-image-to-video directly and
     # check the exact parameter names/schema shown there.
     VIDEO_ENDPOINT = os.environ.get("MUAPI_VIDEO_MODEL", "kling-o1-image-to-video")
 
@@ -83,15 +77,18 @@ class MuAPIVideoGenerator:
         prompt: str,
         image_url: str,
         duration: int,
-        aspect_ratio: str,
         mode: str,
     ) -> Dict[str, Any]:
         return {
             "prompt": prompt,
             "image_url": image_url,
-            "duration": duration,
-            "aspect_ratio": aspect_ratio,
+            "duration": nearest_valid_duration(duration),
             "mode": mode,
+            # aspect_ratio deliberately NOT included: most Kling
+            # image-to-video APIs (across several providers, consistently)
+            # derive the output aspect ratio from the source image itself
+            # rather than accepting it as a request parameter -- this was
+            # confirmed to be the cause of an earlier 422 in production.
         }
 
     async def generate_video_from_image(
@@ -101,12 +98,13 @@ class MuAPIVideoGenerator:
         duration: int = 5,
         aspect_ratio: str = "16:9",
         plan: str = "free",
+        is_cancelled: Optional[Any] = None,
     ) -> str:
         if self.demo:
             return DEMO_VIDEO_URL
 
         mode = mode_for_plan(plan)
-        payload = self._payload(prompt, image_url, duration, aspect_ratio, mode)
+        payload = self._payload(prompt, image_url, duration, mode)
 
         try:
             return await self.client.generate(
@@ -114,9 +112,10 @@ class MuAPIVideoGenerator:
                 payload,
                 poll_interval=3.0,
                 max_polls=200,
+                is_cancelled=is_cancelled,
             )
         except MuAPIError as exc:
-            # Wrong mode string (e.g. MuAPI expects "pro" not "professional") —
+            # Wrong mode string (e.g. MuAPI expects "pro" not "professional") --
             # fall back to standard so the job still completes without HD.
             if mode != "standard" and _is_mode_rejected(exc):
                 logger.warning(
@@ -124,33 +123,12 @@ class MuAPIVideoGenerator:
                     mode,
                     exc,
                 )
-                payload = self._payload(prompt, image_url, duration, aspect_ratio, "standard")
+                payload = self._payload(prompt, image_url, duration, "standard")
                 return await self.client.generate(
                     self.VIDEO_ENDPOINT,
                     payload,
                     poll_interval=3.0,
                     max_polls=200,
+                    is_cancelled=is_cancelled,
                 )
             raise
-        is_cancelled=None,
-    ) -> str:
-        if self.demo:
-            return DEMO_VIDEO_URL
-        payload = {
-            "prompt": prompt,
-            "image_url": image_url,
-            "duration": nearest_valid_duration(duration),
-            "mode": "standard",
-            # aspect_ratio removed: most Kling image-to-video APIs (across
-            # several providers, consistently) derive the output aspect
-            # ratio from the source image itself rather than accepting it
-            # as a request parameter -- a likely candidate for the 422
-            # ("Unprocessable Entity" = reachable endpoint, invalid field).
-        }
-        return await self.client.generate(
-            self.VIDEO_ENDPOINT,
-            payload,
-            poll_interval=3.0,
-            max_polls=200,
-            is_cancelled=is_cancelled,
-        )

@@ -80,12 +80,18 @@ def test_video_payload_no_longer_sends_aspect_ratio():
     first-party-confirmed fact (unlike the flux-dev-image fix), so this
     test documents the current best-effort payload shape rather than an
     assertion the endpoint is exactly correct."""
-    # We can't easily unit test the private payload dict without a real
-    # network call, so this test asserts on the source directly to catch
-    # any accidental re-introduction of aspect_ratio into the payload.
     import inspect
     import tools.muapi_video_generator as vid_mod
 
-    source = inspect.getsource(vid_mod.MuAPIVideoGenerator.generate_video_from_image)
+    # aspect_ratio must not appear anywhere in the module's request-building
+    # code (now centralized in _payload(), not inline in
+    # generate_video_from_image() -- that changed when plan-based HD mode
+    # was added, so check the whole module rather than one method's source).
+    source = inspect.getsource(vid_mod)
     assert '"aspect_ratio"' not in source
-    assert '"mode": "standard"' in source
+
+    # Non-Pro plans must still default to standard mode (unchanged
+    # behavior); Pro gets the (unconfirmed-exact-string) HD mode.
+    assert vid_mod.mode_for_plan("free") == "standard"
+    assert vid_mod.mode_for_plan("creator") == "standard"
+    assert vid_mod.mode_for_plan("pro") != "standard"
