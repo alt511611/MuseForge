@@ -76,7 +76,7 @@ async def test_pipeline_invariants(monkeypatch):
     ):
         return "https://fake.cdn/video.mp4"
 
-    async def fake_design_storyboard(self, script, characters, user_requirement="", director_style="cinematic_balanced"):
+    async def fake_design_storyboard(self, script, characters, user_requirement="", director_style="cinematic_balanced", **_kwargs):
         storyboard_calls.append(director_style)
         return [FakeShot(0)]
 
@@ -166,7 +166,7 @@ async def test_scene_pipeline_returns_shots(monkeypatch):
     ):
         return "https://fake.cdn/clip.mp4"
 
-    async def fake_storyboard(self, script, characters, user_requirement="", director_style="cinematic_balanced"):
+    async def fake_storyboard(self, script, characters, user_requirement="", director_style="cinematic_balanced", **_kwargs):
         return [FakeShot(0)]
 
     async def fake_download(url, path):

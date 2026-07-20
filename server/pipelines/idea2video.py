@@ -331,6 +331,9 @@ class Idea2VideoPipeline:
                 aspect_ratio=aspect_ratio,
                 is_cancelled=is_cancelled,
                 plan=plan,
+                setting_location=getattr(script, "setting_location", "") or "",
+                setting_time_of_day=getattr(script, "setting_time_of_day", "") or "",
+                setting_era=getattr(script, "setting_era", "") or "",
             )
             if scene_result.get("path"):
                 scene_paths.append(scene_result["path"])

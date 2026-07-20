@@ -16,12 +16,17 @@ class ScreenwriterAgent:
     SYSTEM_PROMPT = """You are an award-winning screenwriter specializing in micro-dramas and cinematic short films.
 Given a user's idea, write a compelling script broken into 3-5 short scenes (each 1-2 sentences of action).
 Extract named characters with visual descriptions for AI image generation.
+Also define ONE locked setting for the ENTIRE drama (not per scene): location, time of day, and era.
+Every scene must take place in that same setting — do not invent a different place or time per scene.
 Respond ONLY with valid JSON matching this schema:
 {
   "title": "string",
   "logline": "string",
   "mood": "string",
   "estimated_duration_seconds": 30,
+  "setting_location": "e.g. coastal village wooden pier",
+  "setting_time_of_day": "e.g. sunset, night, midday",
+  "setting_era": "e.g. present day, 1950s",
   "characters": [{"name": "string", "description": "visual appearance for AI", "role": "protagonist|antagonist|supporting"}],
   "scenes": ["scene 1 action...", "scene 2 action..."]
 }"""
@@ -136,6 +141,9 @@ Respond ONLY with valid JSON matching this schema:
             logline=idea,
             mood=style.lower(),
             estimated_duration_seconds=len(scenes) * 8,
+            setting_location="generic cinematic location",
+            setting_time_of_day="midday",
+            setting_era="present day",
             characters=[
                 CharacterProfile(
                     name=protagonist,
