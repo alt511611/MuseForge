@@ -26,7 +26,7 @@ async def test_reference_generation_uses_kontext_schema():
     call = generator.client.generate.await_args
     assert call.args[0] == generator.KONTEXT_ENDPOINT
     payload = call.args[1]
-    assert payload["image_urls"] == ["https://cdn.example/maya-portrait.png"]
+    assert payload["images_list"] == ["https://cdn.example/maya-portrait.png"]
     assert payload["aspect_ratio"] == "9:16"
     assert "image" not in payload
 
@@ -56,14 +56,14 @@ async def test_kontext_rejection_falls_back_to_flux_dev(status):
 
     kontext_call, fallback_call = generator.client.generate.await_args_list
     assert kontext_call.args[0] == generator.KONTEXT_ENDPOINT
-    assert kontext_call.args[1]["image_urls"] == [
+    assert kontext_call.args[1]["images_list"] == [
         "https://cdn.example/maya-portrait.png"
     ]
 
     assert fallback_call.args[0] == generator.IMAGE_ENDPOINT
     fallback_payload = fallback_call.args[1]
     assert fallback_payload["image"] == "https://cdn.example/maya-portrait.png"
-    assert "image_urls" not in fallback_payload
+    assert "images_list" not in fallback_payload
     assert fallback_payload["size"] == "1344*768"
 
 

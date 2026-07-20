@@ -82,16 +82,16 @@ class MuAPIImageGenerator:
             return _demo_image_url(prompt + "|ref", aspect_ratio)
 
         # Kontext is a distinct image-to-image model with a distinct schema:
-        # plural image_urls (list), not flux-dev-image's singular image field.
+        # plural images_list (list), not flux-dev-image's singular image field.
         payload = {
             "prompt": prompt,
-            "image_urls": [reference_url],
+            "images_list": [reference_url],
             "aspect_ratio": aspect_ratio,
         }
         logger.info(
-            "Sending flux-kontext-pro-i2i request with reference: image_urls=%s "
+            "Sending flux-kontext-pro-i2i request with reference: images_list=%s "
             "(prompt starts: %.80s)",
-            bool(payload.get("image_urls")),
+            bool(payload.get("images_list")),
             prompt,
         )
         try:
