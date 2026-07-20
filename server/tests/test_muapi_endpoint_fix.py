@@ -87,3 +87,18 @@ def test_video_payload_no_longer_sends_aspect_ratio():
     assert "aspect_ratio" not in payload
     assert payload["mode"] == "standard"
     assert payload["duration"] in (5, 10)
+    import inspect
+    import tools.muapi_video_generator as vid_mod
+
+    # aspect_ratio must not appear anywhere in the module's request-building
+    # code (now centralized in _payload(), not inline in
+    # generate_video_from_image() -- that changed when plan-based HD mode
+    # was added, so check the whole module rather than one method's source).
+    source = inspect.getsource(vid_mod)
+    assert '"aspect_ratio"' not in source
+
+    # Non-Pro plans must still default to standard mode (unchanged
+    # behavior); Pro gets the (unconfirmed-exact-string) HD mode.
+    assert vid_mod.mode_for_plan("free") == "standard"
+    assert vid_mod.mode_for_plan("creator") == "standard"
+    assert vid_mod.mode_for_plan("pro") != "standard"

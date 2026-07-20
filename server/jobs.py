@@ -120,18 +120,36 @@ def _sb_row_to_dict(row: dict) -> dict:
 
 
 async def _sb_upsert(job: "Job") -> None:
-    """Upsert job row into Supabase. Silently swallows all errors."""
+    """Upsert job row into Supabase. Never raises (fire-and-forget), but
+    now actually surfaces failures instead of hiding them.
+
+    Found via a real, paid generation that completed successfully (a real,
+    playable video existed) but had ZERO row in the jobs table -- meaning
+    it only ever existed in-memory and was lost forever on the next server
+    restart. Root cause: this function only used logger.debug() (invisible
+    at production log levels) AND never checked the response status code
+    at all -- httpx doesn't raise for a non-2xx response unless you call
+    raise_for_status(), so a 400 (e.g. from a schema mismatch -- this repo
+    has hit that exact class of bug multiple times this session, most
+    recently when music_enabled/plan columns were added) was silently
+    treated as success.
+    """
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         return
     try:
         async with httpx.AsyncClient(timeout=6.0) as client:
-            await client.post(
+            resp = await client.post(
                 f"{SUPABASE_URL}/rest/v1/jobs",
                 json=_sb_row(job),
                 headers=_sb_headers(),
             )
+        if resp.status_code >= 400:
+            logger.error(
+                "Supabase upsert FAILED for job %s: status=%s body=%s",
+                job.id, resp.status_code, resp.text[:500],
+            )
     except Exception as exc:
-        logger.debug("Supabase upsert failed (non-fatal): %s", exc)
+        logger.error("Supabase upsert raised an exception for job %s: %s", job.id, exc)
 
 
 async def _sb_get(job_id: str) -> Optional[dict]:
@@ -151,7 +169,7 @@ async def _sb_get(job_id: str) -> Optional[dict]:
         data = resp.json()
         return data[0] if isinstance(data, list) and data else None
     except Exception as exc:
-        logger.debug("Supabase get failed (non-fatal): %s", exc)
+        logger.error("Supabase get failed for job %s: %s", job_id, exc)
         return None
 
 
@@ -190,7 +208,10 @@ async def _sb_refund_credits(user_id: str, amount: int, job_id: str) -> None:
                 },
             )
     except Exception as exc:
-        logger.debug("Credit refund failed (non-fatal): %s", exc)
+        # logger.error (not .debug): a silently failed refund means the
+        # user loses money twice over -- the generation failed AND they
+        # never get their credits back, with zero visibility either time.
+        logger.error("Credit refund FAILED for user %s, job %s, amount %s: %s", user_id, job_id, amount, exc)
 
 
 async def _sb_delete(job_id: str) -> None:
@@ -209,7 +230,7 @@ async def _sb_delete(job_id: str) -> None:
                 },
             )
     except Exception as exc:
-        logger.debug("Supabase delete failed (non-fatal): %s", exc)
+        logger.error("Supabase delete failed for job %s: %s", job_id, exc)
 
 
 # ── Domain models ──────────────────────────────────────────────────────────────

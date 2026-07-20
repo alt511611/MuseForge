@@ -2,7 +2,7 @@
 
 import logging
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from tools.muapi_client import MuAPIClient, MuAPIError
 
@@ -13,7 +13,8 @@ DEMO_VIDEO_URL = os.environ.get(
     "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
 )
 
-# Kling O1: "standard" ≈ 720p, "professional" ≈ 1080p (third-party docs).
+# Kling O1: "standard" ≈ 720p, "professional" ≈ 1080p (third-party docs,
+# not independently confirmed against MuAPI's own first-party docs).
 # Override via env if MuAPI's actual string differs (e.g. "pro").
 DEFAULT_PRO_MODE = "professional"
 
@@ -39,7 +40,7 @@ def _pro_mode_value() -> str:
 
 
 def mode_for_plan(plan: str) -> str:
-    """Return MuAPI `mode` for the caller's plan. Pro → HD; everyone else → standard."""
+    """Return MuAPI `mode` for the caller's plan. Pro -> HD; everyone else -> standard."""
     if (plan or "").lower() == "pro":
         return _pro_mode_value()
     return "standard"
@@ -57,6 +58,32 @@ def _is_mode_rejected(exc: Exception) -> bool:
 
 class MuAPIVideoGenerator:
     # "standard" is a *mode* parameter, not part of the URL slug.
+# CONFIRMED against MuAPI's own validation error response:
+#   {"detail":[{"type":"literal_error","loc":["body","duration"],
+#     "msg":"Input should be 5 or 10", ...}]}
+# The storyboard artist's LLM picks a creative duration_seconds value
+# (e.g. 14) with no awareness that Kling's API only accepts this exact
+# enum -- round to the nearest valid value defensively rather than
+# relying on prompt instructions the model might ignore.
+VALID_DURATIONS = (5, 10)
+
+
+def nearest_valid_duration(seconds) -> int:
+    try:
+        seconds = float(seconds)
+    except (TypeError, ValueError):
+        return VALID_DURATIONS[0]
+    return min(VALID_DURATIONS, key=lambda d: abs(d - seconds))
+
+
+class MuAPIVideoGenerator:
+    # UPDATED based on finding MuAPI's own playground page at
+    # muapi.ai/playground/kling-o1-image-to-video -- "standard" is a
+    # *mode* parameter, not part of the URL slug. STILL NOT independently
+    # confirmed with an exact first-party curl example (unlike
+    # flux-dev-image, which was). If this 404/422s again, open
+    # https://muapi.ai/playground/kling-o1-image-to-video directly and
+    # check the exact parameter names/schema shown there.
     VIDEO_ENDPOINT = os.environ.get("MUAPI_VIDEO_MODEL", "kling-o1-image-to-video")
 
     def __init__(self, api_key: str, demo: bool = False):
@@ -77,6 +104,11 @@ class MuAPIVideoGenerator:
             "mode": mode,
             # aspect_ratio omitted: Kling image-to-video typically derives
             # output aspect from the source image; sending it can 422.
+            # aspect_ratio deliberately NOT included: most Kling
+            # image-to-video APIs (across several providers, consistently)
+            # derive the output aspect ratio from the source image itself
+            # rather than accepting it as a request parameter -- this was
+            # confirmed to be the cause of an earlier 422 in production.
         }
 
     async def generate_video_from_image(
@@ -87,6 +119,7 @@ class MuAPIVideoGenerator:
         aspect_ratio: str = "16:9",
         plan: str = "free",
         is_cancelled=None,
+        is_cancelled: Optional[Any] = None,
     ) -> str:
         # aspect_ratio kept in the signature for callers; not sent in payload.
         _ = aspect_ratio
@@ -105,7 +138,7 @@ class MuAPIVideoGenerator:
                 is_cancelled=is_cancelled,
             )
         except MuAPIError as exc:
-            # Wrong mode string (e.g. MuAPI expects "pro" not "professional") —
+            # Wrong mode string (e.g. MuAPI expects "pro" not "professional") --
             # fall back to standard so the job still completes without HD.
             if mode != "standard" and _is_mode_rejected(exc):
                 logger.warning(
