@@ -99,7 +99,6 @@ class MuAPIVideoGenerator:
         aspect_ratio: str = "16:9",
         plan: str = "free",
         is_cancelled=None,
-        is_cancelled: Optional[Any] = None,
     ) -> str:
         # aspect_ratio kept in the signature for callers; not sent in payload.
         _ = aspect_ratio

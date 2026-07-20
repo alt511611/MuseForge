@@ -1,9 +1,12 @@
 """MuAPI image generation with reference support for character consistency."""
 
 import hashlib
+import logging
 import os
 
-from tools.muapi_client import MuAPIClient
+from tools.muapi_client import MuAPIClient, MuAPIError
+
+logger = logging.getLogger(__name__)
 
 ASPECT_RATIO_MAP = {
     "1:1": {"width": 1024, "height": 1024},
@@ -26,6 +29,9 @@ class MuAPIImageGenerator:
     # the bare "flux-dev" slug 404s. Configurable via env var in case
     # MuAPI's catalog changes again; no code change needed if so.
     IMAGE_ENDPOINT = os.environ.get("MUAPI_IMAGE_MODEL", "flux-dev-image")
+    KONTEXT_ENDPOINT = os.environ.get(
+        "MUAPI_KONTEXT_MODEL", "flux-kontext-pro-i2i"
+    )
 
     def __init__(self, api_key: str, demo: bool = False):
         self.demo = demo
@@ -59,6 +65,10 @@ class MuAPIImageGenerator:
         if self.demo:
             return _demo_image_url(prompt, aspect_ratio)
         payload = self._build_payload(prompt, aspect_ratio)
+        logger.info(
+            "Sending flux-dev-image request WITHOUT reference (prompt starts: %.80s)",
+            prompt,
+        )
         return await self.client.generate(self.IMAGE_ENDPOINT, payload, is_cancelled=is_cancelled)
 
     async def generate_image_with_reference(
@@ -70,5 +80,46 @@ class MuAPIImageGenerator:
     ) -> str:
         if self.demo:
             return _demo_image_url(prompt + "|ref", aspect_ratio)
-        payload = self._build_payload(prompt, aspect_ratio, reference_url)
-        return await self.client.generate(self.IMAGE_ENDPOINT, payload, is_cancelled=is_cancelled)
+
+        # Kontext is a distinct image-to-image model with a distinct schema:
+        # plural image_urls (list), not flux-dev-image's singular image field.
+        payload = {
+            "prompt": prompt,
+            "image_urls": [reference_url],
+            "aspect_ratio": aspect_ratio,
+        }
+        logger.info(
+            "Sending flux-kontext-pro-i2i request with reference: image_urls=%s "
+            "(prompt starts: %.80s)",
+            bool(payload.get("image_urls")),
+            prompt,
+        )
+        try:
+            return await self.client.generate(
+                self.KONTEXT_ENDPOINT,
+                payload,
+                is_cancelled=is_cancelled,
+            )
+        except MuAPIError as exc:
+            # Fail open to the previous flux-dev-image reference behavior only
+            # when MuAPI rejects the endpoint/schema. Other errors retain their
+            # normal retry/error behavior.
+            message = str(exc).lower()
+            if "404" not in message and "422" not in message:
+                raise
+
+            logger.warning(
+                "Kontext endpoint/schema rejected (%s); falling back to "
+                "flux-dev-image reference payload",
+                exc,
+            )
+            fallback_payload = self._build_payload(
+                prompt,
+                aspect_ratio,
+                reference_url,
+            )
+            return await self.client.generate(
+                self.IMAGE_ENDPOINT,
+                fallback_payload,
+                is_cancelled=is_cancelled,
+            )
