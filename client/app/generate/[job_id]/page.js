@@ -76,6 +76,8 @@ export default function GeneratePage() {
   const [initialLoading, setInitialLoading] = useState(true);
   const [inspoIdx] = useState(() => Math.floor(Math.random() * 6));
   const [nowTick, setNowTick] = useState(0);
+  const [editScript, setEditScript] = useState(null);
+  const [approving, setApproving] = useState(false);
   const logRef = useRef(null);
   const seenSeq = useRef(new Set());
   const startTimeRef = useRef(Date.now());
@@ -98,6 +100,10 @@ export default function GeneratePage() {
     if (evt.stage === "error") { setError(friendlyError(evt.message)); setStatus("failed"); }
     if (evt.stage === "complete") setStatus("completed");
     if (evt.stage === "cancelled") setStatus("cancelled");
+    if (evt.stage === "script_ready") {
+      setStatus("awaiting_script_approval");
+      if (evt.data?.script) setEditScript(evt.data.script);
+    }
   }, []);
 
   const fetchJob = useCallback(async () => {
@@ -111,6 +117,9 @@ export default function GeneratePage() {
         if (data.progress) setProgress(data.progress);
         if (data.status) setStatus(data.status);
         if (data.error) setError(friendlyError(data.error));
+        if (data.status === "awaiting_script_approval" && data.result?.script) {
+          setEditScript(data.result.script);
+        }
 
         // Fetch a stable, stage-aware total-duration estimate once we know
         // num_scenes, instead of relying purely on the volatile
@@ -189,10 +198,45 @@ export default function GeneratePage() {
 
   const handleRetry = () => window.location.href = "/";
 
+  const handleApproveScript = async () => {
+    if (!editScript || approving) return;
+    setApproving(true);
+    setError(null);
+    try {
+      const headers = await authHeaders();
+      const res = await fetch(`${API_BASE}/api/jobs/${job_id}/approve-script`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: JSON.stringify({ script: editScript }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          typeof data.detail === "string" ? data.detail : t("gen_approve_failed")
+        );
+      }
+      setStatus("running");
+    } catch (err) {
+      setError(err.message || t("gen_approve_failed"));
+    } finally {
+      setApproving(false);
+    }
+  };
+
+  const updateSceneText = (idx, value) => {
+    setEditScript((prev) => {
+      if (!prev) return prev;
+      const scenes = [...(prev.scenes || [])];
+      scenes[idx] = value;
+      return { ...prev, scenes };
+    });
+  };
+
   const nonHB = events.filter((e) => e.stage !== "heartbeat");
   const currentStage = nonHB.length > 0 ? nonHB[nonHB.length - 1].stage : "screenwriting";
   const stageIndex = PIPELINE_STAGES.indexOf(currentStage);
   const isRunning = status === "running" || status === "queued";
+  const isAwaitingScript = status === "awaiting_script_approval";
 
   // Keep the ETA / overtime label fresh while the job is running.
   useEffect(() => {
@@ -272,6 +316,7 @@ export default function GeneratePage() {
             {status === "completed" ? null
               : status === "failed" ? <span style={{ color: "#ef4444" }}>{t("gen_failed")}</span>
               : status === "cancelled" ? <span style={{ color: "#f59e0b" }}>{t("gen_cancelled_title")}</span>
+              : isAwaitingScript ? <span className="gradient-text">{t("gen_script_review_title")}</span>
               : <span className="gradient-text">{t("gen_running")}</span>}
           </h1>
           <p className="text-sm flex items-center justify-center gap-2" style={{ color: "#64748b" }}>
@@ -288,6 +333,94 @@ export default function GeneratePage() {
         {/* Completed → VideoResult */}
         {status === "completed" && job && (
           <VideoResult job={job} jobId={job_id} />
+        )}
+
+        {/* Script approval */}
+        {isAwaitingScript && editScript && (
+          <div className="glass rounded-2xl p-5 sm:p-6 mb-6 space-y-4">
+            <p className="text-sm" style={{ color: "#94a3b8" }}>{t("gen_script_review_desc")}</p>
+            <div>
+              <label className="text-xs mb-1 block" style={{ color: "#64748b" }}>{t("gen_script_title")}</label>
+              <input
+                value={editScript.title || ""}
+                onChange={(e) => setEditScript({ ...editScript, title: e.target.value })}
+                className="w-full px-3 py-2 rounded-lg text-sm"
+                style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#e2e8f0" }}
+              />
+            </div>
+            <div>
+              <label className="text-xs mb-1 block" style={{ color: "#64748b" }}>{t("gen_script_mood")}</label>
+              <input
+                value={editScript.mood || ""}
+                onChange={(e) => setEditScript({ ...editScript, mood: e.target.value })}
+                className="w-full px-3 py-2 rounded-lg text-sm"
+                style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#e2e8f0" }}
+              />
+            </div>
+            <div>
+              <label className="text-xs mb-1 block" style={{ color: "#64748b" }}>{t("gen_script_setting")}</label>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <input
+                  value={editScript.setting_location || ""}
+                  onChange={(e) => setEditScript({ ...editScript, setting_location: e.target.value })}
+                  placeholder={t("gen_script_location")}
+                  className="w-full px-3 py-2 rounded-lg text-sm"
+                  style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#e2e8f0" }}
+                />
+                <input
+                  value={editScript.setting_time_of_day || ""}
+                  onChange={(e) => setEditScript({ ...editScript, setting_time_of_day: e.target.value })}
+                  placeholder={t("gen_script_time")}
+                  className="w-full px-3 py-2 rounded-lg text-sm"
+                  style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#e2e8f0" }}
+                />
+                <input
+                  value={editScript.setting_era || ""}
+                  onChange={(e) => setEditScript({ ...editScript, setting_era: e.target.value })}
+                  placeholder={t("gen_script_era")}
+                  className="w-full px-3 py-2 rounded-lg text-sm"
+                  style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#e2e8f0" }}
+                />
+              </div>
+            </div>
+            <div>
+              <label className="text-xs mb-2 block" style={{ color: "#64748b" }}>{t("gen_script_scenes")}</label>
+              <div className="space-y-2">
+                {(editScript.scenes || []).map((scene, idx) => (
+                  <textarea
+                    key={idx}
+                    value={scene}
+                    onChange={(e) => updateSceneText(idx, e.target.value)}
+                    rows={2}
+                    className="w-full px-3 py-2 rounded-lg text-sm"
+                    style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#e2e8f0" }}
+                  />
+                ))}
+              </div>
+            </div>
+            {(editScript.characters || []).length > 0 && (
+              <div>
+                <label className="text-xs mb-2 block" style={{ color: "#64748b" }}>{t("gen_script_characters")}</label>
+                <ul className="space-y-1">
+                  {editScript.characters.map((c, i) => (
+                    <li key={i} className="text-sm" style={{ color: "#94a3b8" }}>
+                      <span style={{ color: "#a78bfa" }}>{c.name}</span>
+                      {c.description ? ` — ${c.description}` : ""}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={handleApproveScript}
+              disabled={approving}
+              className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-sm font-medium disabled:opacity-50"
+              style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}
+            >
+              {approving ? t("gen_approving") : t("gen_approve_produce")}
+            </button>
+          </div>
         )}
 
         {/* Running state */}

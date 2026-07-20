@@ -217,6 +217,7 @@ async def _sb_delete(job_id: str) -> None:
 class JobStatus(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
+    AWAITING_SCRIPT_APPROVAL = "awaiting_script_approval"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -259,6 +260,7 @@ class Job:
     character_name: str = ""
     music_enabled: bool = False
     plan: str = "free"
+    require_script_approval: bool = False
     events: List[JobEvent] = field(default_factory=list)
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
@@ -280,6 +282,7 @@ class Job:
             "user_email": self.user_email,
             "music_enabled": self.music_enabled,
             "plan": self.plan,
+            "require_script_approval": self.require_script_approval,
             "events": [e.to_dict() for e in self.events] if include_events else [],
             "result": self.result,
             "error": self.error,
@@ -527,7 +530,12 @@ async def stale_job_reaper_loop() -> None:
 
 # ── Generation runner ──────────────────────────────────────────────────────────
 
+def _job_refund_amount(job: Job) -> int:
+    return job.num_scenes + (1 if job.music_enabled else 0)
+
+
 async def run_generation_job(job: Job, api_key: str):
+    """Start a job. If require_script_approval, stop after screenwriting."""
     from pipelines.idea2video import Idea2VideoPipeline
     from pipelines.script2video import PipelineCancelled
     from tools.muapi_uploader import InvalidCharacterPhoto, upload_base64_image
@@ -544,6 +552,8 @@ async def run_generation_job(job: Job, api_key: str):
         await job_store.emit(job, stage, message, progress, data)
 
     character_portraits_override: Dict[str, str] = {}
+    # Portrait upload can wait until approve when script approval is on —
+    # still do it here so the photo is ready when the user approves.
     if job.character_image and job.character_name.strip():
         try:
             await progress_callback(
@@ -553,6 +563,9 @@ async def run_generation_job(job: Job, api_key: str):
                 job.character_image, api_key, demo=job.demo
             )
             character_portraits_override[job.character_name.strip()] = uploaded_url
+            # Stash for continue_from_script (character_image base64 is large;
+            # keep the uploaded URL in result scratch).
+            job.result = {**(job.result or {}), "_portraits_override": character_portraits_override}
         except InvalidCharacterPhoto as exc:
             job.error = str(exc)
             job.status = JobStatus.FAILED
@@ -566,6 +579,40 @@ async def run_generation_job(job: Job, api_key: str):
 
     try:
         pipeline = Idea2VideoPipeline(api_key=api_key, demo=job.demo)
+
+        if job.require_script_approval:
+            script = await asyncio.wait_for(
+                pipeline.write_script_only(
+                    idea=job.idea,
+                    style=job.style,
+                    num_scenes=job.num_scenes,
+                    user_requirement=job.user_requirement,
+                    progress_callback=progress_callback,
+                    is_cancelled=is_cancelled,
+                ),
+                timeout=PIPELINE_HARD_TIMEOUT_SECONDS,
+            )
+            if is_cancelled():
+                job.status = JobStatus.CANCELLED
+                await job_store.emit(job, "cancelled", "Generation cancelled", 100)
+                await job_store.persist(job)
+                return
+            script_dict = script.model_dump() if hasattr(script, "model_dump") else dict(script)
+            job.result = {
+                **(job.result or {}),
+                "script": script_dict,
+            }
+            job.status = JobStatus.AWAITING_SCRIPT_APPROVAL
+            await job_store.persist(job)
+            await job_store.emit(
+                job,
+                "script_ready",
+                "Script ready for review",
+                10,
+                {"script": script_dict},
+            )
+            return
+
         result = await asyncio.wait_for(
             pipeline.run(
                 idea=job.idea,
@@ -600,20 +647,20 @@ async def run_generation_job(job: Job, api_key: str):
         job.status = JobStatus.CANCELLED
         await job_store.persist(job)
         await job_store.emit(job, "cancelled", "Generation cancelled", 100)
-        # Refund credits on cancellation (user triggered) — include the music
-        # surcharge if it was charged at generation time.
-        if job.user_id and not job.demo:
-            refund_amount = job.num_scenes + (1 if job.music_enabled else 0)
-            asyncio.create_task(_sb_refund_credits(job.user_id, refund_amount, job.id))
+        # Only refund if credits were already charged (full path, not script-only).
+        if job.user_id and not job.demo and not job.require_script_approval:
+            asyncio.create_task(
+                _sb_refund_credits(job.user_id, _job_refund_amount(job), job.id)
+            )
     except asyncio.TimeoutError:
         job.status = JobStatus.FAILED
         job.error = "Generation timed out — please try again."
         await job_store.emit(job, "error", job.error, 100)
         await job_store.persist(job)
-        # Refund credits — timeout is a system failure, not the user's fault.
-        if job.user_id and not job.demo:
-            refund_amount = job.num_scenes + (1 if job.music_enabled else 0)
-            asyncio.create_task(_sb_refund_credits(job.user_id, refund_amount, job.id))
+        if job.user_id and not job.demo and not job.require_script_approval:
+            asyncio.create_task(
+                _sb_refund_credits(job.user_id, _job_refund_amount(job), job.id)
+            )
         cleanup_working_dir(working_dir)
         return
     except Exception as exc:
@@ -623,7 +670,95 @@ async def run_generation_job(job: Job, api_key: str):
         await job_store.emit(
             job, "error", str(exc), job.events[-1].progress if job.events else 0
         )
-        # Refund credits on failure so users aren't penalised for pipeline errors
+        if job.user_id and not job.demo and not job.require_script_approval:
+            asyncio.create_task(
+                _sb_refund_credits(job.user_id, _job_refund_amount(job), job.id)
+            )
+
+
+async def run_continue_from_script_job(job: Job, api_key: str, script_data: Dict[str, Any]):
+    """Resume after script approval — charges already taken by the API layer."""
+    from interfaces.character import DramaScript
+    from pipelines.idea2video import Idea2VideoPipeline
+    from pipelines.script2video import PipelineCancelled
+
+    job.status = JobStatus.RUNNING
+    await job_store.persist(job)
+
+    working_dir = os.path.join(JOBS_DIR, job.id)
+
+    def is_cancelled() -> bool:
+        return job.status == JobStatus.CANCELLED
+
+    async def progress_callback(stage, message, progress, data=None):
+        await job_store.emit(job, stage, message, progress, data)
+
+    portraits_override = None
+    if isinstance(job.result, dict):
+        portraits_override = job.result.get("_portraits_override") or None
+
+    try:
+        script = DramaScript(**script_data)
+        pipeline = Idea2VideoPipeline(api_key=api_key, demo=job.demo)
+        result = await asyncio.wait_for(
+            pipeline.continue_from_script(
+                script=script,
+                style=job.style,
+                director_style=job.director_style,
+                user_requirement=job.user_requirement,
+                aspect_ratio=job.aspect_ratio,
+                working_dir=working_dir,
+                progress_callback=progress_callback,
+                is_cancelled=is_cancelled,
+                character_portraits_override=portraits_override,
+                music_enabled=job.music_enabled,
+                plan=job.plan,
+            ),
+            timeout=PIPELINE_HARD_TIMEOUT_SECONDS,
+        )
+        if is_cancelled():
+            job.status = JobStatus.CANCELLED
+            await job_store.emit(job, "cancelled", "Generation cancelled", 100)
+            await job_store.persist(job)
+            if job.user_id and not job.demo:
+                asyncio.create_task(
+                    _sb_refund_credits(job.user_id, _job_refund_amount(job), job.id)
+                )
+            return
+        # Keep approved script alongside final result for the UI.
+        result = {**result, "script": script_data}
+        job.result = result
+        job.status = JobStatus.COMPLETED
+        await job_store.persist(job)
+        await job_store.emit(job, "complete", "Generation finished", 100, result)
+        if not job.demo and _is_remote_storage_url((result or {}).get("video_url")):
+            cleanup_working_dir(working_dir)
+    except PipelineCancelled:
+        job.status = JobStatus.CANCELLED
+        await job_store.persist(job)
+        await job_store.emit(job, "cancelled", "Generation cancelled", 100)
         if job.user_id and not job.demo:
-            refund_amount = job.num_scenes + (1 if job.music_enabled else 0)
-            asyncio.create_task(_sb_refund_credits(job.user_id, refund_amount, job.id))
+            asyncio.create_task(
+                _sb_refund_credits(job.user_id, _job_refund_amount(job), job.id)
+            )
+    except asyncio.TimeoutError:
+        job.status = JobStatus.FAILED
+        job.error = "Generation timed out — please try again."
+        await job_store.emit(job, "error", job.error, 100)
+        await job_store.persist(job)
+        if job.user_id and not job.demo:
+            asyncio.create_task(
+                _sb_refund_credits(job.user_id, _job_refund_amount(job), job.id)
+            )
+        cleanup_working_dir(working_dir)
+    except Exception as exc:
+        job.error = str(exc)
+        job.status = JobStatus.FAILED
+        await job_store.persist(job)
+        await job_store.emit(
+            job, "error", str(exc), job.events[-1].progress if job.events else 0
+        )
+        if job.user_id and not job.demo:
+            asyncio.create_task(
+                _sb_refund_credits(job.user_id, _job_refund_amount(job), job.id)
+            )
