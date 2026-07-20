@@ -156,9 +156,36 @@ class Script2VideoPipeline:
                     _check_cancel()
 
                     reference_url = None
+                    matched_char = None
+                    shot_text = f"{shot.visual_desc} {shot.motion_desc}".lower()
                     visible_chars = [c for c in characters if c.is_visible]
-                    if visible_chars and portraits.get(visible_chars[0].name):
-                        reference_url = portraits[visible_chars[0].name]
+
+                    # Found via a real report of character-swap between
+                    # scenes: previously this ALWAYS used visible_chars[0]
+                    # (the first character in the list) as the reference
+                    # portrait for every single shot, regardless of which
+                    # character the shot's own text actually describes.
+                    # Now: pick whichever known character's name appears
+                    # FIRST (by text position, i.e. narrative order --
+                    # "Sam looks at Maria" -> Sam is the subject) in this
+                    # shot's own visual_desc/motion_desc.
+                    named_matches = [
+                        (shot_text.find(c.name.lower()), c)
+                        for c in visible_chars
+                        if c.name.lower() in shot_text
+                    ]
+                    if named_matches:
+                        named_matches.sort(key=lambda pair: pair[0])
+                        matched_char = named_matches[0][1]
+                    elif visible_chars:
+                        # No character name appears in this shot's text at
+                        # all (e.g. a pure landscape/establishing shot) --
+                        # fall back to the first visible character, same
+                        # as the previous (unconditional) behavior.
+                        matched_char = visible_chars[0]
+
+                    if matched_char and portraits.get(matched_char.name):
+                        reference_url = portraits[matched_char.name]
 
                     frame_prompt = build_frame_prompt(
                         style,
@@ -202,12 +229,15 @@ class Script2VideoPipeline:
                     raise PipelineCancelled(str(exc)) from exc
                 shot.video_url = video_url
                 meta = shot.model_dump() if hasattr(shot, "model_dump") else dict(vars(shot))
+                # Record which character was actually used as the reference
+                # for this shot -- lets a future "inconsistency" report be
+                # diagnosed from real data (was the wrong character matched,
+                # or did MuAPI itself drift?) instead of guessing blind.
+                meta["reference_character"] = matched_char.name if matched_char else None
 
                 # Optional character + setting QA (same Claude vision call).
                 if qa_enabled and frame_url and anthropic_key:
-                    char_desc = (
-                        visible_chars[0].static_features if visible_chars else ""
-                    )
+                    char_desc = matched_char.static_features if matched_char else ""
                     qa = await verify_frame(
                         frame_url=frame_url,
                         expected_character_desc=char_desc,
