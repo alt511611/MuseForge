@@ -75,6 +75,7 @@ export default function GeneratePage() {
   const [cancelling, setCancelling] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [inspoIdx] = useState(() => Math.floor(Math.random() * 6));
+  const [nowTick, setNowTick] = useState(0);
   const logRef = useRef(null);
   const seenSeq = useRef(new Set());
   const startTimeRef = useRef(Date.now());
@@ -193,7 +194,15 @@ export default function GeneratePage() {
   const stageIndex = PIPELINE_STAGES.indexOf(currentStage);
   const isRunning = status === "running" || status === "queued";
 
+  // Keep the ETA / overtime label fresh while the job is running.
+  useEffect(() => {
+    if (!isRunning) return undefined;
+    const id = setInterval(() => setNowTick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [isRunning]);
+
   // ETA calculation
+  void nowTick; // re-render tick
   const elapsed = Math.round((Date.now() - startTimeRef.current) / 1000);
   // Prefer the stable, stage-aware estimate (total expected duration minus
   // elapsed) over the volatile elapsed/progress extrapolation, which can
@@ -201,13 +210,25 @@ export default function GeneratePage() {
   // time -- e.g. during a slow video-generation stage that stays at ~50%
   // for several minutes. Fall back to the old formula only until the
   // estimate has loaded.
-  const eta =
+  const remainingSeconds =
     estimatedTotalSeconds !== null
-      ? Math.max(0, Math.round(estimatedTotalSeconds - elapsed))
-      : progress > 5
-      ? Math.round((elapsed / progress) * (100 - progress))
+      ? Math.round(estimatedTotalSeconds - elapsed)
       : null;
-  const etaLabel = eta !== null ? (eta < 60 ? `~${eta}s kaldı` : `~${Math.round(eta / 60)}dk kaldı`) : null;
+  const OVERTIME_KEYS = ["gen_overtime_1", "gen_overtime_2", "gen_overtime_3", "gen_overtime_4"];
+  let etaLabel = null;
+  if (remainingSeconds !== null && remainingSeconds <= 0 && isRunning) {
+    // Estimate exhausted — don't freeze on "~0s". Rotate honest status lines.
+    const idx = Math.floor(elapsed / 9) % OVERTIME_KEYS.length;
+    etaLabel = t(OVERTIME_KEYS[idx]);
+  } else if (remainingSeconds !== null && remainingSeconds > 0) {
+    etaLabel =
+      remainingSeconds < 60
+        ? `~${remainingSeconds}s kaldı`
+        : `~${Math.round(remainingSeconds / 60)}dk kaldı`;
+  } else if (estimatedTotalSeconds === null && progress > 5) {
+    const eta = Math.round((elapsed / progress) * (100 - progress));
+    etaLabel = eta < 60 ? `~${eta}s kaldı` : `~${Math.round(eta / 60)}dk kaldı`;
+  }
 
   // Stage-specific inspiration message (i18n via t())
   const msgCount = stageMsgCountRef.current[currentStage] || 0;

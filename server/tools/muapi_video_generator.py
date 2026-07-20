@@ -17,6 +17,22 @@ DEMO_VIDEO_URL = os.environ.get(
 # Override via env if MuAPI's actual string differs (e.g. "pro").
 DEFAULT_PRO_MODE = "professional"
 
+# CONFIRMED against MuAPI's own validation error response:
+#   {"detail":[{"type":"literal_error","loc":["body","duration"],
+#     "msg":"Input should be 5 or 10", ...}]}
+# The storyboard artist's LLM picks a creative duration_seconds value
+# (e.g. 14) with no awareness that Kling's API only accepts this exact
+# enum -- round to the nearest valid value defensively.
+VALID_DURATIONS = (5, 10)
+
+
+def nearest_valid_duration(seconds) -> int:
+    try:
+        seconds = float(seconds)
+    except (TypeError, ValueError):
+        return VALID_DURATIONS[0]
+    return min(VALID_DURATIONS, key=lambda d: abs(d - seconds))
+
 
 def _pro_mode_value() -> str:
     return os.environ.get("MUAPI_VIDEO_PRO_MODE", DEFAULT_PRO_MODE).strip() or DEFAULT_PRO_MODE
@@ -34,44 +50,13 @@ def _is_mode_rejected(exc: Exception) -> bool:
     msg = str(exc).lower()
     if "404" in msg or "422" in msg:
         return True
-    # httpx.HTTPStatusError repr sometimes embeds status_code=
     if "status_code=404" in msg or "status_code=422" in msg:
         return True
     return False
 
 
 class MuAPIVideoGenerator:
-    VIDEO_ENDPOINT = os.environ.get(
-        "MUAPI_VIDEO_MODEL", "kling-o1-standard-image-to-video"
-    )
-# CONFIRMED against MuAPI's own validation error response:
-#   {"detail":[{"type":"literal_error","loc":["body","duration"],
-#     "msg":"Input should be 5 or 10", ...}]}
-# The storyboard artist's LLM picks a creative duration_seconds value
-# (e.g. 14) with no awareness that Kling's API only accepts this exact
-# enum -- round to the nearest valid value defensively rather than
-# relying on prompt instructions the model might ignore.
-VALID_DURATIONS = (5, 10)
-
-
-def nearest_valid_duration(seconds) -> int:
-    try:
-        seconds = float(seconds)
-    except (TypeError, ValueError):
-        return VALID_DURATIONS[0]
-    return min(VALID_DURATIONS, key=lambda d: abs(d - seconds))
-
-
-class MuAPIVideoGenerator:
-    # UPDATED based on finding MuAPI's own playground page at
-    # muapi.ai/playground/kling-o1-image-to-video -- suggesting "standard"
-    # is a *mode* parameter, not part of the URL slug (the previous
-    # "kling-o1-standard-image-to-video" 404'd... then this slug got a 422,
-    # meaning it's at least a real, reachable endpoint, unlike the 404 case).
-    # STILL NOT independently confirmed with an exact first-party curl
-    # example (unlike flux-dev-image, which was). If this 422s again,
-    # open https://muapi.ai/playground/kling-o1-image-to-video directly and
-    # check the exact parameter names/schema shown there.
+    # "standard" is a *mode* parameter, not part of the URL slug.
     VIDEO_ENDPOINT = os.environ.get("MUAPI_VIDEO_MODEL", "kling-o1-image-to-video")
 
     def __init__(self, api_key: str, demo: bool = False):
@@ -83,15 +68,15 @@ class MuAPIVideoGenerator:
         prompt: str,
         image_url: str,
         duration: int,
-        aspect_ratio: str,
         mode: str,
     ) -> Dict[str, Any]:
         return {
             "prompt": prompt,
             "image_url": image_url,
-            "duration": duration,
-            "aspect_ratio": aspect_ratio,
+            "duration": nearest_valid_duration(duration),
             "mode": mode,
+            # aspect_ratio omitted: Kling image-to-video typically derives
+            # output aspect from the source image; sending it can 422.
         }
 
     async def generate_video_from_image(
@@ -101,12 +86,15 @@ class MuAPIVideoGenerator:
         duration: int = 5,
         aspect_ratio: str = "16:9",
         plan: str = "free",
+        is_cancelled=None,
     ) -> str:
+        # aspect_ratio kept in the signature for callers; not sent in payload.
+        _ = aspect_ratio
         if self.demo:
             return DEMO_VIDEO_URL
 
         mode = mode_for_plan(plan)
-        payload = self._payload(prompt, image_url, duration, aspect_ratio, mode)
+        payload = self._payload(prompt, image_url, duration, mode)
 
         try:
             return await self.client.generate(
@@ -114,6 +102,7 @@ class MuAPIVideoGenerator:
                 payload,
                 poll_interval=3.0,
                 max_polls=200,
+                is_cancelled=is_cancelled,
             )
         except MuAPIError as exc:
             # Wrong mode string (e.g. MuAPI expects "pro" not "professional") —
@@ -124,33 +113,12 @@ class MuAPIVideoGenerator:
                     mode,
                     exc,
                 )
-                payload = self._payload(prompt, image_url, duration, aspect_ratio, "standard")
+                payload = self._payload(prompt, image_url, duration, "standard")
                 return await self.client.generate(
                     self.VIDEO_ENDPOINT,
                     payload,
                     poll_interval=3.0,
                     max_polls=200,
+                    is_cancelled=is_cancelled,
                 )
             raise
-        is_cancelled=None,
-    ) -> str:
-        if self.demo:
-            return DEMO_VIDEO_URL
-        payload = {
-            "prompt": prompt,
-            "image_url": image_url,
-            "duration": nearest_valid_duration(duration),
-            "mode": "standard",
-            # aspect_ratio removed: most Kling image-to-video APIs (across
-            # several providers, consistently) derive the output aspect
-            # ratio from the source image itself rather than accepting it
-            # as a request parameter -- a likely candidate for the 422
-            # ("Unprocessable Entity" = reachable endpoint, invalid field).
-        }
-        return await self.client.generate(
-            self.VIDEO_ENDPOINT,
-            payload,
-            poll_interval=3.0,
-            max_polls=200,
-            is_cancelled=is_cancelled,
-        )

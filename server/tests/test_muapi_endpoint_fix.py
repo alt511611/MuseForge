@@ -80,12 +80,10 @@ def test_video_payload_no_longer_sends_aspect_ratio():
     first-party-confirmed fact (unlike the flux-dev-image fix), so this
     test documents the current best-effort payload shape rather than an
     assertion the endpoint is exactly correct."""
-    # We can't easily unit test the private payload dict without a real
-    # network call, so this test asserts on the source directly to catch
-    # any accidental re-introduction of aspect_ratio into the payload.
-    import inspect
-    import tools.muapi_video_generator as vid_mod
+    from tools.muapi_video_generator import MuAPIVideoGenerator
 
-    source = inspect.getsource(vid_mod.MuAPIVideoGenerator.generate_video_from_image)
-    assert '"aspect_ratio"' not in source
-    assert '"mode": "standard"' in source
+    gen = MuAPIVideoGenerator(api_key="test-key")
+    payload = gen._payload("pan left", "https://cdn.example/f.jpg", 5, "standard")
+    assert "aspect_ratio" not in payload
+    assert payload["mode"] == "standard"
+    assert payload["duration"] in (5, 10)

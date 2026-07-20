@@ -55,7 +55,7 @@ ALLOWED_ORIGIN_REGEX = os.environ.get(
 )
 
 DEMO_FLAG = os.environ.get("MUSEFORGE_DEMO", "").lower() in ("1", "true", "yes")
-SECONDS_PER_SCENE = float(os.environ.get("MUSEFORGE_SECONDS_PER_SCENE", "75"))
+SECONDS_PER_SCENE = float(os.environ.get("MUSEFORGE_SECONDS_PER_SCENE", "180"))
 
 
 def _is_demo() -> bool:
