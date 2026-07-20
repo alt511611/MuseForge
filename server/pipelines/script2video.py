@@ -8,6 +8,11 @@ import httpx
 
 from agents.storyboard_artist import StoryboardArtist
 from interfaces.character import CharacterInScene
+from tools.character_qa import (
+    format_expected_setting,
+    is_character_qa_enabled,
+    verify_frame,
+)
 from tools.muapi_image_generator import MuAPIImageGenerator
 from tools.muapi_video_generator import MuAPIVideoGenerator
 from tools.muapi_client import MuAPICancelled
@@ -15,6 +20,34 @@ from tools.muapi_client import MuAPICancelled
 
 class PipelineCancelled(Exception):
     """Raised cooperatively when a job is cancelled mid-flight."""
+
+
+def build_frame_prompt(
+    style: str,
+    shot,
+    setting_location: str = "",
+    setting_time_of_day: str = "",
+    setting_era: str = "",
+) -> str:
+    """Build the image prompt for a shot, injecting locked setting when present.
+
+    Empty setting fields (legacy/demo scripts) keep the old prompt shape —
+    no bare "Setting: , ." fragment.
+    """
+    parts = [
+        p.strip()
+        for p in (setting_location, setting_time_of_day, setting_era)
+        if (p or "").strip()
+    ]
+    if parts:
+        # Prefer "location, time_of_day" when both exist (user-requested shape).
+        setting_clause = f"Setting: {', '.join(parts)}. "
+    else:
+        setting_clause = ""
+    return (
+        f"{style} style. {setting_clause}{shot.visual_desc}. "
+        f"Shot type: {shot.shot_type}. Lens: {shot.lens}."
+    )
 
 
 async def download_video(url: str, path: str) -> str:
@@ -69,6 +102,9 @@ class Script2VideoPipeline:
         aspect_ratio: str = "16:9",
         is_cancelled: Optional[Callable[[], bool]] = None,
         plan: str = "free",
+        setting_location: str = "",
+        setting_time_of_day: str = "",
+        setting_era: str = "",
     ) -> Dict[str, Any]:
         os.makedirs(working_dir, exist_ok=True)
         portraits = character_portraits or {}
@@ -84,7 +120,13 @@ class Script2VideoPipeline:
         _check_cancel()
         await progress("storyboard", f"Designing storyboard for scene {scene_idx + 1}", 10)
         shots = await self.storyboard_artist.design_storyboard(
-            script, characters, user_requirement, director_style
+            script,
+            characters,
+            user_requirement,
+            director_style,
+            setting_location=setting_location,
+            setting_time_of_day=setting_time_of_day,
+            setting_era=setting_era,
         )
 
         shot_videos: List[Optional[str]] = [None] * len(shots)
@@ -101,6 +143,11 @@ class Script2VideoPipeline:
         # Semaphore caps concurrent MuAPI requests so a multi-shot scene
         # doesn't fire a burst of simultaneous calls at the provider.
         semaphore = asyncio.Semaphore(int(os.environ.get("MUSEFORGE_SHOT_CONCURRENCY", "2")))
+        qa_enabled = is_character_qa_enabled() and not self.demo
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        expected_setting = format_expected_setting(
+            setting_location, setting_time_of_day, setting_era
+        )
 
         async def _process_shot(i: int, shot) -> None:
             nonlocal completed_count
@@ -113,9 +160,12 @@ class Script2VideoPipeline:
                     if visible_chars and portraits.get(visible_chars[0].name):
                         reference_url = portraits[visible_chars[0].name]
 
-                    frame_prompt = (
-                        f"{style} style. {shot.visual_desc}. "
-                        f"Shot type: {shot.shot_type}. Lens: {shot.lens}."
+                    frame_prompt = build_frame_prompt(
+                        style,
+                        shot,
+                        setting_location=setting_location,
+                        setting_time_of_day=setting_time_of_day,
+                        setting_era=setting_era,
                     )
 
                     async with progress_lock:
@@ -151,7 +201,25 @@ class Script2VideoPipeline:
                     # a clean "cancelled" job state, not a generic error).
                     raise PipelineCancelled(str(exc)) from exc
                 shot.video_url = video_url
-                shot_meta[i] = shot.model_dump() if hasattr(shot, "model_dump") else dict(vars(shot))
+                meta = shot.model_dump() if hasattr(shot, "model_dump") else dict(vars(shot))
+
+                # Optional character + setting QA (same Claude vision call).
+                if qa_enabled and frame_url and anthropic_key:
+                    char_desc = (
+                        visible_chars[0].static_features if visible_chars else ""
+                    )
+                    qa = await verify_frame(
+                        frame_url=frame_url,
+                        expected_character_desc=char_desc,
+                        expected_setting=expected_setting,
+                        anthropic_api_key=anthropic_key,
+                    )
+                    if not qa.get("character_ok", True):
+                        meta["character_qa_warning"] = True
+                    if not qa.get("setting_ok", True):
+                        meta["setting_qa_warning"] = True
+
+                shot_meta[i] = meta
 
                 if not self.demo:
                     local_path = os.path.join(working_dir, f"shot_{i}.mp4")

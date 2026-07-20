@@ -26,3 +26,8 @@ class DramaScript(BaseModel):
     characters: List[CharacterProfile] = Field(default_factory=list)
     mood: str = "cinematic"
     estimated_duration_seconds: int = 30
+    # Once-per-drama setting lock (not per-scene) — injected into every
+    # frame/storyboard prompt for time/place consistency.
+    setting_location: str = ""
+    setting_time_of_day: str = ""
+    setting_era: str = ""

@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 class StoryboardArtist:
     SYSTEM_PROMPT = """You are a master storyboard artist for cinematic productions.
 Design exactly 1 shot for the given scene script. Apply the director's style guidance.
+If a locked Setting is provided, EVERY shot MUST stay in that place and time of day —
+do not invent a different location or lighting for this scene.
 Respond ONLY with valid JSON array containing a single shot object:
 [{"idx": 0, "visual_desc": "...", "motion_desc": "...", "audio_desc": "...",
   "shot_type": "wide|medium|close-up", "camera_movement": "...", "lens": "50mm", "duration_seconds": 5}]"""
@@ -32,6 +34,9 @@ Respond ONLY with valid JSON array containing a single shot object:
         characters: List[CharacterInScene],
         user_requirement: str = "",
         director_style: str = "cinematic_balanced",
+        setting_location: str = "",
+        setting_time_of_day: str = "",
+        setting_era: str = "",
     ) -> List[StoryboardShot]:
         preset = get_director_style(director_style)
 
@@ -41,8 +46,12 @@ Respond ONLY with valid JSON array containing a single shot object:
             return self._design_template(script, characters, preset)
 
         char_desc = ", ".join(f"{c.name}: {c.static_features}" for c in characters if c.is_visible)
+        setting_line = self._format_setting_line(
+            setting_location, setting_time_of_day, setting_era
+        )
         prompt = (
             f"Scene script: {script}\nCharacters: {char_desc}\n"
+            f"{setting_line}"
             f"Director guidance: {preset.storyboard_guidance}\nDefault lens: {preset.default_lens}\n"
             f"User requirements: {user_requirement or 'none'}"
         )
@@ -71,7 +80,14 @@ Respond ONLY with valid JSON array containing a single shot object:
         # 2) Fall back to a direct Anthropic call if a key is configured.
         if self.api_key:
             shots = await self._design_with_claude(
-                script, characters, user_requirement, preset.storyboard_guidance, preset.default_lens
+                script,
+                characters,
+                user_requirement,
+                preset.storyboard_guidance,
+                preset.default_lens,
+                setting_location=setting_location,
+                setting_time_of_day=setting_time_of_day,
+                setting_era=setting_era,
             )
             if shots:
                 # Hard cap: never produce more than 1 shot per scene (cost control).
@@ -80,6 +96,25 @@ Respond ONLY with valid JSON array containing a single shot object:
         # 3) Last resort: deterministic template, never crashes generation.
         return self._design_template(script, characters, preset)
 
+    @staticmethod
+    def _format_setting_line(
+        setting_location: str = "",
+        setting_time_of_day: str = "",
+        setting_era: str = "",
+    ) -> str:
+        parts = [
+            p.strip()
+            for p in (setting_location, setting_time_of_day, setting_era)
+            if (p or "").strip()
+        ]
+        if not parts:
+            return ""
+        return (
+            "Setting (LOCKED for entire drama — do not change): "
+            + ", ".join(parts)
+            + "\n"
+        )
+
     async def _design_with_claude(
         self,
         script: str,
@@ -87,13 +122,20 @@ Respond ONLY with valid JSON array containing a single shot object:
         user_requirement: str,
         guidance: str,
         default_lens: str,
+        setting_location: str = "",
+        setting_time_of_day: str = "",
+        setting_era: str = "",
     ) -> List[StoryboardShot]:
         try:
             import httpx
 
             char_desc = ", ".join(f"{c.name}: {c.static_features}" for c in characters if c.is_visible)
+            setting_line = self._format_setting_line(
+                setting_location, setting_time_of_day, setting_era
+            )
             prompt = (
                 f"Scene script: {script}\nCharacters: {char_desc}\n"
+                f"{setting_line}"
                 f"Director guidance: {guidance}\nDefault lens: {default_lens}\n"
                 f"User requirements: {user_requirement or 'none'}"
             )

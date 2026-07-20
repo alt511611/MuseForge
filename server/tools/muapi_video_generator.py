@@ -18,6 +18,22 @@ DEMO_VIDEO_URL = os.environ.get(
 # Override via env if MuAPI's actual string differs (e.g. "pro").
 DEFAULT_PRO_MODE = "professional"
 
+# CONFIRMED against MuAPI's own validation error response:
+#   {"detail":[{"type":"literal_error","loc":["body","duration"],
+#     "msg":"Input should be 5 or 10", ...}]}
+# The storyboard artist's LLM picks a creative duration_seconds value
+# (e.g. 14) with no awareness that Kling's API only accepts this exact
+# enum -- round to the nearest valid value defensively.
+VALID_DURATIONS = (5, 10)
+
+
+def nearest_valid_duration(seconds) -> int:
+    try:
+        seconds = float(seconds)
+    except (TypeError, ValueError):
+        return VALID_DURATIONS[0]
+    return min(VALID_DURATIONS, key=lambda d: abs(d - seconds))
+
 
 def _pro_mode_value() -> str:
     return os.environ.get("MUAPI_VIDEO_PRO_MODE", DEFAULT_PRO_MODE).strip() or DEFAULT_PRO_MODE
@@ -40,6 +56,8 @@ def _is_mode_rejected(exc: Exception) -> bool:
     return False
 
 
+class MuAPIVideoGenerator:
+    # "standard" is a *mode* parameter, not part of the URL slug.
 # CONFIRMED against MuAPI's own validation error response:
 #   {"detail":[{"type":"literal_error","loc":["body","duration"],
 #     "msg":"Input should be 5 or 10", ...}]}
@@ -84,6 +102,8 @@ class MuAPIVideoGenerator:
             "image_url": image_url,
             "duration": nearest_valid_duration(duration),
             "mode": mode,
+            # aspect_ratio omitted: Kling image-to-video typically derives
+            # output aspect from the source image; sending it can 422.
             # aspect_ratio deliberately NOT included: most Kling
             # image-to-video APIs (across several providers, consistently)
             # derive the output aspect ratio from the source image itself
@@ -98,8 +118,11 @@ class MuAPIVideoGenerator:
         duration: int = 5,
         aspect_ratio: str = "16:9",
         plan: str = "free",
+        is_cancelled=None,
         is_cancelled: Optional[Any] = None,
     ) -> str:
+        # aspect_ratio kept in the signature for callers; not sent in payload.
+        _ = aspect_ratio
         if self.demo:
             return DEMO_VIDEO_URL
 

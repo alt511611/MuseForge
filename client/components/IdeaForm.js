@@ -75,6 +75,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
   const [uploadError, setUploadError] = useState(null);
   const [plan, setPlan] = useState(null);
   const [musicEnabled, setMusicEnabled] = useState(false);
+  const [requireScriptApproval, setRequireScriptApproval] = useState(false);
 
   // Look up the signed-in user's plan (Creator/Pro unlock optional music +
   // a higher scene cap). Anonymous/free users simply never see the toggle.
@@ -198,6 +199,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
       character_image: characterImage,
       character_name: characterImage ? characterName.trim() : "",
       music_enabled: musicEligible && musicEnabled,
+      require_script_approval: requireScriptApproval,
     });
   };
 
@@ -456,6 +458,32 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
           </div>
         </div>
       )}
+
+      <div className="flex items-center justify-between gap-3 mb-4 px-4 py-3 rounded-xl" style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a" }}>
+        <label className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: "#94a3b8" }}>
+          <Clapperboard size={16} style={{ color: "#a78bfa" }} />
+          <span>
+            {t("form_script_approval_toggle")}
+            <span className="block text-[11px] mt-0.5" style={{ color: "#475569" }}>
+              {t("form_script_approval_hint")}
+            </span>
+          </span>
+        </label>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={requireScriptApproval}
+          onClick={() => setRequireScriptApproval((v) => !v)}
+          disabled={isSubmitting}
+          className="relative inline-flex h-5 w-9 flex-shrink-0 items-center rounded-full transition-colors"
+          style={{ backgroundColor: requireScriptApproval ? "#7c3aed" : "#22223a" }}
+        >
+          <span
+            className="inline-block h-4 w-4 transform rounded-full bg-white transition-transform"
+            style={{ transform: requireScriptApproval ? "translateX(18px)" : "translateX(2px)" }}
+          />
+        </button>
+      </div>
 
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4 text-xs" style={{ color: "#64748b" }}>
         <span className="inline-flex items-center gap-1.5">

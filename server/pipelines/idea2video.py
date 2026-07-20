@@ -144,6 +144,74 @@ async def add_watermark(video_path: str, output_path: str) -> str:
     return output_path
 
 
+def _parse_aspect_ratio(ratio: str) -> tuple:
+    """Parse '9:16' / '1:1' into (w, h) floats. Raises ValueError if invalid."""
+    parts = (ratio or "").strip().split(":")
+    if len(parts) != 2:
+        raise ValueError(f"Invalid aspect ratio: {ratio!r}")
+    w, h = float(parts[0]), float(parts[1])
+    if w <= 0 or h <= 0:
+        raise ValueError(f"Invalid aspect ratio: {ratio!r}")
+    return w, h
+
+
+async def export_alternate_format(
+    source_path: str,
+    output_path: str,
+    target_ratio: str,
+) -> str:
+    """Center-crop ``source_path`` to ``target_ratio`` and write ``output_path``.
+
+    IMPORTANT LIMITATION: this is a *naive center crop*, not smart subject-
+    aware reframing. Content near the edges of the original frame may be
+    lost. Suitable for quick 9:16 / 1:1 exports from a finished 16:9 master
+    without another MuAPI render.
+    """
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    target_w, target_h = _parse_aspect_ratio(target_ratio)
+    target = target_w / target_h
+
+    # moviepy is sync/CPU-bound — run in a worker thread so the event loop
+    # stays responsive during the export.
+    def _crop() -> str:
+        from moviepy import VideoFileClip
+
+        clip = VideoFileClip(source_path)
+        try:
+            src_w, src_h = clip.w, clip.h
+            src_ratio = src_w / src_h
+            if abs(src_ratio - target) < 1e-3:
+                # Already the right ratio — just remux/copy encode.
+                cropped = clip
+            elif src_ratio > target:
+                # Source is wider than target → crop left/right (center).
+                new_w = src_h * target
+                x1 = (src_w - new_w) / 2
+                cropped = clip.cropped(x1=x1, y1=0, width=new_w, height=src_h)
+            else:
+                # Source is taller than target → crop top/bottom (center).
+                new_h = src_w / target
+                y1 = (src_h - new_h) / 2
+                cropped = clip.cropped(x1=0, y1=y1, width=src_w, height=new_h)
+
+            cropped.write_videofile(
+                output_path,
+                codec="libx264",
+                audio_codec="aac",
+                logger=None,
+            )
+            if cropped is not clip:
+                cropped.close()
+        finally:
+            clip.close()
+        return output_path
+
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _crop)
+
+
 class Idea2VideoPipeline:
     def __init__(self, api_key: str, demo: bool = False):
         self.api_key = api_key
@@ -245,23 +313,16 @@ class Idea2VideoPipeline:
             final_path = with_music_path
         return final_path
 
-    async def run(
+    async def write_script_only(
         self,
         idea: str,
         style: str = "Cinematic",
-        director_style: str = "cinematic_balanced",
-        user_requirement: str = "",
         num_scenes: int = 3,
-        aspect_ratio: str = "16:9",
-        working_dir: str = "/tmp/museforge_drama",
+        user_requirement: str = "",
         progress_callback: Optional[Callable] = None,
-        music_url: Optional[str] = None,
         is_cancelled: Optional[Callable[[], bool]] = None,
-        character_portraits_override: Optional[Dict[str, str]] = None,
-        music_enabled: bool = False,
-        plan: str = "free",
-    ) -> dict:
-        os.makedirs(working_dir, exist_ok=True)
+    ) -> DramaScript:
+        """Phase A: screenwriting only — no portraits / frames / video."""
 
         def _check_cancel():
             if is_cancelled and is_cancelled():
@@ -273,7 +334,33 @@ class Idea2VideoPipeline:
 
         _check_cancel()
         await progress("screenwriting", "Writing script", 5)
-        script = await self.screenwriter.write_script(idea, style, num_scenes, user_requirement)
+        return await self.screenwriter.write_script(idea, style, num_scenes, user_requirement)
+
+    async def continue_from_script(
+        self,
+        script: DramaScript,
+        style: str = "Cinematic",
+        director_style: str = "cinematic_balanced",
+        user_requirement: str = "",
+        aspect_ratio: str = "16:9",
+        working_dir: str = "/tmp/museforge_drama",
+        progress_callback: Optional[Callable] = None,
+        music_url: Optional[str] = None,
+        is_cancelled: Optional[Callable[[], bool]] = None,
+        character_portraits_override: Optional[Dict[str, str]] = None,
+        music_enabled: bool = False,
+        plan: str = "free",
+    ) -> dict:
+        """Phase B: everything after screenwriting (portraits → scenes → assemble)."""
+        os.makedirs(working_dir, exist_ok=True)
+
+        def _check_cancel():
+            if is_cancelled and is_cancelled():
+                raise PipelineCancelled("Job cancelled")
+
+        async def progress(stage: str, message: str, pct: float, data=None):
+            if progress_callback:
+                await progress_callback(stage, message, pct, data)
 
         characters = self._characters_from_script(script)
         if not characters:
@@ -331,6 +418,9 @@ class Idea2VideoPipeline:
                 aspect_ratio=aspect_ratio,
                 is_cancelled=is_cancelled,
                 plan=plan,
+                setting_location=getattr(script, "setting_location", "") or "",
+                setting_time_of_day=getattr(script, "setting_time_of_day", "") or "",
+                setting_era=getattr(script, "setting_era", "") or "",
             )
             if scene_result.get("path"):
                 scene_paths.append(scene_result["path"])
@@ -422,4 +512,47 @@ class Idea2VideoPipeline:
             "demo": self.demo,
             "music_enabled": bool(music_url) if not self.demo else False,
             "plan": plan,
+            "setting_location": getattr(script, "setting_location", "") or "",
+            "setting_time_of_day": getattr(script, "setting_time_of_day", "") or "",
+            "setting_era": getattr(script, "setting_era", "") or "",
         }
+
+    async def run(
+        self,
+        idea: str,
+        style: str = "Cinematic",
+        director_style: str = "cinematic_balanced",
+        user_requirement: str = "",
+        num_scenes: int = 3,
+        aspect_ratio: str = "16:9",
+        working_dir: str = "/tmp/museforge_drama",
+        progress_callback: Optional[Callable] = None,
+        music_url: Optional[str] = None,
+        is_cancelled: Optional[Callable[[], bool]] = None,
+        character_portraits_override: Optional[Dict[str, str]] = None,
+        music_enabled: bool = False,
+        plan: str = "free",
+    ) -> dict:
+        """Full end-to-end run (script + production). Default path unchanged."""
+        script = await self.write_script_only(
+            idea=idea,
+            style=style,
+            num_scenes=num_scenes,
+            user_requirement=user_requirement,
+            progress_callback=progress_callback,
+            is_cancelled=is_cancelled,
+        )
+        return await self.continue_from_script(
+            script=script,
+            style=style,
+            director_style=director_style,
+            user_requirement=user_requirement,
+            aspect_ratio=aspect_ratio,
+            working_dir=working_dir,
+            progress_callback=progress_callback,
+            music_url=music_url,
+            is_cancelled=is_cancelled,
+            character_portraits_override=character_portraits_override,
+            music_enabled=music_enabled,
+            plan=plan,
+        )

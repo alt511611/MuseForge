@@ -20,7 +20,7 @@ async def test_shots_run_concurrently_not_sequentially(monkeypatch, tmp_path):
 
     SIMULATED_DELAY = 0.3  # per frame/video call
 
-    async def fake_design_storyboard(self, script, characters, user_requirement, director_style):
+    async def fake_design_storyboard(self, script, characters, user_requirement, director_style, **_kwargs):
         return [
             StoryboardShot(idx=i, visual_desc=f"shot {i}", motion_desc=f"motion {i}")
             for i in range(3)

@@ -2,10 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Download, Share2, Plus, ExternalLink, Layout, ChevronDown, ChevronUp } from "lucide-react";
+import { Download, Share2, Plus, ExternalLink, Layout, ChevronDown, ChevronUp, Loader2 } from "lucide-react";
 import Confetti from "./Confetti";
 import { useLanguage } from "../contexts/LanguageContext";
-import { resolveJobVideoUrl } from "../lib/apiBase";
+import { useAuth } from "../contexts/AuthContext";
+import { API_BASE, resolveJobVideoUrl } from "../lib/apiBase";
 
 function NextSteps({ jobId, videoUrl }) {
   const { t } = useLanguage();
@@ -50,9 +51,12 @@ function NextSteps({ jobId, videoUrl }) {
 
 export default function VideoResult({ job, jobId }) {
   const { t } = useLanguage();
+  const { getAccessToken } = useAuth();
   const result = job?.result;
   const [confetti, setConfetti] = useState(false);
   const [storyboardOpen, setStoryboardOpen] = useState(false);
+  const [exporting, setExporting] = useState(null); // "9:16" | "1:1" | null
+  const [exportError, setExportError] = useState(null);
   const notifiedRef = useRef(false);
 
   useEffect(() => {
@@ -93,6 +97,40 @@ export default function VideoResult({ job, jobId }) {
   const scenes = result.scenes || [];
   const portraits = result.portraits || {};
   const videoSrc = resolveJobVideoUrl(result.video_url, jobId);
+  const originalRatio = result.aspect_ratio || "16:9";
+
+  const handleExport = async (aspectRatio) => {
+    setExportError(null);
+    setExporting(aspectRatio);
+    try {
+      const token = await getAccessToken();
+      const res = await fetch(`${API_BASE}/api/jobs/${jobId}/export`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ aspect_ratio: aspectRatio }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.detail || t("result_export_failed"));
+      }
+      const url = resolveJobVideoUrl(data.video_url, jobId);
+      // Trigger download without leaving the page.
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `museforge_${jobId}_${aspectRatio.replace(":", "x")}.mp4`;
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch (err) {
+      setExportError(err.message || t("result_export_failed"));
+    } finally {
+      setExporting(null);
+    }
+  };
 
   return (
     <>
@@ -114,15 +152,47 @@ export default function VideoResult({ job, jobId }) {
           poster={scenes?.[0]?.shots?.[0]?.frame_url}
           src={videoSrc}
         />
-        <div className="flex items-center justify-between mt-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
           <p className="text-xs truncate" style={{ color: "#475569" }}>{result.logline}</p>
-          <a href={videoSrc} download
-            className="inline-flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg font-medium flex-shrink-0 ml-3"
-            style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}>
-            <Download size={13} />
-            {t("result_download")}
-          </a>
+          <div className="flex flex-wrap items-center gap-2 flex-shrink-0 ml-auto">
+            <a href={videoSrc} download
+              className="inline-flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg font-medium"
+              style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}>
+              <Download size={13} />
+              {t("result_download")}
+            </a>
+            {originalRatio !== "9:16" && (
+              <button
+                type="button"
+                disabled={!!exporting}
+                onClick={() => handleExport("9:16")}
+                className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg font-medium disabled:opacity-50"
+                style={{ backgroundColor: "#12121a", border: "1px solid #22223a", color: "#94a3b8" }}
+                title={t("result_export_crop_note")}
+              >
+                {exporting === "9:16" ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+                {t("result_download_9_16")}
+              </button>
+            )}
+            {originalRatio !== "1:1" && (
+              <button
+                type="button"
+                disabled={!!exporting}
+                onClick={() => handleExport("1:1")}
+                className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg font-medium disabled:opacity-50"
+                style={{ backgroundColor: "#12121a", border: "1px solid #22223a", color: "#94a3b8" }}
+                title={t("result_export_crop_note")}
+              >
+                {exporting === "1:1" ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+                {t("result_download_1_1")}
+              </button>
+            )}
+          </div>
         </div>
+        <p className="text-[10px] mt-2" style={{ color: "#475569" }}>{t("result_export_crop_note")}</p>
+        {exportError && (
+          <p className="text-xs mt-1" style={{ color: "#fca5a5" }}>{exportError}</p>
+        )}
       </div>
 
       <div className="mb-5">

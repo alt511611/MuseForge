@@ -71,7 +71,7 @@ async def test_script2video_translates_muapi_cancelled_to_pipeline_cancelled(mon
     from interfaces.character import CharacterInScene
     from interfaces.shot import StoryboardShot
 
-    async def fake_design_storyboard(self, script, characters, user_requirement, director_style):
+    async def fake_design_storyboard(self, script, characters, user_requirement, director_style, **_kwargs):
         return [StoryboardShot(idx=0, visual_desc="x", motion_desc="y")]
 
     async def fake_generate_image(self, prompt, aspect_ratio, is_cancelled=None):

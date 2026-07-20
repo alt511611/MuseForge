@@ -28,7 +28,13 @@ from auth import (
     get_optional_user,
 )
 from interfaces.camera import DIRECTOR_STYLES
-from jobs import JobStatus, job_store, run_generation_job
+from jobs import (
+    JOBS_DIR,
+    JobStatus,
+    job_store,
+    run_continue_from_script_job,
+    run_generation_job,
+)
 
 load_dotenv()
 
@@ -55,7 +61,7 @@ ALLOWED_ORIGIN_REGEX = os.environ.get(
 )
 
 DEMO_FLAG = os.environ.get("MUSEFORGE_DEMO", "").lower() in ("1", "true", "yes")
-SECONDS_PER_SCENE = float(os.environ.get("MUSEFORGE_SECONDS_PER_SCENE", "75"))
+SECONDS_PER_SCENE = float(os.environ.get("MUSEFORGE_SECONDS_PER_SCENE", "180"))
 
 
 def _is_demo() -> bool:
@@ -185,11 +191,29 @@ class GenerateRequest(BaseModel):
     # plans (checked server-side against the caller's actual plan) — silently
     # ignored for free/anonymous requests rather than erroring.
     music_enabled: bool = False
+    # When True: write script only, pause for user edit/approve. No credits
+    # charged until POST /api/jobs/{id}/approve-script.
+    require_script_approval: bool = False
 
 
 class GenerateResponse(BaseModel):
     job_id: str
     demo: bool
+
+
+class ExportRequest(BaseModel):
+    aspect_ratio: str = Field(..., pattern=r"^(9:16|1:1)$")
+
+
+class ExportResponse(BaseModel):
+    video_url: str
+    aspect_ratio: str
+    # Naive center-crop disclaimer — not smart subject-aware reframing.
+    note: str = "Simple center crop from the original video (edges may be lost)."
+
+
+class ApproveScriptRequest(BaseModel):
+    script: dict
 
 
 class EstimateRequest(BaseModel):
@@ -425,6 +449,9 @@ async def generate(
     # authenticated non-demo requests. Demo/anonymous requests fall back to
     # the free-tier defaults (no music, watermark applies) and only the
     # Pydantic-level bounds on num_scenes.
+    # When require_script_approval is True, credits are NOT charged here —
+    # they are charged at approve-script time so the user can abandon a
+    # bad script for free.
     plan = "free"
     music_enabled = False
     if current_user and not demo:
@@ -441,13 +468,14 @@ async def generate(
         # that send music_enabled=True are silently ignored, not rejected.
         music_enabled = bool(req.music_enabled) and plan in ("creator", "pro")
 
-        credit_cost = req.num_scenes + (MUSIC_EXTRA_CREDIT_COST if music_enabled else 0)
-        ok = await _deduct_credits(current_user.user_id, credit_cost, "video_generation")
-        if not ok:
-            raise HTTPException(
-                status_code=402,
-                detail=f"Insufficient credits. You need {credit_cost} credits for this generation. Please top up your balance.",
-            )
+        if not req.require_script_approval:
+            credit_cost = req.num_scenes + (MUSIC_EXTRA_CREDIT_COST if music_enabled else 0)
+            ok = await _deduct_credits(current_user.user_id, credit_cost, "video_generation")
+            if not ok:
+                raise HTTPException(
+                    status_code=402,
+                    detail=f"Insufficient credits. You need {credit_cost} credits for this generation. Please top up your balance.",
+                )
 
     job = await job_store.create(
         idea=req.idea,
@@ -463,6 +491,7 @@ async def generate(
         character_name=req.character_name,
         music_enabled=music_enabled,
         plan=plan,
+        require_script_approval=bool(req.require_script_approval),
     )
 
     background_tasks.add_task(run_generation_job, job, api_key)
@@ -496,7 +525,7 @@ async def get_job(
 
 
 @app.get("/api/jobs/{job_id}/video")
-async def get_job_video(job_id: str):
+async def get_job_video(job_id: str, format: Optional[str] = None):
     job = job_store.get(job_id)
 
     if job:
@@ -509,6 +538,20 @@ async def get_job_video(job_id: str):
     if not result:
         raise HTTPException(status_code=404, detail="Video not ready")
 
+    # Alternate center-crop exports: ?format=9x16 or ?format=1x1
+    if format:
+        ratio_key = format.replace("x", ":")
+        exp = (result.get("exports") or {}).get(ratio_key) or (result.get("exports") or {}).get(format)
+        if isinstance(exp, dict):
+            ep = exp.get("video_path")
+            if ep and os.path.exists(ep):
+                return FileResponse(
+                    ep, media_type="video/mp4", filename=f"museforge_{job_id}_{format}.mp4"
+                )
+            eu = exp.get("video_url")
+            if eu and str(eu).startswith(("http://", "https://")):
+                return RedirectResponse(eu)
+
     path = result.get("video_path")
     if path and os.path.exists(path):
         return FileResponse(path, media_type="video/mp4", filename=f"museforge_{job_id}.mp4")
@@ -518,6 +561,165 @@ async def get_job_video(job_id: str):
         return RedirectResponse(url)
 
     raise HTTPException(status_code=404, detail="Video not available")
+
+
+async def _resolve_job_source_video(job) -> str:
+    """Return a local filesystem path to the job's master video for export.
+
+    Prefers an existing local ``video_path``; otherwise downloads from
+    ``video_url`` into the job working dir. Raises HTTPException on failure.
+    """
+    from pipelines.script2video import download_video
+
+    result = job.result or {}
+    path = result.get("video_path")
+    if path and os.path.isfile(path):
+        return path
+
+    working_dir = os.path.join(JOBS_DIR, job.id)
+    os.makedirs(working_dir, exist_ok=True)
+
+    # Common local filenames left behind when Storage upload was skipped.
+    for name in ("drama_final.mp4", "drama_with_music.mp4", "drama_concatenated.mp4"):
+        candidate = os.path.join(working_dir, name)
+        if os.path.isfile(candidate):
+            return candidate
+
+    url = result.get("video_url")
+    if url and isinstance(url, str) and url.startswith(("http://", "https://")):
+        local = os.path.join(working_dir, "export_source.mp4")
+        if not os.path.isfile(local):
+            await download_video(url, local)
+        if os.path.isfile(local):
+            return local
+
+    raise HTTPException(
+        status_code=404,
+        detail="Source video not available for export",
+    )
+
+
+@app.post("/api/jobs/{job_id}/export", response_model=ExportResponse)
+async def export_job_format(
+    job_id: str,
+    req: ExportRequest,
+    current_user: Optional[AuthUser] = Depends(get_optional_user),
+):
+    """Center-crop the finished master into 9:16 or 1:1. No MuAPI, no credits.
+
+    This is a *simple center crop* — not smart subject-aware reframing.
+    Edge content from the original frame may be lost.
+    """
+    from pipelines.idea2video import export_alternate_format
+    from tools.supabase_storage import upload_video
+
+    job = job_store.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if current_user and job.user_id and job.user_id != current_user.user_id:
+        if not current_user.is_admin:
+            raise HTTPException(status_code=403, detail="Access denied")
+
+    if job.status != JobStatus.COMPLETED or not job.result:
+        raise HTTPException(status_code=400, detail="Job is not completed")
+
+    # Cache hit: already exported this ratio.
+    exports = (job.result or {}).setdefault("exports", {})
+    cached = exports.get(req.aspect_ratio)
+    if isinstance(cached, dict) and cached.get("video_url"):
+        return ExportResponse(
+            video_url=cached["video_url"],
+            aspect_ratio=req.aspect_ratio,
+        )
+
+    source = await _resolve_job_source_video(job)
+    working_dir = os.path.join(JOBS_DIR, job.id)
+    os.makedirs(working_dir, exist_ok=True)
+    safe_ratio = req.aspect_ratio.replace(":", "x")
+    output_path = os.path.join(working_dir, f"export_{safe_ratio}.mp4")
+
+    try:
+        await export_alternate_format(source, output_path, req.aspect_ratio)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("export_alternate_format failed for job %s", job_id)
+        raise HTTPException(status_code=500, detail=f"Export failed: {exc}") from exc
+
+    video_url = f"/api/jobs/{job_id}/video?format={safe_ratio}"
+    # Best-effort Storage upload under a distinct object key.
+    if not job.demo:
+        try:
+            # upload_video uses {job_id}.mp4 — pass a synthetic id for variants.
+            stored = await upload_video(output_path, f"{job_id}_{safe_ratio}")
+            if stored and stored.startswith("http"):
+                video_url = stored
+        except Exception as exc:
+            logger.warning("Export upload failed (serving local): %s", exc)
+
+    exports[req.aspect_ratio] = {
+        "video_path": output_path,
+        "video_url": video_url,
+    }
+    job.result["exports"] = exports
+    await job_store.persist(job)
+
+    return ExportResponse(video_url=video_url, aspect_ratio=req.aspect_ratio)
+
+
+@app.post("/api/jobs/{job_id}/approve-script")
+async def approve_script(
+    job_id: str,
+    req: ApproveScriptRequest,
+    background_tasks: BackgroundTasks,
+    current_user: Optional[AuthUser] = Depends(get_optional_user),
+):
+    """Charge credits (if needed) and continue production from an edited script."""
+    from interfaces.character import DramaScript
+
+    job = job_store.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if current_user and job.user_id and job.user_id != current_user.user_id:
+        if not current_user.is_admin:
+            raise HTTPException(status_code=403, detail="Access denied")
+
+    if job.status != JobStatus.AWAITING_SCRIPT_APPROVAL:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job is not awaiting script approval (status={job.status.value})",
+        )
+
+    try:
+        script = DramaScript(**(req.script or {}))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid script: {exc}") from exc
+
+    demo = job.demo or _is_demo()
+    api_key = os.environ.get("MUAPI_KEY", "")
+
+    # Charge credits here — script phase was free.
+    if current_user and not demo and job.user_id:
+        credit_cost = job.num_scenes + (MUSIC_EXTRA_CREDIT_COST if job.music_enabled else 0)
+        ok = await _deduct_credits(
+            job.user_id, credit_cost, "video_generation", job_id=job.id
+        )
+        if not ok:
+            raise HTTPException(
+                status_code=402,
+                detail=f"Insufficient credits. You need {credit_cost} credits for this generation.",
+            )
+
+    script_data = script.model_dump()
+    job.result = {**(job.result or {}), "script": script_data}
+    job.status = JobStatus.RUNNING
+    await job_store.persist(job)
+    await job_store.emit(job, "screenwriting", "Script approved — starting production", 12)
+
+    background_tasks.add_task(run_continue_from_script_job, job, api_key, script_data)
+    return {"job_id": job.id, "status": job.status.value}
 
 
 @app.get("/api/jobs/{job_id}/stream")
