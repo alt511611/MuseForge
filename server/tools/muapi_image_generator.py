@@ -101,16 +101,20 @@ class MuAPIImageGenerator:
                 is_cancelled=is_cancelled,
             )
         except MuAPIError as exc:
-            # Fail open to the previous flux-dev-image reference behavior only
-            # when MuAPI rejects the endpoint/schema. Other errors retain their
-            # normal retry/error behavior.
             message = str(exc).lower()
-            if "404" not in message and "422" not in message:
+            is_schema_rejection = "404" in message or "422" in message
+            is_runtime_failure = (
+                '"status":"failed"' in message.replace(" ", "")
+                or "internal error" in message
+            )
+            if not (is_schema_rejection or is_runtime_failure):
                 raise
 
             logger.warning(
-                "Kontext endpoint/schema rejected (%s); falling back to "
-                "flux-dev-image reference payload",
+                "Kontext failed (schema_rejection=%s, runtime_failure=%s): %s; "
+                "falling back to flux-dev-image reference payload",
+                is_schema_rejection,
+                is_runtime_failure,
                 exc,
             )
             fallback_payload = self._build_payload(
