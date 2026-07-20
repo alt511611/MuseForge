@@ -1,4 +1,4 @@
-"""Reference frames use Kontext i2i, with flux-dev-image fail-open fallback."""
+"""Reference frames use flux-pulid, with flux-dev-image fail-open fallback."""
 
 import os
 import sys
@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
 @pytest.mark.asyncio
-async def test_reference_generation_uses_kontext_schema():
+async def test_reference_generation_uses_flux_pulid_schema():
     from tools.muapi_image_generator import MuAPIImageGenerator
 
     generator = MuAPIImageGenerator(api_key="test-key", demo=False)
@@ -25,15 +25,16 @@ async def test_reference_generation_uses_kontext_schema():
     assert result == "https://cdn.example/frame.png"
     call = generator.client.generate.await_args
     assert call.args[0] == generator.KONTEXT_ENDPOINT
+    assert generator.KONTEXT_ENDPOINT == "flux-pulid"
     payload = call.args[1]
-    assert payload["images_list"] == ["https://cdn.example/maya-portrait.png"]
+    assert payload["image_url"] == "https://cdn.example/maya-portrait.png"
     assert payload["aspect_ratio"] == "9:16"
     assert "image" not in payload
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [404, 422])
-async def test_kontext_rejection_falls_back_to_flux_dev(status):
+async def test_flux_pulid_rejection_falls_back_to_flux_dev(status):
     from tools.muapi_client import MuAPIError
     from tools.muapi_image_generator import MuAPIImageGenerator
 
@@ -54,22 +55,22 @@ async def test_kontext_rejection_falls_back_to_flux_dev(status):
     assert result == "https://cdn.example/fallback-frame.png"
     assert generator.client.generate.await_count == 2
 
-    kontext_call, fallback_call = generator.client.generate.await_args_list
-    assert kontext_call.args[0] == generator.KONTEXT_ENDPOINT
-    assert kontext_call.args[1]["images_list"] == [
+    pulid_call, fallback_call = generator.client.generate.await_args_list
+    assert pulid_call.args[0] == generator.KONTEXT_ENDPOINT
+    assert pulid_call.args[1]["image_url"] == (
         "https://cdn.example/maya-portrait.png"
-    ]
+    )
 
     assert fallback_call.args[0] == generator.IMAGE_ENDPOINT
     fallback_payload = fallback_call.args[1]
     assert fallback_payload["image"] == "https://cdn.example/maya-portrait.png"
-    assert "images_list" not in fallback_payload
+    assert "image_url" not in fallback_payload
     assert fallback_payload["size"] == "1344*768"
 
 
 @pytest.mark.asyncio
-async def test_kontext_internal_runtime_failure_falls_back_to_flux_dev():
-    """Accepted Kontext jobs that fail internally must not fail the whole job."""
+async def test_flux_pulid_internal_runtime_failure_falls_back_to_flux_dev():
+    """Accepted PuLID jobs that fail internally must not fail the whole job."""
     from tools.muapi_client import MuAPIError
     from tools.muapi_image_generator import MuAPIImageGenerator
 
@@ -92,8 +93,8 @@ async def test_kontext_internal_runtime_failure_falls_back_to_flux_dev():
 
     assert result == "https://cdn.example/fallback-frame.png"
     assert generator.client.generate.await_count == 2
-    kontext_call, fallback_call = generator.client.generate.await_args_list
-    assert kontext_call.args[0] == generator.KONTEXT_ENDPOINT
+    pulid_call, fallback_call = generator.client.generate.await_args_list
+    assert pulid_call.args[0] == generator.KONTEXT_ENDPOINT
     assert fallback_call.args[0] == generator.IMAGE_ENDPOINT
     assert fallback_call.args[1]["image"] == (
         "https://cdn.example/maya-portrait.png"
@@ -101,7 +102,7 @@ async def test_kontext_internal_runtime_failure_falls_back_to_flux_dev():
 
 
 @pytest.mark.asyncio
-async def test_non_schema_kontext_error_is_not_hidden():
+async def test_non_schema_flux_pulid_error_is_not_hidden():
     from tools.muapi_client import MuAPIError
     from tools.muapi_image_generator import MuAPIImageGenerator
 

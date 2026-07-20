@@ -30,7 +30,7 @@ class MuAPIImageGenerator:
     # MuAPI's catalog changes again; no code change needed if so.
     IMAGE_ENDPOINT = os.environ.get("MUAPI_IMAGE_MODEL", "flux-dev-image")
     KONTEXT_ENDPOINT = os.environ.get(
-        "MUAPI_KONTEXT_MODEL", "flux-kontext-pro-i2i"
+        "MUAPI_KONTEXT_MODEL", "flux-pulid"
     )
 
     def __init__(self, api_key: str, demo: bool = False):
@@ -81,17 +81,16 @@ class MuAPIImageGenerator:
         if self.demo:
             return _demo_image_url(prompt + "|ref", aspect_ratio)
 
-        # Kontext is a distinct image-to-image model with a distinct schema:
-        # plural images_list (list), not flux-dev-image's singular image field.
+        # PuLID is identity-focused and uses a singular reference URL.
         payload = {
             "prompt": prompt,
-            "images_list": [reference_url],
+            "image_url": reference_url,
             "aspect_ratio": aspect_ratio,
         }
         logger.info(
-            "Sending flux-kontext-pro-i2i request with reference: images_list=%s "
+            "Sending flux-pulid request with reference: image_url=%s "
             "(prompt starts: %.80s)",
-            bool(payload.get("images_list")),
+            bool(payload.get("image_url")),
             prompt,
         )
         try:
@@ -111,7 +110,7 @@ class MuAPIImageGenerator:
                 raise
 
             logger.warning(
-                "Kontext failed (schema_rejection=%s, runtime_failure=%s): %s; "
+                "flux-pulid failed (schema_rejection=%s, runtime_failure=%s): %s; "
                 "falling back to flux-dev-image reference payload",
                 is_schema_rejection,
                 is_runtime_failure,
