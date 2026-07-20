@@ -1,9 +1,12 @@
 """MuAPI image generation with reference support for character consistency."""
 
 import hashlib
+import logging
 import os
 
 from tools.muapi_client import MuAPIClient
+
+logger = logging.getLogger(__name__)
 
 ASPECT_RATIO_MAP = {
     "1:1": {"width": 1024, "height": 1024},
@@ -59,6 +62,10 @@ class MuAPIImageGenerator:
         if self.demo:
             return _demo_image_url(prompt, aspect_ratio)
         payload = self._build_payload(prompt, aspect_ratio)
+        logger.info(
+            "Sending flux-dev-image request WITHOUT reference (prompt starts: %.80s)",
+            prompt,
+        )
         return await self.client.generate(self.IMAGE_ENDPOINT, payload, is_cancelled=is_cancelled)
 
     async def generate_image_with_reference(
@@ -71,4 +78,9 @@ class MuAPIImageGenerator:
         if self.demo:
             return _demo_image_url(prompt + "|ref", aspect_ratio)
         payload = self._build_payload(prompt, aspect_ratio, reference_url)
+        logger.info(
+            "Sending flux-dev-image request with reference: image=%s (prompt starts: %.80s)",
+            bool(payload.get("image")),
+            prompt,
+        )
         return await self.client.generate(self.IMAGE_ENDPOINT, payload, is_cancelled=is_cancelled)
