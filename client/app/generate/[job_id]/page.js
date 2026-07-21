@@ -227,7 +227,11 @@ export default function GeneratePage() {
     setEditScript((prev) => {
       if (!prev) return prev;
       const scenes = [...(prev.scenes || [])];
-      scenes[idx] = value;
+      const current = scenes[idx];
+      scenes[idx] =
+        current && typeof current === "object"
+          ? { ...current, action: value }
+          : value;
       return { ...prev, scenes };
     });
   };
@@ -389,7 +393,7 @@ export default function GeneratePage() {
                 {(editScript.scenes || []).map((scene, idx) => (
                   <textarea
                     key={idx}
-                    value={scene}
+                    value={scene && typeof scene === "object" ? scene.action || "" : scene}
                     onChange={(e) => updateSceneText(idx, e.target.value)}
                     rows={2}
                     className="w-full px-3 py-2 rounded-lg text-sm"

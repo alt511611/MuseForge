@@ -13,6 +13,7 @@ from pipelines.script2video import (
     download_video,
 )
 from tools.muapi_image_generator import MuAPIImageGenerator
+from tools.muapi_voice_generator import MuAPIVoiceGenerator, is_dialogue_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,22 @@ _WATERMARK_FONT_CANDIDATES = [
 ]
 
 
+def _scene_action(scene: Any) -> str:
+    if isinstance(scene, str):
+        return scene
+    if isinstance(scene, dict):
+        return str(scene.get("action", ""))
+    return str(getattr(scene, "action", ""))
+
+
+def _scene_dialogue(scene: Any) -> List[Any]:
+    if isinstance(scene, str):
+        return []
+    if isinstance(scene, dict):
+        return list(scene.get("dialogue") or [])
+    return list(getattr(scene, "dialogue", None) or [])
+
+
 def _find_watermark_font() -> Optional[str]:
     for path in _WATERMARK_FONT_CANDIDATES:
         if path and os.path.isfile(path):
@@ -48,42 +65,119 @@ async def add_background_music(
     video_path: str,
     output_path: str,
     music_url: Optional[str] = None,
+    dialogue_tracks: Optional[List[Dict[str, Any]]] = None,
+    scene_paths: Optional[List[str]] = None,
 ) -> str:
-    """Add background music to the final concatenated video (called once per drama)."""
+    """Mix music and timed dialogue once, with dialogue louder than music."""
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     video = None
-    audio = None
+    opened_audio = []
+    final = None
+    final_audio = None
     try:
-        from moviepy import AudioFileClip, VideoFileClip
+        from moviepy import AudioFileClip, CompositeAudioClip, VideoFileClip
 
         video = VideoFileClip(video_path)
+        dialogue_tracks = dialogue_tracks or []
+        layers = []
+
+        # Preserve source audio when present. Generated MuAPI clips are normally
+        # silent, but this avoids unexpectedly discarding audio from future models.
+        if video.audio is not None:
+            layers.append(video.audio)
+
         if music_url:
-            audio = AudioFileClip(music_url).with_duration(video.duration)
-            final = video.with_audio(audio)
+            try:
+                music = AudioFileClip(music_url).with_duration(video.duration)
+                # Dialogue remains at full level; duck music only when speech exists.
+                if dialogue_tracks:
+                    music = music.with_volume_scaled(0.2)
+                opened_audio.append(music)
+                layers.append(music)
+            except Exception as exc:
+                logger.warning("Music track could not be loaded; continuing without it: %s", exc)
+
+        scene_durations: List[float] = []
+        for path in scene_paths or []:
+            scene_clip = None
+            try:
+                scene_clip = VideoFileClip(path)
+                scene_durations.append(float(scene_clip.duration or 0))
+            except Exception:
+                scene_durations.append(0.0)
+            finally:
+                if scene_clip is not None:
+                    scene_clip.close()
+
+        scene_starts: List[float] = []
+        elapsed = 0.0
+        for duration in scene_durations:
+            scene_starts.append(elapsed)
+            elapsed += duration
+        line_offsets: Dict[int, float] = {}
+
+        for track in dialogue_tracks:
+            dialogue = None
+            try:
+                scene_index = int(track.get("scene_index", 0))
+                scene_start = (
+                    scene_starts[scene_index]
+                    if 0 <= scene_index < len(scene_starts)
+                    else 0.0
+                )
+                local_start = line_offsets.get(scene_index, 0.0)
+                dialogue = AudioFileClip(track["audio_url"])
+                available = (
+                    scene_durations[scene_index] - local_start
+                    if 0 <= scene_index < len(scene_durations)
+                    else video.duration - scene_start - local_start
+                )
+                if available <= 0:
+                    dialogue.close()
+                    continue
+                if dialogue.duration > available:
+                    dialogue = dialogue.subclipped(0, available)
+                dialogue = dialogue.with_start(scene_start + local_start)
+                opened_audio.append(dialogue)
+                layers.append(dialogue)
+                line_offsets[scene_index] = local_start + float(dialogue.duration or 0) + 0.2
+            except Exception as exc:
+                if dialogue is not None:
+                    try:
+                        dialogue.close()
+                    except Exception:
+                        pass
+                logger.warning("Dialogue track could not be mixed; skipping it: %s", exc)
+
+        if layers:
+            final_audio = CompositeAudioClip(layers).with_duration(video.duration)
+            final = video.with_audio(final_audio)
         else:
             final = video
         final.write_videofile(output_path, codec="libx264", audio_codec="aac", logger=None)
-        final.close()
-    except Exception:
+    except Exception as exc:
+        logger.warning("Audio mixing failed; shipping silent/source video: %s", exc)
         with open(video_path, "rb") as src:
             data = src.read()
         with open(output_path, "wb") as dst:
             dst.write(data)
     finally:
-        # Found via a free (no-cost) audit: if VideoFileClip() opened
-        # successfully but AudioFileClip(music_url) then failed (invalid/
-        # expired music URL, network blip), the code previously jumped
-        # straight to the except block without ever closing `video` --
-        # leaking its underlying ffmpeg subprocess. Under sustained real
-        # usage with any nonzero music-generation failure rate, each such
-        # failure would leak one process/file handle, compounding over
-        # time -- directly relevant right after fixing an actual OOM crash.
+        if final is not None and final is not video:
+            try:
+                final.close()
+            except Exception:
+                pass
+        if final_audio is not None:
+            try:
+                final_audio.close()
+            except Exception:
+                pass
         if video is not None:
             try:
                 video.close()
             except Exception:
                 pass
-        if audio is not None:
+        for audio in opened_audio:
             try:
                 audio.close()
             except Exception:
@@ -272,6 +366,7 @@ class Idea2VideoPipeline:
         music_url: Optional[str] = None,
         plan: str = "free",
         is_cancelled: Optional[Callable[[], bool]] = None,
+        dialogue_tracks: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Concatenate all scene videos, add background music, then watermark
         (Free plan only) — exactly once per drama.
@@ -300,7 +395,16 @@ class Idea2VideoPipeline:
             await progress_callback("music", "Adding background music", 93)
 
         with_music_path = os.path.join(working_dir, "drama_with_music.mp4")
-        await add_background_music(concatenated_path, with_music_path, music_url)
+        if dialogue_tracks:
+            await add_background_music(
+                concatenated_path,
+                with_music_path,
+                music_url,
+                dialogue_tracks=dialogue_tracks,
+                scene_paths=scene_paths,
+            )
+        else:
+            await add_background_music(concatenated_path, with_music_path, music_url)
 
         final_path = os.path.join(working_dir, "drama_final.mp4")
         if plan in WATERMARK_PLANS:
@@ -394,11 +498,16 @@ class Idea2VideoPipeline:
 
         scene_paths: List[str] = []
         scene_results: List[Dict[str, Any]] = []
+        dialogue_tracks: List[Dict[str, Any]] = []
+        dialogue_requested = is_dialogue_enabled() and not self.demo
+        voice_gen = MuAPIVoiceGenerator(self.api_key, demo=self.demo) if dialogue_requested else None
         total_scenes = max(1, len(script.scenes))
 
-        for idx, scene_script in enumerate(script.scenes):
+        for idx, scene in enumerate(script.scenes):
             _check_cancel()
             base_pct = 15 + (idx / total_scenes) * 65
+            scene_script = _scene_action(scene)
+            scene_dialogue = _scene_dialogue(scene)
 
             async def scene_progress(stage, message, pct, data=None, _base=base_pct):
                 scaled = _base + (pct / 100) * (65 / total_scenes)
@@ -421,11 +530,34 @@ class Idea2VideoPipeline:
                 setting_location=getattr(script, "setting_location", "") or "",
                 setting_time_of_day=getattr(script, "setting_time_of_day", "") or "",
                 setting_era=getattr(script, "setting_era", "") or "",
+                has_dialogue=dialogue_requested and bool(scene_dialogue),
             )
+            assembled_scene_index = None
             if scene_result.get("path"):
                 scene_paths.append(scene_result["path"])
+                assembled_scene_index = len(scene_paths) - 1
+
+            if voice_gen is not None and scene_dialogue and assembled_scene_index is not None:
+                _check_cancel()
+                try:
+                    generated_tracks = await voice_gen.generate_scene_dialogue(
+                        scene_dialogue,
+                        is_cancelled=is_cancelled,
+                    )
+                    for track in generated_tracks:
+                        dialogue_tracks.append(
+                            {**track, "scene_index": assembled_scene_index}
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Scene %s dialogue failed, continuing without its voice layer: %s",
+                        idx + 1,
+                        exc,
+                    )
+
+            serialized_scene = scene.model_dump() if hasattr(scene, "model_dump") else scene
             scene_results.append(
-                {"index": idx, "script": scene_script, "shots": scene_result.get("shots", [])}
+                {"index": idx, "script": serialized_scene, "shots": scene_result.get("shots", [])}
             )
 
         _check_cancel()
@@ -466,6 +598,7 @@ class Idea2VideoPipeline:
                 music_url,
                 plan,
                 is_cancelled=is_cancelled,
+                dialogue_tracks=dialogue_tracks,
             )
             # Persist final video to Supabase Storage (signed URL) when available.
             if final_path and os.path.isfile(final_path):
@@ -511,6 +644,7 @@ class Idea2VideoPipeline:
             "aspect_ratio": aspect_ratio,
             "demo": self.demo,
             "music_enabled": bool(music_url) if not self.demo else False,
+            "dialogue_enabled": bool(dialogue_tracks) if not self.demo else False,
             "plan": plan,
             "setting_location": getattr(script, "setting_location", "") or "",
             "setting_time_of_day": getattr(script, "setting_time_of_day", "") or "",
