@@ -216,6 +216,7 @@ create policy "service_manage_stripe_events"
 -- decision (server/pipelines/idea2video.py: WATERMARK_PLANS) is reproducible
 -- even if the user later upgrades/downgrades.
 alter table public.jobs add column if not exists music_enabled boolean default false;
+alter table public.jobs add column if not exists dialogue_enabled boolean default false;
 alter table public.jobs add column if not exists plan text default 'free';
 
 -- Creator's real scene cap is 3 (was 5 — "Priority render" and "3 team
