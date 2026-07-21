@@ -131,7 +131,11 @@ async def test_pipeline_routes_structured_dialogue_to_voice_layer(tmp_path, monk
         ],
     )
 
-    await pipeline.continue_from_script(script, working_dir=str(tmp_path / "job"))
+    await pipeline.continue_from_script(
+        script,
+        working_dir=str(tmp_path / "job"),
+        dialogue_enabled=True,
+    )
 
     scene_call = pipeline.script2video.run.await_args.kwargs
     assembly_call = pipeline._assemble_final_drama.await_args.kwargs

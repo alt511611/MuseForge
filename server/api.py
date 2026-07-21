@@ -28,6 +28,7 @@ from auth import (
     get_optional_user,
 )
 from interfaces.camera import DIRECTOR_STYLES
+from tools.muapi_voice_generator import is_dialogue_enabled
 from jobs import (
     JOBS_DIR,
     JobStatus,
@@ -191,6 +192,9 @@ class GenerateRequest(BaseModel):
     # plans (checked server-side against the caller's actual plan) — silently
     # ignored for free/anonymous requests rather than erroring.
     music_enabled: bool = False
+    # Optional character dialogue. Pro-only and additionally protected by
+    # MUSEFORGE_DIALOGUE_ENABLED so the infrastructure can be disabled globally.
+    dialogue_enabled: bool = False
     # When True: write script only, pause for user edit/approve. No credits
     # charged until POST /api/jobs/{id}/approve-script.
     require_script_approval: bool = False
@@ -324,6 +328,7 @@ async def estimate(req: EstimateRequest):
 # copy) unless there's an actual enforcement mechanism behind it.
 PLAN_MAX_SCENES = {"free": 3, "creator": 3, "pro": 5}
 MUSIC_EXTRA_CREDIT_COST = 1  # flat surcharge on top of scene credits, Creator/Pro only
+DIALOGUE_EXTRA_CREDIT_COST = 1  # per scene, Pro only
 
 
 async def _get_user_plan(user_id: str) -> str:
@@ -454,6 +459,7 @@ async def generate(
     # bad script for free.
     plan = "free"
     music_enabled = False
+    dialogue_enabled = False
     if current_user and not demo:
         plan = await _get_user_plan(current_user.user_id)
 
@@ -467,9 +473,24 @@ async def generate(
         # Optional background music — Creator/Pro only. Free/anonymous requests
         # that send music_enabled=True are silently ignored, not rejected.
         music_enabled = bool(req.music_enabled) and plan in ("creator", "pro")
+        # Dialogue is intentionally Pro-only. Both the deployment-level feature
+        # flag and the per-request opt-in must be enabled.
+        dialogue_enabled = (
+            bool(req.dialogue_enabled)
+            and plan == "pro"
+            and is_dialogue_enabled()
+        )
 
         if not req.require_script_approval:
-            credit_cost = req.num_scenes + (MUSIC_EXTRA_CREDIT_COST if music_enabled else 0)
+            credit_cost = (
+                req.num_scenes
+                + (MUSIC_EXTRA_CREDIT_COST if music_enabled else 0)
+                + (
+                    req.num_scenes * DIALOGUE_EXTRA_CREDIT_COST
+                    if dialogue_enabled
+                    else 0
+                )
+            )
             ok = await _deduct_credits(current_user.user_id, credit_cost, "video_generation")
             if not ok:
                 raise HTTPException(
@@ -490,6 +511,7 @@ async def generate(
         character_image=req.character_image,
         character_name=req.character_name,
         music_enabled=music_enabled,
+        dialogue_enabled=dialogue_enabled,
         plan=plan,
         require_script_approval=bool(req.require_script_approval),
     )
@@ -702,7 +724,15 @@ async def approve_script(
 
     # Charge credits here — script phase was free.
     if current_user and not demo and job.user_id:
-        credit_cost = job.num_scenes + (MUSIC_EXTRA_CREDIT_COST if job.music_enabled else 0)
+        credit_cost = (
+            job.num_scenes
+            + (MUSIC_EXTRA_CREDIT_COST if job.music_enabled else 0)
+            + (
+                job.num_scenes * DIALOGUE_EXTRA_CREDIT_COST
+                if job.dialogue_enabled
+                else 0
+            )
+        )
         ok = await _deduct_credits(
             job.user_id, credit_cost, "video_generation", job_id=job.id
         )
@@ -836,6 +866,7 @@ async def admin_retry_job(
         user_id=old.user_id,
         user_email=old.user_email,
         music_enabled=old.music_enabled,
+        dialogue_enabled=old.dialogue_enabled,
         plan=old.plan,
     )
     api_key = os.environ.get("MUAPI_KEY", "")

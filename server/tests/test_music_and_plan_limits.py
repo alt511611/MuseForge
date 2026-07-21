@@ -165,6 +165,116 @@ async def test_music_enabled_adds_flat_surcharge_for_creator():
         deduct_mock.assert_awaited_once_with("user-music-creator", 3, "video_generation")
 
 
+@pytest.mark.parametrize("plan", ["free", "creator"])
+@pytest.mark.asyncio
+async def test_dialogue_enabled_silently_ignored_below_pro(plan):
+    """Free/Creator requests cannot activate or pay for the Pro dialogue layer."""
+    import api as _api
+    from fastapi.testclient import TestClient
+
+    deduct_mock = AsyncMock(return_value=True)
+    user_id = f"user-dialogue-{plan}"
+
+    with patch.object(_api, "DEMO_FLAG", False), \
+         patch.dict(
+             os.environ,
+             {"MUAPI_KEY": "real_key", "MUSEFORGE_DIALOGUE_ENABLED": "1"},
+         ), \
+         patch.object(_api, "_get_user_plan", AsyncMock(return_value=plan)), \
+         patch.object(_api, "_deduct_credits", deduct_mock), \
+         patch.object(_api, "run_generation_job", AsyncMock()), \
+         _patch_auth_user(user_id=user_id):
+
+        tc = TestClient(_api.app, raise_server_exceptions=False)
+        resp = tc.post(
+            "/api/generate",
+            json={
+                "idea": "Two travelers argue at a moonlit station",
+                "num_scenes": 2,
+                "dialogue_enabled": True,
+            },
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 200
+        deduct_mock.assert_awaited_once_with(user_id, 2, "video_generation")
+        job = _api.job_store.get(resp.json()["job_id"])
+        assert job is not None
+        assert job.dialogue_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_dialogue_enabled_adds_per_scene_surcharge_for_pro():
+    """Pro dialogue costs one extra credit for every requested scene."""
+    import api as _api
+    from fastapi.testclient import TestClient
+
+    deduct_mock = AsyncMock(return_value=True)
+
+    with patch.object(_api, "DEMO_FLAG", False), \
+         patch.dict(
+             os.environ,
+             {"MUAPI_KEY": "real_key", "MUSEFORGE_DIALOGUE_ENABLED": "1"},
+         ), \
+         patch.object(_api, "_get_user_plan", AsyncMock(return_value="pro")), \
+         patch.object(_api, "_deduct_credits", deduct_mock), \
+         patch.object(_api, "run_generation_job", AsyncMock()), \
+         _patch_auth_user(user_id="user-dialogue-pro"):
+
+        tc = TestClient(_api.app, raise_server_exceptions=False)
+        resp = tc.post(
+            "/api/generate",
+            json={
+                "idea": "Two travelers argue at a moonlit station",
+                "num_scenes": 3,
+                "dialogue_enabled": True,
+            },
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 200
+        # 3 scene credits + 3 dialogue credits.
+        deduct_mock.assert_awaited_once_with(
+            "user-dialogue-pro", 6, "video_generation"
+        )
+        job = _api.job_store.get(resp.json()["job_id"])
+        assert job is not None
+        assert job.dialogue_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_dialogue_request_needs_infrastructure_flag():
+    """A Pro request alone cannot bypass the deployment-level kill switch."""
+    import api as _api
+    from fastapi.testclient import TestClient
+
+    deduct_mock = AsyncMock(return_value=True)
+
+    with patch.object(_api, "DEMO_FLAG", False), \
+         patch.dict(os.environ, {"MUAPI_KEY": "real_key"}, clear=True), \
+         patch.object(_api, "_get_user_plan", AsyncMock(return_value="pro")), \
+         patch.object(_api, "_deduct_credits", deduct_mock), \
+         patch.object(_api, "run_generation_job", AsyncMock()), \
+         _patch_auth_user(user_id="user-dialogue-kill-switch"):
+
+        tc = TestClient(_api.app, raise_server_exceptions=False)
+        resp = tc.post(
+            "/api/generate",
+            json={
+                "idea": "Two travelers argue at a moonlit station",
+                "num_scenes": 2,
+                "dialogue_enabled": True,
+            },
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 200
+        deduct_mock.assert_awaited_once_with(
+            "user-dialogue-kill-switch", 2, "video_generation"
+        )
+        assert _api.job_store.get(resp.json()["job_id"]).dialogue_enabled is False
+
+
 @pytest.mark.asyncio
 async def test_music_never_triggers_in_demo_mode():
     """Demo mode requests never touch plan lookup or credit deduction."""

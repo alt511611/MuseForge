@@ -40,6 +40,8 @@ STALE_JOB_ERROR = "Orphaned (server restart or timeout)"
 PIPELINE_HARD_TIMEOUT_SECONDS = int(
     os.environ.get("MUSEFORGE_PIPELINE_HARD_TIMEOUT", "1200")
 )
+# Keep aligned with server/api.py. Dialogue is charged per requested scene.
+DIALOGUE_EXTRA_CREDIT_COST = 1
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
@@ -87,6 +89,7 @@ def _sb_row(job: "Job") -> dict:
         "user_requirement": job.user_requirement,
         "demo": job.demo,
         "music_enabled": job.music_enabled,
+        "dialogue_enabled": job.dialogue_enabled,
         "plan": job.plan,
         "status": job.status.value,
         "result": job.result,
@@ -108,6 +111,7 @@ def _sb_row_to_dict(row: dict) -> dict:
         "num_scenes": row.get("num_scenes", 3),
         "demo": row.get("demo", False),
         "music_enabled": row.get("music_enabled", False),
+        "dialogue_enabled": row.get("dialogue_enabled", False),
         "plan": row.get("plan", "free"),
         "user_id": row.get("user_id"),
         "user_email": row.get("user_email"),
@@ -280,6 +284,7 @@ class Job:
     character_image: Optional[str] = None
     character_name: str = ""
     music_enabled: bool = False
+    dialogue_enabled: bool = False
     plan: str = "free"
     require_script_approval: bool = False
     events: List[JobEvent] = field(default_factory=list)
@@ -302,6 +307,7 @@ class Job:
             "user_id": self.user_id,
             "user_email": self.user_email,
             "music_enabled": self.music_enabled,
+            "dialogue_enabled": self.dialogue_enabled,
             "plan": self.plan,
             "require_script_approval": self.require_script_approval,
             "events": [e.to_dict() for e in self.events] if include_events else [],
@@ -552,7 +558,15 @@ async def stale_job_reaper_loop() -> None:
 # ── Generation runner ──────────────────────────────────────────────────────────
 
 def _job_refund_amount(job: Job) -> int:
-    return job.num_scenes + (1 if job.music_enabled else 0)
+    return (
+        job.num_scenes
+        + (1 if job.music_enabled else 0)
+        + (
+            job.num_scenes * DIALOGUE_EXTRA_CREDIT_COST
+            if job.dialogue_enabled
+            else 0
+        )
+    )
 
 
 async def run_generation_job(job: Job, api_key: str):
@@ -647,6 +661,7 @@ async def run_generation_job(job: Job, api_key: str):
                 is_cancelled=is_cancelled,
                 character_portraits_override=character_portraits_override or None,
                 music_enabled=job.music_enabled,
+                dialogue_enabled=job.dialogue_enabled,
                 plan=job.plan,
             ),
             timeout=PIPELINE_HARD_TIMEOUT_SECONDS,
@@ -733,6 +748,7 @@ async def run_continue_from_script_job(job: Job, api_key: str, script_data: Dict
                 is_cancelled=is_cancelled,
                 character_portraits_override=portraits_override,
                 music_enabled=job.music_enabled,
+                dialogue_enabled=job.dialogue_enabled,
                 plan=job.plan,
             ),
             timeout=PIPELINE_HARD_TIMEOUT_SECONDS,

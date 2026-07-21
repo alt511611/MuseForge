@@ -453,6 +453,7 @@ class Idea2VideoPipeline:
         is_cancelled: Optional[Callable[[], bool]] = None,
         character_portraits_override: Optional[Dict[str, str]] = None,
         music_enabled: bool = False,
+        dialogue_enabled: bool = False,
         plan: str = "free",
     ) -> dict:
         """Phase B: everything after screenwriting (portraits → scenes → assemble)."""
@@ -499,7 +500,9 @@ class Idea2VideoPipeline:
         scene_paths: List[str] = []
         scene_results: List[Dict[str, Any]] = []
         dialogue_tracks: List[Dict[str, Any]] = []
-        dialogue_requested = is_dialogue_enabled() and not self.demo
+        dialogue_requested = (
+            dialogue_enabled and is_dialogue_enabled() and not self.demo
+        )
         voice_gen = MuAPIVoiceGenerator(self.api_key, demo=self.demo) if dialogue_requested else None
         total_scenes = max(1, len(script.scenes))
 
@@ -665,6 +668,7 @@ class Idea2VideoPipeline:
         is_cancelled: Optional[Callable[[], bool]] = None,
         character_portraits_override: Optional[Dict[str, str]] = None,
         music_enabled: bool = False,
+        dialogue_enabled: bool = False,
         plan: str = "free",
     ) -> dict:
         """Full end-to-end run (script + production). Default path unchanged."""
@@ -688,5 +692,6 @@ class Idea2VideoPipeline:
             is_cancelled=is_cancelled,
             character_portraits_override=character_portraits_override,
             music_enabled=music_enabled,
+            dialogue_enabled=dialogue_enabled,
             plan=plan,
         )
