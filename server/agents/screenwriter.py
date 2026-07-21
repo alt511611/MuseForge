@@ -6,7 +6,7 @@ import os
 import re
 from typing import List, Optional
 
-from interfaces.character import CharacterProfile, DramaScript
+from interfaces.character import CharacterProfile, DramaScript, ScriptScene
 from tools.claude_via_muapi import complete_via_muapi
 
 logger = logging.getLogger(__name__)
@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 class ScreenwriterAgent:
     SYSTEM_PROMPT = """You are an award-winning screenwriter specializing in micro-dramas and cinematic short films.
 Given a user's idea, write a compelling script broken into 3-5 short scenes (each 1-2 sentences of action).
+For every scene, write the exact spoken dialogue as character/line pairs. Use an empty dialogue list for silent scenes.
 Extract named characters with visual descriptions for AI image generation.
 Also define ONE locked setting for the ENTIRE drama (not per scene): location, time of day, and era.
 Every scene must take place in that same setting — do not invent a different place or time per scene.
@@ -28,7 +29,13 @@ Respond ONLY with valid JSON matching this schema:
   "setting_time_of_day": "e.g. sunset, night, midday",
   "setting_era": "e.g. present day, 1950s",
   "characters": [{"name": "string", "description": "visual appearance for AI", "role": "protagonist|antagonist|supporting"}],
-  "scenes": ["scene 1 action...", "scene 2 action..."]
+  "scenes": [
+    {
+      "action": "scene 1 action...",
+      "dialogue": [{"character": "Kemal", "line": "The exact words Kemal says."}]
+    },
+    {"action": "silent scene action...", "dialogue": []}
+  ]
 }"""
 
     def __init__(self, api_key: Optional[str] = None, demo: bool = False):
@@ -134,7 +141,10 @@ Respond ONLY with valid JSON matching this schema:
             f"The aftermath: consequences ripple through the environment.",
             f"Final frame: {protagonist} walks away, transformed.",
         ]
-        scenes = scene_templates[: max(2, min(num_scenes, 5))]
+        scenes = [
+            ScriptScene(action=action, dialogue=[])
+            for action in scene_templates[: max(2, min(num_scenes, 5))]
+        ]
 
         return DramaScript(
             title=title,

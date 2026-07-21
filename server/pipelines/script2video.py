@@ -44,6 +44,7 @@ def build_frame_prompt(
     setting_location: str = "",
     setting_time_of_day: str = "",
     setting_era: str = "",
+    has_dialogue: bool = False,
 ) -> str:
     """Build the image prompt for a shot, injecting locked setting when present.
 
@@ -67,9 +68,15 @@ def build_frame_prompt(
         )
     else:
         setting_clause = ""
+    dialogue_clause = (
+        "For this dialogue shot, the speaking character's mouth should be "
+        "naturally obscured, shown in profile, or not be the focal point. "
+        if has_dialogue
+        else ""
+    )
     return (
         f"{style} style. {setting_clause}{shot.visual_desc}. "
-        f"Shot type: {shot.shot_type}. Lens: {shot.lens}."
+        f"{dialogue_clause}Shot type: {shot.shot_type}. Lens: {shot.lens}."
     )
 
 
@@ -223,6 +230,7 @@ class Script2VideoPipeline:
         setting_location: str = "",
         setting_time_of_day: str = "",
         setting_era: str = "",
+        has_dialogue: bool = False,
     ) -> Dict[str, Any]:
         os.makedirs(working_dir, exist_ok=True)
         portraits = character_portraits or {}
@@ -311,6 +319,7 @@ class Script2VideoPipeline:
                         setting_location=setting_location,
                         setting_time_of_day=setting_time_of_day,
                         setting_era=setting_era,
+                        has_dialogue=has_dialogue,
                     )
 
                     async with progress_lock:
