@@ -32,6 +32,14 @@ def format_expected_setting(
     return ", ".join(p.strip() for p in (location, time_of_day, era) if (p or "").strip())
 
 
+def _truncate_issue(issue: str, max_words: int = 15) -> str:
+    """Defensively cap the issue text -- the prompt asks for <=15 words but
+    nothing stops a model from ignoring that, and this string gets appended
+    verbatim into a downstream image-generation prompt."""
+    words = (issue or "").strip().split()
+    return " ".join(words[:max_words])
+
+
 async def verify_frame(
     frame_url: str,
     expected_character_desc: str,
@@ -40,11 +48,15 @@ async def verify_frame(
 ) -> Dict[str, Any]:
     """Ask Claude vision whether the frame matches character + setting.
 
-    Returns ``{"character_ok": bool, "setting_ok": bool}``.
-    On missing key / network / parse failure: both True (fail-open).
+    Returns ``{"character_ok": bool, "setting_ok": bool, "issue": str}``.
+    ``issue`` is a short (<=15 word) description of what's wrong, populated
+    only when either flag is false -- callers use it to target a repair
+    regeneration instead of blindly retrying with the same prompt.
+    On missing key / network / parse failure: both flags True, issue ""
+    (fail-open).
     """
     if not anthropic_api_key or not frame_url:
-        return {"character_ok": True, "setting_ok": True}
+        return {"character_ok": True, "setting_ok": True, "issue": ""}
 
     char_hint = (expected_character_desc or "").strip() or "the main character"
     setting_hint = (expected_setting or "").strip() or "the established setting"
@@ -54,10 +66,14 @@ async def verify_frame(
         f"Expected character: {char_hint}\n"
         f"Expected setting (location / time / era): {setting_hint}\n"
         "Reply ONLY with JSON: "
-        '{"character_ok": true|false, "setting_ok": true|false}\n'
+        '{"character_ok": true|false, "setting_ok": true|false, "issue": "string"}\n'
         "character_ok=true if the person roughly matches the description. "
         "setting_ok=true if the place/time of day roughly matches. "
-        "When unsure, prefer true."
+        "When unsure, prefer true. "
+        "If either flag is false, set issue to ONE short sentence (max 15 "
+        "words) describing the SPECIFIC visual problem, e.g. "
+        "\"the character's coat color doesn't match the reference\". "
+        "If both flags are true, set issue to an empty string."
     )
 
     try:
@@ -95,12 +111,16 @@ async def verify_frame(
             text = resp.json()["content"][0]["text"]
             match = re.search(r"\{[\s\S]*\}", text)
             if not match:
-                return {"character_ok": True, "setting_ok": True}
+                return {"character_ok": True, "setting_ok": True, "issue": ""}
             data = json.loads(match.group())
+            character_ok = bool(data.get("character_ok", True))
+            setting_ok = bool(data.get("setting_ok", True))
+            issue = _truncate_issue(data.get("issue", "")) if not (character_ok and setting_ok) else ""
             return {
-                "character_ok": bool(data.get("character_ok", True)),
-                "setting_ok": bool(data.get("setting_ok", True)),
+                "character_ok": character_ok,
+                "setting_ok": setting_ok,
+                "issue": issue,
             }
     except Exception as exc:
         logger.warning("character/setting QA failed (fail-open): %s", exc)
-        return {"character_ok": True, "setting_ok": True}
+        return {"character_ok": True, "setting_ok": True, "issue": ""}

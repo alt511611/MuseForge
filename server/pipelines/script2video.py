@@ -260,6 +260,7 @@ class Script2VideoPipeline:
         async def _process_shot(i: int, shot) -> None:
             nonlocal completed_count
             async with semaphore:
+                qa_result: Dict[str, Any] = {}
                 try:
                     _check_cancel()
 
@@ -318,6 +319,49 @@ class Script2VideoPipeline:
 
                     shot.frame_url = frame_url
 
+                    # Audit & targeted repair (adapted from Virginia Tech's
+                    # "Audit & Repair" technique): on QA failure, fix the
+                    # SPECIFIC reported issue with one corrective re-send
+                    # rather than blindly regenerating the whole frame from
+                    # scratch. Only character-referenced shots can be
+                    # repaired this way (flux-pulid needs the reference
+                    # image); a single repair attempt, fail-open throughout.
+                    if qa_enabled and frame_url and anthropic_key:
+                        char_desc = matched_char.static_features if matched_char else ""
+                        qa_result = await verify_frame(
+                            frame_url=frame_url,
+                            expected_character_desc=char_desc,
+                            expected_setting=expected_setting,
+                            anthropic_api_key=anthropic_key,
+                        )
+                        qa_failed = not qa_result.get(
+                            "character_ok", True
+                        ) or not qa_result.get("setting_ok", True)
+                        issue = (qa_result.get("issue") or "").strip()
+                        if qa_failed and reference_url and issue:
+                            _check_cancel()
+                            repair_prompt = (
+                                f"{frame_prompt} IMPORTANT CORRECTION: {issue}"
+                            )
+                            try:
+                                frame_url = await self.image_gen.generate_image_with_reference(
+                                    repair_prompt,
+                                    reference_url,
+                                    aspect_ratio,
+                                    is_cancelled=is_cancelled,
+                                )
+                                shot.frame_url = frame_url
+                            except Exception as exc:
+                                # Fail-open: keep the original (flagged) frame
+                                # rather than blocking the shot on a failed
+                                # repair attempt.
+                                logger.warning(
+                                    "QA repair regeneration failed for shot %s, "
+                                    "keeping original frame: %s",
+                                    i,
+                                    exc,
+                                )
+
                     _check_cancel()
                     async with progress_lock:
                         await progress("video", f"Animating shot {i + 1}/{len(shots)}", 50 + i * 5)
@@ -344,19 +388,16 @@ class Script2VideoPipeline:
                 # or did MuAPI itself drift?) instead of guessing blind.
                 meta["reference_character"] = matched_char.name if matched_char else None
 
-                # Optional character + setting QA (same Claude vision call).
-                if qa_enabled and frame_url and anthropic_key:
-                    char_desc = matched_char.static_features if matched_char else ""
-                    qa = await verify_frame(
-                        frame_url=frame_url,
-                        expected_character_desc=char_desc,
-                        expected_setting=expected_setting,
-                        anthropic_api_key=anthropic_key,
-                    )
-                    if not qa.get("character_ok", True):
+                # QA/repair already ran above (before video generation) so a
+                # detected issue could actually be fixed in the frame that
+                # gets animated, instead of just reported after the fact.
+                if qa_result:
+                    if not qa_result.get("character_ok", True):
                         meta["character_qa_warning"] = True
-                    if not qa.get("setting_ok", True):
+                    if not qa_result.get("setting_ok", True):
                         meta["setting_qa_warning"] = True
+                    if qa_result.get("issue"):
+                        meta["qa_issue"] = qa_result["issue"]
 
                 shot_meta[i] = meta
 
