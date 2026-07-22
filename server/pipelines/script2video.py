@@ -453,7 +453,6 @@ class Script2VideoPipeline:
                 # QA/repair already ran above (before video generation) so a
                 # detected issue could actually be fixed in the frame that
                 # gets animated, instead of just reported after the fact.
-                if qa_result:
                 # Final QA outcome after all retry attempts (fail-open:
                 # we always proceed with whichever frame we ended up with,
                 # even if QA never passed -- this NEVER fails the job,
