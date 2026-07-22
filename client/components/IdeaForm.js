@@ -151,7 +151,12 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
     fetch(`${API_BASE}/api/estimate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ num_scenes: numScenes }),
+      body: JSON.stringify({
+        num_scenes: numScenes,
+        music_enabled: musicEligible && musicEnabled,
+        dialogue_enabled: false,
+        plan: plan || "free",
+      }),
     })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => !cancelled && d && setEstimate(d))
@@ -159,7 +164,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
     return () => {
       cancelled = true;
     };
-  }, [numScenes]);
+  }, [numScenes, musicEligible, musicEnabled, plan]);
 
   const handlePhotoUpload = (e) => {
     const file = e.target.files?.[0];
@@ -485,34 +490,50 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
         </button>
       </div>
 
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4 text-xs" style={{ color: "#64748b" }}>
-        <span className="inline-flex items-center gap-1.5">
-          <Clock size={13} />
-          {estimate
-            ? t("form_est_render", {
-                label: estimate.estimated_label,
-                frames: estimate.asset_count.frames,
-                clips: estimate.asset_count.clips,
-              })
-            : t("form_est_loading")}
-        </span>
-        {demoMode ? (
-          <span
-            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full"
-            style={{ backgroundColor: "rgba(124,58,237,0.15)", color: "#a78bfa" }}
-          >
-            <FlaskConical size={11} /> {t("form_demo_badge")}
+      <div className="flex flex-col gap-1.5 mb-4 text-xs" style={{ color: "#64748b" }}>
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+          <span className="inline-flex items-center gap-1.5">
+            <Clock size={13} />
+            {estimate
+              ? t("form_est_render", {
+                  label: estimate.estimated_label,
+                  frames: estimate.asset_count.frames,
+                  clips: estimate.asset_count.clips,
+                })
+              : t("form_est_loading")}
           </span>
-        ) : (
-          <span
-            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full"
-            style={{ backgroundColor: "rgba(251,191,36,0.12)", color: "#fbbf24" }}
-          >
-            <Sparkles size={11} />{" "}
-            {musicEligible && musicEnabled
-              ? t("form_credit_cost", { n: numScenes + 1 })
-              : t("form_credit_cost", { n: numScenes })}
-          </span>
+          {demoMode ? (
+            <span
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full"
+              style={{ backgroundColor: "rgba(124,58,237,0.15)", color: "#a78bfa" }}
+            >
+              <FlaskConical size={11} /> {t("form_demo_badge")}
+            </span>
+          ) : (
+            <span
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full"
+              style={{ backgroundColor: "rgba(251,191,36,0.12)", color: "#fbbf24" }}
+            >
+              <Sparkles size={11} />{" "}
+              {t("form_credit_cost", {
+                n:
+                  typeof estimate?.total_credits === "number"
+                    ? estimate.total_credits
+                    : musicEligible && musicEnabled
+                      ? numScenes + 1
+                      : numScenes,
+              })}
+            </span>
+          )}
+        </div>
+        {!demoMode && Array.isArray(estimate?.breakdown) && estimate.breakdown.length > 0 && (
+          <ul className="sm:self-end space-y-0.5 text-[11px] leading-relaxed" style={{ color: "#64748b" }}>
+            {estimate.breakdown.map((row) => (
+              <li key={row.label}>
+                {row.label}: {row.credits}
+              </li>
+            ))}
+          </ul>
         )}
       </div>
 

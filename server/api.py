@@ -222,6 +222,61 @@ class ApproveScriptRequest(BaseModel):
 
 class EstimateRequest(BaseModel):
     num_scenes: int = Field(default=3, ge=2, le=5)
+    music_enabled: bool = False
+    dialogue_enabled: bool = False
+    # Client-supplied plan for the credit breakdown preview. The generate
+    # path always re-checks the caller's real plan server-side; spoofing
+    # here only changes the displayed estimate, not billing.
+    plan: str = "free"
+
+
+# ── Plan helpers ──────────────────────────────────────────────────────────────
+
+# Real, currently-enforced plan differentiators. Keep in sync with
+# supabase_migration.sql's public.plan_limits view and client/lib/i18n
+# plan_*_features strings. Do NOT add a plan feature here (or to the pricing
+# copy) unless there's an actual enforcement mechanism behind it.
+PLAN_MAX_SCENES = {"free": 3, "creator": 3, "pro": 5}
+MUSIC_EXTRA_CREDIT_COST = 1  # flat surcharge on top of scene credits, Creator/Pro only
+DIALOGUE_EXTRA_CREDIT_COST = 1  # per scene, Pro only
+
+
+def build_credit_breakdown(
+    num_scenes: int,
+    *,
+    music_enabled: bool = False,
+    dialogue_enabled: bool = False,
+    plan: str = "free",
+) -> dict:
+    """Line-item credit cost matching what /api/generate will charge.
+
+    Only includes surcharges that would actually apply (flag on + plan
+    eligible + dialogue feature flag). Closed options are omitted entirely.
+    """
+    plan = (plan or "free").lower()
+    music_on = bool(music_enabled) and plan in ("creator", "pro")
+    dialogue_on = (
+        bool(dialogue_enabled) and plan == "pro" and is_dialogue_enabled()
+    )
+
+    breakdown = [
+        {
+            "label": f"Temel üretim ({num_scenes} sahne)",
+            "credits": num_scenes,
+        }
+    ]
+    total = num_scenes
+
+    if music_on:
+        breakdown.append({"label": "Müzik", "credits": MUSIC_EXTRA_CREDIT_COST})
+        total += MUSIC_EXTRA_CREDIT_COST
+
+    if dialogue_on:
+        dialogue_credits = num_scenes * DIALOGUE_EXTRA_CREDIT_COST
+        breakdown.append({"label": "Diyalog", "credits": dialogue_credits})
+        total += dialogue_credits
+
+    return {"total_credits": total, "breakdown": breakdown}
 
 
 # ── Public endpoints ──────────────────────────────────────────────────────────
@@ -307,6 +362,12 @@ async def director_styles():
 async def estimate(req: EstimateRequest):
     demo = _is_demo()
     seconds = 5 if demo else int(req.num_scenes * SECONDS_PER_SCENE)
+    credits = build_credit_breakdown(
+        req.num_scenes,
+        music_enabled=req.music_enabled,
+        dialogue_enabled=req.dialogue_enabled,
+        plan=req.plan,
+    )
     return {
         "num_scenes": req.num_scenes,
         "estimated_seconds": seconds,
@@ -317,18 +378,9 @@ async def estimate(req: EstimateRequest):
             "clips": req.num_scenes,
         },
         "demo": demo,
+        "total_credits": credits["total_credits"],
+        "breakdown": credits["breakdown"],
     }
-
-
-# ── Plan helpers ──────────────────────────────────────────────────────────────
-
-# Real, currently-enforced plan differentiators. Keep in sync with
-# supabase_migration.sql's public.plan_limits view and client/lib/i18n
-# plan_*_features strings. Do NOT add a plan feature here (or to the pricing
-# copy) unless there's an actual enforcement mechanism behind it.
-PLAN_MAX_SCENES = {"free": 3, "creator": 3, "pro": 5}
-MUSIC_EXTRA_CREDIT_COST = 1  # flat surcharge on top of scene credits, Creator/Pro only
-DIALOGUE_EXTRA_CREDIT_COST = 1  # per scene, Pro only
 
 
 async def _get_user_plan(user_id: str) -> str:
@@ -482,15 +534,12 @@ async def generate(
         )
 
         if not req.require_script_approval:
-            credit_cost = (
-                req.num_scenes
-                + (MUSIC_EXTRA_CREDIT_COST if music_enabled else 0)
-                + (
-                    req.num_scenes * DIALOGUE_EXTRA_CREDIT_COST
-                    if dialogue_enabled
-                    else 0
-                )
-            )
+            credit_cost = build_credit_breakdown(
+                req.num_scenes,
+                music_enabled=music_enabled,
+                dialogue_enabled=dialogue_enabled,
+                plan=plan,
+            )["total_credits"]
             ok = await _deduct_credits(current_user.user_id, credit_cost, "video_generation")
             if not ok:
                 raise HTTPException(
