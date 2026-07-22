@@ -8,7 +8,9 @@ this was written -- their playground page advertises "Claude via a single
 API" but the precise request/response shape for text models (vs. their
 well-documented image/video submit-and-poll pattern) wasn't independently
 verifiable. MUAPI_LLM_MODEL is therefore an env-configurable guess
-("claude-sonnet-4-5" by default) rather than a hardcoded certainty.
+("claude-sonnet-4-6" by default -- updated from "claude-sonnet-4-5" per a
+working reference integration, see Anil-matcha/Open-AI-Micro-Drama-Generator
+on GitHub) rather than a hardcoded certainty.
 
 Because of that uncertainty, every caller of this module MUST catch
 MuAPIError (or any Exception) and fall back to another path (direct
@@ -23,7 +25,7 @@ from typing import Optional
 
 from tools.muapi_client import MuAPIClient, MuAPIError
 
-MUAPI_LLM_MODEL = os.environ.get("MUAPI_LLM_MODEL", "claude-sonnet-4-5")
+MUAPI_LLM_MODEL = os.environ.get("MUAPI_LLM_MODEL", "claude-sonnet-4-6")
 
 
 async def complete_via_muapi(

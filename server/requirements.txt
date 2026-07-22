@@ -8,3 +8,4 @@ pillow==10.4.0
 python-dotenv==1.0.1
 supabase==2.10.0
 stripe==11.3.0
+fal-client==1.0.0

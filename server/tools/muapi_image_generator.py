@@ -29,6 +29,12 @@ class MuAPIImageGenerator:
     # the bare "flux-dev" slug 404s. Configurable via env var in case
     # MuAPI's catalog changes again; no code change needed if so.
     IMAGE_ENDPOINT = os.environ.get("MUAPI_IMAGE_MODEL", "flux-dev-image")
+    # Default stays flux-pulid -- confirmed working against real videos, do
+    # not change. Override via MUAPI_KONTEXT_MODEL (e.g. to the cheaper
+    # "flux-kontext-dev-i2i" tier) to try a different reference-image model;
+    # generate_image_with_reference() below picks the correct payload shape
+    # for whichever endpoint is configured (PuLID vs. the Kontext family use
+    # different reference-image field names).
     KONTEXT_ENDPOINT = os.environ.get(
         "MUAPI_KONTEXT_MODEL", "flux-pulid"
     )
@@ -81,21 +87,32 @@ class MuAPIImageGenerator:
         if self.demo:
             return _demo_image_url(prompt + "|ref", aspect_ratio)
 
-        # PuLID is identity-focused and uses a singular reference URL.
-        payload = {
-            "prompt": prompt,
-            "image_url": reference_url,
-            "aspect_ratio": aspect_ratio,
-        }
+        endpoint = self.KONTEXT_ENDPOINT
+        if "pulid" in endpoint.lower():
+            # PuLID is identity-focused and uses a singular reference URL.
+            payload = {
+                "prompt": prompt,
+                "image_url": reference_url,
+                "aspect_ratio": aspect_ratio,
+            }
+        else:
+            # Kontext family (e.g. flux-kontext-dev-i2i, flux-kontext-pro-i2i)
+            # expects a LIST of reference images under "images_list" --
+            # confirmed against MuAPI's own 422 validation error during an
+            # earlier attempt ({"loc": ["body", "images_list"]}).
+            payload = {
+                "prompt": prompt,
+                "images_list": [reference_url],
+                "aspect_ratio": aspect_ratio,
+            }
         logger.info(
-            "Sending flux-pulid request with reference: image_url=%s "
-            "(prompt starts: %.80s)",
-            bool(payload.get("image_url")),
+            "Sending %s request with reference (prompt starts: %.80s)",
+            endpoint,
             prompt,
         )
         try:
             return await self.client.generate(
-                self.KONTEXT_ENDPOINT,
+                endpoint,
                 payload,
                 is_cancelled=is_cancelled,
             )
@@ -110,8 +127,9 @@ class MuAPIImageGenerator:
                 raise
 
             logger.warning(
-                "flux-pulid failed (schema_rejection=%s, runtime_failure=%s): %s; "
+                "%s failed (schema_rejection=%s, runtime_failure=%s): %s; "
                 "falling back to flux-dev-image reference payload",
+                endpoint,
                 is_schema_rejection,
                 is_runtime_failure,
                 exc,
