@@ -229,3 +229,25 @@ union all
 select 'creator',          25, 3, false
 union all
 select 'pro',              55, 5, true;
+
+-- ── Pro character library (reuse locked portraits across dramas) ─────────────
+-- Pro-only at the API layer. Real cost: one portrait gen + durable storage.
+create table if not exists public.character_library (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id),
+  name text not null,
+  static_features text not null,
+  portrait_url text not null,
+  created_at timestamptz not null default now()
+);
+
+alter table public.character_library enable row level security;
+
+create policy "users manage own characters"
+  on public.character_library
+  for all
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+grant select, insert, update, delete on public.character_library to authenticated;
+grant all on public.character_library to service_role;

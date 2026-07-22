@@ -717,6 +717,7 @@ class Idea2VideoPipeline:
         user_requirement: str = "",
         progress_callback: Optional[Callable] = None,
         is_cancelled: Optional[Callable[[], bool]] = None,
+        preset_characters: Optional[List[Dict[str, Any]]] = None,
     ) -> DramaScript:
         """Phase A: screenwriting only — no portraits / frames / video."""
 
@@ -730,7 +731,13 @@ class Idea2VideoPipeline:
 
         _check_cancel()
         await progress("screenwriting", "Writing script", 5)
-        return await self.screenwriter.write_script(idea, style, num_scenes, user_requirement)
+        return await self.screenwriter.write_script(
+            idea,
+            style,
+            num_scenes,
+            user_requirement,
+            preset_characters=preset_characters,
+        )
 
     async def continue_from_script(
         self,
@@ -747,6 +754,7 @@ class Idea2VideoPipeline:
         music_enabled: bool = False,
         dialogue_enabled: bool = False,
         plan: str = "free",
+        library_characters: Optional[List[Dict[str, Any]]] = None,
     ) -> dict:
         """Phase B: everything after screenwriting (portraits → scenes → assemble)."""
         os.makedirs(working_dir, exist_ok=True)
@@ -768,6 +776,23 @@ class Idea2VideoPipeline:
                 )
             ]
 
+        # Apply library character features + portraits (Pro reuse path).
+        lib_by_name: Dict[str, Dict[str, Any]] = {}
+        for lib in library_characters or []:
+            name = str(lib.get("name") or "").strip()
+            if not name:
+                continue
+            lib_by_name[name] = lib
+            url = str(lib.get("portrait_url") or "").strip()
+            if url:
+                character_portraits_override = dict(character_portraits_override or {})
+                character_portraits_override.setdefault(name, url)
+
+        for char in characters:
+            lib = lib_by_name.get(char.name)
+            if lib and lib.get("static_features"):
+                char.static_features = str(lib["static_features"])
+
         # If the user uploaded a reference photo under a name that doesn't
         # match any character the screenwriter came up with, add it as its
         # own character rather than silently dropping the upload.
@@ -775,11 +800,16 @@ class Idea2VideoPipeline:
             existing_names = {c.name for c in characters}
             for name in character_portraits_override:
                 if name not in existing_names:
+                    lib = lib_by_name.get(name) or {}
                     characters.append(
                         CharacterInScene(
-                            idx=len(characters), name=name,
-                            static_features="uploaded reference photo",
-                            dynamic_features="", is_visible=True,
+                            idx=len(characters),
+                            name=name,
+                            static_features=str(
+                                lib.get("static_features") or "uploaded reference photo"
+                            ),
+                            dynamic_features="",
+                            is_visible=True,
                         )
                     )
 
@@ -973,6 +1003,7 @@ class Idea2VideoPipeline:
         music_enabled: bool = False,
         dialogue_enabled: bool = False,
         plan: str = "free",
+        preset_characters: Optional[List[Dict[str, Any]]] = None,
     ) -> dict:
         """Full end-to-end run (script + production). Default path unchanged."""
         script = await self.write_script_only(
@@ -982,6 +1013,7 @@ class Idea2VideoPipeline:
             user_requirement=user_requirement,
             progress_callback=progress_callback,
             is_cancelled=is_cancelled,
+            preset_characters=preset_characters,
         )
         return await self.continue_from_script(
             script=script,
@@ -997,4 +1029,5 @@ class Idea2VideoPipeline:
             music_enabled=music_enabled,
             dialogue_enabled=dialogue_enabled,
             plan=plan,
+            library_characters=preset_characters,
         )

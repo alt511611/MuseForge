@@ -19,6 +19,8 @@ For every scene, write the exact spoken dialogue as character/line pairs. Use an
 Extract named characters with visual descriptions for AI image generation.
 Also define ONE locked setting for the ENTIRE drama (not per scene): location, time of day, and era.
 Every scene must take place in that same setting — do not invent a different place or time per scene.
+When the user message includes PRESET CHARACTERS, those characters already exist — do NOT redefine or rename them.
+Use their exact names and visual descriptions in the characters array and weave them into the story. You may add extra supporting characters only if needed.
 Respond ONLY with valid JSON matching this schema:
 {
   "title": "string",
@@ -49,13 +51,30 @@ Respond ONLY with valid JSON matching this schema:
         style: str = "Cinematic",
         num_scenes: int = 3,
         user_requirement: str = "",
+        preset_characters: Optional[List[dict]] = None,
     ) -> DramaScript:
         # Demo mode must stay fast and free of real network calls --
         # matches MuAPIImageGenerator/MuAPIVideoGenerator's demo behavior.
         if self.demo:
-            return self._write_template(idea, style, num_scenes)
+            return self._write_template(idea, style, num_scenes, preset_characters)
+
+        preset_block = ""
+        if preset_characters:
+            lines = []
+            for c in preset_characters:
+                name = str(c.get("name") or "").strip()
+                features = str(c.get("static_features") or "").strip()
+                if name and features:
+                    lines.append(f"- {name}: {features}")
+            if lines:
+                preset_block = (
+                    "PRESET CHARACTERS (already exist — use directly, do not redefine):\n"
+                    + "\n".join(lines)
+                    + "\n"
+                )
 
         prompt = (
+            f"{preset_block}"
             f"Idea: {idea}\nStyle: {style}\nScenes: {num_scenes}\n"
             f"Additional requirements: {user_requirement or 'none'}"
         )
@@ -83,10 +102,12 @@ Respond ONLY with valid JSON matching this schema:
 
         # 2) Fall back to a direct Anthropic call if a key is configured.
         if self.api_key:
-            return await self._write_with_claude(idea, style, num_scenes, user_requirement)
+            return await self._write_with_claude(
+                idea, style, num_scenes, user_requirement, preset_characters
+            )
 
         # 3) Last resort: deterministic template, never crashes generation.
-        return self._write_template(idea, style, num_scenes)
+        return self._write_template(idea, style, num_scenes, preset_characters)
 
     async def _write_with_claude(
         self,
@@ -94,11 +115,26 @@ Respond ONLY with valid JSON matching this schema:
         style: str,
         num_scenes: int,
         user_requirement: str,
+        preset_characters: Optional[List[dict]] = None,
     ) -> DramaScript:
         try:
             import httpx
 
+            preset_block = ""
+            if preset_characters:
+                lines = [
+                    f"- {c.get('name')}: {c.get('static_features')}"
+                    for c in preset_characters
+                    if c.get("name") and c.get("static_features")
+                ]
+                if lines:
+                    preset_block = (
+                        "PRESET CHARACTERS (already exist — use directly, do not redefine):\n"
+                        + "\n".join(lines)
+                        + "\n"
+                    )
             prompt = (
+                f"{preset_block}"
                 f"Idea: {idea}\nStyle: {style}\nScenes: {num_scenes}\n"
                 f"Additional requirements: {user_requirement or 'none'}"
             )
@@ -122,7 +158,7 @@ Respond ONLY with valid JSON matching this schema:
                 data = self._parse_json(content)
                 return DramaScript(**data)
         except Exception:
-            return self._write_template(idea, style, num_scenes)
+            return self._write_template(idea, style, num_scenes, preset_characters)
 
     def _parse_json(self, text: str) -> dict:
         match = re.search(r"\{[\s\S]*\}", text)
@@ -130,9 +166,41 @@ Respond ONLY with valid JSON matching this schema:
             return json.loads(match.group())
         raise ValueError("No JSON found in response")
 
-    def _write_template(self, idea: str, style: str, num_scenes: int) -> DramaScript:
+    def _write_template(
+        self,
+        idea: str,
+        style: str,
+        num_scenes: int,
+        preset_characters: Optional[List[dict]] = None,
+    ) -> DramaScript:
         title = idea[:60].strip().rstrip(".") or "Untitled Drama"
         protagonist = self._extract_protagonist(idea)
+
+        characters = []
+        if preset_characters:
+            for i, c in enumerate(preset_characters):
+                name = str(c.get("name") or "").strip()
+                features = str(c.get("static_features") or "").strip()
+                if not name:
+                    continue
+                characters.append(
+                    CharacterProfile(
+                        name=name,
+                        description=features or f"{name}, {style.lower()} visual style",
+                        role="protagonist" if i == 0 else "supporting",
+                    )
+                )
+            if characters:
+                protagonist = characters[0].name
+
+        if not characters:
+            characters = [
+                CharacterProfile(
+                    name=protagonist,
+                    description=f"Main character from the story, {style.lower()} visual style",
+                    role="protagonist",
+                )
+            ]
 
         scene_templates = [
             f"{protagonist} enters the scene. The {style.lower()} atmosphere sets the tone.",
@@ -154,13 +222,7 @@ Respond ONLY with valid JSON matching this schema:
             setting_location="generic cinematic location",
             setting_time_of_day="midday",
             setting_era="present day",
-            characters=[
-                CharacterProfile(
-                    name=protagonist,
-                    description=f"Main character from the story, {style.lower()} visual style",
-                    role="protagonist",
-                )
-            ],
+            characters=characters,
             scenes=scenes,
         )
 

@@ -59,7 +59,7 @@ const ASPECT_RATIOS = [
 
 export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
   const { t } = useLanguage();
-  const { user } = useAuth();
+  const { user, getAccessToken } = useAuth();
   const [idea, setIdea] = useState("");
   const [style, setStyle] = useState("Cinematic");
   const [directorStyle, setDirectorStyle] = useState("cinematic_balanced");
@@ -76,6 +76,8 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
   const [plan, setPlan] = useState(null);
   const [musicEnabled, setMusicEnabled] = useState(false);
   const [requireScriptApproval, setRequireScriptApproval] = useState(false);
+  const [libraryCharacters, setLibraryCharacters] = useState([]);
+  const [selectedLibraryIds, setSelectedLibraryIds] = useState([]);
 
   // Look up the signed-in user's plan (Creator/Pro unlock optional music +
   // a higher scene cap). Anonymous/free users simply never see the toggle.
@@ -117,6 +119,34 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
 
   const musicEligible = MUSIC_ELIGIBLE_PLANS.includes(plan);
   const maxScenes = PLAN_MAX_SCENES[plan] ?? 5;
+  const libraryEligible = plan === "pro";
+
+  // Pro-only: load saved characters for multi-select reuse.
+  useEffect(() => {
+    if (!user || !libraryEligible) {
+      setLibraryCharacters([]);
+      setSelectedLibraryIds([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const token = await getAccessToken();
+        if (!token || cancelled) return;
+        const res = await fetch(`${API_BASE}/api/characters`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!cancelled) setLibraryCharacters(Array.isArray(data.characters) ? data.characters : []);
+      } catch {
+        /* ignore — picker simply stays empty */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user, libraryEligible, getAccessToken]);
 
   useEffect(() => {
     if (!musicEligible && musicEnabled) setMusicEnabled(false);
@@ -194,6 +224,16 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!idea.trim() || isSubmitting) return;
+    const selectedLibraryCharacters =
+      libraryEligible
+        ? libraryCharacters
+            .filter((c) => selectedLibraryIds.includes(c.id))
+            .map((c) => ({
+              name: c.name,
+              static_features: c.static_features,
+              portrait_url: c.portrait_url,
+            }))
+        : [];
     onSubmit({
       idea: idea.trim(),
       style,
@@ -205,6 +245,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
       character_name: characterImage ? characterName.trim() : "",
       music_enabled: musicEligible && musicEnabled,
       require_script_approval: requireScriptApproval,
+      library_characters: selectedLibraryCharacters,
     });
   };
 
@@ -379,6 +420,50 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
           </p>
         )}
       </div>
+
+      {libraryEligible && libraryCharacters.length > 0 && (
+        <div className="mb-6">
+          <label className="text-sm font-medium mb-2 block" style={{ color: "#94a3b8" }}>
+            {t("form_library_chars") || "Kayıtlı karakterlerimden seç"}
+          </label>
+          <p className="text-xs mb-3" style={{ color: "#64748b" }}>
+            {t("form_library_chars_hint") || "Seçilen karakterler senaryoya doğrudan dahil edilir."}
+          </p>
+          <div className="flex flex-wrap gap-3">
+            {libraryCharacters.map((c) => {
+              const selected = selectedLibraryIds.includes(c.id);
+              return (
+                <button
+                  key={c.id}
+                  type="button"
+                  disabled={isSubmitting}
+                  onClick={() =>
+                    setSelectedLibraryIds((prev) =>
+                      selected ? prev.filter((id) => id !== c.id) : [...prev, c.id]
+                    )
+                  }
+                  className="flex items-center gap-2 px-3 py-2 rounded-xl text-left transition-all"
+                  style={{
+                    backgroundColor: selected ? "rgba(124, 58, 237, 0.15)" : "#0a0a0f",
+                    border: selected ? "1px solid #7c3aed" : "1px solid #22223a",
+                  }}
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={c.portrait_url}
+                    alt={c.name}
+                    className="w-9 h-9 rounded-full object-cover"
+                    style={{ border: "1px solid #7c3aed" }}
+                  />
+                  <span className="text-xs" style={{ color: selected ? "#a78bfa" : "#94a3b8" }}>
+                    {c.name}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <button
         type="button"
