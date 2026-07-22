@@ -59,14 +59,17 @@ def nearest_valid_duration(seconds) -> int:
 
 
 class MuAPIVideoGenerator:
-    # UPDATED based on finding MuAPI's own playground page at
-    # muapi.ai/playground/kling-o1-image-to-video -- "standard" is a
-    # *mode* parameter, not part of the URL slug. STILL NOT independently
-    # confirmed with an exact first-party curl example (unlike
-    # flux-dev-image, which was). If this 404/422s again, open
-    # https://muapi.ai/playground/kling-o1-image-to-video directly and
-    # check the exact parameter names/schema shown there.
-    VIDEO_ENDPOINT = os.environ.get("MUAPI_VIDEO_MODEL", "kling-o1-image-to-video")
+    # UPDATED to "kling-v2.1-standard-i2v", a cheaper tier verified via a
+    # working reference integration (Anil-matcha/Open-AI-Micro-Drama-Generator
+    # on GitHub, a real MuAPI-based project). Previous default was
+    # "kling-o1-image-to-video". STILL NOT independently confirmed against
+    # MuAPI's own first-party docs for THIS project's exact payload shape --
+    # _payload() below (prompt/image_url/duration/mode) was written for the
+    # O1 endpoint and has NOT been adjusted for v2.1 yet. If this 404/422s,
+    # capture the exact error and check
+    # https://muapi.ai/playground/kling-v2.1-standard-i2v for the confirmed
+    # schema before changing _payload().
+    VIDEO_ENDPOINT = os.environ.get("MUAPI_VIDEO_MODEL", "kling-v2.1-standard-i2v")
 
     def __init__(self, api_key: str, demo: bool = False):
         self.demo = demo
