@@ -23,17 +23,6 @@ from tools.muapi_client import MuAPICancelled
 logger = logging.getLogger(__name__)
 
 
-def _qa_max_retries() -> int:
-    """Extra frame-regeneration attempts when character/setting QA fails
-    (0 = no retries, just log the first result). Only consulted when
-    MUSEFORGE_CHARACTER_QA_ENABLED is already on, so this adds zero cost
-    when QA itself is disabled (the default)."""
-    try:
-        return max(0, int(os.environ.get("MUSEFORGE_QA_MAX_RETRIES", "2")))
-    except ValueError:
-        return 2
-
-
 class PipelineCancelled(Exception):
     """Raised cooperatively when a job is cancelled mid-flight."""
 
@@ -348,44 +337,14 @@ class Script2VideoPipeline:
                     async with progress_lock:
                         await progress("frames", f"Generating frame {i + 1}/{len(shots)}", 20 + i * 5)
 
-                    # Frame generation + optional QA happen BEFORE video
-                    # animation (the expensive, slow step) so a rejected
-                    # frame is retried without wasting money on animating
-                    # a frame we're about to throw away.
-                    char_desc = matched_char.static_features if matched_char else ""
-                    frame_url = None
-                    qa_result = {"character_ok": True, "setting_ok": True}
-                    max_qa_attempts = 1 + (_qa_max_retries() if qa_enabled else 0)
-
-                    for attempt in range(max_qa_attempts):
-                        if reference_url:
-                            frame_url = await self.image_gen.generate_image_with_reference(
-                                frame_prompt, reference_url, aspect_ratio, is_cancelled=is_cancelled
-                            )
-                        else:
-                            frame_url = await self.image_gen.generate_image(
-                                frame_prompt, aspect_ratio, is_cancelled=is_cancelled
-                            )
-
-                        if not (qa_enabled and frame_url and anthropic_key):
-                            break
-
-                        qa_result = await verify_frame(
-                            frame_url=frame_url,
-                            expected_character_desc=char_desc,
-                            expected_setting=expected_setting,
-                            anthropic_api_key=anthropic_key,
+                    if reference_url:
+                        frame_url = await self.image_gen.generate_image_with_reference(
+                            frame_prompt, reference_url, aspect_ratio, is_cancelled=is_cancelled
                         )
-                        if qa_result.get("character_ok", True) and qa_result.get("setting_ok", True):
-                            break
-                        if attempt < max_qa_attempts - 1:
-                            logger.warning(
-                                "Shot %d frame failed QA (character_ok=%s, setting_ok=%s), "
-                                "retrying (attempt %d/%d)",
-                                i, qa_result.get("character_ok"), qa_result.get("setting_ok"),
-                                attempt + 2, max_qa_attempts,
-                            )
-                        _check_cancel()
+                    else:
+                        frame_url = await self.image_gen.generate_image(
+                            frame_prompt, aspect_ratio, is_cancelled=is_cancelled
+                        )
 
                     shot.frame_url = frame_url
 
@@ -469,11 +428,6 @@ class Script2VideoPipeline:
                 # detected issue could actually be fixed in the frame that
                 # gets animated, instead of just reported after the fact.
                 if qa_result:
-                # Final QA outcome after all retry attempts (fail-open:
-                # we always proceed with whichever frame we ended up with,
-                # even if QA never passed -- this NEVER fails the job,
-                # it only flags the shot for visibility).
-                if qa_enabled and frame_url and anthropic_key:
                     if not qa_result.get("character_ok", True):
                         meta["character_qa_warning"] = True
                     if not qa_result.get("setting_ok", True):
