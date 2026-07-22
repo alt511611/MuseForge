@@ -8,7 +8,7 @@ import re
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +179,12 @@ async def security_headers(request: Request, call_next):
 
 # ── Request / Response models ─────────────────────────────────────────────────
 
+class LibraryCharacterIn(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    static_features: str = Field(..., min_length=1, max_length=2000)
+    portrait_url: str = Field(..., min_length=1, max_length=2000)
+
+
 class GenerateRequest(BaseModel):
     idea: str = Field(..., min_length=3, max_length=2000)
     style: str = "Cinematic"
@@ -188,6 +194,8 @@ class GenerateRequest(BaseModel):
     user_requirement: str = ""
     character_image: Optional[str] = None
     character_name: str = ""
+    # Pro-only: reuse locked portraits from the character library.
+    library_characters: List[LibraryCharacterIn] = Field(default_factory=list)
     # Optional instrumental background music. Only honoured for Creator/Pro
     # plans (checked server-side against the caller's actual plan) — silently
     # ignored for free/anonymous requests rather than erroring.
@@ -198,6 +206,12 @@ class GenerateRequest(BaseModel):
     # When True: write script only, pause for user edit/approve. No credits
     # charged until POST /api/jobs/{id}/approve-script.
     require_script_approval: bool = False
+
+
+class CharacterCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    static_features: str = Field(..., min_length=1, max_length=2000)
+    portrait_url: str = Field(..., min_length=1, max_length=2000)
 
 
 class GenerateResponse(BaseModel):
@@ -547,6 +561,20 @@ async def generate(
                     detail=f"Insufficient credits. You need {credit_cost} credits for this generation. Please top up your balance.",
                 )
 
+    # Pro-only library characters (name + static_features + portrait_url).
+    # Free/Creator payloads that include this field are silently dropped.
+    library_characters: List[dict] = []
+    if current_user and not demo and plan == "pro" and req.library_characters:
+        library_characters = [
+            {
+                "name": c.name.strip(),
+                "static_features": c.static_features.strip(),
+                "portrait_url": c.portrait_url.strip(),
+            }
+            for c in req.library_characters
+            if c.name.strip() and c.static_features.strip() and c.portrait_url.strip()
+        ]
+
     job = await job_store.create(
         idea=req.idea,
         style=req.style,
@@ -563,6 +591,7 @@ async def generate(
         dialogue_enabled=dialogue_enabled,
         plan=plan,
         require_script_approval=bool(req.require_script_approval),
+        library_characters=library_characters,
     )
 
     background_tasks.add_task(run_generation_job, job, api_key)
@@ -837,6 +866,157 @@ async def cancel_job(
     job.status = JobStatus.CANCELLED
     await job_store.persist(job)
     return {"status": "cancelled"}
+
+
+# ── Character library (Pro) ───────────────────────────────────────────────────
+
+# In-memory fallback when Supabase isn't configured (local/demo/tests).
+_character_library_mem: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+
+
+def _sb_headers() -> dict:
+    return {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
+
+
+async def _library_list(user_id: str) -> List[Dict[str, Any]]:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return list(_character_library_mem.get(user_id, []))
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/character_library",
+                params={
+                    "user_id": f"eq.{user_id}",
+                    "select": "id,name,static_features,portrait_url,created_at",
+                    "order": "created_at.desc",
+                },
+                headers=_sb_headers(),
+            )
+            if resp.status_code >= 400:
+                logger.error("character_library list failed: %s", resp.text[:300])
+                return []
+            data = resp.json()
+            return data if isinstance(data, list) else []
+    except Exception as exc:
+        logger.error("character_library list error: %s", exc)
+        return []
+
+
+async def _library_insert(user_id: str, payload: dict) -> Dict[str, Any]:
+    import uuid as _uuid
+    from datetime import datetime, timezone
+
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        row = {
+            "id": str(_uuid.uuid4()),
+            "user_id": user_id,
+            "name": payload["name"],
+            "static_features": payload["static_features"],
+            "portrait_url": payload["portrait_url"],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _character_library_mem[user_id].insert(0, row)
+        return row
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.post(
+                f"{SUPABASE_URL}/rest/v1/character_library",
+                headers=_sb_headers(),
+                json={
+                    "user_id": user_id,
+                    "name": payload["name"],
+                    "static_features": payload["static_features"],
+                    "portrait_url": payload["portrait_url"],
+                },
+            )
+            if resp.status_code >= 400:
+                logger.error("character_library insert failed: %s", resp.text[:300])
+                raise HTTPException(status_code=502, detail="Failed to save character")
+            data = resp.json()
+            if isinstance(data, list) and data:
+                return data[0]
+            if isinstance(data, dict):
+                return data
+            raise HTTPException(status_code=502, detail="Failed to save character")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("character_library insert error: %s", exc)
+        raise HTTPException(status_code=502, detail="Failed to save character") from exc
+
+
+async def _library_delete(user_id: str, character_id: str) -> bool:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        before = len(_character_library_mem.get(user_id, []))
+        _character_library_mem[user_id] = [
+            c for c in _character_library_mem.get(user_id, []) if c.get("id") != character_id
+        ]
+        return len(_character_library_mem.get(user_id, [])) < before
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.delete(
+                f"{SUPABASE_URL}/rest/v1/character_library",
+                params={"id": f"eq.{character_id}", "user_id": f"eq.{user_id}"},
+                headers=_sb_headers(),
+            )
+            return resp.status_code < 400
+    except Exception as exc:
+        logger.error("character_library delete error: %s", exc)
+        return False
+
+
+@app.post("/api/characters")
+async def create_character(
+    req: CharacterCreateRequest,
+    current_user: AuthUser = Depends(get_current_user),
+):
+    plan = await _get_user_plan(current_user.user_id)
+    if plan != "pro":
+        raise HTTPException(
+            status_code=403,
+            detail="Character library is available on the Pro plan only.",
+        )
+    row = await _library_insert(
+        current_user.user_id,
+        {
+            "name": req.name.strip(),
+            "static_features": req.static_features.strip(),
+            "portrait_url": req.portrait_url.strip(),
+        },
+    )
+    return row
+
+
+@app.get("/api/characters")
+async def list_characters(current_user: AuthUser = Depends(get_current_user)):
+    plan = await _get_user_plan(current_user.user_id)
+    if plan != "pro":
+        # Hide the feature entirely for Free/Creator — empty list, not an error.
+        return {"characters": []}
+    chars = await _library_list(current_user.user_id)
+    return {"characters": chars}
+
+
+@app.delete("/api/characters/{character_id}")
+async def delete_character(
+    character_id: str,
+    current_user: AuthUser = Depends(get_current_user),
+):
+    plan = await _get_user_plan(current_user.user_id)
+    if plan != "pro":
+        raise HTTPException(
+            status_code=403,
+            detail="Character library is available on the Pro plan only.",
+        )
+    ok = await _library_delete(current_user.user_id, character_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Character not found")
+    return {"ok": True}
 
 
 # ── Auth helper ───────────────────────────────────────────────────────────────

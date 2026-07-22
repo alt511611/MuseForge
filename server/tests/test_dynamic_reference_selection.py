@@ -68,7 +68,7 @@ async def test_second_scene_references_first_scenes_generated_frame(monkeypatch)
     async def fake_design_storyboard(self, script, characters, user_requirement="", director_style="cinematic_balanced", **_kwargs):
         return [FakeShot(0)]
 
-    async def fake_write_script(self, idea, style="Cinematic", num_scenes=3, user_requirement=""):
+    async def fake_write_script(self, idea, style="Cinematic", num_scenes=3, user_requirement="", preset_characters=None):
         return DramaScript(
             title="Maya",
             logline=idea,

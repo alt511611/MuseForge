@@ -287,6 +287,8 @@ class Job:
     dialogue_enabled: bool = False
     plan: str = "free"
     require_script_approval: bool = False
+    # Pro-only: [{name, static_features, portrait_url}, ...]
+    library_characters: List[Dict[str, Any]] = field(default_factory=list)
     events: List[JobEvent] = field(default_factory=list)
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
@@ -587,6 +589,13 @@ async def run_generation_job(job: Job, api_key: str):
         await job_store.emit(job, stage, message, progress, data)
 
     character_portraits_override: Dict[str, str] = {}
+    library_characters: List[Dict[str, Any]] = list(job.library_characters or [])
+    for lib_char in library_characters:
+        name = str(lib_char.get("name") or "").strip()
+        url = str(lib_char.get("portrait_url") or "").strip()
+        if name and url:
+            character_portraits_override[name] = url
+
     # Portrait upload can wait until approve when script approval is on —
     # still do it here so the photo is ready when the user approves.
     if job.character_image and job.character_name.strip():
@@ -600,7 +609,11 @@ async def run_generation_job(job: Job, api_key: str):
             character_portraits_override[job.character_name.strip()] = uploaded_url
             # Stash for continue_from_script (character_image base64 is large;
             # keep the uploaded URL in result scratch).
-            job.result = {**(job.result or {}), "_portraits_override": character_portraits_override}
+            job.result = {
+                **(job.result or {}),
+                "_portraits_override": character_portraits_override,
+                "_library_characters": library_characters,
+            }
         except InvalidCharacterPhoto as exc:
             job.error = str(exc)
             job.status = JobStatus.FAILED
@@ -611,6 +624,16 @@ async def run_generation_job(job: Job, api_key: str):
             await job_store.emit(
                 job, "portraits", f"Could not use uploaded photo, generating one instead: {exc}", 3
             )
+
+    if library_characters and not (job.result or {}).get("_library_characters"):
+        job.result = {
+            **(job.result or {}),
+            "_portraits_override": {
+                **((job.result or {}).get("_portraits_override") or {}),
+                **character_portraits_override,
+            },
+            "_library_characters": library_characters,
+        }
 
     try:
         pipeline = Idea2VideoPipeline(api_key=api_key, demo=job.demo)
@@ -624,6 +647,7 @@ async def run_generation_job(job: Job, api_key: str):
                     user_requirement=job.user_requirement,
                     progress_callback=progress_callback,
                     is_cancelled=is_cancelled,
+                    preset_characters=library_characters or None,
                 ),
                 timeout=PIPELINE_HARD_TIMEOUT_SECONDS,
             )
@@ -663,6 +687,7 @@ async def run_generation_job(job: Job, api_key: str):
                 music_enabled=job.music_enabled,
                 dialogue_enabled=job.dialogue_enabled,
                 plan=job.plan,
+                preset_characters=library_characters or None,
             ),
             timeout=PIPELINE_HARD_TIMEOUT_SECONDS,
         )
@@ -730,8 +755,11 @@ async def run_continue_from_script_job(job: Job, api_key: str, script_data: Dict
         await job_store.emit(job, stage, message, progress, data)
 
     portraits_override = None
+    library_characters = list(job.library_characters or [])
     if isinstance(job.result, dict):
         portraits_override = job.result.get("_portraits_override") or None
+        if not library_characters:
+            library_characters = list(job.result.get("_library_characters") or [])
 
     try:
         script = DramaScript(**script_data)
@@ -750,6 +778,7 @@ async def run_continue_from_script_job(job: Job, api_key: str, script_data: Dict
                 music_enabled=job.music_enabled,
                 dialogue_enabled=job.dialogue_enabled,
                 plan=job.plan,
+                library_characters=library_characters or None,
             ),
             timeout=PIPELINE_HARD_TIMEOUT_SECONDS,
         )

@@ -2,11 +2,78 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Download, Share2, Plus, ExternalLink, Layout, ChevronDown, ChevronUp, Loader2 } from "lucide-react";
+import { Download, Share2, Plus, ExternalLink, Layout, ChevronDown, ChevronUp, Loader2, BookmarkPlus, Check } from "lucide-react";
 import Confetti from "./Confetti";
 import { useLanguage } from "../contexts/LanguageContext";
 import { useAuth } from "../contexts/AuthContext";
 import { API_BASE, resolveJobVideoUrl } from "../lib/apiBase";
+
+function SaveCharacterButton({ character }) {
+  const { t } = useLanguage();
+  const { getAccessToken } = useAuth();
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
+
+  const handleSave = async () => {
+    if (saving || saved) return;
+    setError(null);
+    setSaving(true);
+    try {
+      const token = await getAccessToken();
+      if (!token) throw new Error(t("result_save_char_auth") || "Sign in required");
+      const res = await fetch(`${API_BASE}/api/characters`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          name: character.name,
+          static_features: character.static_features || character.name,
+          portrait_url: character.portrait_url,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.detail || t("result_save_char_failed") || "Could not save character");
+      }
+      setSaved(true);
+    } catch (err) {
+      setError(err.message || t("result_save_char_failed") || "Could not save character");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col items-center gap-0.5">
+      <button
+        type="button"
+        onClick={handleSave}
+        disabled={saving || saved}
+        className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-md disabled:opacity-70"
+        style={{
+          backgroundColor: saved ? "rgba(34,197,94,0.15)" : "rgba(124,58,237,0.12)",
+          color: saved ? "#86efac" : "#a78bfa",
+          border: "1px solid #22223a",
+        }}
+      >
+        {saving ? (
+          <Loader2 size={10} className="animate-spin" />
+        ) : saved ? (
+          <Check size={10} />
+        ) : (
+          <BookmarkPlus size={10} />
+        )}
+        {saved
+          ? (t("result_char_saved") || "Kaydedildi")
+          : (t("result_save_char") || "Bu karakteri kaydet")}
+      </button>
+      {error && <span className="text-[9px] text-center" style={{ color: "#fca5a5" }}>{error}</span>}
+    </div>
+  );
+}
 
 function NextSteps({ jobId, videoUrl }) {
   const { t } = useLanguage();
@@ -218,14 +285,35 @@ export default function VideoResult({ job, jobId }) {
                 <div className="mb-4">
                   <p className="text-xs mb-2" style={{ color: "#64748b" }}>{t("result_locked_chars")}</p>
                   <div className="flex flex-wrap gap-3">
-                    {Object.entries(portraits).map(([name, url]) => (
-                      <div key={name} className="flex flex-col items-center gap-1">
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={url} alt={name} className="w-14 h-14 rounded-full object-cover"
-                          style={{ border: "2px solid #7c3aed" }} />
-                        <span className="text-[10px]" style={{ color: "#94a3b8" }}>{name}</span>
-                      </div>
-                    ))}
+                    {(result.characters?.length
+                      ? result.characters
+                      : Object.entries(portraits).map(([name, url]) => ({
+                          name,
+                          portrait_url: url,
+                          static_features: "",
+                        }))
+                    ).map((char) => {
+                      const name = char.name;
+                      const url = char.portrait_url || portraits[name];
+                      if (!url) return null;
+                      return (
+                        <div key={name} className="flex flex-col items-center gap-1 max-w-[88px]">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={url} alt={name} className="w-14 h-14 rounded-full object-cover"
+                            style={{ border: "2px solid #7c3aed" }} />
+                          <span className="text-[10px] text-center" style={{ color: "#94a3b8" }}>{name}</span>
+                          { (job?.plan === "pro" || result?.plan === "pro") && (
+                            <SaveCharacterButton
+                              character={{
+                                name,
+                                static_features: char.static_features || char.description || name,
+                                portrait_url: url,
+                              }}
+                            />
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               )}
