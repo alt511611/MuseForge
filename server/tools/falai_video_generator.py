@@ -62,7 +62,11 @@ class FalAIVideoGenerator:
 
     def __init__(self, api_key: str, demo: bool = False):
         self.demo = demo
-        self.api_key = api_key or os.environ.get("FAL_KEY", "")
+        # .strip() guards against a stray trailing newline/whitespace in the
+        # env var value (easy to introduce when pasting into Render's
+        # dashboard) which httpx/fal_client would otherwise send verbatim
+        # in a request header, causing an opaque "Illegal header value".
+        self.api_key = (api_key or os.environ.get("FAL_KEY", "")).strip()
         self.client = fal_client.AsyncClient(key=self.api_key or None)
 
     async def generate_video_from_image(

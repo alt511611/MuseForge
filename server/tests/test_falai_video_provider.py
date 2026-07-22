@@ -108,6 +108,50 @@ async def test_submits_confirmed_schema_and_returns_video_url(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_api_key_is_stripped_before_use(monkeypatch):
+    """A trailing newline/whitespace in FAL_KEY (easy to introduce when
+    pasting into Render's dashboard) must never reach the real request --
+    it would otherwise cause an opaque 'Illegal header value' error."""
+    import fal_client
+    from tools.falai_video_generator import FalAIVideoGenerator
+
+    seen_keys = []
+    submitted = {}
+
+    class FakeHandle:
+        request_id = "req-strip"
+
+    class FakeAsyncClient:
+        def __init__(self, key=None):
+            seen_keys.append(key)
+
+        async def submit(self, application, arguments):
+            submitted["arguments"] = arguments
+            return FakeHandle()
+
+        async def status(self, application, request_id, with_logs=False):
+            return fal_client.Completed(logs=None, metrics={}, error=None)
+
+        async def result(self, application, request_id):
+            return {"video": {"url": "https://fal.media/output.mp4"}}
+
+        async def cancel(self, application, request_id):
+            pass
+
+    monkeypatch.setattr(fal_client, "AsyncClient", FakeAsyncClient)
+
+    gen = FalAIVideoGenerator(api_key="abc123\n", demo=False)
+    assert gen.api_key == "abc123"
+    assert seen_keys == ["abc123"]
+
+    await gen.generate_video_from_image("prompt", "https://example.com/f.png")
+    # Confirms the cleaned key is what actually backs the client used for
+    # the real request, not just the stored attribute.
+    assert seen_keys == ["abc123"]
+    assert submitted["arguments"]["prompt"] == "prompt"
+
+
+@pytest.mark.asyncio
 async def test_completed_with_error_raises(monkeypatch):
     import fal_client
     from tools.falai_video_generator import FalAIVideoGenerator
