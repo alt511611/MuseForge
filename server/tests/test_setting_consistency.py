@@ -1,4 +1,5 @@
 """Setting lock: DramaScript fields + frame_prompt injection + QA fail-open."""
+import json
 import os
 import sys
 from types import SimpleNamespace
@@ -83,7 +84,7 @@ async def test_verify_frame_fail_open_without_key():
         expected_setting="coastal village, sunset",
         anthropic_api_key="",
     )
-    assert result == {"character_ok": True, "setting_ok": True}
+    assert result == {"character_ok": True, "setting_ok": True, "issue": ""}
 
 
 @pytest.mark.asyncio
@@ -102,7 +103,7 @@ async def test_verify_frame_fail_open_on_http_error():
             expected_setting="harbor, night",
             anthropic_api_key="fake-key",
         )
-    assert result == {"character_ok": True, "setting_ok": True}
+    assert result == {"character_ok": True, "setting_ok": True, "issue": ""}
 
 
 @pytest.mark.asyncio
@@ -115,7 +116,10 @@ async def test_verify_frame_parses_both_flags():
         "content": [
             {
                 "type": "text",
-                "text": '{"character_ok": false, "setting_ok": true}',
+                "text": (
+                    '{"character_ok": false, "setting_ok": true, '
+                    '"issue": "the coat color doesn\'t match the reference"}'
+                ),
             }
         ]
     }
@@ -132,4 +136,75 @@ async def test_verify_frame_parses_both_flags():
             expected_setting="harbor, night",
             anthropic_api_key="fake-key",
         )
-    assert result == {"character_ok": False, "setting_ok": True}
+    assert result == {
+        "character_ok": False,
+        "setting_ok": True,
+        "issue": "the coat color doesn't match the reference",
+    }
+
+
+@pytest.mark.asyncio
+async def test_verify_frame_omits_issue_when_both_ok():
+    """issue must stay empty when there's nothing to repair, even if the
+    model includes stray text in that field."""
+    from tools import character_qa as qa_mod
+
+    resp = AsyncMock()
+    resp.raise_for_status = lambda: None
+    resp.json = lambda: {
+        "content": [
+            {
+                "type": "text",
+                "text": '{"character_ok": true, "setting_ok": true, "issue": "looks fine"}',
+            }
+        ]
+    }
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(return_value=resp)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        result = await qa_mod.verify_frame(
+            frame_url="https://example.com/f.jpg",
+            expected_character_desc="woman",
+            expected_setting="harbor, night",
+            anthropic_api_key="fake-key",
+        )
+    assert result == {"character_ok": True, "setting_ok": True, "issue": ""}
+
+
+@pytest.mark.asyncio
+async def test_verify_frame_truncates_overlong_issue():
+    """A misbehaving model returning a long issue string must be capped to
+    <=15 words before it's usable in a downstream repair prompt."""
+    from tools import character_qa as qa_mod
+
+    long_issue = " ".join(f"word{i}" for i in range(40))
+    resp = AsyncMock()
+    resp.raise_for_status = lambda: None
+    resp.json = lambda: {
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {"character_ok": False, "setting_ok": True, "issue": long_issue}
+                ),
+            }
+        ]
+    }
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(return_value=resp)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        result = await qa_mod.verify_frame(
+            frame_url="https://example.com/f.jpg",
+            expected_character_desc="woman",
+            expected_setting="harbor, night",
+            anthropic_api_key="fake-key",
+        )
+    assert len(result["issue"].split()) == 15
