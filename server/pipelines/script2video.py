@@ -27,6 +27,21 @@ class PipelineCancelled(Exception):
     """Raised cooperatively when a job is cancelled mid-flight."""
 
 
+def _make_video_generator(api_key: str, demo: bool):
+    """Pick the video-generation backend. Defaults to the existing MuAPI
+    path unchanged; MUSEFORGE_VIDEO_PROVIDER=falai opts into fal.ai's
+    Kling O3 Pro model instead, without touching any other behavior.
+    Imported lazily so the default path never requires fal-client to be
+    installed/importable.
+    """
+    provider = os.environ.get("MUSEFORGE_VIDEO_PROVIDER", "muapi")
+    if provider == "falai":
+        from tools.falai_video_generator import FalAIVideoGenerator
+
+        return FalAIVideoGenerator(os.environ.get("FAL_KEY", ""), demo=demo)
+    return MuAPIVideoGenerator(api_key, demo=demo)
+
+
 def build_frame_prompt(
     style: str,
     shot,
@@ -199,7 +214,7 @@ class Script2VideoPipeline:
         self.api_key = api_key
         self.demo = demo
         self.image_gen = MuAPIImageGenerator(api_key, demo=demo)
-        self.video_gen = MuAPIVideoGenerator(api_key, demo=demo)
+        self.video_gen = _make_video_generator(api_key, demo)
         self.storyboard_artist = StoryboardArtist(demo=demo)
 
     async def run(
