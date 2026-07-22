@@ -352,6 +352,12 @@ class Script2VideoPipeline:
                     async with progress_lock:
                         await progress("frames", f"Generating frame {i + 1}/{len(shots)}", 20 + i * 5)
 
+                    # Frame generation + optional QA happen BEFORE video
+                    # animation (the expensive, slow step) so a rejected
+                    # frame is retried without wasting money on animating
+                    # a frame we're about to throw away.
+                    char_desc = matched_char.static_features if matched_char else ""
+
                     if reference_url:
                         frame_url = await self.image_gen.generate_image_with_reference(
                             frame_prompt, reference_url, aspect_ratio, is_cancelled=is_cancelled
@@ -362,16 +368,21 @@ class Script2VideoPipeline:
                         )
 
                     shot.frame_url = frame_url
+                    qa_result = {"character_ok": True, "setting_ok": True}
 
                     # Audit & targeted repair (adapted from Virginia Tech's
                     # "Audit & Repair" technique): on QA failure, fix the
-                    # SPECIFIC reported issue with one corrective re-send
+                    # SPECIFIC reported issue with ONE corrective re-send
                     # rather than blindly regenerating the whole frame from
-                    # scratch. Only character-referenced shots can be
-                    # repaired this way (flux-pulid needs the reference
+                    # scratch repeatedly. Only character-referenced shots can
+                    # be repaired this way (flux-pulid needs the reference
                     # image); a single repair attempt, fail-open throughout.
+                    # (Previously this ran AFTER an already-blind 1-3x retry
+                    # loop, calling verify_frame up to 4x per shot for no
+                    # real benefit -- removed the redundant loop so this is
+                    # now the only QA/repair pass.)
                     if qa_enabled and frame_url and anthropic_key:
-                        char_desc = matched_char.static_features if matched_char else ""
+                        _check_cancel()
                         qa_result = await verify_frame(
                             frame_url=frame_url,
                             expected_character_desc=char_desc,
@@ -443,6 +454,11 @@ class Script2VideoPipeline:
                 # detected issue could actually be fixed in the frame that
                 # gets animated, instead of just reported after the fact.
                 if qa_result:
+                # Final QA outcome after all retry attempts (fail-open:
+                # we always proceed with whichever frame we ended up with,
+                # even if QA never passed -- this NEVER fails the job,
+                # it only flags the shot for visibility).
+                if qa_enabled and frame_url and anthropic_key and qa_result:
                     if not qa_result.get("character_ok", True):
                         meta["character_qa_warning"] = True
                     if not qa_result.get("setting_ok", True):
