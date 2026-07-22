@@ -29,17 +29,38 @@ class PipelineCancelled(Exception):
 
 def _make_video_generator(api_key: str, demo: bool):
     """Pick the video-generation backend. Defaults to the existing MuAPI
-    path unchanged; MUSEFORGE_VIDEO_PROVIDER=falai opts into fal.ai's
-    Kling O3 Pro model instead, without touching any other behavior.
-    Imported lazily so the default path never requires fal-client to be
-    installed/importable.
+    path unchanged. Imported lazily so the default path never requires
+    fal-client to be installed/importable.
+
+    MUSEFORGE_VIDEO_PROVIDER:
+      - "muapi" (default) — MuAPIVideoGenerator
+      - "falai" — fal.ai Kling O3 Pro image-to-video
+      - "falai_reference" — fal.ai Kling O3 Pro reference-to-video
+        (one-step character-consistent video; skips separate frame gen)
     """
     provider = os.environ.get("MUSEFORGE_VIDEO_PROVIDER", "muapi")
     if provider == "falai":
         from tools.falai_video_generator import FalAIVideoGenerator
 
         return FalAIVideoGenerator(os.environ.get("FAL_KEY", ""), demo=demo)
+    if provider == "falai_reference":
+        from tools.falai_reference_video_generator import FalAIReferenceVideoGenerator
+
+        return FalAIReferenceVideoGenerator(os.environ.get("FAL_KEY", ""), demo=demo)
     return MuAPIVideoGenerator(api_key, demo=demo)
+
+
+def _make_image_generator(api_key: str, demo: bool):
+    """Pick the image-generation backend. Defaults to MuAPI unchanged.
+    MUSEFORGE_IMAGE_PROVIDER=falai opts into fal.ai FLUX (v1.1 text-to-image
+    + flux-pro/kontext for reference). Lazy-imported.
+    """
+    provider = os.environ.get("MUSEFORGE_IMAGE_PROVIDER", "muapi")
+    if provider == "falai":
+        from tools.falai_image_generator import FalAIImageGenerator
+
+        return FalAIImageGenerator(os.environ.get("FAL_KEY", ""), demo=demo)
+    return MuAPIImageGenerator(api_key, demo=demo)
 
 
 def build_frame_prompt(
@@ -363,7 +384,7 @@ class Script2VideoPipeline:
     def __init__(self, api_key: str, demo: bool = False):
         self.api_key = api_key
         self.demo = demo
-        self.image_gen = MuAPIImageGenerator(api_key, demo=demo)
+        self.image_gen = _make_image_generator(api_key, demo)
         self.video_gen = _make_video_generator(api_key, demo)
         self.storyboard_artist = StoryboardArtist(demo=demo)
 
@@ -499,79 +520,105 @@ class Script2VideoPipeline:
                         has_dialogue=has_dialogue,
                     )
 
+                    # fal.ai reference-to-video binds character identity in a
+                    # SINGLE call (elements + prompt), so the separate
+                    # PuLID/Kontext frame step is skipped when that provider
+                    # is selected AND we have a character reference.
+                    one_step_reference_video = (
+                        getattr(self.video_gen, "uses_character_reference_to_video", False)
+                        and bool(reference_url)
+                    )
+
                     async with progress_lock:
-                        await progress("frames", f"Generating frame {i + 1}/{len(shots)}", 20 + i * 5)
+                        await progress(
+                            "frames" if not one_step_reference_video else "video",
+                            (
+                                f"Generating frame {i + 1}/{len(shots)}"
+                                if not one_step_reference_video
+                                else f"Reference-to-video shot {i + 1}/{len(shots)}"
+                            ),
+                            20 + i * 5,
+                        )
 
-                    # Frame generation + optional QA happen BEFORE video
-                    # animation (the expensive, slow step) so a rejected
-                    # frame is retried without wasting money on animating
-                    # a frame we're about to throw away.
                     char_desc = matched_char.static_features if matched_char else ""
+                    qa_result = {"character_ok": True, "setting_ok": True}
+                    frame_url = None
 
-                    if reference_url:
-                        frame_url = await self.image_gen.generate_image_with_reference(
-                            frame_prompt, reference_url, aspect_ratio, is_cancelled=is_cancelled
+                    if one_step_reference_video:
+                        # Portrait (or last dynamic frame) is the element
+                        # reference; motion/visual become the video prompt.
+                        # Store the reference as frame_url for meta/downstream
+                        # dynamic-reference chaining.
+                        frame_url = reference_url
+                        shot.frame_url = frame_url
+                        video_prompt = (
+                            f"{frame_prompt} Motion: {shot.motion_desc}"
                         )
                     else:
-                        frame_url = await self.image_gen.generate_image(
-                            frame_prompt, aspect_ratio, is_cancelled=is_cancelled
-                        )
-
-                    shot.frame_url = frame_url
-                    qa_result = {"character_ok": True, "setting_ok": True}
-
-                    # Audit & targeted repair (adapted from Virginia Tech's
-                    # "Audit & Repair" technique): on QA failure, fix the
-                    # SPECIFIC reported issue with ONE corrective re-send
-                    # rather than blindly regenerating the whole frame from
-                    # scratch repeatedly. Only character-referenced shots can
-                    # be repaired this way (flux-pulid needs the reference
-                    # image); a single repair attempt, fail-open throughout.
-                    # (Previously this ran AFTER an already-blind 1-3x retry
-                    # loop, calling verify_frame up to 4x per shot for no
-                    # real benefit -- removed the redundant loop so this is
-                    # now the only QA/repair pass.)
-                    if qa_enabled and frame_url and anthropic_key:
-                        _check_cancel()
-                        qa_result = await verify_frame(
-                            frame_url=frame_url,
-                            expected_character_desc=char_desc,
-                            expected_setting=expected_setting,
-                            anthropic_api_key=anthropic_key,
-                        )
-                        qa_failed = not qa_result.get(
-                            "character_ok", True
-                        ) or not qa_result.get("setting_ok", True)
-                        issue = (qa_result.get("issue") or "").strip()
-                        if qa_failed and reference_url and issue:
-                            _check_cancel()
-                            repair_prompt = (
-                                f"{frame_prompt} IMPORTANT CORRECTION: {issue}"
+                        # Frame generation + optional QA happen BEFORE video
+                        # animation (the expensive, slow step) so a rejected
+                        # frame is retried without wasting money on animating
+                        # a frame we're about to throw away.
+                        if reference_url:
+                            frame_url = await self.image_gen.generate_image_with_reference(
+                                frame_prompt, reference_url, aspect_ratio, is_cancelled=is_cancelled
                             )
-                            try:
-                                frame_url = await self.image_gen.generate_image_with_reference(
-                                    repair_prompt,
-                                    reference_url,
-                                    aspect_ratio,
-                                    is_cancelled=is_cancelled,
+                        else:
+                            frame_url = await self.image_gen.generate_image(
+                                frame_prompt, aspect_ratio, is_cancelled=is_cancelled
+                            )
+
+                        shot.frame_url = frame_url
+
+                        # Audit & targeted repair (adapted from Virginia Tech's
+                        # "Audit & Repair" technique): on QA failure, fix the
+                        # SPECIFIC reported issue with ONE corrective re-send
+                        # rather than blindly regenerating the whole frame from
+                        # scratch repeatedly. Only character-referenced shots can
+                        # be repaired this way (flux-pulid needs the reference
+                        # image); a single repair attempt, fail-open throughout.
+                        if qa_enabled and frame_url and anthropic_key:
+                            _check_cancel()
+                            qa_result = await verify_frame(
+                                frame_url=frame_url,
+                                expected_character_desc=char_desc,
+                                expected_setting=expected_setting,
+                                anthropic_api_key=anthropic_key,
+                            )
+                            qa_failed = not qa_result.get(
+                                "character_ok", True
+                            ) or not qa_result.get("setting_ok", True)
+                            issue = (qa_result.get("issue") or "").strip()
+                            if qa_failed and reference_url and issue:
+                                _check_cancel()
+                                repair_prompt = (
+                                    f"{frame_prompt} IMPORTANT CORRECTION: {issue}"
                                 )
-                                shot.frame_url = frame_url
-                            except Exception as exc:
-                                # Fail-open: keep the original (flagged) frame
-                                # rather than blocking the shot on a failed
-                                # repair attempt.
-                                logger.warning(
-                                    "QA repair regeneration failed for shot %s, "
-                                    "keeping original frame: %s",
-                                    i,
-                                    exc,
-                                )
+                                try:
+                                    frame_url = await self.image_gen.generate_image_with_reference(
+                                        repair_prompt,
+                                        reference_url,
+                                        aspect_ratio,
+                                        is_cancelled=is_cancelled,
+                                    )
+                                    shot.frame_url = frame_url
+                                except Exception as exc:
+                                    # Fail-open: keep the original (flagged) frame
+                                    # rather than blocking the shot on a failed
+                                    # repair attempt.
+                                    logger.warning(
+                                        "QA repair regeneration failed for shot %s, "
+                                        "keeping original frame: %s",
+                                        i,
+                                        exc,
+                                    )
+                        video_prompt = shot.motion_desc
 
                     # Record this shot's final frame (post-repair, if any)
                     # as the new "most recent" reference for its character
                     # -- the NEXT shot/scene featuring them will prefer this
                     # over the original locked portrait.
-                    if matched_char:
+                    if matched_char and frame_url:
                         last_frame_by_character[matched_char.name] = frame_url
 
                     _check_cancel()
@@ -579,8 +626,8 @@ class Script2VideoPipeline:
                         await progress("video", f"Animating shot {i + 1}/{len(shots)}", 50 + i * 5)
 
                     video_url = await self.video_gen.generate_video_from_image(
-                        prompt=shot.motion_desc,
-                        image_url=frame_url,
+                        prompt=video_prompt,
+                        image_url=frame_url if not one_step_reference_video else reference_url,
                         duration=int(getattr(shot, "duration_seconds", 5.0)),
                         aspect_ratio=aspect_ratio,
                         plan=plan,
@@ -603,6 +650,7 @@ class Script2VideoPipeline:
                 # QA/repair already ran above (before video generation) so a
                 # detected issue could actually be fixed in the frame that
                 # gets animated, instead of just reported after the fact.
+                if qa_result:
                 # Final QA outcome after all retry attempts (fail-open:
                 # we always proceed with whichever frame we ended up with,
                 # even if QA never passed -- this NEVER fails the job,

@@ -1,7 +1,10 @@
 """Full idea-to-video orchestration pipeline."""
 
+import asyncio
 import logging
 import os
+import shutil
+import tempfile
 from typing import Any, Callable, Dict, List, Optional
 
 from agents.screenwriter import ScreenwriterAgent
@@ -9,16 +12,32 @@ from interfaces.character import CharacterInScene, DramaScript
 from pipelines.script2video import (
     PipelineCancelled,
     Script2VideoPipeline,
+    _make_image_generator,
     apply_color_grade,
     concatenate_videos,
     concatenate_videos_with_transitions,
     download_video,
     is_scene_transitions_enabled,
 )
-from tools.muapi_image_generator import MuAPIImageGenerator
 from tools.muapi_voice_generator import MuAPIVoiceGenerator, is_dialogue_enabled
 
 logger = logging.getLogger(__name__)
+
+
+def _make_music_generator(api_key: str, demo: bool):
+    """Pick the music-generation backend. Defaults to MuAPI unchanged.
+    MUSEFORGE_MUSIC_PROVIDER=falai opts into fal.ai Beatoven
+    (endpoint ``beatoven/music-generation``). Lazy-imported.
+    """
+    provider = os.environ.get("MUSEFORGE_MUSIC_PROVIDER", "muapi")
+    if provider == "falai":
+        from tools.falai_music_generator import FalAIMusicGenerator
+
+        return FalAIMusicGenerator(os.environ.get("FAL_KEY", ""), demo=demo)
+    from tools.muapi_music_generator import MuAPIMusicGenerator
+
+    return MuAPIMusicGenerator(api_key, demo=demo)
+
 
 # Watermark applies to the Free plan only — Creator and Pro are watermark-free.
 # This is the ONE real, enforced differentiator behind the "No watermark" /
@@ -188,6 +207,243 @@ async def add_background_music(
     return output_path
 
 
+def _format_srt_timestamp(seconds: float) -> str:
+    """SRT timestamp: HH:MM:SS,mmm"""
+    total_ms = max(0, int(round(float(seconds) * 1000)))
+    hours, rem = divmod(total_ms, 3_600_000)
+    minutes, rem = divmod(rem, 60_000)
+    secs, millis = divmod(rem, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def _estimate_line_duration_seconds(line: str) -> float:
+    """Rough spoken duration from text when audio can't be probed (~2.5 words/sec)."""
+    words = max(1, len((line or "").split()))
+    return max(1.2, min(8.0, words / 2.5))
+
+
+def _probe_audio_duration_seconds(audio_url: str) -> Optional[float]:
+    try:
+        from moviepy import AudioFileClip
+
+        clip = AudioFileClip(audio_url)
+        try:
+            duration = float(clip.duration or 0)
+            return duration if duration > 0 else None
+        finally:
+            clip.close()
+    except Exception:
+        return None
+
+
+def _scene_start_offsets(scene_paths: Optional[List[str]]) -> List[float]:
+    """Absolute start time of each scene in the concatenated drama (seconds)."""
+    starts: List[float] = []
+    elapsed = 0.0
+    for path in scene_paths or []:
+        starts.append(elapsed)
+        duration = 0.0
+        scene_clip = None
+        try:
+            from moviepy import VideoFileClip
+
+            scene_clip = VideoFileClip(path)
+            duration = float(scene_clip.duration or 0)
+        except Exception:
+            duration = 0.0
+        finally:
+            if scene_clip is not None:
+                try:
+                    scene_clip.close()
+                except Exception:
+                    pass
+        elapsed += duration
+    return starts
+
+
+def build_srt_from_dialogue_tracks(
+    dialogue_tracks: List[Dict[str, Any]],
+    scene_paths: Optional[List[str]] = None,
+) -> str:
+    """Build an SRT document from dialogue tracks.
+
+    Timing mirrors ``add_background_music``: lines within a scene are laid
+    out sequentially from that scene's start, with a short gap between lines.
+    Tracks may optionally carry explicit ``start_seconds`` / ``end_seconds``
+    (or ``duration_seconds``) for tests / pre-timed callers.
+    """
+    scene_starts = _scene_start_offsets(scene_paths)
+    line_offsets: Dict[int, float] = {}
+    blocks: List[str] = []
+    index = 0
+
+    for track in dialogue_tracks or []:
+        line = str(track.get("line") or "").strip()
+        if not line:
+            continue
+        character = str(track.get("character") or "").strip()
+        text = f"{character}: {line}" if character else line
+
+        if "start_seconds" in track:
+            start = float(track["start_seconds"])
+            if "end_seconds" in track:
+                end = float(track["end_seconds"])
+            else:
+                duration = float(
+                    track.get("duration_seconds")
+                    or _probe_audio_duration_seconds(str(track.get("audio_url") or ""))
+                    or _estimate_line_duration_seconds(line)
+                )
+                end = start + duration
+        else:
+            scene_index = int(track.get("scene_index", 0))
+            scene_start = (
+                scene_starts[scene_index]
+                if 0 <= scene_index < len(scene_starts)
+                else 0.0
+            )
+            local_start = line_offsets.get(scene_index, 0.0)
+            start = scene_start + local_start
+            duration = float(
+                track.get("duration_seconds")
+                or _probe_audio_duration_seconds(str(track.get("audio_url") or ""))
+                or _estimate_line_duration_seconds(line)
+            )
+            end = start + duration
+            line_offsets[scene_index] = local_start + duration + 0.2
+
+        if end <= start:
+            end = start + 1.0
+
+        index += 1
+        # SRT uses blank lines between cues; escape nothing special beyond
+        # stripping carriage returns so a single cue stays one logical block.
+        safe_text = text.replace("\r\n", "\n").replace("\r", "\n")
+        blocks.append(
+            f"{index}\n"
+            f"{_format_srt_timestamp(start)} --> {_format_srt_timestamp(end)}\n"
+            f"{safe_text}\n"
+        )
+
+    return "\n".join(blocks)
+
+
+def _escape_subtitles_filter_path(path: str) -> str:
+    """Escape a filesystem path for ffmpeg's subtitles= filter."""
+    # Prefer forward slashes; escape characters that break the filter grammar.
+    escaped = os.path.abspath(path).replace("\\", "/")
+    escaped = escaped.replace(":", "\\:").replace("'", "\\'")
+    return escaped
+
+
+async def burn_subtitles(
+    video_path: str,
+    output_path: str,
+    dialogue_tracks: list,
+    scene_paths: Optional[List[str]] = None,
+) -> str:
+    """Burn dialogue captions into ``video_path`` via ffmpeg's subtitles filter.
+
+    Builds a temporary .srt from ``dialogue_tracks`` (white text + black outline
+    / box for readability). Fails open: on any error the original video is
+    copied through unchanged — same pattern as watermark / color grade.
+    """
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+    def _copy_through() -> str:
+        if os.path.abspath(video_path) != os.path.abspath(output_path):
+            with open(video_path, "rb") as src:
+                data = src.read()
+            with open(output_path, "wb") as dst:
+                dst.write(data)
+        return output_path
+
+    if not dialogue_tracks:
+        return _copy_through()
+
+    srt_path = None
+    try:
+        srt_body = build_srt_from_dialogue_tracks(
+            list(dialogue_tracks), scene_paths=scene_paths
+        )
+        if not srt_body.strip():
+            return _copy_through()
+
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".srt",
+            prefix="museforge_subs_",
+            dir=os.path.dirname(output_path) or ".",
+            delete=False,
+            encoding="utf-8",
+        ) as srt_file:
+            srt_path = srt_file.name
+            srt_file.write(srt_body)
+
+        ffmpeg_binary = os.environ.get("MUSEFORGE_FFMPEG_BINARY") or shutil.which("ffmpeg")
+        if not ffmpeg_binary:
+            try:
+                import imageio_ffmpeg
+
+                ffmpeg_binary = imageio_ffmpeg.get_ffmpeg_exe()
+            except Exception:
+                ffmpeg_binary = "ffmpeg"
+
+        # White primary text, black outline, BorderStyle=3 = opaque box behind
+        # text for readability on busy backgrounds.
+        force_style = (
+            "FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
+            "BorderStyle=3,Outline=1,Shadow=0,Alignment=2,MarginV=36"
+        )
+        vf = (
+            f"subtitles={_escape_subtitles_filter_path(srt_path)}"
+            f":force_style='{force_style}'"
+        )
+
+        process = await asyncio.create_subprocess_exec(
+            ffmpeg_binary,
+            "-y",
+            "-i",
+            video_path,
+            "-vf",
+            vf,
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "copy",
+            output_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode == 0 and os.path.isfile(output_path):
+            return output_path
+        logger.warning(
+            "Subtitle burn ffmpeg filter failed (exit=%s), shipping without captions: %s",
+            process.returncode,
+            stderr.decode("utf-8", errors="replace")[-1000:],
+        )
+    except Exception as exc:
+        logger.warning("Subtitle burn unavailable, shipping without captions: %s", exc)
+        try:
+            os.unlink(output_path)
+        except OSError:
+            pass
+        return _copy_through()
+    finally:
+        if srt_path:
+            try:
+                os.unlink(srt_path)
+            except OSError:
+                pass
+
+    try:
+        os.unlink(output_path)
+    except OSError:
+        pass
+    return _copy_through()
+
+
 async def add_watermark(video_path: str, output_path: str) -> str:
     """Burn a small, semi-transparent "MuseForge" text watermark into the
     bottom-right corner. Free plan only (see WATERMARK_PLANS).
@@ -314,7 +570,7 @@ class Idea2VideoPipeline:
         self.api_key = api_key
         self.demo = demo
         self.screenwriter = ScreenwriterAgent(demo=demo)
-        self.image_gen = MuAPIImageGenerator(api_key, demo=demo)
+        self.image_gen = _make_image_generator(api_key, demo=demo)
         self.script2video = Script2VideoPipeline(api_key, demo=demo)
 
     async def _lock_character_portraits(
@@ -372,11 +628,13 @@ class Idea2VideoPipeline:
         dialogue_tracks: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Concatenate all scene videos, color-grade, add background music,
-        then watermark (Free plan only) — exactly once per drama.
+        burn dialogue captions (when tracks present), then watermark
+        (Free plan only) — exactly once per drama.
 
         Cancel is checked BEFORE each step starts (concat / grade / music /
-        watermark). Once an ffmpeg/moviepy render has begun we intentionally
-        do NOT abort mid-write — that would leave a half-baked file on disk.
+        subtitles / watermark). Once an ffmpeg/moviepy render has begun we
+        intentionally do NOT abort mid-write — that would leave a half-baked
+        file on disk.
         """
         def _check_cancel():
             if is_cancelled and is_cancelled():
@@ -424,15 +682,31 @@ class Idea2VideoPipeline:
         else:
             await add_background_music(graded_path, with_music_path, music_url)
 
+        # Burn captions only when dialogue tracks are actually present —
+        # no extra ffmpeg work when dialogue is off / empty.
+        video_for_final = with_music_path
+        if dialogue_tracks:
+            _check_cancel()
+            if progress_callback:
+                await progress_callback("subtitles", "Burning captions", 95)
+            subtitled_path = os.path.join(working_dir, "drama_subtitled.mp4")
+            await burn_subtitles(
+                with_music_path,
+                subtitled_path,
+                dialogue_tracks,
+                scene_paths=scene_paths,
+            )
+            video_for_final = subtitled_path
+
         final_path = os.path.join(working_dir, "drama_final.mp4")
         if plan in WATERMARK_PLANS:
             # Before watermark render
             _check_cancel()
             if progress_callback:
                 await progress_callback("music", "Applying watermark", 97)
-            await add_watermark(with_music_path, final_path)
+            await add_watermark(video_for_final, final_path)
         else:
-            final_path = with_music_path
+            final_path = video_for_final
         return final_path
 
     async def write_script_only(
@@ -607,9 +881,7 @@ class Idea2VideoPipeline:
         if music_enabled and not self.demo and not music_url:
             _check_cancel()
             try:
-                from tools.muapi_music_generator import MuAPIMusicGenerator
-
-                music_gen = MuAPIMusicGenerator(self.api_key, demo=self.demo)
+                music_gen = _make_music_generator(self.api_key, demo=self.demo)
                 music_url = await music_gen.generate_instrumental(mood=script.mood or "cinematic")
             except PipelineCancelled:
                 raise
