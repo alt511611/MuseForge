@@ -209,6 +209,156 @@ async def concatenate_videos(paths: List[str], out_path: str) -> str:
     return out_path
 
 
+def is_scene_transitions_enabled() -> bool:
+    """Opt-in flag for crossfade transitions between scenes. Off by
+    default: moviepy's "compose" method (required to overlap/blend
+    adjacent clips) decodes and holds more in memory than the default
+    ffmpeg stream-copy / "chain" paths in concatenate_videos() -- exactly
+    the OOM risk that function's fallback ladder was built to avoid."""
+    return os.environ.get("MUSEFORGE_SCENE_TRANSITIONS", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+async def concatenate_videos_with_transitions(
+    paths: List[str], out_path: str, transition_duration: float = 0.5
+) -> str:
+    """Concatenate clips with a ~0.5s crossfade (cross-dissolve) between
+    each pair of adjacent scenes, using moviepy's "compose" method.
+
+    Opt-in via MUSEFORGE_SCENE_TRANSITIONS (see is_scene_transitions_enabled)
+    -- heavier on memory than the default concatenate_videos() path, so it
+    is never used unless explicitly enabled. Fails open to the plain
+    (transition-less) concatenate_videos() path on ANY error, so a bad
+    transition render never blocks the job.
+    """
+    if len(paths) < 2:
+        return await concatenate_videos(paths, out_path)
+
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    clips = []
+    faded_clips = []
+    final = None
+    try:
+        from moviepy import VideoFileClip, concatenate_videoclips
+        from moviepy.video.fx import CrossFadeIn, CrossFadeOut
+
+        clips = [VideoFileClip(p) for p in paths]
+        last = len(clips) - 1
+        for idx, clip in enumerate(clips):
+            faded = clip
+            if idx > 0:
+                faded = faded.with_effects([CrossFadeIn(transition_duration)])
+            if idx < last:
+                faded = faded.with_effects([CrossFadeOut(transition_duration)])
+            faded_clips.append(faded)
+
+        # Negative padding overlaps each clip with the next by the
+        # transition duration so the cross-fades actually blend instead of
+        # playing back-to-back.
+        final = concatenate_videoclips(
+            faded_clips, method="compose", padding=-transition_duration
+        )
+        final.write_videofile(out_path, codec="libx264", audio=False, logger=None)
+        return out_path
+    except Exception as exc:
+        logger.warning(
+            "Crossfade transition concat failed, falling back to plain concat: %s", exc
+        )
+    finally:
+        if final is not None:
+            try:
+                final.close()
+            except Exception:
+                pass
+        for clip in clips:
+            try:
+                clip.close()
+            except Exception:
+                pass
+
+    try:
+        os.unlink(out_path)
+    except OSError:
+        pass
+    return await concatenate_videos(paths, out_path)
+
+
+async def apply_color_grade(
+    video_path: str, output_path: str, style: str = "cinematic"
+) -> str:
+    """Apply a cinematic "teal & orange" color grade via ffmpeg's eq/curves
+    filters -- pure ffmpeg, no extra API calls or cost.
+
+    Fails open: if the filter chain errors (e.g. unsupported build of
+    ffmpeg), the original video is copied through ungraded rather than
+    failing the job, matching add_watermark()/add_background_music()'s
+    existing fallback pattern.
+    """
+    _ = style  # only one preset exists today; kept for a future style param
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+    def _copy_through() -> str:
+        if os.path.abspath(video_path) != os.path.abspath(output_path):
+            with open(video_path, "rb") as src:
+                data = src.read()
+            with open(output_path, "wb") as dst:
+                dst.write(data)
+        return output_path
+
+    # "cinematic" is currently the only preset; kept as a parameter so a
+    # future style (e.g. "warm", "desaturated") can be added without
+    # changing the call site. curves=preset=cross_process leans the
+    # shadows/mids toward teal-orange; eq nudges contrast/saturation up
+    # slightly on top of that.
+    filter_chain = "eq=contrast=1.05:saturation=1.1,curves=preset=cross_process"
+
+    ffmpeg_binary = os.environ.get("MUSEFORGE_FFMPEG_BINARY") or shutil.which("ffmpeg")
+    if not ffmpeg_binary:
+        try:
+            import imageio_ffmpeg
+
+            ffmpeg_binary = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            ffmpeg_binary = "ffmpeg"
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            ffmpeg_binary,
+            "-y",
+            "-i",
+            video_path,
+            "-vf",
+            filter_chain,
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "copy",
+            output_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode == 0 and os.path.isfile(output_path):
+            return output_path
+        logger.warning(
+            "Color grade ffmpeg filter failed (exit=%s), shipping ungraded video: %s",
+            process.returncode,
+            stderr.decode("utf-8", errors="replace")[-1000:],
+        )
+    except Exception as exc:
+        logger.warning("Color grade unavailable, shipping ungraded video: %s", exc)
+
+    try:
+        os.unlink(output_path)
+    except OSError:
+        pass
+    return _copy_through()
+
+
 class Script2VideoPipeline:
     def __init__(self, api_key: str, demo: bool = False):
         self.api_key = api_key
@@ -453,6 +603,7 @@ class Script2VideoPipeline:
                 # QA/repair already ran above (before video generation) so a
                 # detected issue could actually be fixed in the frame that
                 # gets animated, instead of just reported after the fact.
+                if qa_result:
                 # Final QA outcome after all retry attempts (fail-open:
                 # we always proceed with whichever frame we ended up with,
                 # even if QA never passed -- this NEVER fails the job,

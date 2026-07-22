@@ -9,8 +9,11 @@ from interfaces.character import CharacterInScene, DramaScript
 from pipelines.script2video import (
     PipelineCancelled,
     Script2VideoPipeline,
+    apply_color_grade,
     concatenate_videos,
+    concatenate_videos_with_transitions,
     download_video,
+    is_scene_transitions_enabled,
 )
 from tools.muapi_image_generator import MuAPIImageGenerator
 from tools.muapi_voice_generator import MuAPIVoiceGenerator, is_dialogue_enabled
@@ -368,12 +371,12 @@ class Idea2VideoPipeline:
         is_cancelled: Optional[Callable[[], bool]] = None,
         dialogue_tracks: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
-        """Concatenate all scene videos, add background music, then watermark
-        (Free plan only) — exactly once per drama.
+        """Concatenate all scene videos, color-grade, add background music,
+        then watermark (Free plan only) — exactly once per drama.
 
-        Cancel is checked BEFORE each step starts (concat / music / watermark).
-        Once an ffmpeg/moviepy render has begun we intentionally do NOT abort
-        mid-write — that would leave a half-baked file on disk.
+        Cancel is checked BEFORE each step starts (concat / grade / music /
+        watermark). Once an ffmpeg/moviepy render has begun we intentionally
+        do NOT abort mid-write — that would leave a half-baked file on disk.
         """
         def _check_cancel():
             if is_cancelled and is_cancelled():
@@ -387,7 +390,22 @@ class Idea2VideoPipeline:
             await progress_callback("assembly", "Concatenating scene videos", 85)
 
         concatenated_path = os.path.join(working_dir, "drama_concatenated.mp4")
-        await concatenate_videos(scene_paths, concatenated_path)
+        # Crossfade transitions are opt-in (MUSEFORGE_SCENE_TRANSITIONS) --
+        # moviepy's "compose" mode they require is heavier on memory than
+        # the default ffmpeg stream-copy path, so it stays off unless
+        # explicitly enabled.
+        if is_scene_transitions_enabled():
+            await concatenate_videos_with_transitions(scene_paths, concatenated_path)
+        else:
+            await concatenate_videos(scene_paths, concatenated_path)
+
+        # Before color grade
+        _check_cancel()
+        if progress_callback:
+            await progress_callback("grade", "Applying color grade", 89)
+
+        graded_path = os.path.join(working_dir, "drama_graded.mp4")
+        await apply_color_grade(concatenated_path, graded_path)
 
         # Before music mix
         _check_cancel()
@@ -397,14 +415,14 @@ class Idea2VideoPipeline:
         with_music_path = os.path.join(working_dir, "drama_with_music.mp4")
         if dialogue_tracks:
             await add_background_music(
-                concatenated_path,
+                graded_path,
                 with_music_path,
                 music_url,
                 dialogue_tracks=dialogue_tracks,
                 scene_paths=scene_paths,
             )
         else:
-            await add_background_music(concatenated_path, with_music_path, music_url)
+            await add_background_music(graded_path, with_music_path, music_url)
 
         final_path = os.path.join(working_dir, "drama_final.mp4")
         if plan in WATERMARK_PLANS:
