@@ -9,16 +9,32 @@ from interfaces.character import CharacterInScene, DramaScript
 from pipelines.script2video import (
     PipelineCancelled,
     Script2VideoPipeline,
+    _make_image_generator,
     apply_color_grade,
     concatenate_videos,
     concatenate_videos_with_transitions,
     download_video,
     is_scene_transitions_enabled,
 )
-from tools.muapi_image_generator import MuAPIImageGenerator
 from tools.muapi_voice_generator import MuAPIVoiceGenerator, is_dialogue_enabled
 
 logger = logging.getLogger(__name__)
+
+
+def _make_music_generator(api_key: str, demo: bool):
+    """Pick the music-generation backend. Defaults to MuAPI unchanged.
+    MUSEFORGE_MUSIC_PROVIDER=falai opts into fal.ai Beatoven
+    (endpoint ``beatoven/music-generation``). Lazy-imported.
+    """
+    provider = os.environ.get("MUSEFORGE_MUSIC_PROVIDER", "muapi")
+    if provider == "falai":
+        from tools.falai_music_generator import FalAIMusicGenerator
+
+        return FalAIMusicGenerator(os.environ.get("FAL_KEY", ""), demo=demo)
+    from tools.muapi_music_generator import MuAPIMusicGenerator
+
+    return MuAPIMusicGenerator(api_key, demo=demo)
+
 
 # Watermark applies to the Free plan only — Creator and Pro are watermark-free.
 # This is the ONE real, enforced differentiator behind the "No watermark" /
@@ -314,7 +330,7 @@ class Idea2VideoPipeline:
         self.api_key = api_key
         self.demo = demo
         self.screenwriter = ScreenwriterAgent(demo=demo)
-        self.image_gen = MuAPIImageGenerator(api_key, demo=demo)
+        self.image_gen = _make_image_generator(api_key, demo=demo)
         self.script2video = Script2VideoPipeline(api_key, demo=demo)
 
     async def _lock_character_portraits(
@@ -607,9 +623,7 @@ class Idea2VideoPipeline:
         if music_enabled and not self.demo and not music_url:
             _check_cancel()
             try:
-                from tools.muapi_music_generator import MuAPIMusicGenerator
-
-                music_gen = MuAPIMusicGenerator(self.api_key, demo=self.demo)
+                music_gen = _make_music_generator(self.api_key, demo=self.demo)
                 music_url = await music_gen.generate_instrumental(mood=script.mood or "cinematic")
             except PipelineCancelled:
                 raise
