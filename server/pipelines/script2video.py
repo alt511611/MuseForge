@@ -454,6 +454,11 @@ class Script2VideoPipeline:
                 # detected issue could actually be fixed in the frame that
                 # gets animated, instead of just reported after the fact.
                 if qa_result:
+                # Final QA outcome after all retry attempts (fail-open:
+                # we always proceed with whichever frame we ended up with,
+                # even if QA never passed -- this NEVER fails the job,
+                # it only flags the shot for visibility).
+                if qa_enabled and frame_url and anthropic_key and qa_result:
                     if not qa_result.get("character_ok", True):
                         meta["character_qa_warning"] = True
                     if not qa_result.get("setting_ok", True):
