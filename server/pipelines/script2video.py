@@ -213,9 +213,25 @@ class Script2VideoPipeline:
         setting_time_of_day: str = "",
         setting_era: str = "",
         has_dialogue: bool = False,
+        last_frame_by_character: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         os.makedirs(working_dir, exist_ok=True)
         portraits = character_portraits or {}
+        # Shared, mutable across scenes (owned by the caller) so a later
+        # scene can reference an earlier scene's generated frame instead of
+        # only ever the locked portrait. A fresh dict when the caller
+        # doesn't pass one keeps single-scene callers/tests unaffected.
+        if last_frame_by_character is None:
+            last_frame_by_character = {}
+        # Snapshot taken BEFORE this scene's shots start, not read live --
+        # shots within the same scene run concurrently, so reading the live
+        # dict mid-scene would let a sibling shot's just-finished frame leak
+        # in as a reference for a character that otherwise never had one
+        # (e.g. no locked portrait at all), which is a within-scene change,
+        # not the intended "next scene builds on the previous one" effect.
+        # Each new scene call gets a fresh snapshot of whatever the dict
+        # looked like once the PREVIOUS scene fully finished.
+        reference_snapshot = dict(last_frame_by_character)
 
         def _check_cancel():
             if is_cancelled and is_cancelled():
@@ -293,8 +309,14 @@ class Script2VideoPipeline:
                         # as the previous (unconditional) behavior.
                         matched_char = visible_chars[0]
 
-                    if matched_char and portraits.get(matched_char.name):
-                        reference_url = portraits[matched_char.name]
+                    if matched_char:
+                        # Prefer the most recently generated frame for this
+                        # character (dynamic reference) over the static
+                        # locked portrait -- only populated from the second
+                        # shot/scene onward, so the very first reference for
+                        # any character is still its locked portrait.
+                        dynamic_reference = reference_snapshot.get(matched_char.name)
+                        reference_url = dynamic_reference or portraits.get(matched_char.name)
 
                     frame_prompt = build_frame_prompt(
                         style,
@@ -361,6 +383,13 @@ class Script2VideoPipeline:
                                     i,
                                     exc,
                                 )
+
+                    # Record this shot's final frame (post-repair, if any)
+                    # as the new "most recent" reference for its character
+                    # -- the NEXT shot/scene featuring them will prefer this
+                    # over the original locked portrait.
+                    if matched_char:
+                        last_frame_by_character[matched_char.name] = frame_url
 
                     _check_cancel()
                     async with progress_lock:

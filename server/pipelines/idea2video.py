@@ -497,6 +497,18 @@ class Idea2VideoPipeline:
             characters, style, character_portraits_override=character_portraits_override
         )
 
+        # Dynamic reference selection (adapted from ViMax's "previous
+        # timeline" technique): as scenes progress, prefer each character's
+        # MOST RECENTLY generated frame over the static locked portrait as
+        # the identity reference for the next shot. This tracks drift in
+        # outfit/pose/lighting across the story better than always pinning
+        # to the first-ever portrait. Reset per call so retries/re-runs on
+        # the same pipeline instance don't leak state from a prior attempt.
+        # Starts empty -- the very first shot of the whole drama has no
+        # entry yet, so it still falls back to the locked portrait exactly
+        # as before.
+        self._last_frame_by_character: Dict[str, str] = {}
+
         scene_paths: List[str] = []
         scene_results: List[Dict[str, Any]] = []
         dialogue_tracks: List[Dict[str, Any]] = []
@@ -534,6 +546,7 @@ class Idea2VideoPipeline:
                 setting_time_of_day=getattr(script, "setting_time_of_day", "") or "",
                 setting_era=getattr(script, "setting_era", "") or "",
                 has_dialogue=dialogue_requested and bool(scene_dialogue),
+                last_frame_by_character=self._last_frame_by_character,
             )
             assembled_scene_index = None
             if scene_result.get("path"):
