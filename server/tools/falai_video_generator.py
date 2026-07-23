@@ -99,6 +99,12 @@ class FalAIVideoGenerator:
                 raise await self._cancel(request_id)
 
             status = await self.client.status(self.ENDPOINT, request_id, with_logs=False)
+            logger.info(
+                "fal.ai poll for %s: type=%s repr=%.300s",
+                request_id,
+                type(status).__name__,
+                repr(status),
+            )
             if isinstance(status, fal_client.Completed):
                 if status.error:
                     raise RuntimeError(
