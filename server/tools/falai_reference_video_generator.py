@@ -72,7 +72,7 @@ class FalAIReferenceVideoGenerator:
     def __init__(self, api_key: str, demo: bool = False):
         self.demo = demo
         self.api_key = (api_key or os.environ.get("FAL_KEY", "")).strip()
-        self.client = make_fal_client(self.api_key)
+        self.client = make_fal_client(self.api_key, demo=demo)
 
     async def generate_video_from_image(
         self,

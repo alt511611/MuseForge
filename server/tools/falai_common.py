@@ -21,10 +21,28 @@ DEFAULT_POLL_INTERVAL = 3.0
 DEFAULT_MAX_POLLS = 200
 
 
-def make_fal_client(api_key: str) -> fal_client.AsyncClient:
+def make_fal_client(api_key: str, demo: bool = False) -> fal_client.AsyncClient:
     # .strip() guards against trailing whitespace/newlines from Render env paste
     # that would otherwise cause "Illegal header value".
     key = (api_key or "").strip()
+    if not key and not demo:
+        # Found during a deep audit: previously this silently built a client
+        # with key=None, which falls through to fal_client's own internal
+        # env-var lookup -- if FAL_KEY genuinely isn't set anywhere, this
+        # produced unpredictable behavior (a slow/unclear failure deep
+        # inside the first network call) instead of an immediate, obvious
+        # error at construction time, which is much harder to diagnose from
+        # logs alone -- exactly the kind of "silent, invisible failure"
+        # class of bug this whole project has repeatedly been bitten by.
+        # Demo mode is exempt: it never makes a real network call, so it
+        # never needs a real key.
+        raise RuntimeError(
+            "FAL_KEY is not set (or is empty) -- cannot use a fal.ai "
+            "provider (MUSEFORGE_IMAGE_PROVIDER/MUSEFORGE_MUSIC_PROVIDER/"
+            "MUSEFORGE_VIDEO_PROVIDER=falai) without it. Set FAL_KEY in "
+            "Render's environment, or switch the provider(s) back to "
+            "\"muapi\"."
+        )
     return fal_client.AsyncClient(key=key or None)
 
 

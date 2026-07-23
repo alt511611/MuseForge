@@ -67,6 +67,19 @@ class FalAIVideoGenerator:
         # dashboard) which httpx/fal_client would otherwise send verbatim
         # in a request header, causing an opaque "Illegal header value".
         self.api_key = (api_key or os.environ.get("FAL_KEY", "")).strip()
+        if not self.api_key and not demo:
+            # Found during a deep audit: constructing fal_client.AsyncClient
+            # with key=None silently falls through to the SDK's own env-var
+            # lookup, producing unpredictable (slow/unclear) failures deep
+            # inside the first real network call instead of an immediate,
+            # obvious error here -- exactly the invisible-failure pattern
+            # this project has been bitten by repeatedly. Demo mode is
+            # exempt since it never makes a real network call.
+            raise RuntimeError(
+                "FAL_KEY is not set (or is empty) -- cannot use "
+                "MUSEFORGE_VIDEO_PROVIDER=falai without it. Set FAL_KEY in "
+                "Render's environment, or switch back to \"muapi\"."
+            )
         self.client = fal_client.AsyncClient(key=self.api_key or None)
 
     async def generate_video_from_image(
