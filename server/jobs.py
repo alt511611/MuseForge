@@ -573,80 +573,121 @@ def _job_refund_amount(job: Job) -> int:
 
 async def run_generation_job(job: Job, api_key: str):
     """Start a job. If require_script_approval, stop after screenwriting."""
-    from pipelines.idea2video import Idea2VideoPipeline
-    from pipelines.script2video import PipelineCancelled
-    from tools.muapi_uploader import InvalidCharacterPhoto, upload_base64_image
+    try:
+        from pipelines.idea2video import Idea2VideoPipeline
+        from pipelines.script2video import PipelineCancelled
+        from tools.muapi_uploader import InvalidCharacterPhoto, upload_base64_image
 
-    job.status = JobStatus.RUNNING
-    await job_store.persist(job)  # persist RUNNING state
+        job.status = JobStatus.RUNNING
+        await job_store.persist(job)  # persist RUNNING state
 
-    working_dir = os.path.join(JOBS_DIR, job.id)
+        working_dir = os.path.join(JOBS_DIR, job.id)
 
-    def is_cancelled() -> bool:
-        return job.status == JobStatus.CANCELLED
+        def is_cancelled() -> bool:
+            return job.status == JobStatus.CANCELLED
 
-    async def progress_callback(stage, message, progress, data=None):
-        await job_store.emit(job, stage, message, progress, data)
+        async def progress_callback(stage, message, progress, data=None):
+            await job_store.emit(job, stage, message, progress, data)
 
-    character_portraits_override: Dict[str, str] = {}
-    library_characters: List[Dict[str, Any]] = list(job.library_characters or [])
-    for lib_char in library_characters:
-        name = str(lib_char.get("name") or "").strip()
-        url = str(lib_char.get("portrait_url") or "").strip()
-        if name and url:
-            character_portraits_override[name] = url
+        character_portraits_override: Dict[str, str] = {}
+        library_characters: List[Dict[str, Any]] = list(job.library_characters or [])
+        for lib_char in library_characters:
+            name = str(lib_char.get("name") or "").strip()
+            url = str(lib_char.get("portrait_url") or "").strip()
+            if name and url:
+                character_portraits_override[name] = url
 
-    # Portrait upload can wait until approve when script approval is on —
-    # still do it here so the photo is ready when the user approves.
-    if job.character_image and job.character_name.strip():
-        try:
-            await progress_callback(
-                "portraits", f"Uploading reference photo for {job.character_name}...", 3
-            )
-            uploaded_url = await upload_base64_image(
-                job.character_image, api_key, demo=job.demo
-            )
-            character_portraits_override[job.character_name.strip()] = uploaded_url
-            # Stash for continue_from_script (character_image base64 is large;
-            # keep the uploaded URL in result scratch).
+        # Portrait upload can wait until approve when script approval is on —
+        # still do it here so the photo is ready when the user approves.
+        if job.character_image and job.character_name.strip():
+            try:
+                await progress_callback(
+                    "portraits", f"Uploading reference photo for {job.character_name}...", 3
+                )
+                uploaded_url = await upload_base64_image(
+                    job.character_image, api_key, demo=job.demo
+                )
+                character_portraits_override[job.character_name.strip()] = uploaded_url
+                # Stash for continue_from_script (character_image base64 is large;
+                # keep the uploaded URL in result scratch).
+                job.result = {
+                    **(job.result or {}),
+                    "_portraits_override": character_portraits_override,
+                    "_library_characters": library_characters,
+                }
+            except InvalidCharacterPhoto as exc:
+                job.error = str(exc)
+                job.status = JobStatus.FAILED
+                await job_store.emit(job, "error", str(exc), 0)
+                await job_store.persist(job)
+                return
+            except Exception as exc:
+                await job_store.emit(
+                    job, "portraits", f"Could not use uploaded photo, generating one instead: {exc}", 3
+                )
+
+        if library_characters and not (job.result or {}).get("_library_characters"):
             job.result = {
                 **(job.result or {}),
-                "_portraits_override": character_portraits_override,
+                "_portraits_override": {
+                    **((job.result or {}).get("_portraits_override") or {}),
+                    **character_portraits_override,
+                },
                 "_library_characters": library_characters,
             }
-        except InvalidCharacterPhoto as exc:
-            job.error = str(exc)
-            job.status = JobStatus.FAILED
-            await job_store.emit(job, "error", str(exc), 0)
-            await job_store.persist(job)
-            return
-        except Exception as exc:
-            await job_store.emit(
-                job, "portraits", f"Could not use uploaded photo, generating one instead: {exc}", 3
-            )
 
-    if library_characters and not (job.result or {}).get("_library_characters"):
-        job.result = {
-            **(job.result or {}),
-            "_portraits_override": {
-                **((job.result or {}).get("_portraits_override") or {}),
-                **character_portraits_override,
-            },
-            "_library_characters": library_characters,
-        }
+        try:
+            pipeline = Idea2VideoPipeline(api_key=api_key, demo=job.demo)
 
-    try:
-        pipeline = Idea2VideoPipeline(api_key=api_key, demo=job.demo)
+            if job.require_script_approval:
+                script = await asyncio.wait_for(
+                    pipeline.write_script_only(
+                        idea=job.idea,
+                        style=job.style,
+                        num_scenes=job.num_scenes,
+                        user_requirement=job.user_requirement,
+                        progress_callback=progress_callback,
+                        is_cancelled=is_cancelled,
+                        preset_characters=library_characters or None,
+                    ),
+                    timeout=PIPELINE_HARD_TIMEOUT_SECONDS,
+                )
+                if is_cancelled():
+                    job.status = JobStatus.CANCELLED
+                    await job_store.emit(job, "cancelled", "Generation cancelled", 100)
+                    await job_store.persist(job)
+                    return
+                script_dict = script.model_dump() if hasattr(script, "model_dump") else dict(script)
+                job.result = {
+                    **(job.result or {}),
+                    "script": script_dict,
+                }
+                job.status = JobStatus.AWAITING_SCRIPT_APPROVAL
+                await job_store.persist(job)
+                await job_store.emit(
+                    job,
+                    "script_ready",
+                    "Script ready for review",
+                    10,
+                    {"script": script_dict},
+                )
+                return
 
-        if job.require_script_approval:
-            script = await asyncio.wait_for(
-                pipeline.write_script_only(
+            result = await asyncio.wait_for(
+                pipeline.run(
                     idea=job.idea,
                     style=job.style,
-                    num_scenes=job.num_scenes,
+                    director_style=job.director_style,
                     user_requirement=job.user_requirement,
+                    num_scenes=job.num_scenes,
+                    aspect_ratio=job.aspect_ratio,
+                    working_dir=working_dir,
                     progress_callback=progress_callback,
                     is_cancelled=is_cancelled,
+                    character_portraits_override=character_portraits_override or None,
+                    music_enabled=job.music_enabled,
+                    dialogue_enabled=job.dialogue_enabled,
+                    plan=job.plan,
                     preset_characters=library_characters or None,
                 ),
                 timeout=PIPELINE_HARD_TIMEOUT_SECONDS,
@@ -656,86 +697,52 @@ async def run_generation_job(job: Job, api_key: str):
                 await job_store.emit(job, "cancelled", "Generation cancelled", 100)
                 await job_store.persist(job)
                 return
-            script_dict = script.model_dump() if hasattr(script, "model_dump") else dict(script)
-            job.result = {
-                **(job.result or {}),
-                "script": script_dict,
-            }
-            job.status = JobStatus.AWAITING_SCRIPT_APPROVAL
+            job.result = result
+            job.status = JobStatus.COMPLETED
+            # Persist COMPLETED + result (includes signed Storage URL when uploaded)
             await job_store.persist(job)
-            await job_store.emit(
-                job,
-                "script_ready",
-                "Script ready for review",
-                10,
-                {"script": script_dict},
-            )
-            return
-
-        result = await asyncio.wait_for(
-            pipeline.run(
-                idea=job.idea,
-                style=job.style,
-                director_style=job.director_style,
-                user_requirement=job.user_requirement,
-                num_scenes=job.num_scenes,
-                aspect_ratio=job.aspect_ratio,
-                working_dir=working_dir,
-                progress_callback=progress_callback,
-                is_cancelled=is_cancelled,
-                character_portraits_override=character_portraits_override or None,
-                music_enabled=job.music_enabled,
-                dialogue_enabled=job.dialogue_enabled,
-                plan=job.plan,
-                preset_characters=library_characters or None,
-            ),
-            timeout=PIPELINE_HARD_TIMEOUT_SECONDS,
-        )
-        if is_cancelled():
+            await job_store.emit(job, "complete", "Generation finished", 100, result)
+            # Disk cleanup only after a successful remote upload
+            if not job.demo and _is_remote_storage_url((result or {}).get("video_url")):
+                cleanup_working_dir(working_dir)
+        except PipelineCancelled:
             job.status = JobStatus.CANCELLED
-            await job_store.emit(job, "cancelled", "Generation cancelled", 100)
             await job_store.persist(job)
-            return
-        job.result = result
-        job.status = JobStatus.COMPLETED
-        # Persist COMPLETED + result (includes signed Storage URL when uploaded)
-        await job_store.persist(job)
-        await job_store.emit(job, "complete", "Generation finished", 100, result)
-        # Disk cleanup only after a successful remote upload
-        if not job.demo and _is_remote_storage_url((result or {}).get("video_url")):
+            await job_store.emit(job, "cancelled", "Generation cancelled", 100)
+            # Only refund if credits were already charged (full path, not script-only).
+            if job.user_id and not job.demo and not job.require_script_approval:
+                asyncio.create_task(
+                    _sb_refund_credits(job.user_id, _job_refund_amount(job), job.id)
+                )
+        except asyncio.TimeoutError:
+            job.status = JobStatus.FAILED
+            job.error = "Generation timed out — please try again."
+            await job_store.emit(job, "error", job.error, 100)
+            await job_store.persist(job)
+            if job.user_id and not job.demo and not job.require_script_approval:
+                asyncio.create_task(
+                    _sb_refund_credits(job.user_id, _job_refund_amount(job), job.id)
+                )
             cleanup_working_dir(working_dir)
-    except PipelineCancelled:
-        job.status = JobStatus.CANCELLED
-        await job_store.persist(job)
-        await job_store.emit(job, "cancelled", "Generation cancelled", 100)
-        # Only refund if credits were already charged (full path, not script-only).
-        if job.user_id and not job.demo and not job.require_script_approval:
-            asyncio.create_task(
-                _sb_refund_credits(job.user_id, _job_refund_amount(job), job.id)
-            )
-    except asyncio.TimeoutError:
+            return
+    except Exception as exc:
+        import traceback
+
+        logger.error(
+            "run_generation_job CRASHED before/during pipeline for "
+            "job %s: %s\n%s",
+            job.id,
+            exc,
+            traceback.format_exc(),
+        )
         job.status = JobStatus.FAILED
-        job.error = "Generation timed out — please try again."
+        job.error = f"Internal error: {exc}"
         await job_store.emit(job, "error", job.error, 100)
         await job_store.persist(job)
         if job.user_id and not job.demo and not job.require_script_approval:
             asyncio.create_task(
                 _sb_refund_credits(job.user_id, _job_refund_amount(job), job.id)
             )
-        cleanup_working_dir(working_dir)
-        return
-    except Exception as exc:
-        job.error = str(exc)
-        job.status = JobStatus.FAILED
-        await job_store.persist(job)  # persist FAILED + error message
-        await job_store.emit(
-            job, "error", str(exc), job.events[-1].progress if job.events else 0
-        )
-        if job.user_id and not job.demo and not job.require_script_approval:
-            asyncio.create_task(
-                _sb_refund_credits(job.user_id, _job_refund_amount(job), job.id)
-            )
-
 
 async def run_continue_from_script_job(job: Job, api_key: str, script_data: Dict[str, Any]):
     """Resume after script approval — charges already taken by the API layer."""
