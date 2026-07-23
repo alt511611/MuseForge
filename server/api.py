@@ -594,7 +594,9 @@ async def generate(
         library_characters=library_characters,
     )
 
+    logger.info("About to schedule background job %s", job.id)
     background_tasks.add_task(run_generation_job, job, api_key)
+    logger.info("Successfully scheduled background job %s", job.id)
     return GenerateResponse(job_id=job.id, demo=demo)
 
 
@@ -826,7 +828,9 @@ async def approve_script(
     await job_store.persist(job)
     await job_store.emit(job, "screenwriting", "Script approved — starting production", 12)
 
+    logger.info("About to schedule background job %s", job.id)
     background_tasks.add_task(run_continue_from_script_job, job, api_key, script_data)
+    logger.info("Successfully scheduled background job %s", job.id)
     return {"job_id": job.id, "status": job.status.value}
 
 
@@ -1099,7 +1103,9 @@ async def admin_retry_job(
         plan=old.plan,
     )
     api_key = os.environ.get("MUAPI_KEY", "")
+    logger.info("About to schedule background job %s", new_job.id)
     background_tasks.add_task(run_generation_job, new_job, api_key)
+    logger.info("Successfully scheduled background job %s", new_job.id)
     return {"new_job_id": new_job.id}
 
 
