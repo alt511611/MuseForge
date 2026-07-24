@@ -134,7 +134,18 @@ class FalAIVideoGenerator:
                 f"{DEFAULT_MAX_POLLS * DEFAULT_POLL_INTERVAL}s"
             )
 
-        result = await self.client.result(self.ENDPOINT, request_id)
+        try:
+            result = await self.client.result(self.ENDPOINT, request_id)
+        except Exception as exc:
+            if "content_policy_violation" in str(exc):
+                raise RuntimeError(
+                    "fal.ai flagged this scene's content automatically "
+                    "(often a false positive on fantasy/forest imagery). "
+                    "Try regenerating -- a new character portrait may not "
+                    "trigger the same flag."
+                ) from exc
+            raise
+
         video_url = ((result or {}).get("video") or {}).get("url")
         if not video_url:
             raise RuntimeError(f"fal.ai completed but no video URL in result: {result}")

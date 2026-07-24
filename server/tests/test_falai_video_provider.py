@@ -217,3 +217,36 @@ async def test_cancellation_mid_poll_cancels_remote_job_and_raises(monkeypatch):
             "prompt", "https://example.com/f.png", is_cancelled=lambda: True
         )
     assert cancel_calls == ["req-cancel"]
+
+
+@pytest.mark.asyncio
+async def test_content_policy_violation_returns_friendly_message(monkeypatch):
+    import fal_client
+    from tools.falai_video_generator import FalAIVideoGenerator
+
+    class FakeHandle:
+        request_id = "req-policy"
+
+    class FakeAsyncClient:
+        def __init__(self, key=None):
+            pass
+
+        async def submit(self, application, arguments):
+            return FakeHandle()
+
+        async def status(self, application, request_id, with_logs=False):
+            return fal_client.Completed(logs=None, metrics={}, error=None)
+
+        async def result(self, application, request_id):
+            raise RuntimeError(
+                '422: {"detail":[{"type":"content_policy_violation","msg":"blocked"}]}'
+            )
+
+        async def cancel(self, application, request_id):
+            pass
+
+    monkeypatch.setattr(fal_client, "AsyncClient", FakeAsyncClient)
+
+    gen = FalAIVideoGenerator(api_key="test-fal-key", demo=False)
+    with pytest.raises(RuntimeError, match="fal.ai flagged this scene's content automatically"):
+        await gen.generate_video_from_image("prompt", "https://example.com/f.png")
