@@ -65,9 +65,7 @@ async def test_character_voice_ids_are_locked_and_reused():
     from tools.muapi_voice_generator import MuAPIVoiceGenerator
 
     generator = MuAPIVoiceGenerator("test-key")
-    generator.client.generate = AsyncMock(
-        side_effect=["https://audio/1.mp3", "https://audio/2.mp3", "https://audio/3.mp3"]
-    )
+    generator.client.generate = AsyncMock(return_value="https://audio/scene.mp3")
 
     tracks = await generator.generate_scene_dialogue(
         [
@@ -77,16 +75,27 @@ async def test_character_voice_ids_are_locked_and_reused():
         ]
     )
 
-    calls = generator.client.generate.await_args_list
-    kemal_voice = calls[0].args[1]["voice_id"]
-    leyla_voice = calls[1].args[1]["voice_id"]
+    # One batch request for the whole scene (ElevenLabs dialogue v3).
+    assert generator.client.generate.await_count == 1
+    call = generator.client.generate.await_args
+    assert call.args[0] == "elevenlabs-text-to-dialogue-v3"
+    payload = call.args[1]
+    assert "inputs" in payload
+    assert len(payload["inputs"]) == 3
+    assert payload["stability"] == 0.5
 
-    assert calls[2].args[1]["voice_id"] == kemal_voice
+    kemal_voice = payload["inputs"][0]["voice_id"]
+    leyla_voice = payload["inputs"][1]["voice_id"]
+    assert payload["inputs"][2]["voice_id"] == kemal_voice
     assert leyla_voice != kemal_voice
+    assert kemal_voice in MuAPIVoiceGenerator.SYSTEM_VOICE_IDS
+
     assert tracks[0]["character"] == "Kemal"
     assert tracks[0]["voice_id"] == kemal_voice
+    assert tracks[0]["audio_url"] == "https://audio/scene.mp3"
+    # Combined audio only on the first track; later rows are caption-only.
+    assert "audio_url" not in tracks[1]
     assert tracks[2]["voice_id"] == kemal_voice
-    assert all(call.args[0] == "minimax-speech-2.6-hd" for call in calls)
 
 
 @pytest.mark.asyncio
@@ -106,7 +115,7 @@ async def test_pipeline_routes_structured_dialogue_to_voice_layer(tmp_path, monk
                 {
                     "character": dialogue[0].character,
                     "line": dialogue[0].line,
-                    "voice_id": "Friendly_Person",
+                    "voice_id": "George - Warm",
                     "audio_url": "https://audio/line.mp3",
                 }
             ]
@@ -143,4 +152,4 @@ async def test_pipeline_routes_structured_dialogue_to_voice_layer(tmp_path, monk
     assert scene_call["has_dialogue"] is True
     assert captured["character"] == "Kemal"
     assert assembly_call["dialogue_tracks"][0]["scene_index"] == 0
-    assert assembly_call["dialogue_tracks"][0]["voice_id"] == "Friendly_Person"
+    assert assembly_call["dialogue_tracks"][0]["voice_id"] == "George - Warm"

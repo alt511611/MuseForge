@@ -141,6 +141,11 @@ async def add_background_music(
         for track in dialogue_tracks:
             dialogue = None
             try:
+                audio_url = track.get("audio_url")
+                if not audio_url:
+                    # Caption-only rows (ElevenLabs returns one combined file
+                    # per scene; later lines carry text for SRT only).
+                    continue
                 scene_index = int(track.get("scene_index", 0))
                 scene_start = (
                     scene_starts[scene_index]
@@ -148,7 +153,7 @@ async def add_background_music(
                     else 0.0
                 )
                 local_start = line_offsets.get(scene_index, 0.0)
-                dialogue = AudioFileClip(track["audio_url"])
+                dialogue = AudioFileClip(audio_url)
                 available = (
                     scene_durations[scene_index] - local_start
                     if 0 <= scene_index < len(scene_durations)

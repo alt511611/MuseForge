@@ -61,7 +61,7 @@ async def test_flux_pulid_rejection_falls_back_to_flux_dev(status):
         "https://cdn.example/maya-portrait.png"
     )
 
-    assert fallback_call.args[0] == generator.IMAGE_ENDPOINT
+    assert fallback_call.args[0] == generator.LEGACY_SIZE_ENDPOINT
     fallback_payload = fallback_call.args[1]
     assert fallback_payload["image"] == "https://cdn.example/maya-portrait.png"
     assert "image_url" not in fallback_payload
@@ -95,7 +95,7 @@ async def test_flux_pulid_internal_runtime_failure_falls_back_to_flux_dev():
     assert generator.client.generate.await_count == 2
     pulid_call, fallback_call = generator.client.generate.await_args_list
     assert pulid_call.args[0] == generator.KONTEXT_ENDPOINT
-    assert fallback_call.args[0] == generator.IMAGE_ENDPOINT
+    assert fallback_call.args[0] == generator.LEGACY_SIZE_ENDPOINT
     assert fallback_call.args[1]["image"] == (
         "https://cdn.example/maya-portrait.png"
     )
