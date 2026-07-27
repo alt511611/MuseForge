@@ -1,4 +1,8 @@
-"""Optional, fail-open character dialogue generation via MuAPI."""
+"""Optional, fail-open character dialogue generation via MuAPI.
+
+Uses ElevenLabs text-to-dialogue v3: one request per scene with all lines
+in a single ``inputs`` list (confirmed MuAPI playground schema).
+"""
 
 import hashlib
 import logging
@@ -17,28 +21,30 @@ def is_dialogue_enabled() -> bool:
     return os.environ.get("MUSEFORGE_DIALOGUE_ENABLED", "0").strip().lower() in TRUTHY
 
 
-class MuAPIVoiceGenerator:
-    """Lock each character to one MiniMax system voice for the whole drama.
+def _estimate_line_duration_seconds(line: str) -> float:
+    """Rough spoken duration (~2.5 words/sec) when the API returns no timings."""
+    words = max(1, len((line or "").split()))
+    return max(1.2, min(8.0, words / 2.5))
 
-    MuAPI also exposes ``minimax-voice-clone``, but it requires a consented
-    reference-audio sample. MuseForge currently has no voice-upload input, so
-    assigning stable system voices is the safe character-identity mechanism.
+
+class MuAPIVoiceGenerator:
+    """Lock each character to one ElevenLabs dialogue voice for the whole drama.
+
+    Voice IDs must match MuAPI's ``elevenlabs-text-to-dialogue-v3`` enum exactly
+    (playground labels like ``George - Warm``).
     """
 
-    VOICE_ENDPOINT = os.environ.get("MUAPI_VOICE_MODEL", "minimax-speech-2.6-hd")
+    VOICE_ENDPOINT = os.environ.get(
+        "MUAPI_VOICE_MODEL", "elevenlabs-text-to-dialogue-v3"
+    )
+    # Stable subset from MuAPI's confirmed voice_id enum — gender/tone variety.
     SYSTEM_VOICE_IDS = (
-        "Friendly_Person",
-        "Wise_Woman",
-        "Deep_Voice_Man",
-        "Calm_Woman",
-        "Casual_Guy",
-        "Lively_Girl",
-        "Patient_Man",
-        "Young_Knight",
-        "Determined_Man",
-        "Lovely_Girl",
-        "Elegant_Man",
-        "Inspirational_girl",
+        "George - Warm",
+        "Sarah - Soft",
+        "Brian - Deep, Resonant and Comforting",
+        "Charlotte - Clear",
+        "Callum - Husky Trickster",
+        "Laura - Enthusiast, Quirky Attitude",
     )
 
     def __init__(self, api_key: str, demo: bool = False):
@@ -65,34 +71,52 @@ class MuAPIVoiceGenerator:
         self._character_voices[key] = voice_id
         return voice_id
 
-    async def generate_dialogue(
-        self,
-        character: str,
-        line: str,
-        is_cancelled: Optional[Callable[[], bool]] = None,
-    ) -> Optional[str]:
-        """Generate one spoken line; return ``None`` on every provider failure."""
-        text = (line or "").strip()
-        if not text or self.demo:
-            return None
+    def _parse_lines(self, dialogue: Iterable[Any]) -> List[Dict[str, str]]:
+        lines: List[Dict[str, str]] = []
+        for item in dialogue or []:
+            if isinstance(item, dict):
+                character = str(item.get("character", "Narrator"))
+                line = str(item.get("line", ""))
+            else:
+                character = str(getattr(item, "character", "Narrator"))
+                line = str(getattr(item, "line", ""))
+            text = line.strip()
+            if not text:
+                continue
+            voice_id = self.voice_id_for_character(character)
+            lines.append(
+                {
+                    "character": character,
+                    "line": text,
+                    "voice_id": voice_id,
+                }
+            )
+        return lines
 
-        voice_id = self.voice_id_for_character(character)
+    async def generate_scene_dialogue(
+        self,
+        dialogue: Iterable[Any],
+        is_cancelled: Optional[Callable[[], bool]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Generate all non-empty scene lines in ONE ElevenLabs dialogue request.
+
+        Returns per-line track metadata for captions. The combined audio URL
+        (when the API returns a single file) is attached only to the first
+        track so the mixer plays it once; later tracks are caption-only.
+        """
+        lines = self._parse_lines(dialogue)
+        if not lines or self.demo:
+            return []
+
         payload = {
-            "prompt": text,
-            "voice_id": voice_id,
-            "speed": 1,
-            "volume": 1,
-            "pitch": 0,
-            "emotion": "neutral",
-            "english_normalization": False,
-            "sample_rate": 32000,
-            "bitrate": 128000,
-            "channel": 1,
-            "format": "mp3",
-            "language_boost": "auto",
+            "inputs": [
+                {"text": row["line"], "voice_id": row["voice_id"]} for row in lines
+            ],
+            "stability": 0.5,
+            "language": None,
         }
         try:
-            return await self.client.generate(
+            audio_url = await self.client.generate(
                 self.VOICE_ENDPOINT,
                 payload,
                 poll_interval=2.0,
@@ -101,38 +125,26 @@ class MuAPIVoiceGenerator:
             )
         except Exception as exc:
             logger.warning(
-                "Dialogue generation failed for character %s; continuing silently: %s",
-                character,
+                "Scene dialogue generation failed; continuing silently: %s",
                 exc,
             )
-            return None
+            return []
 
-    async def generate_scene_dialogue(
-        self,
-        dialogue: Iterable[Any],
-        is_cancelled: Optional[Callable[[], bool]] = None,
-    ) -> List[Dict[str, str]]:
-        """Generate non-empty scene lines in order with locked voice metadata."""
-        tracks: List[Dict[str, str]] = []
-        for item in dialogue or []:
-            if isinstance(item, dict):
-                character = str(item.get("character", "Narrator"))
-                line = str(item.get("line", ""))
-            else:
-                character = str(getattr(item, "character", "Narrator"))
-                line = str(getattr(item, "line", ""))
-            if not line.strip():
-                continue
+        if not audio_url:
+            return []
 
-            voice_id = self.voice_id_for_character(character)
-            audio_url = await self.generate_dialogue(character, line, is_cancelled=is_cancelled)
-            if audio_url:
-                tracks.append(
-                    {
-                        "character": character,
-                        "line": line,
-                        "voice_id": voice_id,
-                        "audio_url": audio_url,
-                    }
-                )
+        # Single combined audio file for the whole scene (confirmed typical
+        # MuAPI outputs[0] shape). Per-line duration_seconds are fail-safe
+        # estimates for SRT when the API does not return cue timings.
+        tracks: List[Dict[str, Any]] = []
+        for i, row in enumerate(lines):
+            track: Dict[str, Any] = {
+                "character": row["character"],
+                "line": row["line"],
+                "voice_id": row["voice_id"],
+                "duration_seconds": _estimate_line_duration_seconds(row["line"]),
+            }
+            if i == 0:
+                track["audio_url"] = audio_url
+            tracks.append(track)
         return tracks

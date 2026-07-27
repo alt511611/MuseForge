@@ -1,7 +1,4 @@
-"""Verify the flux-dev-image endpoint fix: correct endpoint slug (confirmed
-against MuAPI's own docs) and correct payload shape (combined "size"
-string, not separate width/height).
-"""
+"""Verify MuAPI image endpoint + flux-3-text-to-image payload schema."""
 import os
 import sys
 
@@ -11,32 +8,46 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("MUAPI_KEY", "test-key")
 
 
-def test_image_endpoint_matches_muapi_docs():
+def test_image_endpoint_is_flux_3_text_to_image():
     from tools.muapi_image_generator import MuAPIImageGenerator
 
-    # Confirmed against https://www.muapi.ai/docs/flux-dev's own curl
-    # example: POST https://api.muapi.ai/api/v1/flux-dev-image
-    assert MuAPIImageGenerator.IMAGE_ENDPOINT == "flux-dev-image"
+    assert MuAPIImageGenerator.IMAGE_ENDPOINT == "flux-3-text-to-image"
+    assert MuAPIImageGenerator.KONTEXT_ENDPOINT == "flux-pulid"
 
 
-def test_payload_uses_combined_size_string_not_separate_dimensions():
+def test_text_to_image_payload_uses_resolution_and_aspect_ratio(monkeypatch):
+    monkeypatch.delenv("MUAPI_IMAGE_RESOLUTION", raising=False)
     from tools.muapi_image_generator import MuAPIImageGenerator
 
     gen = MuAPIImageGenerator(api_key="test-key")
-    payload = gen._build_payload("a cat", "1:1")
+    payload = gen._text_to_image_payload("a cat", "1:1")
 
-    assert payload["size"] == "1024*1024"
+    assert payload == {
+        "prompt": "a cat",
+        "resolution": "2k",
+        "aspect_ratio": "1:1",
+    }
+    assert "size" not in payload
     assert "width" not in payload
     assert "height" not in payload
 
 
-def test_reference_image_uses_image_field():
+def test_invalid_aspect_ratio_falls_back_to_16_9():
+    from tools.muapi_image_generator import MuAPIImageGenerator
+
+    gen = MuAPIImageGenerator(api_key="test-key")
+    payload = gen._text_to_image_payload("a cat", "99:1")
+    assert payload["aspect_ratio"] == "16:9"
+
+
+def test_legacy_size_payload_still_available_for_pulid_fallback():
     from tools.muapi_image_generator import MuAPIImageGenerator
 
     gen = MuAPIImageGenerator(api_key="test-key")
     payload = gen._build_payload("a cat", "16:9", reference_url="https://example.com/ref.png")
 
     assert payload["image"] == "https://example.com/ref.png"
+    assert payload["size"] == "1344*768"
     assert "image_url" not in payload
 
 
@@ -56,10 +67,7 @@ def test_endpoints_are_env_overridable():
     module replaces its class objects with new ones, but any other module
     that already did `from tools.x import Y` still holds the OLD class
     reference. That mismatch broke unrelated tests' monkeypatches when run
-    in the same session (patches applied to the reloaded module's fresh
-    class didn't affect instances created via the stale reference held
-    elsewhere, e.g. in pipelines/script2video.py). A source-level check
-    avoids mutating any shared module state.
+    in the same session. A source-level check avoids mutating shared state.
     """
     import inspect
     import tools.muapi_image_generator as img_mod
