@@ -1,4 +1,4 @@
-"""Verify MuAPI image endpoint + flux-3-text-to-image payload schema."""
+"""Verify MuAPI image endpoint + flux-2-pro size payload schema."""
 import os
 import sys
 
@@ -8,26 +8,23 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("MUAPI_KEY", "test-key")
 
 
-def test_image_endpoint_is_flux_3_text_to_image():
+def test_image_endpoint_is_flux_2_pro():
     from tools.muapi_image_generator import MuAPIImageGenerator
 
-    assert MuAPIImageGenerator.IMAGE_ENDPOINT == "flux-3-text-to-image"
+    assert MuAPIImageGenerator.IMAGE_ENDPOINT == "flux-2-pro"
     assert MuAPIImageGenerator.KONTEXT_ENDPOINT == "flux-pulid"
 
 
-def test_text_to_image_payload_uses_resolution_and_aspect_ratio(monkeypatch):
-    monkeypatch.delenv("MUAPI_IMAGE_RESOLUTION", raising=False)
+def test_text_to_image_payload_uses_size_string():
     from tools.muapi_image_generator import MuAPIImageGenerator
 
     gen = MuAPIImageGenerator(api_key="test-key")
     payload = gen._text_to_image_payload("a cat", "1:1")
 
-    assert payload == {
-        "prompt": "a cat",
-        "resolution": "2k",
-        "aspect_ratio": "1:1",
-    }
-    assert "size" not in payload
+    assert payload["prompt"] == "a cat"
+    assert payload["size"] == "1024*1024"
+    assert "resolution" not in payload
+    assert "aspect_ratio" not in payload
     assert "width" not in payload
     assert "height" not in payload
 
@@ -37,7 +34,7 @@ def test_invalid_aspect_ratio_falls_back_to_16_9():
 
     gen = MuAPIImageGenerator(api_key="test-key")
     payload = gen._text_to_image_payload("a cat", "99:1")
-    assert payload["aspect_ratio"] == "16:9"
+    assert payload["size"] == "1344*768"
 
 
 def test_legacy_size_payload_still_available_for_pulid_fallback():

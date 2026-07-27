@@ -8,25 +8,13 @@ from tools.muapi_client import MuAPIClient, MuAPIError
 
 logger = logging.getLogger(__name__)
 
-# Used only for demo placeholders and the legacy flux-dev-image fallback path
-# (PuLID failure). flux-3-text-to-image uses resolution + aspect_ratio instead.
+# Pixel sizes for flux-2-pro / flux-dev-image style "size" payloads
+# (e.g. "1024*1024"). Also used for demo placeholder URLs.
 ASPECT_RATIO_MAP = {
     "1:1": {"width": 1024, "height": 1024},
     "16:9": {"width": 1344, "height": 768},
     "9:16": {"width": 768, "height": 1344},
     "4:3": {"width": 1152, "height": 896},
-}
-
-# Confirmed against MuAPI flux-3-text-to-image playground enum.
-VALID_ASPECT_RATIOS = {
-    "16:9",
-    "9:16",
-    "1:1",
-    "4:3",
-    "3:4",
-    "3:2",
-    "2:3",
-    "21:9",
 }
 
 
@@ -38,9 +26,9 @@ def _demo_image_url(prompt: str, aspect_ratio: str) -> str:
 
 
 class MuAPIImageGenerator:
-    # Text-to-image: flux-3-text-to-image (confirmed MuAPI playground schema:
-    # prompt + resolution + aspect_ratio — NOT the old size "1024*1024" shape).
-    IMAGE_ENDPOINT = os.environ.get("MUAPI_IMAGE_MODEL", "flux-3-text-to-image")
+    # Referanssız text-to-image: flux-2-pro (size "W*H" schema).
+    # flux-3-text-to-image currently 404s on MuAPI (not live yet).
+    IMAGE_ENDPOINT = os.environ.get("MUAPI_IMAGE_MODEL", "flux-2-pro")
     # Legacy size-based endpoint kept only as PuLID fail-open fallback.
     LEGACY_SIZE_ENDPOINT = os.environ.get(
         "MUAPI_IMAGE_FALLBACK_MODEL", "flux-dev-image"
@@ -59,18 +47,10 @@ class MuAPIImageGenerator:
         self.demo = demo
         self.client = MuAPIClient(api_key)
 
-    def _text_to_image_payload(self, prompt: str, aspect_ratio: str) -> dict:
-        ratio = aspect_ratio if aspect_ratio in VALID_ASPECT_RATIOS else "16:9"
-        return {
-            "prompt": prompt,
-            "resolution": os.environ.get("MUAPI_IMAGE_RESOLUTION", "2k"),
-            "aspect_ratio": ratio,
-        }
-
-    def _legacy_size_payload(
+    def _size_payload(
         self, prompt: str, aspect_ratio: str, reference_url: str = None
     ) -> dict:
-        """flux-dev-image style payload (size string) — fallback only."""
+        """flux-2-pro / flux-dev-image style payload (combined size string)."""
         dims = ASPECT_RATIO_MAP.get(aspect_ratio, ASPECT_RATIO_MAP["16:9"])
         payload = {
             "prompt": prompt,
@@ -84,10 +64,17 @@ class MuAPIImageGenerator:
             payload["image"] = reference_url
         return payload
 
-    # Back-compat alias for tests that still call _build_payload on the
-    # legacy size path (PuLID fallback schema checks).
+    # Aliases kept for call sites / tests.
+    def _text_to_image_payload(self, prompt: str, aspect_ratio: str) -> dict:
+        return self._size_payload(prompt, aspect_ratio)
+
+    def _legacy_size_payload(
+        self, prompt: str, aspect_ratio: str, reference_url: str = None
+    ) -> dict:
+        return self._size_payload(prompt, aspect_ratio, reference_url)
+
     def _build_payload(self, prompt: str, aspect_ratio: str, reference_url: str = None) -> dict:
-        return self._legacy_size_payload(prompt, aspect_ratio, reference_url)
+        return self._size_payload(prompt, aspect_ratio, reference_url)
 
     async def generate_image(
         self, prompt: str, aspect_ratio: str = "1:1", is_cancelled=None
