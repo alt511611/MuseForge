@@ -50,9 +50,7 @@ async def test_demo_mode_still_works_without_network():
 
 
 def test_endpoints_are_env_overridable():
-    """Both endpoints must be adjustable via env var without a code change,
-    since neither could be 100% confirmed against first-party docs (image
-    endpoint was confirmed; video endpoint was not).
+    """Endpoints must be adjustable via env var without a code change.
 
     NOTE: deliberately does NOT use importlib.reload() here -- reloading a
     module replaces its class objects with new ones, but any other module
@@ -70,35 +68,31 @@ def test_endpoints_are_env_overridable():
     img_source = inspect.getsource(img_mod)
     vid_source = inspect.getsource(vid_mod)
     assert 'os.environ.get("MUAPI_IMAGE_MODEL"' in img_source
-    assert 'os.environ.get("MUAPI_VIDEO_MODEL"' in vid_source
+    assert "MUAPI_VIDEO_MODEL_PRO" in vid_source
+    assert "MUAPI_VIDEO_MODEL_STANDARD" in vid_source
+    assert "os.environ.get" in vid_source
 
 
-def test_video_payload_no_longer_sends_aspect_ratio():
-    """aspect_ratio removed as a likely cause of the reported 422 --
-    Kling image-to-video APIs typically derive aspect ratio from the
-    source image rather than accepting it as a parameter. Not a
-    first-party-confirmed fact (unlike the flux-dev-image fix), so this
-    test documents the current best-effort payload shape rather than an
-    assertion the endpoint is exactly correct."""
+def test_video_payload_matches_kling_v3_schema():
+    """Kling v3.0 i2v: prompt/image_url/duration/generate_audio; no mode,
+    no aspect_ratio (derived from source image)."""
     from tools.muapi_video_generator import MuAPIVideoGenerator
 
     gen = MuAPIVideoGenerator(api_key="test-key")
-    payload = gen._payload("pan left", "https://cdn.example/f.jpg", 5, "standard")
+    payload = gen._payload("pan left", "https://cdn.example/f.jpg", 5)
     assert "aspect_ratio" not in payload
-    assert payload["mode"] == "standard"
-    assert payload["duration"] in (5, 10)
+    assert "mode" not in payload
+    assert payload["duration"] == 5
+    assert payload["generate_audio"] is True
+    assert payload["prompt"] == "pan left"
+    assert payload["image_url"] == "https://cdn.example/f.jpg"
     import inspect
     import tools.muapi_video_generator as vid_mod
 
-    # aspect_ratio must not appear anywhere in the module's request-building
-    # code (now centralized in _payload(), not inline in
-    # generate_video_from_image() -- that changed when plan-based HD mode
-    # was added, so check the whole module rather than one method's source).
     source = inspect.getsource(vid_mod)
     assert '"aspect_ratio"' not in source
 
-    # Non-Pro plans must still default to standard mode (unchanged
-    # behavior); Pro gets the (unconfirmed-exact-string) HD mode.
-    assert vid_mod.mode_for_plan("free") == "standard"
-    assert vid_mod.mode_for_plan("creator") == "standard"
-    assert vid_mod.mode_for_plan("pro") != "standard"
+    assert vid_mod.endpoint_for_plan("free") == vid_mod.STANDARD_ENDPOINT
+    assert vid_mod.endpoint_for_plan("creator") == vid_mod.STANDARD_ENDPOINT
+    assert vid_mod.endpoint_for_plan("pro") == vid_mod.PRO_ENDPOINT
+    assert vid_mod.endpoint_for_plan("pro") != vid_mod.STANDARD_ENDPOINT

@@ -1,8 +1,8 @@
-"""MuAPI image-to-video generation."""
+"""MuAPI image-to-video generation (Kling v3.0 Pro / Standard)."""
 
 import logging
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from tools.muapi_client import MuAPIClient, MuAPIError
 
@@ -13,25 +13,22 @@ DEMO_VIDEO_URL = os.environ.get(
     "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
 )
 
-# Kling O1: "standard" ≈ 720p, "professional" ≈ 1080p (third-party docs,
-# not independently confirmed against MuAPI's own first-party docs).
-# Override via env if MuAPI's actual string differs (e.g. "pro").
-DEFAULT_PRO_MODE = "professional"
+# Confirmed MuAPI playground endpoints: Pro vs Standard is the endpoint
+# itself, not a `mode` field inside one shared payload.
+PRO_ENDPOINT = os.environ.get(
+    "MUAPI_VIDEO_MODEL_PRO", "kling-v3.0-pro-image-to-video"
+)
+STANDARD_ENDPOINT = os.environ.get(
+    "MUAPI_VIDEO_MODEL_STANDARD", "kling-v3.0-standard-image-to-video"
+)
 
 
-def _pro_mode_value() -> str:
-    return os.environ.get("MUAPI_VIDEO_PRO_MODE", DEFAULT_PRO_MODE).strip() or DEFAULT_PRO_MODE
+def endpoint_for_plan(plan: str) -> str:
+    return PRO_ENDPOINT if (plan or "").lower() == "pro" else STANDARD_ENDPOINT
 
 
-def mode_for_plan(plan: str) -> str:
-    """Return MuAPI `mode` for the caller's plan. Pro -> HD; everyone else -> standard."""
-    if (plan or "").lower() == "pro":
-        return _pro_mode_value()
-    return "standard"
-
-
-def _is_mode_rejected(exc: Exception) -> bool:
-    """True when MuAPI likely rejected the mode value (404/422)."""
+def _is_endpoint_rejected(exc: Exception) -> bool:
+    """True when MuAPI likely rejected the endpoint (404/422)."""
     msg = str(exc).lower()
     if "404" in msg or "422" in msg:
         return True
@@ -40,13 +37,8 @@ def _is_mode_rejected(exc: Exception) -> bool:
     return False
 
 
-# CONFIRMED against MuAPI's own validation error response:
-#   {"detail":[{"type":"literal_error","loc":["body","duration"],
-#     "msg":"Input should be 5 or 10", ...}]}
-# The storyboard artist's LLM picks a creative duration_seconds value
-# (e.g. 14) with no awareness that Kling's API only accepts this exact
-# enum -- round to the nearest valid value defensively rather than
-# relying on prompt instructions the model might ignore.
+# Kept for any legacy callers / older Kling enums (5 or 10 only).
+# New v3.0 path uses clamp_duration() instead.
 VALID_DURATIONS = (5, 10)
 
 
@@ -58,19 +50,16 @@ def nearest_valid_duration(seconds) -> int:
     return min(VALID_DURATIONS, key=lambda d: abs(d - seconds))
 
 
-class MuAPIVideoGenerator:
-    # UPDATED to "kling-v2.1-standard-i2v", a cheaper tier verified via a
-    # working reference integration (Anil-matcha/Open-AI-Micro-Drama-Generator
-    # on GitHub, a real MuAPI-based project). Previous default was
-    # "kling-o1-image-to-video". STILL NOT independently confirmed against
-    # MuAPI's own first-party docs for THIS project's exact payload shape --
-    # _payload() below (prompt/image_url/duration/mode) was written for the
-    # O1 endpoint and has NOT been adjusted for v2.1 yet. If this 404/422s,
-    # capture the exact error and check
-    # https://muapi.ai/playground/kling-v2.1-standard-i2v for the confirmed
-    # schema before changing _payload().
-    VIDEO_ENDPOINT = os.environ.get("MUAPI_VIDEO_MODEL", "kling-v2.1-standard-i2v")
+def clamp_duration(seconds) -> int:
+    """Kling v3.0 accepts integer duration 3–15 (default 5)."""
+    try:
+        value = int(round(float(seconds)))
+    except (TypeError, ValueError):
+        return 5
+    return max(3, min(15, value))
 
+
+class MuAPIVideoGenerator:
     def __init__(self, api_key: str, demo: bool = False):
         self.demo = demo
         self.client = MuAPIClient(api_key)
@@ -80,19 +69,21 @@ class MuAPIVideoGenerator:
         prompt: str,
         image_url: str,
         duration: int,
-        mode: str,
+        generate_audio: bool = True,
+        last_image: Optional[str] = None,
     ) -> Dict[str, Any]:
-        return {
+        # Schema confirmed against MuAPI playground for kling-v3.0-*-image-to-video:
+        # prompt, image_url, duration (int 3-15), generate_audio; optional last_image.
+        # No `mode` field — Pro/Standard is selected via endpoint_for_plan().
+        payload: Dict[str, Any] = {
             "prompt": prompt,
             "image_url": image_url,
-            "duration": nearest_valid_duration(duration),
-            "mode": mode,
-            # aspect_ratio deliberately NOT included: most Kling
-            # image-to-video APIs (across several providers, consistently)
-            # derive the output aspect ratio from the source image itself
-            # rather than accepting it as a request parameter -- this was
-            # confirmed to be the cause of an earlier 422 in production.
+            "duration": clamp_duration(duration),
+            "generate_audio": generate_audio,
         }
+        if last_image:
+            payload["last_image"] = last_image
+        return payload
 
     async def generate_video_from_image(
         self,
@@ -103,34 +94,36 @@ class MuAPIVideoGenerator:
         plan: str = "free",
         is_cancelled=None,
     ) -> str:
-        # aspect_ratio kept in the signature for callers; not sent in payload.
+        # aspect_ratio kept in the signature for callers; not sent in payload
+        # (Kling i2v derives aspect from the source image).
         _ = aspect_ratio
         if self.demo:
             return DEMO_VIDEO_URL
 
-        mode = mode_for_plan(plan)
-        payload = self._payload(prompt, image_url, duration, mode)
+        endpoint = endpoint_for_plan(plan)
+        # Native Kling audio on for now; exposed as its own feature later.
+        payload = self._payload(prompt, image_url, duration, generate_audio=True)
 
         try:
             return await self.client.generate(
-                self.VIDEO_ENDPOINT,
+                endpoint,
                 payload,
                 poll_interval=3.0,
                 max_polls=200,
                 is_cancelled=is_cancelled,
             )
         except MuAPIError as exc:
-            # Wrong mode string (e.g. MuAPI expects "pro" not "professional") --
-            # fall back to standard so the job still completes without HD.
-            if mode != "standard" and _is_mode_rejected(exc):
+            # Pro endpoint missing / schema mismatch — fall back to Standard
+            # so the job still completes (same idea as the old mode fallback).
+            if endpoint != STANDARD_ENDPOINT and _is_endpoint_rejected(exc):
                 logger.warning(
-                    "MuAPI rejected mode=%r (%s); retrying with mode=standard",
-                    mode,
+                    "MuAPI rejected endpoint=%r (%s); retrying with %r",
+                    endpoint,
                     exc,
+                    STANDARD_ENDPOINT,
                 )
-                payload = self._payload(prompt, image_url, duration, "standard")
                 return await self.client.generate(
-                    self.VIDEO_ENDPOINT,
+                    STANDARD_ENDPOINT,
                     payload,
                     poll_interval=3.0,
                     max_polls=200,
