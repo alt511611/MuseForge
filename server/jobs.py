@@ -573,6 +573,7 @@ def _job_refund_amount(job: Job) -> int:
 
 async def run_generation_job(job: Job, api_key: str):
     """Start a job. If require_script_approval, stop after screenwriting."""
+    logger.info("run_generation_job ENTERED for job %s", job.id)
     try:
         from pipelines.idea2video import Idea2VideoPipeline
         from pipelines.script2video import PipelineCancelled
