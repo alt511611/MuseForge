@@ -87,9 +87,33 @@ class MuAPIImageGenerator:
             self.IMAGE_ENDPOINT,
             prompt,
         )
-        return await self.client.generate(
-            self.IMAGE_ENDPOINT, payload, is_cancelled=is_cancelled
-        )
+        try:
+            return await self.client.generate(
+                self.IMAGE_ENDPOINT, payload, is_cancelled=is_cancelled
+            )
+        except MuAPIError as exc:
+            message = str(exc).lower()
+            is_schema_rejection = "404" in message or "422" in message
+            is_runtime_failure = (
+                '"status":"failed"' in message.replace(" ", "")
+                or "internal error" in message
+            )
+            if not (is_schema_rejection or is_runtime_failure):
+                raise
+
+            logger.warning(
+                "%s failed (schema_rejection=%s, runtime_failure=%s): %s; "
+                "falling back to %s",
+                self.IMAGE_ENDPOINT,
+                is_schema_rejection,
+                is_runtime_failure,
+                exc,
+                self.LEGACY_SIZE_ENDPOINT,
+            )
+            fallback_payload = self._legacy_size_payload(prompt, aspect_ratio)
+            return await self.client.generate(
+                self.LEGACY_SIZE_ENDPOINT, fallback_payload, is_cancelled=is_cancelled
+            )
 
     async def generate_image_with_reference(
         self,
