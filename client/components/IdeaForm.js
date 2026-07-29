@@ -27,7 +27,7 @@ const MUSIC_ELIGIBLE_PLANS = ["creator", "pro"];
 
 // Real, currently-enforced scene caps. Kept in sync with server/api.py's
 // PLAN_MAX_SCENES — this just avoids the user hitting a 400 after the fact.
-const PLAN_MAX_SCENES = { free: 3, creator: 3, pro: 5 };
+const PLAN_MAX_SCENES = { free: 5, creator: 8, pro: 10 };
 
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024; // 5MB — keep in sync with server/constants.py
 
@@ -118,9 +118,14 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
   }, [user]);
 
   const musicEligible = MUSIC_ELIGIBLE_PLANS.includes(plan);
-  const maxScenes = PLAN_MAX_SCENES[plan] ?? 5;
+  const maxScenes = PLAN_MAX_SCENES[plan] ?? PLAN_MAX_SCENES.free;
   const libraryEligible = plan === "pro";
 
+  // If the user's plan loads with a lower cap than the current slider value,
+  // clamp so we never submit above what the server will accept.
+  useEffect(() => {
+    if (numScenes > maxScenes) setNumScenes(maxScenes);
+  }, [maxScenes, numScenes]);
   // Pro-only: load saved characters for multi-select reuse.
   useEffect(() => {
     if (!user || !libraryEligible) {
@@ -497,6 +502,11 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
               <span>2 scenes (~16s)</span>
               <span>{maxScenes} scenes (~{maxScenes * 8}s)</span>
             </div>
+            {plan !== "pro" && numScenes >= maxScenes && (
+              <p className="text-xs mt-2" style={{ color: "#fbbf24" }}>
+                {t("form_scenes_upgrade_hint", { max: maxScenes })}
+              </p>
+            )}
           </div>
           <div>
             <label className="text-sm font-medium mb-2 block" style={{ color: "#94a3b8" }}>
@@ -619,6 +629,11 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
               </li>
             ))}
           </ul>
+        )}
+        {!demoMode && estimate?.wait_warning_minutes != null && (
+          <p className="text-[11px] leading-relaxed" style={{ color: "#fbbf24" }}>
+            {t("form_long_job_warning", { minutes: estimate.wait_warning_minutes })}
+          </p>
         )}
       </div>
 
