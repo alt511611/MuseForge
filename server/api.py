@@ -190,7 +190,7 @@ class GenerateRequest(BaseModel):
     style: str = "Cinematic"
     director_style: str = "cinematic_balanced"
     aspect_ratio: str = "16:9"
-    num_scenes: int = Field(default=3, ge=2, le=5)
+    num_scenes: int = Field(default=3, ge=2, le=10)
     user_requirement: str = ""
     character_image: Optional[str] = None
     character_name: str = ""
@@ -235,7 +235,7 @@ class ApproveScriptRequest(BaseModel):
 
 
 class EstimateRequest(BaseModel):
-    num_scenes: int = Field(default=3, ge=2, le=5)
+    num_scenes: int = Field(default=3, ge=2, le=10)
     music_enabled: bool = False
     dialogue_enabled: bool = False
     # Client-supplied plan for the credit breakdown preview. The generate
@@ -250,9 +250,24 @@ class EstimateRequest(BaseModel):
 # supabase_migration.sql's public.plan_limits view and client/lib/i18n
 # plan_*_features strings. Do NOT add a plan feature here (or to the pricing
 # copy) unless there's an actual enforcement mechanism behind it.
-PLAN_MAX_SCENES = {"free": 3, "creator": 3, "pro": 5}
+# Pydantic allows up to 10; per-plan caps below are the real ceiling.
+PLAN_MAX_SCENES = {"free": 5, "creator": 8, "pro": 10}
+MAX_SCENES_BY_PLAN = PLAN_MAX_SCENES  # alias used by docs / callers
 MUSIC_EXTRA_CREDIT_COST = 1  # flat surcharge on top of scene credits, Creator/Pro only
 DIALOGUE_EXTRA_CREDIT_COST = 1  # per scene, Pro only
+
+
+def _enforce_plan_scene_limit(plan: str, num_scenes: int) -> None:
+    """Raise 400 when num_scenes exceeds the caller's plan ceiling."""
+    max_allowed = PLAN_MAX_SCENES.get((plan or "free").lower(), PLAN_MAX_SCENES["free"])
+    if num_scenes > max_allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Your plan allows up to {max_allowed} scenes. "
+                "Upgrade for longer videos."
+            ),
+        )
 
 
 def build_credit_breakdown(
@@ -376,12 +391,21 @@ async def director_styles():
 async def estimate(req: EstimateRequest):
     demo = _is_demo()
     seconds = 5 if demo else int(req.num_scenes * SECONDS_PER_SCENE)
+    minutes = max(1, round(seconds / 60))
     credits = build_credit_breakdown(
         req.num_scenes,
         music_enabled=req.music_enabled,
         dialogue_enabled=req.dialogue_enabled,
         plan=req.plan,
     )
+    # Surface wall-clock wait for longer jobs so users know before they start.
+    wait_warning = None
+    wait_warning_minutes = None
+    if not demo and req.num_scenes >= 6:
+        wait_warning_minutes = minutes
+        wait_warning = (
+            f"A production this long typically takes ~{minutes} minutes on average."
+        )
     return {
         "num_scenes": req.num_scenes,
         "estimated_seconds": seconds,
@@ -394,6 +418,8 @@ async def estimate(req: EstimateRequest):
         "demo": demo,
         "total_credits": credits["total_credits"],
         "breakdown": credits["breakdown"],
+        "wait_warning": wait_warning,
+        "wait_warning_minutes": wait_warning_minutes,
     }
 
 
@@ -528,13 +554,7 @@ async def generate(
     dialogue_enabled = False
     if current_user and not demo:
         plan = await _get_user_plan(current_user.user_id)
-
-        max_scenes = PLAN_MAX_SCENES.get(plan, PLAN_MAX_SCENES["free"])
-        if req.num_scenes > max_scenes:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Your plan allows up to {max_scenes} scenes. Upgrade to generate longer videos.",
-            )
+        _enforce_plan_scene_limit(plan, req.num_scenes)
 
         # Optional background music — Creator/Pro only. Free/anonymous requests
         # that send music_enabled=True are silently ignored, not rejected.
@@ -804,6 +824,8 @@ async def approve_script(
 
     # Charge credits here — script phase was free.
     if current_user and not demo and job.user_id:
+        plan = (job.plan or await _get_user_plan(job.user_id) or "free").lower()
+        _enforce_plan_scene_limit(plan, job.num_scenes)
         credit_cost = (
             job.num_scenes
             + (MUSIC_EXTRA_CREDIT_COST if job.music_enabled else 0)

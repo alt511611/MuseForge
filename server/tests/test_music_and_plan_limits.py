@@ -1,7 +1,7 @@
 """Tests for optional background music and Creator/Pro plan differentiation.
 
 Covers:
-- Plan-based num_scenes limits (Free/Creator = 3, Pro = 5)
+- Plan-based num_scenes limits (Free = 5, Creator = 8, Pro = 10)
 - music_enabled is silently ignored for Free plan (no extra credit, no error)
 - music_enabled adds a flat +1 credit surcharge for Creator/Pro
 - None of this ever triggers in demo mode
@@ -44,7 +44,7 @@ def _patch_auth_user(user_id="user-1", email="u@example.com"):
 
 
 @pytest.mark.asyncio
-async def test_free_plan_scene_limit_enforced():
+async def test_free_plan_rejects_six_scenes():
     import api as _api
     from fastapi.testclient import TestClient
 
@@ -58,15 +58,15 @@ async def test_free_plan_scene_limit_enforced():
         tc = TestClient(_api.app, raise_server_exceptions=False)
         resp = tc.post(
             "/api/generate",
-            json={"idea": "A lone astronaut drifts through the void", "num_scenes": 4},
+            json={"idea": "A lone astronaut drifts through the void", "num_scenes": 6},
             headers=_auth_headers(),
         )
         assert resp.status_code == 400
-        assert "3 scenes" in resp.json()["detail"]
+        assert "5 scenes" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio
-async def test_creator_plan_capped_at_three_scenes():
+async def test_creator_plan_capped_at_eight_scenes():
     import api as _api
     from fastapi.testclient import TestClient
 
@@ -80,21 +80,22 @@ async def test_creator_plan_capped_at_three_scenes():
         tc = TestClient(_api.app, raise_server_exceptions=False)
         resp_ok = tc.post(
             "/api/generate",
-            json={"idea": "A lone astronaut drifts through the void", "num_scenes": 3},
+            json={"idea": "A lone astronaut drifts through the void", "num_scenes": 8},
             headers=_auth_headers(),
         )
         assert resp_ok.status_code == 200
 
         resp_over = tc.post(
             "/api/generate",
-            json={"idea": "A lone astronaut drifts through the void", "num_scenes": 5},
+            json={"idea": "A lone astronaut drifts through the void", "num_scenes": 9},
             headers=_auth_headers(),
         )
         assert resp_over.status_code == 400
+        assert "8 scenes" in resp_over.json()["detail"]
 
 
 @pytest.mark.asyncio
-async def test_pro_plan_allows_five_scenes():
+async def test_pro_plan_allows_ten_scenes():
     import api as _api
     from fastapi.testclient import TestClient
 
@@ -108,10 +109,30 @@ async def test_pro_plan_allows_five_scenes():
         tc = TestClient(_api.app, raise_server_exceptions=False)
         resp = tc.post(
             "/api/generate",
-            json={"idea": "A lone astronaut drifts through the void", "num_scenes": 5},
+            json={"idea": "A lone astronaut drifts through the void", "num_scenes": 10},
             headers=_auth_headers(),
         )
         assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_estimate_warns_for_six_plus_scenes():
+    import api as _api
+    from fastapi.testclient import TestClient
+
+    with patch.object(_api, "DEMO_FLAG", False), \
+         patch.dict(os.environ, {"MUAPI_KEY": "real_key", "MUSEFORGE_SECONDS_PER_SCENE": "180"}):
+        # SECONDS_PER_SCENE is read at import time — patch the module constant.
+        with patch.object(_api, "SECONDS_PER_SCENE", 180.0):
+            tc = TestClient(_api.app, raise_server_exceptions=False)
+            resp = tc.post("/api/estimate", json={"num_scenes": 6, "plan": "creator"})
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["wait_warning_minutes"] == 18
+            assert "18" in (body.get("wait_warning") or "")
+
+            short = tc.post("/api/estimate", json={"num_scenes": 3, "plan": "free"})
+            assert short.json().get("wait_warning_minutes") is None
 
 
 @pytest.mark.asyncio

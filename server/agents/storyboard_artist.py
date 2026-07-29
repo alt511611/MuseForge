@@ -19,9 +19,14 @@ class StoryboardArtist:
 Design exactly 1 shot for the given scene script. Apply the director's style guidance.
 If a locked Setting is provided, EVERY shot MUST stay in that place and time of day —
 do not invent a different location or lighting for this scene.
+For duration_seconds do NOT blindly assign 5 to every shot — pick between 3 and 15
+based on the scene's importance: 4-6 for short transition/action shots, 8-12 for
+emotional/establishing moments, 13-15 for very important finales.
 Respond ONLY with valid JSON array containing a single shot object:
 [{"idx": 0, "visual_desc": "...", "motion_desc": "...", "audio_desc": "...",
-  "shot_type": "wide|medium|close-up", "camera_movement": "...", "lens": "50mm", "duration_seconds": 5}]"""
+  "shot_type": "wide|medium|close-up", "camera_movement": "...", "lens": "50mm",
+  "duration_seconds": 8}]
+(duration_seconds is an example — vary 3-15 by scene; do not always use 5.)"""
 
     def __init__(self, api_key: Optional[str] = None, demo: bool = False):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")

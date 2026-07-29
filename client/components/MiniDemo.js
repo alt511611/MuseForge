@@ -11,11 +11,14 @@ const MOCK_STAGES = [
   { icon: CheckCircle2, label: "Done!",                 ms: 0 },
 ];
 
-const MOCK_CARDS = [
-  { scene: "Scene 1", desc: "Opening shot — establishing the world.", color: "#1e3a8a" },
-  { scene: "Scene 2", desc: "Rising action — the conflict ignites.",  color: "#7c3aed" },
-  { scene: "Scene 3", desc: "Climax — the turning point arrives.",    color: "#be185d" },
-];
+function buildMockScenes(idea) {
+  const topic = idea.trim().split(/\s+/).slice(0, 4).join(" ") || "your story";
+  return [
+    { scene: "Scene 1", desc: `Opening shot: we meet the world of "${topic}".`, color: "#1e3a8a" },
+    { scene: "Scene 2", desc: `Rising action: tension builds around "${topic}".`, color: "#7c3aed" },
+    { scene: "Scene 3", desc: `Climax: "${topic}" reaches its turning point.`, color: "#be185d" },
+  ];
+}
 
 export default function MiniDemo({ onTryReal }) {
   const { t } = useLanguage();
@@ -109,7 +112,7 @@ export default function MiniDemo({ onTryReal }) {
             Mock storyboard for: <span style={{ color: "#a78bfa" }}>"{idea}"</span>
           </p>
           <div className="grid grid-cols-3 gap-2 mb-4">
-            {MOCK_CARDS.map((c) => (
+            {buildMockScenes(idea).map((c) => (
               <div
                 key={c.scene}
                 className="rounded-xl p-3 text-xs"

@@ -230,6 +230,15 @@ select 'creator',          25, 3, false
 union all
 select 'pro',              55, 5, true;
 
+-- Raised scene caps: Free 5 / Creator 8 / Pro 10 (Kling v3 durations make
+-- longer dramas practical; server/api.py PLAN_MAX_SCENES is the enforcer).
+create or replace view public.plan_limits as
+select 'free'    as plan, 3   as monthly_credits, 5 as max_scenes, false as hd_export
+union all
+select 'creator',          25, 8, false
+union all
+select 'pro',              55, 10, true;
+
 -- ── Pro character library (reuse locked portraits across dramas) ─────────────
 -- Pro-only at the API layer. Real cost: one portrait gen + durable storage.
 create table if not exists public.character_library (
