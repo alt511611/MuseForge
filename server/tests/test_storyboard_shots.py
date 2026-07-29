@@ -134,3 +134,60 @@ async def test_design_template_still_returns_one_shot():
         characters=chars,
     )
     assert len(result) == 1
+
+
+def test_system_prompt_encourages_variable_durations():
+    """LLM must be steered away from always emitting duration_seconds=5."""
+    prompt = StoryboardArtist.SYSTEM_PROMPT
+    assert "do NOT blindly assign 5" in prompt
+    assert "3 and 15" in prompt or "3 ile 15" in prompt
+    assert '"duration_seconds": 5}' not in prompt.replace(" ", "")
+    assert "duration_seconds" in prompt
+
+
+@pytest.mark.asyncio
+async def test_varied_duration_seconds_accepted_from_muapi(monkeypatch):
+    """Non-5 durations from the LLM must pass through unchanged."""
+    import json as json_mod
+    import agents.storyboard_artist as sb_mod
+
+    artist = StoryboardArtist(api_key="")
+    artist.muapi_key = "fake-muapi-key"
+
+    shot_json = json_mod.dumps(
+        [
+            {
+                "idx": 0,
+                "visual_desc": "Emotional close-up as Maya realizes the truth",
+                "motion_desc": "slow push-in",
+                "audio_desc": "soft score swell",
+                "shot_type": "close-up",
+                "camera_movement": "dolly in",
+                "lens": "85mm",
+                "duration_seconds": 12,
+            }
+        ]
+    )
+
+    async def fake_complete_via_muapi(*_args, **_kwargs):
+        return shot_json
+
+    monkeypatch.setattr(sb_mod, "complete_via_muapi", fake_complete_via_muapi)
+
+    chars = [
+        CharacterInScene(
+            idx=0,
+            name="Maya",
+            is_visible=True,
+            static_features="dark hair",
+            dynamic_features="tearful",
+        )
+    ]
+    result = await artist.design_storyboard(
+        script="Maya realizes the truth and breaks down.",
+        characters=chars,
+    )
+
+    assert len(result) == 1
+    assert result[0].duration_seconds == 12.0
+    assert result[0].duration_seconds != 5.0
