@@ -33,6 +33,12 @@ Respond ONLY with valid JSON array containing a single shot object:
         self.muapi_key = os.environ.get("MUAPI_KEY", "")
         self.demo = demo
 
+    # Non-finale scenes are capped well below the model's max so a run of
+    # "important" scenes can't each independently land on 13-15s -- that
+    # both defeats the intended variety and multiplies total Kling render
+    # time, since every scene is generated sequentially.
+    NON_FINALE_MAX_DURATION = 9.0
+
     async def design_storyboard(
         self,
         script: str,
@@ -42,13 +48,16 @@ Respond ONLY with valid JSON array containing a single shot object:
         setting_location: str = "",
         setting_time_of_day: str = "",
         setting_era: str = "",
+        is_finale: bool = False,
     ) -> List[StoryboardShot]:
         preset = get_director_style(director_style)
 
         # Demo mode must stay fast and free of real network calls --
         # matches MuAPIImageGenerator/MuAPIVideoGenerator's demo behavior.
         if self.demo:
-            return self._design_template(script, characters, preset)
+            return self._clamp_durations(
+                self._design_template(script, characters, preset), is_finale
+            )
 
         char_desc = ", ".join(f"{c.name}: {c.static_features}" for c in characters if c.is_visible)
         setting_line = self._format_setting_line(
@@ -74,7 +83,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                     # the same cap already applied to the direct-Anthropic
                     # fallback below, silently defeating the cost fix
                     # since MuAPI is the PRIMARY path, tried first.
-                    return shots[:1]
+                    return self._clamp_durations(shots[:1], is_finale)
             except Exception as exc:
                 raw_snippet = locals().get("content", "<no content received>")
                 logger.warning(
@@ -96,10 +105,22 @@ Respond ONLY with valid JSON array containing a single shot object:
             )
             if shots:
                 # Hard cap: never produce more than 1 shot per scene (cost control).
-                return shots[:1]
+                return self._clamp_durations(shots[:1], is_finale)
 
         # 3) Last resort: deterministic template, never crashes generation.
-        return self._design_template(script, characters, preset)
+        return self._clamp_durations(
+            self._design_template(script, characters, preset), is_finale
+        )
+
+    @classmethod
+    def _clamp_durations(
+        cls, shots: List[StoryboardShot], is_finale: bool
+    ) -> List[StoryboardShot]:
+        if is_finale:
+            return shots
+        for shot in shots:
+            shot.duration_seconds = min(shot.duration_seconds, cls.NON_FINALE_MAX_DURATION)
+        return shots
 
     @staticmethod
     def _format_setting_line(

@@ -845,48 +845,81 @@ class Idea2VideoPipeline:
         voice_gen = MuAPIVoiceGenerator(self.api_key, demo=self.demo) if dialogue_requested else None
         total_scenes = max(1, len(script.scenes))
 
-        for idx, scene in enumerate(script.scenes):
-            _check_cancel()
-            base_pct = 15 + (idx / total_scenes) * 65
-            scene_script = _scene_action(scene)
-            scene_dialogue = _scene_dialogue(scene)
+        # Kick off background music as soon as the mood is known (it needs
+        # nothing from the scene loop) so its generation time overlaps with
+        # scene rendering instead of adding to the end of the job. Best-effort
+        # — any failure just leaves music_url as None, same as before.
+        music_task: Optional["asyncio.Task"] = None
+        if music_enabled and not self.demo and not music_url:
 
-            async def scene_progress(stage, message, pct, data=None, _base=base_pct):
-                scaled = _base + (pct / 100) * (65 / total_scenes)
-                await progress(stage, message, scaled, data)
-
-            scene_dir = os.path.join(working_dir, f"scene_{idx}")
-            scene_result = await self.script2video.run(
-                script=scene_script,
-                characters=characters,
-                user_requirement=user_requirement,
-                style=style,
-                working_dir=scene_dir,
-                progress_callback=scene_progress,
-                scene_idx=idx,
-                character_portraits=portraits,
-                director_style=director_style,
-                aspect_ratio=aspect_ratio,
-                is_cancelled=is_cancelled,
-                plan=plan,
-                setting_location=getattr(script, "setting_location", "") or "",
-                setting_time_of_day=getattr(script, "setting_time_of_day", "") or "",
-                setting_era=getattr(script, "setting_era", "") or "",
-                has_dialogue=dialogue_requested and bool(scene_dialogue),
-                last_frame_by_character=self._last_frame_by_character,
-            )
-            assembled_scene_index = None
-            if scene_result.get("path"):
-                scene_paths.append(scene_result["path"])
-                assembled_scene_index = len(scene_paths) - 1
-
-            if voice_gen is not None and scene_dialogue and assembled_scene_index is not None:
-                _check_cancel()
+            async def _generate_music() -> Optional[str]:
                 try:
-                    generated_tracks = await voice_gen.generate_scene_dialogue(
-                        scene_dialogue,
-                        is_cancelled=is_cancelled,
+                    music_gen = _make_music_generator(self.api_key, demo=self.demo)
+                    return await music_gen.generate_instrumental(mood=script.mood or "cinematic")
+                except Exception as exc:
+                    logger.warning("Background music generation failed, continuing without music: %s", exc)
+                    return None
+
+            music_task = asyncio.create_task(_generate_music())
+
+        # Scene dialogue is generated in the background too: it only feeds
+        # the final audio mix, not the next scene's visual continuity (that
+        # comes from the video's last frame), so there's no need to block
+        # the next scene's rendering on it finishing first.
+        dialogue_tasks: List[tuple] = []
+
+        try:
+            for idx, scene in enumerate(script.scenes):
+                _check_cancel()
+                base_pct = 15 + (idx / total_scenes) * 65
+                scene_script = _scene_action(scene)
+                scene_dialogue = _scene_dialogue(scene)
+
+                async def scene_progress(stage, message, pct, data=None, _base=base_pct):
+                    scaled = _base + (pct / 100) * (65 / total_scenes)
+                    await progress(stage, message, scaled, data)
+
+                scene_dir = os.path.join(working_dir, f"scene_{idx}")
+                scene_result = await self.script2video.run(
+                    script=scene_script,
+                    characters=characters,
+                    user_requirement=user_requirement,
+                    style=style,
+                    working_dir=scene_dir,
+                    progress_callback=scene_progress,
+                    scene_idx=idx,
+                    total_scenes=total_scenes,
+                    character_portraits=portraits,
+                    director_style=director_style,
+                    aspect_ratio=aspect_ratio,
+                    is_cancelled=is_cancelled,
+                    plan=plan,
+                    setting_location=getattr(script, "setting_location", "") or "",
+                    setting_time_of_day=getattr(script, "setting_time_of_day", "") or "",
+                    setting_era=getattr(script, "setting_era", "") or "",
+                    has_dialogue=dialogue_requested and bool(scene_dialogue),
+                    last_frame_by_character=self._last_frame_by_character,
+                )
+                assembled_scene_index = None
+                if scene_result.get("path"):
+                    scene_paths.append(scene_result["path"])
+                    assembled_scene_index = len(scene_paths) - 1
+
+                if voice_gen is not None and scene_dialogue and assembled_scene_index is not None:
+                    task = asyncio.create_task(
+                        voice_gen.generate_scene_dialogue(scene_dialogue, is_cancelled=is_cancelled)
                     )
+                    dialogue_tasks.append((assembled_scene_index, idx, task))
+
+                serialized_scene = scene.model_dump() if hasattr(scene, "model_dump") else scene
+                scene_results.append(
+                    {"index": idx, "script": serialized_scene, "shots": scene_result.get("shots", [])}
+                )
+
+            _check_cancel()
+            for assembled_scene_index, scene_number, task in dialogue_tasks:
+                try:
+                    generated_tracks = await task
                     for track in generated_tracks:
                         dialogue_tracks.append(
                             {**track, "scene_index": assembled_scene_index}
@@ -894,36 +927,23 @@ class Idea2VideoPipeline:
                 except Exception as exc:
                     logger.warning(
                         "Scene %s dialogue failed, continuing without its voice layer: %s",
-                        idx + 1,
+                        scene_number + 1,
                         exc,
                     )
+        except BaseException:
+            if music_task is not None:
+                music_task.cancel()
+            for _, _, task in dialogue_tasks:
+                task.cancel()
+            raise
 
-            serialized_scene = scene.model_dump() if hasattr(scene, "model_dump") else scene
-            scene_results.append(
-                {"index": idx, "script": serialized_scene, "shots": scene_result.get("shots", [])}
-            )
-
-        _check_cancel()
         final_path: Optional[str] = None
         video_url: Optional[str] = None
 
-        # Optional instrumental background music (Creator/Pro only — gated
-        # server-side in api.py before music_enabled ever reaches here).
-        # Best-effort: any failure is logged and the job continues without
-        # music rather than crashing. Never triggered in demo mode.
-        # Cancel is checked BEFORE the MuAPI call starts — once it has begun
-        # we let it finish (or fail) rather than orphan a half-written track.
-        if music_enabled and not self.demo and not music_url:
-            _check_cancel()
-            try:
-                music_gen = _make_music_generator(self.api_key, demo=self.demo)
-                music_url = await music_gen.generate_instrumental(mood=script.mood or "cinematic")
-            except PipelineCancelled:
-                raise
-            except Exception as exc:
-                logger.warning("Background music generation failed, continuing without music: %s", exc)
-                music_url = None
+        if music_task is not None:
+            music_url = await music_task
 
+        actual_duration_seconds: Optional[float] = None
         if self.demo or not scene_paths:
             await progress("assembly", "Assembling preview", 90)
             for scene in reversed(scene_results):
@@ -941,6 +961,18 @@ class Idea2VideoPipeline:
                 is_cancelled=is_cancelled,
                 dialogue_tracks=dialogue_tracks,
             )
+            # Measure the real assembled length before upload/cleanup — the
+            # screenwriter's estimated_duration_seconds is a pre-generation
+            # guess and can drift far from reality since storyboard_artist
+            # picks each shot's actual duration (3-15s) independently, later.
+            if final_path and os.path.isfile(final_path):
+                from moviepy import VideoFileClip
+
+                try:
+                    with VideoFileClip(final_path) as _clip:
+                        actual_duration_seconds = _clip.duration
+                except Exception as exc:
+                    logger.warning("Could not measure final video duration: %s", exc)
             # Persist final video to Supabase Storage (signed URL) when available.
             if final_path and os.path.isfile(final_path):
                 from tools.supabase_storage import upload_video
@@ -976,7 +1008,11 @@ class Idea2VideoPipeline:
             "video_path": final_path,
             "video_url": video_url,
             "scene_count": len(scene_results),
-            "duration_estimate": script.estimated_duration_seconds,
+            "duration_estimate": (
+                round(actual_duration_seconds)
+                if actual_duration_seconds is not None
+                else script.estimated_duration_seconds
+            ),
             "characters": [c.model_dump() for c in characters],
             "portraits": portraits,
             "scenes": scene_results,
