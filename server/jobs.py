@@ -36,9 +36,10 @@ STALE_JOB_ERROR = "Orphaned (server restart or timeout)"
 
 # Hard upper bound for a single pipeline.run() call. Prevents silent hangs
 # where no exception is raised but generation never finishes.
-# Override with MUSEFORGE_PIPELINE_HARD_TIMEOUT (seconds). Default: 20 minutes.
+# Pro allows up to 24 sequential scenes (~30–60+ min wall-clock); default 2h.
+# Override with MUSEFORGE_PIPELINE_HARD_TIMEOUT (seconds).
 PIPELINE_HARD_TIMEOUT_SECONDS = int(
-    os.environ.get("MUSEFORGE_PIPELINE_HARD_TIMEOUT", "1200")
+    os.environ.get("MUSEFORGE_PIPELINE_HARD_TIMEOUT", "7200")
 )
 # Keep aligned with server/api.py. Dialogue is charged per requested scene.
 DIALOGUE_EXTRA_CREDIT_COST = 1
@@ -49,11 +50,13 @@ JOBS_DIR = os.environ.get("MUSEFORGE_JOBS_DIR", "/tmp/museforge_jobs")
 
 
 def _stale_timeout_minutes() -> int:
-    raw = os.environ.get("MUSEFORGE_STALE_JOB_TIMEOUT_MINUTES", "45")
+    # Must exceed PIPELINE_HARD_TIMEOUT so long Pro jobs aren't reaped mid-run.
+    # Default 150 min (> 2h hard timeout). Override via env.
+    raw = os.environ.get("MUSEFORGE_STALE_JOB_TIMEOUT_MINUTES", "150")
     try:
         return max(1, int(raw))
     except (TypeError, ValueError):
-        return 45
+        return 150
 
 
 def _parse_ts(value: Any) -> Optional[datetime]:

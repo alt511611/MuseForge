@@ -9,7 +9,9 @@ import httpx
 
 MUAPI_BASE = os.environ.get("MUAPI_BASE", "https://api.muapi.ai/api/v1")
 DEFAULT_POLL_INTERVAL = 2.0
-DEFAULT_MAX_POLLS = 180
+# 240 * 2s = 8 min per MuAPI job — headroom for longer Kling clips (up to 15s
+# finale) without failing long multi-scene dramas early.
+DEFAULT_MAX_POLLS = 240
 DEFAULT_MAX_RETRIES = 3
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 

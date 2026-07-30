@@ -27,7 +27,17 @@ const MUSIC_ELIGIBLE_PLANS = ["creator", "pro"];
 
 // Real, currently-enforced scene caps. Kept in sync with server/api.py's
 // PLAN_MAX_SCENES — this just avoids the user hitting a 400 after the fact.
-const PLAN_MAX_SCENES = { free: 5, creator: 8, pro: 10 };
+// Avg ~7.5s/scene → Pro 24 ≈ up to ~3 min of finished video.
+const PLAN_MAX_SCENES = { free: 8, creator: 16, pro: 24 };
+const AVG_SCENE_SECONDS = 7.5;
+
+function formatVideoDuration(sceneCount) {
+  const secs = Math.round(sceneCount * AVG_SCENE_SECONDS);
+  if (secs < 60) return `~${secs}s`;
+  const mins = secs / 60;
+  const label = Number.isInteger(mins) ? String(mins) : mins.toFixed(1).replace(/\.0$/, "");
+  return `~${label} min`;
+}
 
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024; // 5MB — keep in sync with server/constants.py
 
@@ -499,8 +509,10 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
               disabled={isSubmitting}
             />
             <div className="flex justify-between text-xs mt-1" style={{ color: "#64748b" }}>
-              <span>2 scenes (~16s)</span>
-              <span>{maxScenes} scenes (~{maxScenes * 8}s)</span>
+              <span>2 scenes ({formatVideoDuration(2)})</span>
+              <span>
+                {maxScenes} scenes ({formatVideoDuration(maxScenes)})
+              </span>
             </div>
             {plan !== "pro" && numScenes >= maxScenes && (
               <p className="text-xs mt-2" style={{ color: "#fbbf24" }}>

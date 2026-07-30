@@ -78,6 +78,25 @@ Storage signed URLs.
   unwatermarked, job never fails) and logs a warning — check logs after
   deploying if Free-plan videos should be watermarked but aren't.
 
+## Long-running generation jobs (multi-scene)
+
+Generation is scheduled with FastAPI `BackgroundTasks` after `/api/generate`
+returns `job_id`, so Render's ~100-minute HTTP request timeout does **not**
+apply to the pipeline itself. In-process guards still matter:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MUSEFORGE_PIPELINE_HARD_TIMEOUT` | `7200` (2h) | `asyncio.wait_for` around `pipeline.run()` |
+| `MUSEFORGE_STALE_JOB_TIMEOUT_MINUTES` | `150` | Reaper marks stuck queued/running DB rows failed |
+| `MUSEFORGE_SECONDS_PER_SCENE` | `100` | `/api/estimate` wall-clock per sequential scene |
+
+Scenes render **sequentially** (character continuity). Pro allows up to 24
+scenes (~3 min finished video at ~7.5s/scene average); expect 30–60+ minutes
+of wall-clock for large jobs. Keep `MUAPI_KEY` set and `MUSEFORGE_DEMO`
+empty/false — if `/api/health` reports `demo_mode: true` with
+`demo_reason: "MUAPI_KEY_missing"`, estimates collapse to ~5s and no real
+renders run.
+
 ## Runbook reminders
 
 1. Apply `supabase_migration.sql` (including `deduct_credits` RPC,

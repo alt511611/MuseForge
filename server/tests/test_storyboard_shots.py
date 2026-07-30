@@ -242,3 +242,52 @@ async def test_non_finale_scenes_are_capped_below_finale_max(monkeypatch):
 
     assert len(result) == 1
     assert result[0].duration_seconds <= StoryboardArtist.NON_FINALE_MAX_DURATION
+
+
+@pytest.mark.asyncio
+async def test_finale_duration_clamped_to_15(monkeypatch):
+    """Finale shots may be longer, but never above FINALE_MAX_DURATION."""
+    import json as json_mod
+    import agents.storyboard_artist as sb_mod
+
+    artist = StoryboardArtist(demo=False)
+    artist.muapi_key = "test-key"
+    artist.api_key = ""
+
+    shot_json = json_mod.dumps(
+        [
+            {
+                "idx": 0,
+                "visual_desc": "wide emotional close",
+                "motion_desc": "slow push-in",
+                "audio_desc": "swelling score",
+                "shot_type": "close-up",
+                "camera_movement": "push-in",
+                "lens": "85mm",
+                "duration_seconds": 20,
+            }
+        ]
+    )
+
+    async def fake_complete_via_muapi(*_args, **_kwargs):
+        return shot_json
+
+    monkeypatch.setattr(sb_mod, "complete_via_muapi", fake_complete_via_muapi)
+
+    chars = [
+        CharacterInScene(
+            idx=0,
+            name="Maya",
+            is_visible=True,
+            static_features="dark hair",
+            dynamic_features="tearful",
+        )
+    ]
+    result = await artist.design_storyboard(
+        script="Maya realizes the truth and breaks down.",
+        characters=chars,
+        is_finale=True,
+    )
+
+    assert len(result) == 1
+    assert result[0].duration_seconds == StoryboardArtist.FINALE_MAX_DURATION

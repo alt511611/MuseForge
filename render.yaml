@@ -36,3 +36,13 @@ services:
         value: "https://your-project.vercel.app"
       - key: MUSEFORGE_JOBS_DIR
         value: /tmp/museforge_jobs
+      # Long Pro jobs (up to 24 sequential scenes) need generous timeouts.
+      # Generation runs as a FastAPI BackgroundTask after /api/generate returns,
+      # so Render's ~100 min HTTP request timeout does not apply to the job
+      # itself — these bounds are in-process guards instead.
+      - key: MUSEFORGE_PIPELINE_HARD_TIMEOUT
+        value: "7200"
+      - key: MUSEFORGE_STALE_JOB_TIMEOUT_MINUTES
+        value: "150"
+      - key: MUSEFORGE_SECONDS_PER_SCENE
+        value: "100"

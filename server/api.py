@@ -62,11 +62,68 @@ ALLOWED_ORIGIN_REGEX = os.environ.get(
 )
 
 DEMO_FLAG = os.environ.get("MUSEFORGE_DEMO", "").lower() in ("1", "true", "yes")
-SECONDS_PER_SCENE = float(os.environ.get("MUSEFORGE_SECONDS_PER_SCENE", "180"))
+# Wall-clock generation time per sequential scene (frame + Kling video).
+# Music/dialogue overlap the scene loop, so they are modelled as smaller add-ons
+# below rather than another full scene multiplier. Override via env.
+SECONDS_PER_SCENE = float(os.environ.get("MUSEFORGE_SECONDS_PER_SCENE", "100"))
+# Screenplay + portraits + final assembly overhead (mostly fixed).
+ESTIMATE_BASE_SECONDS = float(os.environ.get("MUSEFORGE_ESTIMATE_BASE_SECONDS", "90"))
+# Residual music cost after overlap (mix + any leftover generation wait).
+ESTIMATE_MUSIC_SECONDS = float(os.environ.get("MUSEFORGE_ESTIMATE_MUSIC_SECONDS", "45"))
+# Per-scene residual for dialogue TTS that may not fully overlap video gen.
+ESTIMATE_DIALOGUE_PER_SCENE = float(
+    os.environ.get("MUSEFORGE_ESTIMATE_DIALOGUE_PER_SCENE", "20")
+)
+# Surface a wait warning once estimated wall-clock exceeds this many minutes.
+WAIT_WARNING_MINUTES = int(os.environ.get("MUSEFORGE_WAIT_WARNING_MINUTES", "15"))
 
 
 def _is_demo() -> bool:
-    return DEMO_FLAG or not bool(os.environ.get("MUAPI_KEY"))
+    """True when explicitly flagged, or when no usable MuAPI key is set.
+
+    Missing MUAPI_KEY alone forces demo so local/dev stays offline-safe.
+    If /api/estimate always returns ~5s in production, check /api/health
+    for demo_reason — almost always MUAPI_KEY unset/empty on the host.
+    """
+    if DEMO_FLAG:
+        return True
+    return not bool((os.environ.get("MUAPI_KEY") or "").strip())
+
+
+def _demo_reason() -> Optional[str]:
+    if DEMO_FLAG:
+        return "MUSEFORGE_DEMO"
+    if not (os.environ.get("MUAPI_KEY") or "").strip():
+        return "MUAPI_KEY_missing"
+    return None
+
+
+def estimate_generation_seconds(
+    num_scenes: int,
+    *,
+    music_enabled: bool = False,
+    dialogue_enabled: bool = False,
+    plan: str = "free",
+    demo: Optional[bool] = None,
+) -> int:
+    """Wall-clock generation estimate (not output video length)."""
+    if demo is None:
+        demo = _is_demo()
+    if demo:
+        # Demo pipeline is near-instant regardless of scene count.
+        return 5
+
+    plan = (plan or "free").lower()
+    music_on = bool(music_enabled) and plan in ("creator", "pro")
+    dialogue_on = (
+        bool(dialogue_enabled) and plan == "pro" and is_dialogue_enabled()
+    )
+    seconds = ESTIMATE_BASE_SECONDS + num_scenes * SECONDS_PER_SCENE
+    if music_on:
+        seconds += ESTIMATE_MUSIC_SECONDS
+    if dialogue_on:
+        seconds += num_scenes * ESTIMATE_DIALOGUE_PER_SCENE
+    return max(1, int(round(seconds)))
 
 
 # ── Rate limiter (sliding-window, no external dependencies) ───────────────────
@@ -190,7 +247,8 @@ class GenerateRequest(BaseModel):
     style: str = "Cinematic"
     director_style: str = "cinematic_balanced"
     aspect_ratio: str = "16:9"
-    num_scenes: int = Field(default=3, ge=2, le=10)
+    # Absolute ceiling = Pro plan max; per-plan caps enforced in generate().
+    num_scenes: int = Field(default=3, ge=2, le=24)
     user_requirement: str = ""
     character_image: Optional[str] = None
     character_name: str = ""
@@ -235,7 +293,8 @@ class ApproveScriptRequest(BaseModel):
 
 
 class EstimateRequest(BaseModel):
-    num_scenes: int = Field(default=3, ge=2, le=10)
+    # Absolute ceiling = Pro plan max; estimate is informational only.
+    num_scenes: int = Field(default=3, ge=2, le=24)
     music_enabled: bool = False
     dialogue_enabled: bool = False
     # Client-supplied plan for the credit breakdown preview. The generate
@@ -247,11 +306,12 @@ class EstimateRequest(BaseModel):
 # ── Plan helpers ──────────────────────────────────────────────────────────────
 
 # Real, currently-enforced plan differentiators. Keep in sync with
-# supabase_migration.sql's public.plan_limits view and client/lib/i18n
-# plan_*_features strings. Do NOT add a plan feature here (or to the pricing
-# copy) unless there's an actual enforcement mechanism behind it.
-# Pydantic allows up to 10; per-plan caps below are the real ceiling.
-PLAN_MAX_SCENES = {"free": 5, "creator": 8, "pro": 10}
+# supabase_migration.sql's public.plan_limits view, client IdeaForm.js, and
+# client/lib/i18n plan_*_features strings. Do NOT add a plan feature here
+# (or to the pricing copy) unless there's an actual enforcement mechanism.
+# Avg ~7.5s/scene (non-finale ≤9s, finale ≤15s) → Pro 24 scenes ≈ 3 min video.
+# Pydantic allows up to max(PLAN_MAX_SCENES); per-plan caps below are the ceiling.
+PLAN_MAX_SCENES = {"free": 8, "creator": 16, "pro": 24}
 MAX_SCENES_BY_PLAN = PLAN_MAX_SCENES  # alias used by docs / callers
 MUSIC_EXTRA_CREDIT_COST = 1  # flat surcharge on top of scene credits, Creator/Pro only
 DIALOGUE_EXTRA_CREDIT_COST = 1  # per scene, Pro only
@@ -312,12 +372,16 @@ def build_credit_breakdown(
 
 @app.get("/api/health")
 async def health():
+    demo = _is_demo()
     return {
         "status": "ok",
         "service": "museforge-api",
         "version": "2.3.0",
-        "demo_mode": _is_demo(),
-        "muapi_configured": bool(os.environ.get("MUAPI_KEY")),
+        "demo_mode": demo,
+        # Why demo is on — null when running real generation. Useful when
+        # /api/estimate is stuck at ~5s (that's the demo short-circuit).
+        "demo_reason": _demo_reason(),
+        "muapi_configured": bool((os.environ.get("MUAPI_KEY") or "").strip()),
         "claude_configured": bool(os.environ.get("ANTHROPIC_API_KEY")),
         # True if the screenwriter/storyboard agents have ANY working LLM
         # path (MuAPI's Claude route tried first, direct Anthropic as
@@ -325,7 +389,8 @@ async def health():
         # the direct-Anthropic fallback and doesn't tell you if MuAPI alone
         # is already covering it.
         "creative_llm_available": bool(
-            os.environ.get("MUAPI_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+            (os.environ.get("MUAPI_KEY") or "").strip()
+            or os.environ.get("ANTHROPIC_API_KEY")
         ),
         "auth_configured": bool(SUPABASE_URL),
     }
@@ -390,7 +455,13 @@ async def director_styles():
 @app.post("/api/estimate")
 async def estimate(req: EstimateRequest):
     demo = _is_demo()
-    seconds = 5 if demo else int(req.num_scenes * SECONDS_PER_SCENE)
+    seconds = estimate_generation_seconds(
+        req.num_scenes,
+        music_enabled=req.music_enabled,
+        dialogue_enabled=req.dialogue_enabled,
+        plan=req.plan,
+        demo=demo,
+    )
     minutes = max(1, round(seconds / 60))
     credits = build_credit_breakdown(
         req.num_scenes,
@@ -399,12 +470,15 @@ async def estimate(req: EstimateRequest):
         plan=req.plan,
     )
     # Surface wall-clock wait for longer jobs so users know before they start.
+    # Scenes run sequentially for character continuity — 16–24 scene jobs
+    # commonly take 30–60+ minutes.
     wait_warning = None
     wait_warning_minutes = None
-    if not demo and req.num_scenes >= 6:
+    if not demo and minutes >= WAIT_WARNING_MINUTES:
         wait_warning_minutes = minutes
         wait_warning = (
-            f"A production this long typically takes ~{minutes} minutes on average."
+            f"A production this long typically takes ~{minutes} minutes on average. "
+            "Scenes render one-by-one for character continuity — keep this tab open."
         )
     return {
         "num_scenes": req.num_scenes,
@@ -416,6 +490,7 @@ async def estimate(req: EstimateRequest):
             "clips": req.num_scenes,
         },
         "demo": demo,
+        "demo_reason": _demo_reason(),
         "total_credits": credits["total_credits"],
         "breakdown": credits["breakdown"],
         "wait_warning": wait_warning,
