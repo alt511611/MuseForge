@@ -1,7 +1,7 @@
 """Tests for optional background music and Creator/Pro plan differentiation.
 
 Covers:
-- Plan-based num_scenes limits (Free = 5, Creator = 8, Pro = 10)
+- Plan-based num_scenes limits (Free = 8, Creator = 16, Pro = 24)
 - music_enabled is silently ignored for Free plan (no extra credit, no error)
 - music_enabled adds a flat +1 credit surcharge for Creator/Pro
 - None of this ever triggers in demo mode
@@ -44,7 +44,7 @@ def _patch_auth_user(user_id="user-1", email="u@example.com"):
 
 
 @pytest.mark.asyncio
-async def test_free_plan_rejects_six_scenes():
+async def test_free_plan_rejects_nine_scenes():
     import api as _api
     from fastapi.testclient import TestClient
 
@@ -58,15 +58,15 @@ async def test_free_plan_rejects_six_scenes():
         tc = TestClient(_api.app, raise_server_exceptions=False)
         resp = tc.post(
             "/api/generate",
-            json={"idea": "A lone astronaut drifts through the void", "num_scenes": 6},
+            json={"idea": "A lone astronaut drifts through the void", "num_scenes": 9},
             headers=_auth_headers(),
         )
         assert resp.status_code == 400
-        assert "5 scenes" in resp.json()["detail"]
+        assert "8 scenes" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio
-async def test_creator_plan_capped_at_eight_scenes():
+async def test_creator_plan_capped_at_sixteen_scenes():
     import api as _api
     from fastapi.testclient import TestClient
 
@@ -80,22 +80,22 @@ async def test_creator_plan_capped_at_eight_scenes():
         tc = TestClient(_api.app, raise_server_exceptions=False)
         resp_ok = tc.post(
             "/api/generate",
-            json={"idea": "A lone astronaut drifts through the void", "num_scenes": 8},
+            json={"idea": "A lone astronaut drifts through the void", "num_scenes": 16},
             headers=_auth_headers(),
         )
         assert resp_ok.status_code == 200
 
         resp_over = tc.post(
             "/api/generate",
-            json={"idea": "A lone astronaut drifts through the void", "num_scenes": 9},
+            json={"idea": "A lone astronaut drifts through the void", "num_scenes": 17},
             headers=_auth_headers(),
         )
         assert resp_over.status_code == 400
-        assert "8 scenes" in resp_over.json()["detail"]
+        assert "16 scenes" in resp_over.json()["detail"]
 
 
 @pytest.mark.asyncio
-async def test_pro_plan_allows_ten_scenes():
+async def test_pro_plan_allows_twenty_four_scenes():
     import api as _api
     from fastapi.testclient import TestClient
 
@@ -109,29 +109,46 @@ async def test_pro_plan_allows_ten_scenes():
         tc = TestClient(_api.app, raise_server_exceptions=False)
         resp = tc.post(
             "/api/generate",
-            json={"idea": "A lone astronaut drifts through the void", "num_scenes": 10},
+            json={"idea": "A lone astronaut drifts through the void", "num_scenes": 24},
             headers=_auth_headers(),
         )
         assert resp.status_code == 200
 
 
 @pytest.mark.asyncio
-async def test_estimate_warns_for_six_plus_scenes():
+async def test_estimate_warns_for_long_jobs():
     import api as _api
     from fastapi.testclient import TestClient
 
     with patch.object(_api, "DEMO_FLAG", False), \
-         patch.dict(os.environ, {"MUAPI_KEY": "real_key", "MUSEFORGE_SECONDS_PER_SCENE": "180"}):
-        # SECONDS_PER_SCENE is read at import time — patch the module constant.
-        with patch.object(_api, "SECONDS_PER_SCENE", 180.0):
+         patch.dict(os.environ, {"MUAPI_KEY": "real_key"}):
+        with patch.object(_api, "SECONDS_PER_SCENE", 100.0), \
+             patch.object(_api, "ESTIMATE_BASE_SECONDS", 90.0), \
+             patch.object(_api, "ESTIMATE_MUSIC_SECONDS", 45.0), \
+             patch.object(_api, "ESTIMATE_DIALOGUE_PER_SCENE", 20.0), \
+             patch.object(_api, "WAIT_WARNING_MINUTES", 15):
             tc = TestClient(_api.app, raise_server_exceptions=False)
-            resp = tc.post("/api/estimate", json={"num_scenes": 6, "plan": "creator"})
+            # 16 scenes → 90 + 16*100 = 1690s ≈ 28 min → warning
+            resp = tc.post(
+                "/api/estimate",
+                json={"num_scenes": 16, "plan": "creator"},
+            )
             assert resp.status_code == 200
             body = resp.json()
-            assert body["wait_warning_minutes"] == 18
-            assert "18" in (body.get("wait_warning") or "")
+            assert body["estimated_seconds"] == 1690
+            assert body["wait_warning_minutes"] == 28
+            assert "28" in (body.get("wait_warning") or "")
 
+            # Music adds residual wall-clock on eligible plans
+            with_music = tc.post(
+                "/api/estimate",
+                json={"num_scenes": 16, "plan": "creator", "music_enabled": True},
+            ).json()
+            assert with_music["estimated_seconds"] == 1690 + 45
+
+            # Short jobs stay quiet
             short = tc.post("/api/estimate", json={"num_scenes": 3, "plan": "free"})
+            assert short.json()["estimated_seconds"] == 90 + 3 * 100
             assert short.json().get("wait_warning_minutes") is None
 
 

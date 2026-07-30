@@ -66,7 +66,7 @@ export default function EducationPage() {
         highlight: false,
         cta: "Start with Creator",
         ctaHref: "/pricing",
-        features: ["25 credits/mo", "Up to 3 scenes", "All presets", "All ratios", "No watermark"],
+        features: ["25 credits/mo", "Up to 16 scenes (~2 min)", "All presets", "All ratios", "No watermark"],
       }}
       ctaBanner={{
         title: "Need a Campus-Wide Licence?",

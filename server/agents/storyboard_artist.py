@@ -38,6 +38,7 @@ Respond ONLY with valid JSON array containing a single shot object:
     # both defeats the intended variety and multiplies total Kling render
     # time, since every scene is generated sequentially.
     NON_FINALE_MAX_DURATION = 9.0
+    FINALE_MAX_DURATION = 15.0
 
     async def design_storyboard(
         self,
@@ -116,10 +117,9 @@ Respond ONLY with valid JSON array containing a single shot object:
     def _clamp_durations(
         cls, shots: List[StoryboardShot], is_finale: bool
     ) -> List[StoryboardShot]:
-        if is_finale:
-            return shots
+        cap = cls.FINALE_MAX_DURATION if is_finale else cls.NON_FINALE_MAX_DURATION
         for shot in shots:
-            shot.duration_seconds = min(shot.duration_seconds, cls.NON_FINALE_MAX_DURATION)
+            shot.duration_seconds = min(float(shot.duration_seconds or 0), cap)
         return shots
 
     @staticmethod
