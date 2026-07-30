@@ -186,8 +186,59 @@ async def test_varied_duration_seconds_accepted_from_muapi(monkeypatch):
     result = await artist.design_storyboard(
         script="Maya realizes the truth and breaks down.",
         characters=chars,
+        is_finale=True,
     )
 
     assert len(result) == 1
     assert result[0].duration_seconds == 12.0
     assert result[0].duration_seconds != 5.0
+
+
+@pytest.mark.asyncio
+async def test_non_finale_scenes_are_capped_below_finale_max(monkeypatch):
+    """Non-finale scenes can't land on the same 13-15s max as the finale --
+    otherwise every scene the LLM deems 'important' ends up at the cap,
+    killing variety and needlessly lengthening total render time."""
+    import json as json_mod
+    import agents.storyboard_artist as sb_mod
+
+    artist = StoryboardArtist(api_key="")
+    artist.muapi_key = "fake-muapi-key"
+
+    shot_json = json_mod.dumps(
+        [
+            {
+                "idx": 0,
+                "visual_desc": "Emotional close-up as Maya realizes the truth",
+                "motion_desc": "slow push-in",
+                "audio_desc": "soft score swell",
+                "shot_type": "close-up",
+                "camera_movement": "dolly in",
+                "lens": "85mm",
+                "duration_seconds": 15,
+            }
+        ]
+    )
+
+    async def fake_complete_via_muapi(*_args, **_kwargs):
+        return shot_json
+
+    monkeypatch.setattr(sb_mod, "complete_via_muapi", fake_complete_via_muapi)
+
+    chars = [
+        CharacterInScene(
+            idx=0,
+            name="Maya",
+            is_visible=True,
+            static_features="dark hair",
+            dynamic_features="tearful",
+        )
+    ]
+    result = await artist.design_storyboard(
+        script="Maya realizes the truth and breaks down.",
+        characters=chars,
+        is_finale=False,
+    )
+
+    assert len(result) == 1
+    assert result[0].duration_seconds <= StoryboardArtist.NON_FINALE_MAX_DURATION

@@ -397,6 +397,7 @@ class Script2VideoPipeline:
         working_dir: str = "/tmp/museforge_scene",
         progress_callback: Optional[Callable] = None,
         scene_idx: int = 0,
+        total_scenes: int = 1,
         character_portraits: Optional[Dict[str, str]] = None,
         director_style: str = "cinematic_balanced",
         aspect_ratio: str = "16:9",
@@ -444,6 +445,7 @@ class Script2VideoPipeline:
             setting_location=setting_location,
             setting_time_of_day=setting_time_of_day,
             setting_era=setting_era,
+            is_finale=(scene_idx == total_scenes - 1),
         )
 
         shot_videos: List[Optional[str]] = [None] * len(shots)
