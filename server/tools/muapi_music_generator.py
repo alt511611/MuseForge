@@ -39,6 +39,7 @@ class MuAPIMusicGenerator:
         self,
         mood: str,
         duration: int = 30,
+        style_hint: str = "",
     ) -> str:
         """Generate a short instrumental track matching the drama's mood.
 
@@ -48,7 +49,14 @@ class MuAPIMusicGenerator:
         """
         if self.demo:
             return DEMO_MUSIC_URL
-        prompt = f"Instrumental background music, {mood} mood, cinematic, no vocals, no lyrics."
+        # style_hint carries the drama's emotional arc (opening -> closing
+        # beat + theme) so the score follows the story instead of being one
+        # flat mood for its whole length.
+        hint = f" {style_hint.strip()}" if (style_hint or "").strip() else ""
+        prompt = (
+            f"Instrumental background music, {mood} mood, cinematic,"
+            f"{hint} no vocals, no lyrics."
+        )
         payload = {"prompt": prompt, "duration": duration, "instrumental": True}
         try:
             return await self.client.generate(self.MUSIC_ENDPOINT, payload, poll_interval=3.0, max_polls=100)

@@ -104,7 +104,13 @@ async def test_burn_subtitles_noop_when_tracks_empty(tmp_path):
 
 @pytest.mark.asyncio
 async def test_assemble_burns_subtitles_before_watermark(tmp_path, monkeypatch):
-    """Order: concat -> grade -> music -> subtitles -> watermark (when tracks)."""
+    """Order: concat -> grade -> music -> subtitles -> watermark (when tracks).
+
+    Finishing (fades/loudness) is disabled here so this test stays focused on
+    the subtitle/watermark ordering it names; the finishing step has its own
+    ordering test in test_finishing_master.py.
+    """
+    monkeypatch.setenv("MUSEFORGE_FINISHING", "0")
     from pipelines.idea2video import Idea2VideoPipeline
 
     calls = []

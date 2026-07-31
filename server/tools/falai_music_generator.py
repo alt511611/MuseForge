@@ -56,13 +56,15 @@ class FalAIMusicGenerator:
         self,
         mood: str,
         duration: int = 30,
+        style_hint: str = "",
     ) -> str:
         if self.demo:
             return DEMO_MUSIC_URL
 
+        hint = f"{style_hint.strip()} " if (style_hint or "").strip() else ""
         prompt = (
             f"Instrumental background music, {mood} mood, cinematic, "
-            f"no vocals, no lyrics."
+            f"{hint}no vocals, no lyrics."
         )
         payload = {
             "prompt": prompt,

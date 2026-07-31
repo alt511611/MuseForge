@@ -184,6 +184,27 @@ def _format_character_direction(script: DramaScript) -> str:
     return "\n".join(lines)
 
 
+def _music_style_hint(script: DramaScript) -> str:
+    """Describe the drama's emotional arc for the music generator.
+
+    The score previously got ONE word (the drama's mood) for its whole
+    length; a track that opens like the first scene and resolves like the
+    last sits under the film instead of beside it.
+    """
+    scenes = getattr(script, "scenes", None) or []
+    opening = _scene_emotion(scenes[0]) if scenes else ""
+    closing = _scene_emotion(scenes[-1]) if len(scenes) > 1 else ""
+    parts = []
+    if opening:
+        parts.append(f"opening with {opening}")
+    if closing and closing != opening:
+        parts.append(f"resolving into {closing}")
+    theme = (getattr(script, "theme", "") or "").strip().rstrip(".")
+    if theme:
+        parts.append(f"about: {theme.lower()}")
+    return (", ".join(parts) + ".") if parts else ""
+
+
 def _format_scene_dialogue(dialogue: List[Any]) -> str:
     """Render dialogue lines as "Name: line" text for the storyboard artist.
 
@@ -216,6 +237,113 @@ def _even(value: float) -> int:
     dimension is normalised here. Rounding down never exceeds the source.
     """
     return max(2, int(value) // 2 * 2)
+
+
+#: Opening fade-in / closing fade-out lengths, seconds. Standard finishing:
+#: a hard cut from black into frame 1 (and out of the last frame) reads as
+#: unfinished; every professionally delivered short opens and lands softly.
+FADE_IN_SECONDS = 0.6
+FADE_OUT_SECONDS = 0.9
+
+
+def is_finishing_enabled() -> bool:
+    """Master finishing pass (fades + loudness normalization). Default ON;
+    MUSEFORGE_FINISHING=0 skips it entirely (and its one extra encode)."""
+    return os.environ.get("MUSEFORGE_FINISHING", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+async def finalize_master(video_path: str, output_path: str) -> str:
+    """One finishing encode: fade in from black, fade out to black, and --
+    when the video carries audio -- matching audio fades plus EBU R128
+    loudness normalization to -14 LUFS (the delivery loudness streaming
+    platforms normalize to; an unnormalized mix plays back unpredictably
+    quiet or hot next to everything else the viewer watches).
+
+    Single pass so it costs ONE encode at the shared CRF-18 profile, not one
+    per effect. Fails open: any error ships the un-finished video rather
+    than failing the job, matching the rest of the assembly chain.
+    """
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+    def _copy_through() -> str:
+        if os.path.abspath(video_path) != os.path.abspath(output_path):
+            with open(video_path, "rb") as src, open(output_path, "wb") as dst:
+                dst.write(src.read())
+        return output_path
+
+    try:
+        from moviepy import VideoFileClip
+
+        with VideoFileClip(video_path) as clip:
+            duration = float(clip.duration or 0)
+            has_audio = clip.audio is not None
+    except Exception as exc:
+        logger.warning("Finishing pass could not probe video, skipping: %s", exc)
+        return _copy_through()
+
+    # Too short to fade meaningfully -- don't eat the whole clip with fades.
+    if duration < (FADE_IN_SECONDS + FADE_OUT_SECONDS) * 2:
+        return _copy_through()
+
+    fade_out_start = max(0.0, duration - FADE_OUT_SECONDS)
+    vf = (
+        f"fade=t=in:st=0:d={FADE_IN_SECONDS},"
+        f"fade=t=out:st={fade_out_start:.3f}:d={FADE_OUT_SECONDS}"
+    )
+    ffmpeg_binary = os.environ.get("MUSEFORGE_FFMPEG_BINARY") or shutil.which("ffmpeg")
+    if not ffmpeg_binary:
+        try:
+            import imageio_ffmpeg
+
+            ffmpeg_binary = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            ffmpeg_binary = "ffmpeg"
+
+    cmd = [ffmpeg_binary, "-y", "-i", video_path, "-vf", vf]
+    if has_audio:
+        cmd += [
+            "-af",
+            (
+                f"afade=t=in:st=0:d={FADE_IN_SECONDS},"
+                f"afade=t=out:st={fade_out_start:.3f}:d={FADE_OUT_SECONDS},"
+                # I: integrated loudness target; TP: true-peak ceiling;
+                # LRA: allowed loudness range. -14 LUFS / -1.5 dBTP is the
+                # common streaming delivery spec.
+                "loudnorm=I=-14:TP=-1.5:LRA=11"
+            ),
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+        ]
+    cmd += [*video_encode_args(), output_path]
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode == 0 and os.path.isfile(output_path):
+            return output_path
+        logger.warning(
+            "Finishing pass failed (exit=%s), shipping un-finished video: %s",
+            process.returncode,
+            stderr.decode("utf-8", errors="replace")[-1000:],
+        )
+    except Exception as exc:
+        logger.warning("Finishing pass unavailable, shipping un-finished video: %s", exc)
+    try:
+        os.unlink(output_path)
+    except OSError:
+        pass
+    return _copy_through()
 
 
 def _find_watermark_font() -> Optional[str]:
@@ -859,6 +987,15 @@ class Idea2VideoPipeline:
             )
             video_for_final = subtitled_path
 
+        # Master finishing (fades + loudness) BEFORE the watermark so the
+        # watermark stays at constant opacity over the fade to black.
+        if is_finishing_enabled():
+            _check_cancel()
+            if progress_callback:
+                await progress_callback("finishing", "Mastering fades & loudness", 96)
+            finished_path = os.path.join(working_dir, "drama_finished.mp4")
+            video_for_final = await finalize_master(video_for_final, finished_path)
+
         final_path = os.path.join(working_dir, "drama_final.mp4")
         if plan in WATERMARK_PLANS:
             # Before watermark render
@@ -1011,7 +1148,10 @@ class Idea2VideoPipeline:
             async def _generate_music() -> Optional[str]:
                 try:
                     music_gen = _make_music_generator(self.api_key, demo=self.demo)
-                    return await music_gen.generate_instrumental(mood=script.mood or "cinematic")
+                    return await music_gen.generate_instrumental(
+                        mood=script.mood or "cinematic",
+                        style_hint=_music_style_hint(script),
+                    )
                 except Exception as exc:
                     logger.warning("Background music generation failed, continuing without music: %s", exc)
                     return None

@@ -182,6 +182,39 @@ def build_frame_prompt(
     )
 
 
+def build_motion_prompt(shot, matched_char=None) -> str:
+    """Build the prompt sent to the video (image-to-video) model.
+
+    Previously this was ``shot.motion_desc`` alone, which starved the
+    animation step of everything else the storyboard decided: the designed
+    camera move never reached Kling (it invented its own), and the acted
+    expression wasn't carried, so a face could drift to neutral -- or to a
+    different-looking person -- WITHIN a shot. Identity drift inside a shot
+    happens in the video model, not the frame, so the character lock has to
+    be restated here too.
+    """
+    parts = []
+    camera = (getattr(shot, "camera_movement", "") or "").strip().rstrip(".")
+    if camera:
+        parts.append(f"Camera: {camera}.")
+    motion = (getattr(shot, "motion_desc", "") or "").strip().rstrip(".")
+    if motion:
+        parts.append(f"{motion}.")
+    expression = (getattr(shot, "expression_desc", "") or "").strip().rstrip(".")
+    if expression:
+        parts.append(
+            f"The character's expression stays true to the beat: {expression}."
+        )
+    name = (getattr(matched_char, "name", "") or "").strip() if matched_char else ""
+    subject = name or "each character"
+    parts.append(
+        f"Keep {subject}'s facial identity EXACTLY as in the source image "
+        f"throughout the shot — no morphing, no face changes. "
+        f"Natural, subtle human motion; no warping or distortion."
+    )
+    return " ".join(parts)
+
+
 async def download_video(url: str, path: str) -> str:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
@@ -803,7 +836,8 @@ class Script2VideoPipeline:
                         frame_url = reference_url
                         shot.frame_url = frame_url
                         video_prompt = (
-                            f"{frame_prompt} Motion: {shot.motion_desc}"
+                            f"{frame_prompt} "
+                            f"{build_motion_prompt(shot, matched_char)}"
                         )
                     else:
                         # Frame generation + optional QA happen BEFORE video
@@ -863,7 +897,7 @@ class Script2VideoPipeline:
                                         i,
                                         exc,
                                     )
-                        video_prompt = shot.motion_desc
+                        video_prompt = build_motion_prompt(shot, matched_char)
 
                     # Record this shot's final frame (post-repair, if any)
                     # as the new "most recent" reference for its character
