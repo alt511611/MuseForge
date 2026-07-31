@@ -9,6 +9,10 @@ class CharacterInScene(BaseModel):
     name: str
     static_features: str
     dynamic_features: str = ""
+    # Costume, carried separately from static_features (face/build/age) so it
+    # can be restated in every frame prompt. The identity reference image
+    # binds a face, not an outfit.
+    wardrobe: str = ""
     is_visible: bool = True
     portrait_url: Optional[str] = None
 
@@ -17,11 +21,35 @@ class CharacterProfile(BaseModel):
     name: str
     description: str
     role: str = "supporting"
+    # Wardrobe kept SEPARATE from `description` (face/build/age). The identity
+    # reference image binds a face, not an outfit, so wardrobe has to be
+    # restated as text in every frame prompt or the costume changes between
+    # scenes even when the face holds.
+    wardrobe: str = ""
+    # Performance direction. want = the external goal the character pursues on
+    # screen; need = the internal truth they're avoiding; arc = how they change
+    # across the drama. These drive how a beat is PLAYED (what the face does),
+    # which is what separates a director's script from a plot summary.
+    want: str = ""
+    need: str = ""
+    arc: str = ""
 
 
 class DialogueLine(BaseModel):
     character: str
     line: str
+
+
+#: Narrative function a scene serves. Drives shot scale and duration: setup
+#: wants width and air, a climax wants a close-up and time to land.
+DRAMATIC_FUNCTIONS = (
+    "setup",
+    "inciting_incident",
+    "rising_action",
+    "turning_point",
+    "climax",
+    "resolution",
+)
 
 
 class ScriptScene(BaseModel):
@@ -32,6 +60,23 @@ class ScriptScene(BaseModel):
     # so shot design (facial expression, body language) matches the story
     # instead of defaulting to a neutral/expressionless read of the action line.
     emotion: str = ""
+    # Where this scene sits in the story's shape (see DRAMATIC_FUNCTIONS).
+    dramatic_function: str = ""
+    # THE most load-bearing field for shot selection: what actually CHANGES in
+    # this scene. A scene without a turn is a scene with nothing to film. The
+    # storyboard artist draws this moment rather than the surrounding business.
+    turn: str = ""
+    # What the characters mean underneath what they say. Drives the played
+    # expression when it contradicts the spoken line -- the difference between
+    # a face that illustrates dialogue and one that acts against it.
+    subtext: str = ""
+    # Physical blocking: who is where, what they do with their hands, the
+    # object the scene turns on. Gives the frame concrete staging instead of
+    # two people abstractly "talking".
+    staging: str = ""
+    # Dramatic tension 1-10. Shapes the tension curve across the drama and
+    # informs shot scale/duration for this beat.
+    tension: int = 0
 
 
 class DramaScript(BaseModel):
@@ -48,3 +93,11 @@ class DramaScript(BaseModel):
     setting_location: str = ""
     setting_time_of_day: str = ""
     setting_era: str = ""
+    # The controlling idea the drama argues, in one sentence. Keeps every
+    # scene pulling in the same direction instead of being three unrelated
+    # vignettes that happen to share a room.
+    theme: str = ""
+    # One recurring visual element (an object, a gesture, a quality of light)
+    # deliberately restaged across scenes. This is what makes a set of shots
+    # read as a single film rather than a slideshow.
+    visual_motif: str = ""

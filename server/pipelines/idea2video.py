@@ -76,17 +76,64 @@ def _scene_dialogue(scene: Any) -> List[Any]:
     return list(getattr(scene, "dialogue", None) or [])
 
 
-def _scene_emotion(scene: Any) -> str:
-    """The scene's emotional beat, when the script carries one.
+def _scene_field(scene: Any, field: str) -> str:
+    """Read one director-level field off a scene, whatever shape it is in.
 
-    Legacy/demo scripts store scenes as bare strings and have no emotion
-    field — those keep the previous (emotion-less) behavior.
+    Legacy/demo scripts store scenes as bare strings and carry none of these
+    fields — those degrade to "" and keep the previous behavior.
     """
     if isinstance(scene, str):
         return ""
     if isinstance(scene, dict):
-        return str(scene.get("emotion") or "")
-    return str(getattr(scene, "emotion", "") or "")
+        value = scene.get(field)
+    else:
+        value = getattr(scene, field, None)
+    return "" if value is None else str(value)
+
+
+def _scene_emotion(scene: Any) -> str:
+    """The scene's emotional beat, when the script carries one."""
+    return _scene_field(scene, "emotion")
+
+
+def _format_scene_direction(scene: Any) -> str:
+    """Render a scene's director-level notes for the storyboard artist.
+
+    Only fields the script actually carries are emitted, so a legacy script
+    produces an empty block rather than a wall of empty labels.
+    """
+    parts = []
+    for label, field in (
+        ("Dramatic function", "dramatic_function"),
+        ("THE TURN — film this moment", "turn"),
+        ("Subtext (what they really mean)", "subtext"),
+        ("Staging", "staging"),
+    ):
+        value = _scene_field(scene, field).strip()
+        if value:
+            parts.append(f"{label}: {value}")
+    tension = _scene_field(scene, "tension").strip()
+    if tension and tension not in ("0", "0.0"):
+        parts.append(f"Dramatic tension: {tension}/10")
+    return "\n".join(parts)
+
+
+def _format_character_direction(script: DramaScript) -> str:
+    """Render per-character performance direction (want / need / arc)."""
+    lines = []
+    for char in getattr(script, "characters", None) or []:
+        bits = [
+            f"{label}: {value.strip()}"
+            for label, value in (
+                ("wants", str(getattr(char, "want", "") or "")),
+                ("needs", str(getattr(char, "need", "") or "")),
+                ("arc", str(getattr(char, "arc", "") or "")),
+            )
+            if value.strip()
+        ]
+        if bits:
+            lines.append(f"{char.name} — " + "; ".join(bits))
+    return "\n".join(lines)
 
 
 def _format_scene_dialogue(dialogue: List[Any]) -> str:
@@ -635,9 +682,13 @@ class Idea2VideoPipeline:
                 # Already supplied by the user — skip AI generation for this one.
                 char.portrait_url = portraits[char.name]
                 continue
+            wardrobe = (getattr(char, "wardrobe", "") or "").strip()
             prompt = (
                 f"Character portrait, {style} style. "
                 f"{char.static_features}. {char.dynamic_features}. "
+                # The locked portrait is the costume reference too -- generating
+                # it without wardrobe leaves every scene to invent an outfit.
+                f"{('Wearing ' + wardrobe + '. ') if wardrobe else ''}"
                 f"Front-facing, neutral expression, studio lighting, high detail."
             )
             url = await self.image_gen.generate_image(prompt, aspect_ratio="1:1")
@@ -652,6 +703,7 @@ class Idea2VideoPipeline:
                 name=c.name,
                 static_features=c.description,
                 dynamic_features="",
+                wardrobe=str(getattr(c, "wardrobe", "") or ""),
                 is_visible=True,
             )
             for i, c in enumerate(script.characters)
@@ -906,6 +958,9 @@ class Idea2VideoPipeline:
         # the next scene's rendering on it finishing first.
         dialogue_tasks: List[tuple] = []
 
+        # Drama-wide direction: identical for every scene, so build it once.
+        character_direction = _format_character_direction(script)
+
         try:
             for idx, scene in enumerate(script.scenes):
                 _check_cancel()
@@ -942,6 +997,10 @@ class Idea2VideoPipeline:
                     # independent of whether VOICE generation is enabled --
                     # dialogue is what tells the artist which moment matters.
                     scene_dialogue=_format_scene_dialogue(scene_dialogue),
+                    scene_direction=_format_scene_direction(scene),
+                    character_direction=character_direction,
+                    theme=getattr(script, "theme", "") or "",
+                    visual_motif=getattr(script, "visual_motif", "") or "",
                 )
                 assembled_scene_index = None
                 if scene_result.get("path"):

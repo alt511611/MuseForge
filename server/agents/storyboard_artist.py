@@ -24,6 +24,18 @@ look that lands, the touch, the break, the decision). Do NOT storyboard set-up,
 arrival, walking, waiting, or scene-setting business when an emotional beat exists in
 the scene; a viewer seeing only your shot must understand what emotionally happened.
 If the scene has dialogue, stage the moment around the most important line.
+When the director's notes name THE TURN, that is the moment — film it, not the
+business around it. Honour the given staging (positions, hands, the object the scene
+turns on) instead of inventing different blocking.
+
+MATCH SHOT SCALE TO THE BEAT. Let the scene's dramatic function and tension pick the
+framing: setup and resolution can breathe in wide or medium; rising_action and
+turning_point tighten to medium; climax and any tension of 8+ belong in a close-up
+where the face fills the frame. High tension also earns more screen time.
+
+PLAY THE SUBTEXT, NOT THE LINE. When the notes give subtext that contradicts the
+dialogue, the expression must play the subtext — a character insisting they are fine
+while their face says otherwise is the shot worth making.
 
 SHOW THE EMOTION ON THE FACE. The scene's emotional beat is given to you. "expression_desc"
 must state the concrete, visible facial expression AND body language for the character(s)
@@ -72,6 +84,10 @@ Respond ONLY with valid JSON array containing a single shot object:
         is_finale: bool = False,
         scene_emotion: str = "",
         scene_dialogue: str = "",
+        scene_direction: str = "",
+        character_direction: str = "",
+        theme: str = "",
+        visual_motif: str = "",
     ) -> List[StoryboardShot]:
         preset = get_director_style(director_style)
 
@@ -90,9 +106,12 @@ Respond ONLY with valid JSON array containing a single shot object:
         prompt = (
             f"Scene script: {script}\n"
             f"{self._format_emotion_line(scene_emotion)}"
+            f"{self._format_direction_block(scene_direction)}"
             f"{self._format_dialogue_line(scene_dialogue)}"
             f"Characters: {char_desc}\n"
+            f"{self._format_character_direction_block(character_direction)}"
             f"{setting_line}"
+            f"{self._format_through_line(theme, visual_motif)}"
             f"Director guidance: {preset.storyboard_guidance}\nDefault lens: {preset.default_lens}\n"
             f"User requirements: {user_requirement or 'none'}"
         )
@@ -132,6 +151,10 @@ Respond ONLY with valid JSON array containing a single shot object:
                 setting_era=setting_era,
                 scene_emotion=scene_emotion,
                 scene_dialogue=scene_dialogue,
+                scene_direction=scene_direction,
+                character_direction=character_direction,
+                theme=theme,
+                visual_motif=visual_motif,
             )
             self._ensure_expression(shots, scene_emotion)
             if shots:
@@ -204,6 +227,45 @@ Respond ONLY with valid JSON array containing a single shot object:
         )
 
     @staticmethod
+    def _format_direction_block(scene_direction: str = "") -> str:
+        """The scene's dramatic function, turn, subtext, staging and tension.
+
+        The turn is the single most important input to shot selection: it
+        names the moment that must be filmed.
+        """
+        direction = (scene_direction or "").strip()
+        if not direction:
+            return ""
+        return f"DIRECTOR'S NOTES FOR THIS SCENE:\n{direction}\n"
+
+    @staticmethod
+    def _format_character_direction_block(character_direction: str = "") -> str:
+        direction = (character_direction or "").strip()
+        if not direction:
+            return ""
+        return (
+            "Character performance (what each is playing underneath):\n"
+            f"{direction}\n"
+        )
+
+    @staticmethod
+    def _format_through_line(theme: str = "", visual_motif: str = "") -> str:
+        """Drama-wide theme and recurring visual motif.
+
+        Restaging the motif is what makes a set of independently generated
+        shots read as one film instead of a slideshow.
+        """
+        parts = []
+        if (theme or "").strip():
+            parts.append(f"Theme (the idea every shot should serve): {theme.strip()}")
+        if (visual_motif or "").strip():
+            parts.append(
+                f"Recurring visual motif — restage it in this shot where it "
+                f"fits naturally: {visual_motif.strip()}"
+            )
+        return "\n".join(parts) + "\n" if parts else ""
+
+    @staticmethod
     def _format_dialogue_line(scene_dialogue: str = "") -> str:
         dialogue = (scene_dialogue or "").strip()
         if not dialogue:
@@ -244,6 +306,10 @@ Respond ONLY with valid JSON array containing a single shot object:
         setting_era: str = "",
         scene_emotion: str = "",
         scene_dialogue: str = "",
+        scene_direction: str = "",
+        character_direction: str = "",
+        theme: str = "",
+        visual_motif: str = "",
     ) -> List[StoryboardShot]:
         try:
             import httpx
@@ -255,9 +321,12 @@ Respond ONLY with valid JSON array containing a single shot object:
             prompt = (
                 f"Scene script: {script}\n"
                 f"{self._format_emotion_line(scene_emotion)}"
+                f"{self._format_direction_block(scene_direction)}"
                 f"{self._format_dialogue_line(scene_dialogue)}"
                 f"Characters: {char_desc}\n"
+                f"{self._format_character_direction_block(character_direction)}"
                 f"{setting_line}"
+                f"{self._format_through_line(theme, visual_motif)}"
                 f"Director guidance: {guidance}\nDefault lens: {default_lens}\n"
                 f"User requirements: {user_requirement or 'none'}"
             )
