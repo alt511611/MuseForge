@@ -18,6 +18,8 @@ from pipelines.script2video import (
     concatenate_videos_with_transitions,
     download_video,
     is_scene_transitions_enabled,
+    moviepy_encode_kwargs,
+    video_encode_args,
 )
 from tools.muapi_voice_generator import MuAPIVoiceGenerator, is_dialogue_enabled
 
@@ -158,6 +160,18 @@ def _format_scene_dialogue(dialogue: List[Any]) -> str:
     return "\n".join(lines)
 
 
+def _even(value: float) -> int:
+    """Round a pixel dimension DOWN to the nearest even number.
+
+    4:2:0 chroma subsampling (yuv420p, required for broad player support)
+    halves both axes, so an odd width or height cannot be encoded -- x264
+    fails outright. Aspect-ratio cropping produces fractional sizes routinely
+    (a 640x360 source cropped to 9:16 wants 202.5px), so every computed
+    dimension is normalised here. Rounding down never exceeds the source.
+    """
+    return max(2, int(value) // 2 * 2)
+
+
 def _find_watermark_font() -> Optional[str]:
     for path in _WATERMARK_FONT_CANDIDATES:
         if path and os.path.isfile(path):
@@ -263,7 +277,10 @@ async def add_background_music(
             final = video.with_audio(final_audio)
         else:
             final = video
-        final.write_videofile(output_path, codec="libx264", audio_codec="aac", logger=None)
+        final.write_videofile(
+            output_path, codec="libx264", audio_codec="aac", logger=None,
+            **moviepy_encode_kwargs(),
+        )
     except Exception as exc:
         logger.warning("Audio mixing failed; shipping silent/source video: %s", exc)
         with open(video_path, "rb") as src:
@@ -494,8 +511,7 @@ async def burn_subtitles(
             video_path,
             "-vf",
             vf,
-            "-c:v",
-            "libx264",
+            *video_encode_args(),
             "-c:a",
             "copy",
             output_path,
@@ -570,7 +586,10 @@ async def add_watermark(video_path: str, output_path: str) -> str:
             (video.w - watermark.w - margin, video.h - watermark.h - margin)
         )
         final = CompositeVideoClip([video, watermark])
-        final.write_videofile(output_path, codec="libx264", audio_codec="aac", logger=None)
+        final.write_videofile(
+            output_path, codec="libx264", audio_codec="aac", logger=None,
+            **moviepy_encode_kwargs(),
+        )
         video.close()
         watermark.close()
         final.close()
@@ -625,20 +644,21 @@ async def export_alternate_format(
                 cropped = clip
             elif src_ratio > target:
                 # Source is wider than target → crop left/right (center).
-                new_w = src_h * target
+                new_w = _even(src_h * target)
                 x1 = (src_w - new_w) / 2
-                cropped = clip.cropped(x1=x1, y1=0, width=new_w, height=src_h)
+                cropped = clip.cropped(x1=x1, y1=0, width=new_w, height=_even(src_h))
             else:
                 # Source is taller than target → crop top/bottom (center).
-                new_h = src_w / target
+                new_h = _even(src_w / target)
                 y1 = (src_h - new_h) / 2
-                cropped = clip.cropped(x1=0, y1=y1, width=src_w, height=new_h)
+                cropped = clip.cropped(x1=0, y1=y1, width=_even(src_w), height=new_h)
 
             cropped.write_videofile(
                 output_path,
                 codec="libx264",
                 audio_codec="aac",
                 logger=None,
+                **moviepy_encode_kwargs(),
             )
             if cropped is not clip:
                 cropped.close()

@@ -10,12 +10,56 @@ logger = logging.getLogger(__name__)
 
 # Pixel sizes for flux-2-pro / flux-dev-image style "size" payloads
 # (e.g. "1024*1024"). Also used for demo placeholder URLs.
+#
+# These frames are the conditioning image for Kling image-to-video, which
+# renders at its own (higher) output resolution -- so anything we hand it
+# below that gets upscaled, and the softness is baked into every frame of the
+# finished shot. The video ratios are therefore ~1.3MP rather than the old
+# ~1.0MP, which buys real detail while staying inside the range FLUX renders
+# reliably; pushing to a full 1920x1080 (2.07MP) sits at the edge of that
+# range and is left to MUSEFORGE_IMAGE_WIDTH/HEIGHT for anyone whose endpoint
+# handles it. 1:1 is only ever the character portrait (a reference, never
+# shown), so it stays at 1024 and costs nothing extra.
 ASPECT_RATIO_MAP = {
     "1:1": {"width": 1024, "height": 1024},
-    "16:9": {"width": 1344, "height": 768},
-    "9:16": {"width": 768, "height": 1344},
-    "4:3": {"width": 1152, "height": 896},
+    "16:9": {"width": 1536, "height": 864},
+    "9:16": {"width": 864, "height": 1536},
+    "4:3": {"width": 1344, "height": 1008},
 }
+
+
+def resolve_dimensions(aspect_ratio: str) -> dict:
+    """Pixel size for an aspect ratio, with an explicit env override.
+
+    MUSEFORGE_IMAGE_WIDTH/HEIGHT override every ratio -- an escape hatch for
+    endpoints that comfortably render above the default ~1.3MP. Both must be
+    set and valid, otherwise the mapped default stands (a half-configured or
+    typo'd override must not silently produce a broken payload).
+    """
+    dims = ASPECT_RATIO_MAP.get(aspect_ratio, ASPECT_RATIO_MAP["16:9"])
+    raw_w = os.environ.get("MUSEFORGE_IMAGE_WIDTH", "").strip()
+    raw_h = os.environ.get("MUSEFORGE_IMAGE_HEIGHT", "").strip()
+    if not (raw_w and raw_h):
+        return dims
+    try:
+        width, height = int(raw_w), int(raw_h)
+    except ValueError:
+        logger.warning(
+            "Invalid MUSEFORGE_IMAGE_WIDTH/HEIGHT (%r x %r), using %s default",
+            raw_w,
+            raw_h,
+            aspect_ratio,
+        )
+        return dims
+    if width <= 0 or height <= 0:
+        logger.warning(
+            "Non-positive MUSEFORGE_IMAGE_WIDTH/HEIGHT (%s x %s), using %s default",
+            width,
+            height,
+            aspect_ratio,
+        )
+        return dims
+    return {"width": width, "height": height}
 
 
 def _demo_image_url(prompt: str, aspect_ratio: str) -> str:
@@ -51,7 +95,7 @@ class MuAPIImageGenerator:
         self, prompt: str, aspect_ratio: str, reference_url: str = None
     ) -> dict:
         """flux-2-pro / flux-dev-image style payload (combined size string)."""
-        dims = ASPECT_RATIO_MAP.get(aspect_ratio, ASPECT_RATIO_MAP["16:9"])
+        dims = resolve_dimensions(aspect_ratio)
         payload = {
             "prompt": prompt,
             "size": f"{dims['width']}*{dims['height']}",

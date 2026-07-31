@@ -27,6 +27,26 @@ def endpoint_for_plan(plan: str) -> str:
     return PRO_ENDPOINT if (plan or "").lower() == "pro" else STANDARD_ENDPOINT
 
 
+def is_native_audio_enabled() -> bool:
+    """Whether to ask Kling to generate its own audio track.
+
+    OFF by default, because that audio is unconditionally DISCARDED further
+    down the pipeline: concatenate_videos() passes ``-an`` (and the moviepy
+    fallback writes ``audio=False``), then add_background_music() lays the
+    real score and dialogue over a silent picture. Requesting it only spent
+    generation time and credits on a track no viewer could ever hear.
+
+    Kept behind a flag rather than deleted so native Kling audio can be
+    switched on the day the assembly step is taught to keep it.
+    """
+    return os.environ.get("MUSEFORGE_KLING_NATIVE_AUDIO", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _is_endpoint_rejected(exc: Exception) -> bool:
     """True when MuAPI likely rejected the endpoint (404/422)."""
     msg = str(exc).lower()
@@ -101,8 +121,9 @@ class MuAPIVideoGenerator:
             return DEMO_VIDEO_URL
 
         endpoint = endpoint_for_plan(plan)
-        # Native Kling audio on for now; exposed as its own feature later.
-        payload = self._payload(prompt, image_url, duration, generate_audio=True)
+        payload = self._payload(
+            prompt, image_url, duration, generate_audio=is_native_audio_enabled()
+        )
 
         try:
             return await self.client.generate(

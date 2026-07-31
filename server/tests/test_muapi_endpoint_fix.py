@@ -5,6 +5,15 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+
+def _expected_size(aspect_ratio):
+    """Derive from the map so a deliberate resolution change does not
+    silently fail an unrelated schema test."""
+    from tools.muapi_image_generator import ASPECT_RATIO_MAP
+
+    dims = ASPECT_RATIO_MAP[aspect_ratio]
+    return f"{dims['width']}*{dims['height']}"
 os.environ.setdefault("MUAPI_KEY", "test-key")
 
 
@@ -34,7 +43,7 @@ def test_invalid_aspect_ratio_falls_back_to_16_9():
 
     gen = MuAPIImageGenerator(api_key="test-key")
     payload = gen._text_to_image_payload("a cat", "99:1")
-    assert payload["size"] == "1344*768"
+    assert payload["size"] == _expected_size("16:9")
 
 
 def test_legacy_size_payload_still_available_for_pulid_fallback():
@@ -44,7 +53,7 @@ def test_legacy_size_payload_still_available_for_pulid_fallback():
     payload = gen._build_payload("a cat", "16:9", reference_url="https://example.com/ref.png")
 
     assert payload["image"] == "https://example.com/ref.png"
-    assert payload["size"] == "1344*768"
+    assert payload["size"] == _expected_size("16:9")
     assert "image_url" not in payload
 
 

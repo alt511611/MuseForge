@@ -65,6 +65,23 @@ def _make_image_generator(api_key: str, demo: bool):
     return MuAPIImageGenerator(api_key, demo=demo)
 
 
+#: Craft/quality direction appended to every frame prompt.
+#:
+#: FLUX is a distilled, guidance-based model: it has no true classifier-free
+#: guidance, so a `negative_prompt` field is either ignored or rejected
+#: (a 422 would silently demote every frame to the fallback endpoint).
+#: Quality is therefore steered POSITIVELY, naming the look we want rather
+#: than listing artifacts to avoid. Anatomy is called out because hands and
+#: eyes are where generated people break most visibly, and text because
+#: spurious captions/watermarks are a common FLUX failure on cinematic prompts.
+IMAGE_QUALITY_SUFFIX = (
+    "Shot on 35mm film, natural filmic grain, realistic skin texture with "
+    "visible pores, catchlights in the eyes, anatomically correct hands, "
+    "sharp focus on the face with natural depth of field. "
+    "No text, captions, subtitles, watermarks or logos anywhere in the frame."
+)
+
+
 def build_character_identity_clause(characters, matched_char=None) -> str:
     """Restate every on-screen character's fixed appearance in the prompt text.
 
@@ -160,7 +177,8 @@ def build_frame_prompt(
     return (
         f"{style} style. {setting_clause}{identity_clause}{shot.visual_desc}. "
         f"{expression_clause}{face_clause}"
-        f"{dialogue_clause}Shot type: {shot.shot_type}. Lens: {shot.lens}."
+        f"{dialogue_clause}Shot type: {shot.shot_type}. Lens: {shot.lens}. "
+        f"{IMAGE_QUALITY_SUFFIX}"
     )
 
 
@@ -261,7 +279,10 @@ async def concatenate_videos(paths: List[str], out_path: str) -> str:
 
         clips = [VideoFileClip(p) for p in paths]
         final = concatenate_videoclips(clips, method="chain")
-        final.write_videofile(out_path, codec="libx264", audio=False, logger=None)
+        final.write_videofile(
+            out_path, codec="libx264", audio=False, logger=None,
+            **moviepy_encode_kwargs(),
+        )
         return out_path
     except Exception as exc:
         logger.warning("moviepy chain concat failed, using raw byte-copy: %s", exc)
@@ -287,6 +308,65 @@ async def concatenate_videos(paths: List[str], out_path: str) -> str:
         # Keep the pipeline fail-open even if a source disappears mid-copy.
         logger.error("raw concat fallback failed: %s", exc)
     return out_path
+
+
+# --- Encode quality ---------------------------------------------------------
+#
+# A finished drama is re-encoded several times on its way out: colour grade,
+# audio mix, caption burn, watermark, aspect export. Every one of those passes
+# used bare `libx264` with no rate control, which means ffmpeg's default CRF 23
+# -- and the loss COMPOUNDS, so the last pass is encoding an already-degraded
+# picture. CRF 18 is close to visually lossless and keeps generational loss
+# negligible across the chain at a modest size cost on clips this short.
+DEFAULT_VIDEO_CRF = "18"
+#: x264 speed/efficiency tradeoff. "medium" is x264's own default; CRF governs
+#: quality far more than preset does, so this stays fast by default.
+DEFAULT_VIDEO_PRESET = "medium"
+#: 4:2:0 8-bit. Sources can arrive as yuv444p/yuv422p, which Safari and most
+#: hardware decoders refuse to play -- an unplayable video is the worst
+#: possible "quality" outcome, so every output is normalised.
+VIDEO_PIX_FMT = "yuv420p"
+
+
+def video_encode_args() -> List[str]:
+    """ffmpeg output args shared by every re-encode in the pipeline.
+
+    ``-movflags +faststart`` moves the moov atom to the front so the browser
+    player can start the video before the whole file has downloaded.
+    """
+    return [
+        "-c:v",
+        "libx264",
+        "-crf",
+        os.environ.get("MUSEFORGE_VIDEO_CRF", DEFAULT_VIDEO_CRF),
+        "-preset",
+        os.environ.get("MUSEFORGE_VIDEO_PRESET", DEFAULT_VIDEO_PRESET),
+        "-pix_fmt",
+        VIDEO_PIX_FMT,
+        "-movflags",
+        "+faststart",
+    ]
+
+
+def moviepy_encode_kwargs() -> Dict[str, Any]:
+    """The same settings for moviepy's ``write_videofile``.
+
+    moviepy takes ``preset`` as its own argument and passes the rest through
+    ``ffmpeg_params``; duplicating -preset in both places makes ffmpeg error.
+    """
+    args = video_encode_args()
+    preset = args[args.index("-preset") + 1]
+    passthrough: List[str] = []
+    skip_next = False
+    for i, arg in enumerate(args):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in ("-c:v", "-preset"):
+            skip_next = True
+            continue
+        passthrough.append(arg)
+    return {"preset": preset, "ffmpeg_params": passthrough}
 
 
 def is_dynamic_reference_enabled() -> bool:
@@ -363,7 +443,10 @@ async def concatenate_videos_with_transitions(
         final = concatenate_videoclips(
             faded_clips, method="compose", padding=-transition_duration
         )
-        final.write_videofile(out_path, codec="libx264", audio=False, logger=None)
+        final.write_videofile(
+            out_path, codec="libx264", audio=False, logger=None,
+            **moviepy_encode_kwargs(),
+        )
         return out_path
     except Exception as exc:
         logger.warning(
@@ -487,8 +570,7 @@ async def apply_color_grade(
             video_path,
             "-vf",
             filter_chain,
-            "-c:v",
-            "libx264",
+            *video_encode_args(),
             "-c:a",
             "copy",
             output_path,
