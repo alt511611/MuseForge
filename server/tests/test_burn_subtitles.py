@@ -115,7 +115,7 @@ async def test_assemble_burns_subtitles_before_watermark(tmp_path, monkeypatch):
             f.write(b"concat")
         return output_path
 
-    async def _fake_grade(video_path, output_path, style="cinematic"):
+    async def _fake_grade(video_path, output_path, director_style="cinematic_balanced"):
         calls.append("grade")
         with open(output_path, "wb") as f:
             f.write(b"graded")
@@ -175,7 +175,7 @@ async def test_assemble_skips_subtitles_without_dialogue(tmp_path, monkeypatch):
             f.write(b"c")
         return output_path
 
-    async def _fake_grade(video_path, output_path, style="cinematic"):
+    async def _fake_grade(video_path, output_path, director_style="cinematic_balanced"):
         with open(output_path, "wb") as f:
             f.write(b"g")
         return output_path
