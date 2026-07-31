@@ -3,6 +3,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from interfaces.second_budget import SECONDS_PER_CREDIT  # noqa: E402
 os.environ["MUSEFORGE_DEMO"] = "1"
 os.environ.pop("MUAPI_KEY", None)
 
@@ -27,7 +29,7 @@ def test_estimate_breakdown_base_only_when_addons_off():
     body = resp.json()
     assert body["total_credits"] == 3
     assert body["breakdown"] == [
-        {"label": "Temel üretim (3 sahne)", "credits": 3},
+        {"label": f"Temel üretim (3 sahne, {int(3 * SECONDS_PER_CREDIT)} sn video)", "credits": 3},
     ]
 
 
@@ -47,7 +49,7 @@ def test_estimate_breakdown_music_and_dialogue_when_on(monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body["breakdown"] == [
-        {"label": "Temel üretim (3 sahne)", "credits": 3},
+        {"label": f"Temel üretim (3 sahne, {int(3 * SECONDS_PER_CREDIT)} sn video)", "credits": 3},
         {"label": "Müzik", "credits": 1},
         {"label": "Diyalog", "credits": 3},
     ]
@@ -69,7 +71,7 @@ def test_estimate_breakdown_ignores_addons_on_free_plan(monkeypatch):
     body = resp.json()
     assert body["total_credits"] == 2
     assert body["breakdown"] == [
-        {"label": "Temel üretim (2 sahne)", "credits": 2},
+        {"label": f"Temel üretim (2 sahne, {int(2 * SECONDS_PER_CREDIT)} sn video)", "credits": 2},
     ]
 
 
@@ -80,7 +82,7 @@ def test_build_credit_breakdown_music_only_for_creator():
         3, music_enabled=True, dialogue_enabled=True, plan="creator"
     )
     assert result["breakdown"] == [
-        {"label": "Temel üretim (3 sahne)", "credits": 3},
+        {"label": f"Temel üretim (3 sahne, {int(3 * SECONDS_PER_CREDIT)} sn video)", "credits": 3},
         {"label": "Müzik", "credits": 1},
     ]
     assert result["total_credits"] == 4

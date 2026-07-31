@@ -124,6 +124,7 @@ Respond ONLY with valid JSON array containing a single shot object:
         scene_dialogue: str = "",
         scene_direction: str = "",
         scene_tension: int = 0,
+        scene_duration: float = 0.0,
         character_direction: str = "",
         theme: str = "",
         visual_motif: str = "",
@@ -137,6 +138,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                 self._design_template(script, characters, preset, scene_emotion),
                 is_finale,
                 scene_tension,
+                scene_duration,
             )
 
         char_desc = ", ".join(f"{c.name}: {c.static_features}" for c in characters if c.is_visible)
@@ -170,7 +172,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                     # the same cap already applied to the direct-Anthropic
                     # fallback below, silently defeating the cost fix
                     # since MuAPI is the PRIMARY path, tried first.
-                    return self._clamp_durations(shots[:1], is_finale, scene_tension)
+                    return self._clamp_durations(shots[:1], is_finale, scene_tension, scene_duration)
             except Exception as exc:
                 raw_snippet = locals().get("content", "<no content received>")
                 logger.warning(
@@ -199,19 +201,41 @@ Respond ONLY with valid JSON array containing a single shot object:
             self._ensure_expression(shots, scene_emotion)
             if shots:
                 # Hard cap: never produce more than 1 shot per scene (cost control).
-                return self._clamp_durations(shots[:1], is_finale, scene_tension)
+                return self._clamp_durations(shots[:1], is_finale, scene_tension, scene_duration)
 
         # 3) Last resort: deterministic template, never crashes generation.
         return self._clamp_durations(
             self._design_template(script, characters, preset, scene_emotion),
             is_finale,
             scene_tension,
+            scene_duration,
         )
 
     @classmethod
     def _clamp_durations(
-        cls, shots: List[StoryboardShot], is_finale: bool, tension: int = 0
+        cls,
+        shots: List[StoryboardShot],
+        is_finale: bool,
+        tension: int = 0,
+        budget: float = 0.0,
     ) -> List[StoryboardShot]:
+        """Set each shot's length.
+
+        With a `budget` (the drama's fixed second allowance, already split by
+        tension in interfaces/second_budget) the scene is SET to it rather
+        than merely capped: the provider bills per second, so leaving the
+        model free to come in under budget makes the job's cost -- and its
+        margin -- unpredictable at the moment credits are charged. The budget
+        is the whole point; honouring it exactly is what makes the promise
+        "N credits buys M seconds" true.
+
+        Without a budget (legacy callers, single-scene tests) this keeps the
+        previous cap-only behaviour.
+        """
+        if budget and budget > 0:
+            for shot in shots:
+                shot.duration_seconds = float(budget)
+            return shots
         cap = cls.duration_cap(is_finale, tension)
         for shot in shots:
             shot.duration_seconds = min(float(shot.duration_seconds or 0), cap)
