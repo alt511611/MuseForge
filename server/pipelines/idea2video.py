@@ -76,6 +76,41 @@ def _scene_dialogue(scene: Any) -> List[Any]:
     return list(getattr(scene, "dialogue", None) or [])
 
 
+def _scene_emotion(scene: Any) -> str:
+    """The scene's emotional beat, when the script carries one.
+
+    Legacy/demo scripts store scenes as bare strings and have no emotion
+    field — those keep the previous (emotion-less) behavior.
+    """
+    if isinstance(scene, str):
+        return ""
+    if isinstance(scene, dict):
+        return str(scene.get("emotion") or "")
+    return str(getattr(scene, "emotion", "") or "")
+
+
+def _format_scene_dialogue(dialogue: List[Any]) -> str:
+    """Render dialogue lines as "Name: line" text for the storyboard artist.
+
+    The storyboard step previously saw ONLY the scene's action line, so the
+    words that carry the scene's emotional turn were invisible to the agent
+    choosing which moment to draw — a direct cause of shots that felt
+    unrelated to the story.
+    """
+    lines = []
+    for entry in dialogue or []:
+        if isinstance(entry, dict):
+            character = str(entry.get("character") or "").strip()
+            line = str(entry.get("line") or "").strip()
+        else:
+            character = str(getattr(entry, "character", "") or "").strip()
+            line = str(getattr(entry, "line", "") or "").strip()
+        if not line:
+            continue
+        lines.append(f"{character}: {line}" if character else line)
+    return "\n".join(lines)
+
+
 def _find_watermark_font() -> Optional[str]:
     for path in _WATERMARK_FONT_CANDIDATES:
         if path and os.path.isfile(path):
@@ -899,6 +934,11 @@ class Idea2VideoPipeline:
                     setting_era=getattr(script, "setting_era", "") or "",
                     has_dialogue=dialogue_requested and bool(scene_dialogue),
                     last_frame_by_character=self._last_frame_by_character,
+                    scene_emotion=_scene_emotion(scene),
+                    # Always pass the words themselves to the storyboard step,
+                    # independent of whether VOICE generation is enabled --
+                    # dialogue is what tells the artist which moment matters.
+                    scene_dialogue=_format_scene_dialogue(scene_dialogue),
                 )
                 assembled_scene_index = None
                 if scene_result.get("path"):

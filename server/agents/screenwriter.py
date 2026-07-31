@@ -16,6 +16,11 @@ class ScreenwriterAgent:
     SYSTEM_PROMPT = """You are an award-winning screenwriter specializing in micro-dramas and cinematic short films.
 Given a user's idea, write a compelling script broken into 3-5 short scenes (each 1-2 sentences of action).
 For every scene, write the exact spoken dialogue as character/line pairs. Use an empty dialogue list for silent scenes.
+For every scene, also set "emotion": a short (2-4 word) tag for the scene's emotional beat, driven by
+what actually happens in that scene's action/dialogue (e.g. "tearful reconciliation", "cold resentment",
+"joyful reunion", "tense confrontation", "quiet resignation") -- this is what a later storyboard step
+uses to pick the character's facial expression, so it must never default to something neutral/flat
+unless the scene is genuinely emotionless (e.g. a pure establishing shot).
 Extract named characters with visual descriptions for AI image generation.
 Also define ONE locked setting for the ENTIRE drama (not per scene): location, time of day, and era.
 Every scene must take place in that same setting — do not invent a different place or time per scene.
@@ -34,9 +39,10 @@ Respond ONLY with valid JSON matching this schema:
   "scenes": [
     {
       "action": "scene 1 action...",
-      "dialogue": [{"character": "Kemal", "line": "The exact words Kemal says."}]
+      "dialogue": [{"character": "Kemal", "line": "The exact words Kemal says."}],
+      "emotion": "e.g. tearful reconciliation"
     },
-    {"action": "silent scene action...", "dialogue": []}
+    {"action": "silent scene action...", "dialogue": [], "emotion": "e.g. quiet dread"}
   ]
 }"""
 
@@ -203,15 +209,30 @@ Respond ONLY with valid JSON matching this schema:
             ]
 
         scene_templates = [
-            f"{protagonist} enters the scene. The {style.lower()} atmosphere sets the tone.",
-            f"Tension builds as {protagonist} faces an unexpected challenge.",
-            f"A pivotal moment — {protagonist} makes a decisive choice.",
-            f"The aftermath: consequences ripple through the environment.",
-            f"Final frame: {protagonist} walks away, transformed.",
+            (
+                f"{protagonist} enters the scene. The {style.lower()} atmosphere sets the tone.",
+                "guarded anticipation",
+            ),
+            (
+                f"Tension builds as {protagonist} faces an unexpected challenge.",
+                "rising alarm",
+            ),
+            (
+                f"A pivotal moment — {protagonist} makes a decisive choice.",
+                "steeled resolve",
+            ),
+            (
+                f"The aftermath: consequences ripple through the environment.",
+                "stunned aftermath",
+            ),
+            (
+                f"Final frame: {protagonist} walks away, transformed.",
+                "quiet release",
+            ),
         ]
         scenes = [
-            ScriptScene(action=action, dialogue=[])
-            for action in scene_templates[: max(2, min(num_scenes, 5))]
+            ScriptScene(action=action, dialogue=[], emotion=emotion)
+            for action, emotion in scene_templates[: max(2, min(num_scenes, 5))]
         ]
 
         return DramaScript(

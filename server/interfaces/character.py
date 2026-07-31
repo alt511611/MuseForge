@@ -27,6 +27,11 @@ class DialogueLine(BaseModel):
 class ScriptScene(BaseModel):
     action: str
     dialogue: List[DialogueLine] = Field(default_factory=list)
+    # Short emotional-beat tag for this scene (e.g. "tearful relief",
+    # "cold resentment", "joyful reunion") -- feeds the storyboard artist
+    # so shot design (facial expression, body language) matches the story
+    # instead of defaulting to a neutral/expressionless read of the action line.
+    emotion: str = ""
 
 
 class DramaScript(BaseModel):

@@ -63,6 +63,38 @@ def _make_image_generator(api_key: str, demo: bool):
     return MuAPIImageGenerator(api_key, demo=demo)
 
 
+def build_character_identity_clause(characters, matched_char=None) -> str:
+    """Restate every on-screen character's fixed appearance in the prompt text.
+
+    The reference image only ever binds ONE character's identity (both MuAPI
+    PuLID and fal Kontext take a single reference URL), so in a two-hander
+    every OTHER character was previously re-invented from scratch by the image
+    model on every scene — the direct cause of "the mother and daughter look
+    like different people in different scenes". Naming each character with
+    their locked description gives the non-referenced ones a stable textual
+    anchor across the whole drama.
+    """
+    visible = [c for c in (characters or []) if getattr(c, "is_visible", True)]
+    described = [
+        f"{c.name} ({c.static_features.strip()})"
+        for c in visible
+        if (getattr(c, "static_features", "") or "").strip()
+    ]
+    if not described:
+        return ""
+    clause = (
+        "Character appearance is FIXED for the entire story and must be "
+        "IDENTICAL to previous scenes — same face, same age, same hair length, "
+        "colour and style, same build: " + "; ".join(described) + ". "
+    )
+    if matched_char is not None and getattr(matched_char, "name", ""):
+        clause += (
+            f"The attached reference image is {matched_char.name}; match that "
+            f"face exactly. "
+        )
+    return clause
+
+
 def build_frame_prompt(
     style: str,
     shot,
@@ -70,6 +102,8 @@ def build_frame_prompt(
     setting_time_of_day: str = "",
     setting_era: str = "",
     has_dialogue: bool = False,
+    characters=None,
+    matched_char=None,
 ) -> str:
     """Build the image prompt for a shot, injecting locked setting when present.
 
@@ -99,8 +133,26 @@ def build_frame_prompt(
         if has_dialogue
         else ""
     )
+    # Emotion is stated explicitly (not left implicit in visual_desc) and
+    # paired with a face-visibility requirement: flat, unreadable faces were
+    # coming from both a missing expression instruction AND from frames
+    # designed as backlit silhouettes where no expression could be seen.
+    expression = (getattr(shot, "expression_desc", "") or "").strip().rstrip(".")
+    if expression:
+        expression_clause = (
+            f"Facial expression and body language: {expression}. The emotion "
+            f"must be clearly readable on the face. "
+        )
+    else:
+        expression_clause = ""
+    face_clause = (
+        "The character's face is clearly visible and softly lit — not a "
+        "silhouette, not backlit into shadow, not turned away from camera. "
+    )
+    identity_clause = build_character_identity_clause(characters, matched_char)
     return (
-        f"{style} style. {setting_clause}{shot.visual_desc}. "
+        f"{style} style. {setting_clause}{identity_clause}{shot.visual_desc}. "
+        f"{expression_clause}{face_clause}"
         f"{dialogue_clause}Shot type: {shot.shot_type}. Lens: {shot.lens}."
     )
 
@@ -230,6 +282,27 @@ async def concatenate_videos(paths: List[str], out_path: str) -> str:
     return out_path
 
 
+def is_dynamic_reference_enabled() -> bool:
+    """Opt-in flag for chaining each character's identity reference forward
+    to their most recently generated frame (ViMax "previous timeline").
+
+    OFF by default. Chaining preserves short-range outfit/pose continuity,
+    but each generated frame is only an APPROXIMATION of its reference, so
+    feeding frame N in as the reference for frame N+1 lets identity error
+    compound scene over scene -- a random walk away from the original face.
+    That is what produced the reported "the mother and daughter look like
+    different people in different scenes", and it silently defeats the
+    product's headline "locked portrait, reused everywhere" guarantee.
+    Anchoring every scene to the locked portrait instead bounds the error.
+    """
+    return os.environ.get("MUSEFORGE_DYNAMIC_REFERENCE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def is_scene_transitions_enabled() -> bool:
     """Opt-in flag for crossfade transitions between scenes. Off by
     default: moviepy's "compose" method (required to overlap/blend
@@ -308,6 +381,32 @@ async def concatenate_videos_with_transitions(
     return await concatenate_videos(paths, out_path)
 
 
+#: How much of the stylized cross-process grade to keep. Deliberately well
+#: below 1.0: at full strength the grade overwhelms skin tones and hides
+#: facial expression, which defeats the emotional read of a scene.
+DEFAULT_GRADE_STRENGTH = 0.45
+
+
+def _grade_strength() -> float:
+    """Grade blend strength in [0, 1], from MUSEFORGE_GRADE_STRENGTH.
+
+    Fails open to the default on anything unparseable rather than letting a
+    typo'd env var break rendering.
+    """
+    raw = os.environ.get("MUSEFORGE_GRADE_STRENGTH", "").strip()
+    if not raw:
+        return DEFAULT_GRADE_STRENGTH
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except ValueError:
+        logger.warning(
+            "Invalid MUSEFORGE_GRADE_STRENGTH=%r, using default %s",
+            raw,
+            DEFAULT_GRADE_STRENGTH,
+        )
+        return DEFAULT_GRADE_STRENGTH
+
+
 async def apply_color_grade(
     video_path: str, output_path: str, style: str = "cinematic"
 ) -> str:
@@ -335,7 +434,30 @@ async def apply_color_grade(
     # changing the call site. curves=preset=cross_process leans the
     # shadows/mids toward teal-orange; eq nudges contrast/saturation up
     # slightly on top of that.
-    filter_chain = "eq=contrast=1.05:saturation=1.1,curves=preset=cross_process"
+    #
+    # cross_process applied at FULL strength crushed skin tones into a flat
+    # yellow-green cast that made faces — and therefore the actors'
+    # expressions — unreadable, which is a large part of why finished dramas
+    # were reported as feeling "neutral/emotionless". The graded image is now
+    # blended back over the ungraded one so the look survives without
+    # destroying the performance. Tunable via MUSEFORGE_GRADE_STRENGTH
+    # (0 = ungraded, 1 = the previous full-strength look).
+    strength = _grade_strength()
+    if strength >= 0.999:
+        filter_chain = "eq=contrast=1.05:saturation=1.1,curves=preset=cross_process"
+    else:
+        # ffmpeg's blend takes the FIRST input as the top layer, and
+        # all_opacity is the weight of that top layer:
+        #   result = opacity * top + (1 - opacity) * bottom
+        # Here top is the UNGRADED stream, so the opacity that keeps
+        # `strength` worth of grade is (1 - strength) -- not `strength`.
+        ungraded_opacity = 1.0 - strength
+        filter_chain = (
+            "split[grade_a][grade_b];"
+            "[grade_a]eq=contrast=1.05:saturation=1.1,"
+            "curves=preset=cross_process[graded];"
+            f"[grade_b][graded]blend=all_mode=normal:all_opacity={ungraded_opacity:.3f}"
+        )
 
     ffmpeg_binary = os.environ.get("MUSEFORGE_FFMPEG_BINARY") or shutil.which("ffmpeg")
     if not ffmpeg_binary:
@@ -408,6 +530,8 @@ class Script2VideoPipeline:
         setting_era: str = "",
         has_dialogue: bool = False,
         last_frame_by_character: Optional[Dict[str, str]] = None,
+        scene_emotion: str = "",
+        scene_dialogue: str = "",
     ) -> Dict[str, Any]:
         os.makedirs(working_dir, exist_ok=True)
         portraits = character_portraits or {}
@@ -446,6 +570,8 @@ class Script2VideoPipeline:
             setting_time_of_day=setting_time_of_day,
             setting_era=setting_era,
             is_finale=(scene_idx == total_scenes - 1),
+            scene_emotion=scene_emotion,
+            scene_dialogue=scene_dialogue,
         )
 
         shot_videos: List[Optional[str]] = [None] * len(shots)
@@ -463,6 +589,7 @@ class Script2VideoPipeline:
         # doesn't fire a burst of simultaneous calls at the provider.
         semaphore = asyncio.Semaphore(int(os.environ.get("MUSEFORGE_SHOT_CONCURRENCY", "2")))
         qa_enabled = is_character_qa_enabled() and not self.demo
+        dynamic_reference_enabled = is_dynamic_reference_enabled()
         anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
         expected_setting = format_expected_setting(
             setting_location, setting_time_of_day, setting_era
@@ -505,13 +632,30 @@ class Script2VideoPipeline:
                         matched_char = visible_chars[0]
 
                     if matched_char:
-                        # Prefer the most recently generated frame for this
-                        # character (dynamic reference) over the static
-                        # locked portrait -- only populated from the second
-                        # shot/scene onward, so the very first reference for
-                        # any character is still its locked portrait.
-                        dynamic_reference = reference_snapshot.get(matched_char.name)
-                        reference_url = dynamic_reference or portraits.get(matched_char.name)
+                        # Default: always anchor to the character's LOCKED
+                        # portrait, so identity error stays bounded instead
+                        # of compounding across scenes (see
+                        # is_dynamic_reference_enabled). Opting in restores
+                        # the previous chain-forward behavior, where the most
+                        # recently generated frame wins -- only populated from
+                        # the second shot/scene onward, so the very first
+                        # reference for any character is the portrait either way.
+                        locked_portrait = portraits.get(matched_char.name)
+                        if dynamic_reference_enabled:
+                            dynamic_reference = reference_snapshot.get(matched_char.name)
+                            reference_url = dynamic_reference or locked_portrait
+                        else:
+                            reference_url = locked_portrait or reference_snapshot.get(
+                                matched_char.name
+                            )
+
+                    # Belt-and-braces: design_storyboard already repairs a
+                    # missing/neutral expression, but the frame prompt is the
+                    # thing that actually decides whether the scene reads as
+                    # emotional, so the guarantee is re-applied at the point
+                    # of use -- it also covers shots that reached here from
+                    # any other path.
+                    StoryboardArtist._ensure_expression([shot], scene_emotion)
 
                     frame_prompt = build_frame_prompt(
                         style,
@@ -520,6 +664,8 @@ class Script2VideoPipeline:
                         setting_time_of_day=setting_time_of_day,
                         setting_era=setting_era,
                         has_dialogue=has_dialogue,
+                        characters=characters,
+                        matched_char=matched_char,
                     )
 
                     # fal.ai reference-to-video binds character identity in a
