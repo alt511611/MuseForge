@@ -65,6 +65,23 @@ def _make_image_generator(api_key: str, demo: bool):
     return MuAPIImageGenerator(api_key, demo=demo)
 
 
+#: Craft/quality direction appended to every frame prompt.
+#:
+#: FLUX is a distilled, guidance-based model: it has no true classifier-free
+#: guidance, so a `negative_prompt` field is either ignored or rejected
+#: (a 422 would silently demote every frame to the fallback endpoint).
+#: Quality is therefore steered POSITIVELY, naming the look we want rather
+#: than listing artifacts to avoid. Anatomy is called out because hands and
+#: eyes are where generated people break most visibly, and text because
+#: spurious captions/watermarks are a common FLUX failure on cinematic prompts.
+IMAGE_QUALITY_SUFFIX = (
+    "Shot on 35mm film, natural filmic grain, realistic skin texture with "
+    "visible pores, catchlights in the eyes, anatomically correct hands, "
+    "sharp focus on the face with natural depth of field. "
+    "No text, captions, subtitles, watermarks or logos anywhere in the frame."
+)
+
+
 def build_character_identity_clause(characters, matched_char=None) -> str:
     """Restate every on-screen character's fixed appearance in the prompt text.
 
@@ -100,6 +117,35 @@ def build_character_identity_clause(characters, matched_char=None) -> str:
             f"face exactly. "
         )
     return clause
+
+
+def build_screen_direction_clause(characters) -> str:
+    """Deterministic 180°-rule axis for a two-hander, stated in the prompt.
+
+    Scenes are storyboarded and rendered independently (and, by default, in
+    parallel), so screen direction cannot be left to each scene's own
+    judgement -- the axis is derived from character ORDER, which is identical
+    for every scene of the drama: first visible character frame-left looking
+    screen-right, second frame-right looking screen-left. Without this, shots
+    of a conversation flip sides between scenes and the cut reads as two
+    people facing away from each other. Only emitted for exactly two visible
+    characters; singles have no axis to hold and ensembles need real blocking.
+    """
+    visible = [
+        c
+        for c in (characters or [])
+        if getattr(c, "is_visible", True) and (getattr(c, "name", "") or "").strip()
+    ]
+    if len(visible) != 2:
+        return ""
+    left, right = visible[0].name, visible[1].name
+    return (
+        f"Screen direction (LOCKED for the entire story, 180-degree rule): "
+        f"{left} is on frame-left facing screen-right; {right} is on "
+        f"frame-right facing screen-left. Keep this orientation even when "
+        f"only one of them is in frame — they look toward the other's side. "
+        f"Never mirror or flip the composition. "
+    )
 
 
 def build_frame_prompt(
@@ -157,11 +203,49 @@ def build_frame_prompt(
         "silhouette, not backlit into shadow, not turned away from camera. "
     )
     identity_clause = build_character_identity_clause(characters, matched_char)
+    direction_clause = build_screen_direction_clause(characters)
     return (
-        f"{style} style. {setting_clause}{identity_clause}{shot.visual_desc}. "
+        f"{style} style. {setting_clause}{identity_clause}{direction_clause}"
+        f"{shot.visual_desc}. "
         f"{expression_clause}{face_clause}"
-        f"{dialogue_clause}Shot type: {shot.shot_type}. Lens: {shot.lens}."
+        f"{dialogue_clause}Shot type: {shot.shot_type}. Lens: {shot.lens}. "
+        f"{IMAGE_QUALITY_SUFFIX}"
     )
+
+
+def build_motion_prompt(shot, matched_char=None) -> str:
+    """Build the prompt sent to the video (image-to-video) model.
+
+    Previously this was ``shot.motion_desc`` alone, which starved the
+    animation step of everything else the storyboard decided: the designed
+    camera move never reached Kling (it invented its own), and the acted
+    expression wasn't carried, so a face could drift to neutral -- or to a
+    different-looking person -- WITHIN a shot. Identity drift inside a shot
+    happens in the video model, not the frame, so the character lock has to
+    be restated here too.
+    """
+    parts = []
+    camera = (getattr(shot, "camera_movement", "") or "").strip().rstrip(".")
+    if camera:
+        parts.append(f"Camera: {camera}.")
+    motion = (getattr(shot, "motion_desc", "") or "").strip().rstrip(".")
+    if motion:
+        parts.append(f"{motion}.")
+    expression = (getattr(shot, "expression_desc", "") or "").strip().rstrip(".")
+    if expression:
+        parts.append(
+            f"The character's expression stays true to the beat: {expression}."
+        )
+    name = (getattr(matched_char, "name", "") or "").strip() if matched_char else ""
+    subject = name or "each character"
+    parts.append(
+        f"Keep {subject}'s facial identity EXACTLY as in the source image "
+        f"throughout the shot — no morphing, no face changes. "
+        f"Preserve the source image's screen direction: characters keep "
+        f"facing the same way, never mirror the composition. "
+        f"Natural, subtle human motion; no warping or distortion."
+    )
+    return " ".join(parts)
 
 
 async def download_video(url: str, path: str) -> str:
@@ -261,7 +345,10 @@ async def concatenate_videos(paths: List[str], out_path: str) -> str:
 
         clips = [VideoFileClip(p) for p in paths]
         final = concatenate_videoclips(clips, method="chain")
-        final.write_videofile(out_path, codec="libx264", audio=False, logger=None)
+        final.write_videofile(
+            out_path, codec="libx264", audio=False, logger=None,
+            **moviepy_encode_kwargs(),
+        )
         return out_path
     except Exception as exc:
         logger.warning("moviepy chain concat failed, using raw byte-copy: %s", exc)
@@ -287,6 +374,65 @@ async def concatenate_videos(paths: List[str], out_path: str) -> str:
         # Keep the pipeline fail-open even if a source disappears mid-copy.
         logger.error("raw concat fallback failed: %s", exc)
     return out_path
+
+
+# --- Encode quality ---------------------------------------------------------
+#
+# A finished drama is re-encoded several times on its way out: colour grade,
+# audio mix, caption burn, watermark, aspect export. Every one of those passes
+# used bare `libx264` with no rate control, which means ffmpeg's default CRF 23
+# -- and the loss COMPOUNDS, so the last pass is encoding an already-degraded
+# picture. CRF 18 is close to visually lossless and keeps generational loss
+# negligible across the chain at a modest size cost on clips this short.
+DEFAULT_VIDEO_CRF = "18"
+#: x264 speed/efficiency tradeoff. "medium" is x264's own default; CRF governs
+#: quality far more than preset does, so this stays fast by default.
+DEFAULT_VIDEO_PRESET = "medium"
+#: 4:2:0 8-bit. Sources can arrive as yuv444p/yuv422p, which Safari and most
+#: hardware decoders refuse to play -- an unplayable video is the worst
+#: possible "quality" outcome, so every output is normalised.
+VIDEO_PIX_FMT = "yuv420p"
+
+
+def video_encode_args() -> List[str]:
+    """ffmpeg output args shared by every re-encode in the pipeline.
+
+    ``-movflags +faststart`` moves the moov atom to the front so the browser
+    player can start the video before the whole file has downloaded.
+    """
+    return [
+        "-c:v",
+        "libx264",
+        "-crf",
+        os.environ.get("MUSEFORGE_VIDEO_CRF", DEFAULT_VIDEO_CRF),
+        "-preset",
+        os.environ.get("MUSEFORGE_VIDEO_PRESET", DEFAULT_VIDEO_PRESET),
+        "-pix_fmt",
+        VIDEO_PIX_FMT,
+        "-movflags",
+        "+faststart",
+    ]
+
+
+def moviepy_encode_kwargs() -> Dict[str, Any]:
+    """The same settings for moviepy's ``write_videofile``.
+
+    moviepy takes ``preset`` as its own argument and passes the rest through
+    ``ffmpeg_params``; duplicating -preset in both places makes ffmpeg error.
+    """
+    args = video_encode_args()
+    preset = args[args.index("-preset") + 1]
+    passthrough: List[str] = []
+    skip_next = False
+    for i, arg in enumerate(args):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in ("-c:v", "-preset"):
+            skip_next = True
+            continue
+        passthrough.append(arg)
+    return {"preset": preset, "ffmpeg_params": passthrough}
 
 
 def is_dynamic_reference_enabled() -> bool:
@@ -363,7 +509,10 @@ async def concatenate_videos_with_transitions(
         final = concatenate_videoclips(
             faded_clips, method="compose", padding=-transition_duration
         )
-        final.write_videofile(out_path, codec="libx264", audio=False, logger=None)
+        final.write_videofile(
+            out_path, codec="libx264", audio=False, logger=None,
+            **moviepy_encode_kwargs(),
+        )
         return out_path
     except Exception as exc:
         logger.warning(
@@ -487,8 +636,7 @@ async def apply_color_grade(
             video_path,
             "-vf",
             filter_chain,
-            "-c:v",
-            "libx264",
+            *video_encode_args(),
             "-c:a",
             "copy",
             output_path,
@@ -544,6 +692,7 @@ class Script2VideoPipeline:
         scene_emotion: str = "",
         scene_dialogue: str = "",
         scene_direction: str = "",
+        scene_tension: int = 0,
         character_direction: str = "",
         theme: str = "",
         visual_motif: str = "",
@@ -588,6 +737,7 @@ class Script2VideoPipeline:
             scene_emotion=scene_emotion,
             scene_dialogue=scene_dialogue,
             scene_direction=scene_direction,
+            scene_tension=scene_tension,
             character_direction=character_direction,
             theme=theme,
             visual_motif=visual_motif,
@@ -719,7 +869,8 @@ class Script2VideoPipeline:
                         frame_url = reference_url
                         shot.frame_url = frame_url
                         video_prompt = (
-                            f"{frame_prompt} Motion: {shot.motion_desc}"
+                            f"{frame_prompt} "
+                            f"{build_motion_prompt(shot, matched_char)}"
                         )
                     else:
                         # Frame generation + optional QA happen BEFORE video
@@ -779,7 +930,7 @@ class Script2VideoPipeline:
                                         i,
                                         exc,
                                     )
-                        video_prompt = shot.motion_desc
+                        video_prompt = build_motion_prompt(shot, matched_char)
 
                     # Record this shot's final frame (post-repair, if any)
                     # as the new "most recent" reference for its character

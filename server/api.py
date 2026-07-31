@@ -118,7 +118,14 @@ def estimate_generation_seconds(
     dialogue_on = (
         bool(dialogue_enabled) and plan == "pro" and is_dialogue_enabled()
     )
-    seconds = ESTIMATE_BASE_SECONDS + num_scenes * SECONDS_PER_SCENE
+    # Scenes render in parallel batches (see idea2video._scene_concurrency),
+    # so wall-clock scales with the number of BATCHES, not raw scene count --
+    # a 5-scene job at concurrency 3 takes ~2 scene-slots, not 5.
+    from pipelines.idea2video import _scene_concurrency
+
+    concurrency = _scene_concurrency(num_scenes)
+    batches = -(-max(1, num_scenes) // concurrency)  # ceil division
+    seconds = ESTIMATE_BASE_SECONDS + batches * SECONDS_PER_SCENE
     if music_on:
         seconds += ESTIMATE_MUSIC_SECONDS
     if dialogue_on:

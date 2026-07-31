@@ -54,5 +54,5 @@ async def test_generate_video_from_image_clamps_duration(monkeypatch):
     )
 
     assert captured_payload["duration"] == 14
-    assert captured_payload["generate_audio"] is True
+    assert captured_payload["generate_audio"] is False  # off by default; see is_native_audio_enabled
     assert "mode" not in captured_payload

@@ -9,6 +9,15 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
+def _expected_size(aspect_ratio):
+    """Derive from the map so a deliberate resolution change does not
+    silently fail an unrelated schema test."""
+    from tools.muapi_image_generator import ASPECT_RATIO_MAP
+
+    dims = ASPECT_RATIO_MAP[aspect_ratio]
+    return f"{dims['width']}*{dims['height']}"
+
+
 @pytest.mark.asyncio
 async def test_reference_generation_uses_flux_pulid_schema():
     from tools.muapi_image_generator import MuAPIImageGenerator
@@ -65,7 +74,7 @@ async def test_flux_pulid_rejection_falls_back_to_flux_dev(status):
     fallback_payload = fallback_call.args[1]
     assert fallback_payload["image"] == "https://cdn.example/maya-portrait.png"
     assert "image_url" not in fallback_payload
-    assert fallback_payload["size"] == "1344*768"
+    assert fallback_payload["size"] == _expected_size("16:9")
 
 
 @pytest.mark.asyncio

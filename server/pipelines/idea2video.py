@@ -18,6 +18,8 @@ from pipelines.script2video import (
     concatenate_videos_with_transitions,
     download_video,
     is_scene_transitions_enabled,
+    moviepy_encode_kwargs,
+    video_encode_args,
 )
 from tools.muapi_voice_generator import MuAPIVoiceGenerator, is_dialogue_enabled
 
@@ -96,6 +98,52 @@ def _scene_emotion(scene: Any) -> str:
     return _scene_field(scene, "emotion")
 
 
+def _scene_tension(scene: Any) -> int:
+    """Dramatic tension 1-10, or 0 when the script does not carry one."""
+    raw = _scene_field(scene, "tension").strip()
+    if not raw:
+        return 0
+    try:
+        return max(0, min(10, int(float(raw))))
+    except ValueError:
+        return 0
+
+
+#: How many scenes may render at once. Scenes are independent by default, and
+#: each is a multi-minute Kling call, so this is the single biggest lever on
+#: wall-clock time. Capped to keep a burst of simultaneous requests off the
+#: provider (and to bound peak memory during download/assembly).
+DEFAULT_SCENE_CONCURRENCY = 3
+
+
+def _scene_concurrency(total_scenes: int) -> int:
+    """Resolve how many scenes to render in parallel.
+
+    Forced to 1 when identity references are chained forward, because in that
+    mode scene N's reference image is scene N-1's finished frame -- rendering
+    them together would race and silently fall back to the locked portrait,
+    quietly discarding the very continuity that mode exists to provide.
+    """
+    from pipelines.script2video import is_dynamic_reference_enabled
+
+    if is_dynamic_reference_enabled():
+        return 1
+    raw = os.environ.get("MUSEFORGE_SCENE_CONCURRENCY", "").strip()
+    if raw:
+        try:
+            configured = int(raw)
+        except ValueError:
+            logger.warning(
+                "Invalid MUSEFORGE_SCENE_CONCURRENCY=%r, using %s",
+                raw,
+                DEFAULT_SCENE_CONCURRENCY,
+            )
+            configured = DEFAULT_SCENE_CONCURRENCY
+    else:
+        configured = DEFAULT_SCENE_CONCURRENCY
+    return max(1, min(configured, max(1, total_scenes)))
+
+
 def _format_scene_direction(scene: Any) -> str:
     """Render a scene's director-level notes for the storyboard artist.
 
@@ -136,6 +184,27 @@ def _format_character_direction(script: DramaScript) -> str:
     return "\n".join(lines)
 
 
+def _music_style_hint(script: DramaScript) -> str:
+    """Describe the drama's emotional arc for the music generator.
+
+    The score previously got ONE word (the drama's mood) for its whole
+    length; a track that opens like the first scene and resolves like the
+    last sits under the film instead of beside it.
+    """
+    scenes = getattr(script, "scenes", None) or []
+    opening = _scene_emotion(scenes[0]) if scenes else ""
+    closing = _scene_emotion(scenes[-1]) if len(scenes) > 1 else ""
+    parts = []
+    if opening:
+        parts.append(f"opening with {opening}")
+    if closing and closing != opening:
+        parts.append(f"resolving into {closing}")
+    theme = (getattr(script, "theme", "") or "").strip().rstrip(".")
+    if theme:
+        parts.append(f"about: {theme.lower()}")
+    return (", ".join(parts) + ".") if parts else ""
+
+
 def _format_scene_dialogue(dialogue: List[Any]) -> str:
     """Render dialogue lines as "Name: line" text for the storyboard artist.
 
@@ -156,6 +225,125 @@ def _format_scene_dialogue(dialogue: List[Any]) -> str:
             continue
         lines.append(f"{character}: {line}" if character else line)
     return "\n".join(lines)
+
+
+def _even(value: float) -> int:
+    """Round a pixel dimension DOWN to the nearest even number.
+
+    4:2:0 chroma subsampling (yuv420p, required for broad player support)
+    halves both axes, so an odd width or height cannot be encoded -- x264
+    fails outright. Aspect-ratio cropping produces fractional sizes routinely
+    (a 640x360 source cropped to 9:16 wants 202.5px), so every computed
+    dimension is normalised here. Rounding down never exceeds the source.
+    """
+    return max(2, int(value) // 2 * 2)
+
+
+#: Opening fade-in / closing fade-out lengths, seconds. Standard finishing:
+#: a hard cut from black into frame 1 (and out of the last frame) reads as
+#: unfinished; every professionally delivered short opens and lands softly.
+FADE_IN_SECONDS = 0.6
+FADE_OUT_SECONDS = 0.9
+
+
+def is_finishing_enabled() -> bool:
+    """Master finishing pass (fades + loudness normalization). Default ON;
+    MUSEFORGE_FINISHING=0 skips it entirely (and its one extra encode)."""
+    return os.environ.get("MUSEFORGE_FINISHING", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+async def finalize_master(video_path: str, output_path: str) -> str:
+    """One finishing encode: fade in from black, fade out to black, and --
+    when the video carries audio -- matching audio fades plus EBU R128
+    loudness normalization to -14 LUFS (the delivery loudness streaming
+    platforms normalize to; an unnormalized mix plays back unpredictably
+    quiet or hot next to everything else the viewer watches).
+
+    Single pass so it costs ONE encode at the shared CRF-18 profile, not one
+    per effect. Fails open: any error ships the un-finished video rather
+    than failing the job, matching the rest of the assembly chain.
+    """
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+    def _copy_through() -> str:
+        if os.path.abspath(video_path) != os.path.abspath(output_path):
+            with open(video_path, "rb") as src, open(output_path, "wb") as dst:
+                dst.write(src.read())
+        return output_path
+
+    try:
+        from moviepy import VideoFileClip
+
+        with VideoFileClip(video_path) as clip:
+            duration = float(clip.duration or 0)
+            has_audio = clip.audio is not None
+    except Exception as exc:
+        logger.warning("Finishing pass could not probe video, skipping: %s", exc)
+        return _copy_through()
+
+    # Too short to fade meaningfully -- don't eat the whole clip with fades.
+    if duration < (FADE_IN_SECONDS + FADE_OUT_SECONDS) * 2:
+        return _copy_through()
+
+    fade_out_start = max(0.0, duration - FADE_OUT_SECONDS)
+    vf = (
+        f"fade=t=in:st=0:d={FADE_IN_SECONDS},"
+        f"fade=t=out:st={fade_out_start:.3f}:d={FADE_OUT_SECONDS}"
+    )
+    ffmpeg_binary = os.environ.get("MUSEFORGE_FFMPEG_BINARY") or shutil.which("ffmpeg")
+    if not ffmpeg_binary:
+        try:
+            import imageio_ffmpeg
+
+            ffmpeg_binary = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            ffmpeg_binary = "ffmpeg"
+
+    cmd = [ffmpeg_binary, "-y", "-i", video_path, "-vf", vf]
+    if has_audio:
+        cmd += [
+            "-af",
+            (
+                f"afade=t=in:st=0:d={FADE_IN_SECONDS},"
+                f"afade=t=out:st={fade_out_start:.3f}:d={FADE_OUT_SECONDS},"
+                # I: integrated loudness target; TP: true-peak ceiling;
+                # LRA: allowed loudness range. -14 LUFS / -1.5 dBTP is the
+                # common streaming delivery spec.
+                "loudnorm=I=-14:TP=-1.5:LRA=11"
+            ),
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+        ]
+    cmd += [*video_encode_args(), output_path]
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode == 0 and os.path.isfile(output_path):
+            return output_path
+        logger.warning(
+            "Finishing pass failed (exit=%s), shipping un-finished video: %s",
+            process.returncode,
+            stderr.decode("utf-8", errors="replace")[-1000:],
+        )
+    except Exception as exc:
+        logger.warning("Finishing pass unavailable, shipping un-finished video: %s", exc)
+    try:
+        os.unlink(output_path)
+    except OSError:
+        pass
+    return _copy_through()
 
 
 def _find_watermark_font() -> Optional[str]:
@@ -263,7 +451,10 @@ async def add_background_music(
             final = video.with_audio(final_audio)
         else:
             final = video
-        final.write_videofile(output_path, codec="libx264", audio_codec="aac", logger=None)
+        final.write_videofile(
+            output_path, codec="libx264", audio_codec="aac", logger=None,
+            **moviepy_encode_kwargs(),
+        )
     except Exception as exc:
         logger.warning("Audio mixing failed; shipping silent/source video: %s", exc)
         with open(video_path, "rb") as src:
@@ -494,8 +685,7 @@ async def burn_subtitles(
             video_path,
             "-vf",
             vf,
-            "-c:v",
-            "libx264",
+            *video_encode_args(),
             "-c:a",
             "copy",
             output_path,
@@ -570,7 +760,10 @@ async def add_watermark(video_path: str, output_path: str) -> str:
             (video.w - watermark.w - margin, video.h - watermark.h - margin)
         )
         final = CompositeVideoClip([video, watermark])
-        final.write_videofile(output_path, codec="libx264", audio_codec="aac", logger=None)
+        final.write_videofile(
+            output_path, codec="libx264", audio_codec="aac", logger=None,
+            **moviepy_encode_kwargs(),
+        )
         video.close()
         watermark.close()
         final.close()
@@ -625,20 +818,21 @@ async def export_alternate_format(
                 cropped = clip
             elif src_ratio > target:
                 # Source is wider than target → crop left/right (center).
-                new_w = src_h * target
+                new_w = _even(src_h * target)
                 x1 = (src_w - new_w) / 2
-                cropped = clip.cropped(x1=x1, y1=0, width=new_w, height=src_h)
+                cropped = clip.cropped(x1=x1, y1=0, width=new_w, height=_even(src_h))
             else:
                 # Source is taller than target → crop top/bottom (center).
-                new_h = src_w / target
+                new_h = _even(src_w / target)
                 y1 = (src_h - new_h) / 2
-                cropped = clip.cropped(x1=0, y1=y1, width=src_w, height=new_h)
+                cropped = clip.cropped(x1=0, y1=y1, width=_even(src_w), height=new_h)
 
             cropped.write_videofile(
                 output_path,
                 codec="libx264",
                 audio_codec="aac",
                 logger=None,
+                **moviepy_encode_kwargs(),
             )
             if cropped is not clip:
                 cropped.close()
@@ -793,6 +987,15 @@ class Idea2VideoPipeline:
             )
             video_for_final = subtitled_path
 
+        # Master finishing (fades + loudness) BEFORE the watermark so the
+        # watermark stays at constant opacity over the fade to black.
+        if is_finishing_enabled():
+            _check_cancel()
+            if progress_callback:
+                await progress_callback("finishing", "Mastering fades & loudness", 96)
+            finished_path = os.path.join(working_dir, "drama_finished.mp4")
+            video_for_final = await finalize_master(video_for_final, finished_path)
+
         final_path = os.path.join(working_dir, "drama_final.mp4")
         if plan in WATERMARK_PLANS:
             # Before watermark render
@@ -933,6 +1136,11 @@ class Idea2VideoPipeline:
             dialogue_enabled and is_dialogue_enabled() and not self.demo
         )
         voice_gen = MuAPIVoiceGenerator(self.api_key, demo=self.demo) if dialogue_requested else None
+        if voice_gen is not None:
+            # Cast the whole ensemble up front, gender-matched to each
+            # character's description -- otherwise the per-line hash fallback
+            # can voice a mother with a male voice.
+            voice_gen.cast_characters(characters)
         total_scenes = max(1, len(script.scenes))
 
         # Kick off background music as soon as the mood is known (it needs
@@ -945,7 +1153,10 @@ class Idea2VideoPipeline:
             async def _generate_music() -> Optional[str]:
                 try:
                     music_gen = _make_music_generator(self.api_key, demo=self.demo)
-                    return await music_gen.generate_instrumental(mood=script.mood or "cinematic")
+                    return await music_gen.generate_instrumental(
+                        mood=script.mood or "cinematic",
+                        style_hint=_music_style_hint(script),
+                    )
                 except Exception as exc:
                     logger.warning("Background music generation failed, continuing without music: %s", exc)
                     return None
@@ -961,24 +1172,43 @@ class Idea2VideoPipeline:
         # Drama-wide direction: identical for every scene, so build it once.
         character_direction = _format_character_direction(script)
 
-        try:
-            for idx, scene in enumerate(script.scenes):
+        # Scene rendering is the whole cost of a job: each scene is a Kling
+        # call that takes 1-3+ minutes, and with one shot per scene the
+        # existing per-shot concurrency never engaged, so a 5-scene drama
+        # spent 5 x that time strictly in series.
+        #
+        # Scenes are only independent when identity references are NOT chained
+        # forward (the default -- see is_dynamic_reference_enabled). With
+        # chaining on, scene N's reference is scene N-1's finished frame, so
+        # that mode stays strictly sequential and simply renders as before.
+        scene_concurrency = _scene_concurrency(total_scenes)
+        scene_slots: List[Optional[Dict[str, Any]]] = [None] * len(script.scenes)
+        scene_semaphore = asyncio.Semaphore(scene_concurrency)
+        progress_lock = asyncio.Lock()
+        completed_scenes = 0
+
+        async def _render_scene(idx: int, scene: Any) -> None:
+            nonlocal completed_scenes
+            async with scene_semaphore:
                 _check_cancel()
-                base_pct = 15 + (idx / total_scenes) * 65
-                scene_script = _scene_action(scene)
-                scene_dialogue = _scene_dialogue(scene)
+                scene_dialogue_lines = _scene_dialogue(scene)
 
-                async def scene_progress(stage, message, pct, data=None, _base=base_pct):
-                    scaled = _base + (pct / 100) * (65 / total_scenes)
-                    await progress(stage, message, scaled, data)
+                async def scene_progress(stage, message, pct, data=None, _idx=idx):
+                    # Scenes may finish out of order, so progress tracks how
+                    # many have COMPLETED rather than which one is running --
+                    # a percentage that jumps backwards reads as a bug.
+                    async with progress_lock:
+                        base = 15 + (completed_scenes / total_scenes) * 65
+                        await progress(
+                            stage, f"[{_idx + 1}/{total_scenes}] {message}", base, data
+                        )
 
-                scene_dir = os.path.join(working_dir, f"scene_{idx}")
-                scene_result = await self.script2video.run(
-                    script=scene_script,
+                scene_slots[idx] = await self.script2video.run(
+                    script=_scene_action(scene),
                     characters=characters,
                     user_requirement=user_requirement,
                     style=style,
-                    working_dir=scene_dir,
+                    working_dir=os.path.join(working_dir, f"scene_{idx}"),
                     progress_callback=scene_progress,
                     scene_idx=idx,
                     total_scenes=total_scenes,
@@ -990,26 +1220,67 @@ class Idea2VideoPipeline:
                     setting_location=getattr(script, "setting_location", "") or "",
                     setting_time_of_day=getattr(script, "setting_time_of_day", "") or "",
                     setting_era=getattr(script, "setting_era", "") or "",
-                    has_dialogue=dialogue_requested and bool(scene_dialogue),
+                    has_dialogue=dialogue_requested and bool(scene_dialogue_lines),
                     last_frame_by_character=self._last_frame_by_character,
                     scene_emotion=_scene_emotion(scene),
                     # Always pass the words themselves to the storyboard step,
                     # independent of whether VOICE generation is enabled --
                     # dialogue is what tells the artist which moment matters.
-                    scene_dialogue=_format_scene_dialogue(scene_dialogue),
+                    scene_dialogue=_format_scene_dialogue(scene_dialogue_lines),
                     scene_direction=_format_scene_direction(scene),
+                    scene_tension=_scene_tension(scene),
                     character_direction=character_direction,
                     theme=getattr(script, "theme", "") or "",
                     visual_motif=getattr(script, "visual_motif", "") or "",
                 )
+                async with progress_lock:
+                    completed_scenes += 1
+                    await progress(
+                        "video",
+                        f"Scene {completed_scenes}/{total_scenes} complete",
+                        15 + (completed_scenes / total_scenes) * 65,
+                    )
+
+        try:
+            if scene_concurrency <= 1:
+                # Strictly sequential: preserves the exact previous ordering,
+                # which the reference-chaining mode depends on.
+                for idx, scene in enumerate(script.scenes):
+                    await _render_scene(idx, scene)
+            else:
+                scene_tasks = [
+                    asyncio.create_task(_render_scene(idx, scene))
+                    for idx, scene in enumerate(script.scenes)
+                ]
+                try:
+                    await asyncio.gather(*scene_tasks)
+                except BaseException:
+                    # gather() propagates the first failure but does NOT stop
+                    # the siblings -- left alone they would keep polling the
+                    # provider (and burning credits) behind a failed job.
+                    for task in scene_tasks:
+                        task.cancel()
+                    await asyncio.gather(*scene_tasks, return_exceptions=True)
+                    raise
+
+            # Collect results in SCENE order regardless of completion order --
+            # scene_paths feeds concatenation, so a shuffled list would splice
+            # the drama out of sequence.
+            for idx, scene in enumerate(script.scenes):
+                scene_result = scene_slots[idx]
+                if scene_result is None:
+                    continue
                 assembled_scene_index = None
                 if scene_result.get("path"):
                     scene_paths.append(scene_result["path"])
                     assembled_scene_index = len(scene_paths) - 1
 
-                if voice_gen is not None and scene_dialogue and assembled_scene_index is not None:
+                scene_dialogue_lines = _scene_dialogue(scene)
+                if voice_gen is not None and scene_dialogue_lines and assembled_scene_index is not None:
                     task = asyncio.create_task(
-                        voice_gen.generate_scene_dialogue(scene_dialogue, is_cancelled=is_cancelled)
+                        voice_gen.generate_scene_dialogue(
+                            scene_dialogue_lines, is_cancelled=is_cancelled
+                        )
                     )
                     dialogue_tasks.append((assembled_scene_index, idx, task))
 

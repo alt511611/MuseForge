@@ -50,8 +50,42 @@ async def test_pro_plan_uses_pro_endpoint():
     payload = gen.client.generate.await_args.args[1]
     assert endpoint == "kling-v3.0-pro-image-to-video"
     assert "mode" not in payload
-    assert payload["generate_audio"] is True
+    # Native Kling audio is OFF by default: the assembly step drops it with
+    # -an and lays the real score/dialogue over a silent picture, so
+    # requesting it only burned generation time on an inaudible track.
+    assert payload["generate_audio"] is False
     assert payload["duration"] == 5
+
+
+@pytest.mark.asyncio
+async def test_native_audio_off_by_default_and_opt_in(monkeypatch):
+    from tools.muapi_video_generator import (
+        MuAPIVideoGenerator,
+        is_native_audio_enabled,
+    )
+
+    monkeypatch.delenv("MUSEFORGE_KLING_NATIVE_AUDIO", raising=False)
+    assert is_native_audio_enabled() is False
+
+    monkeypatch.setenv("MUSEFORGE_KLING_NATIVE_AUDIO", "1")
+    assert is_native_audio_enabled() is True
+
+    gen = MuAPIVideoGenerator(api_key="k", demo=False)
+    gen.client.generate = AsyncMock(return_value="https://cdn.example/v.mp4")
+    await gen.generate_video_from_image(
+        prompt="pan", image_url="https://cdn.example/f.jpg", plan="pro"
+    )
+    assert gen.client.generate.await_args.args[1]["generate_audio"] is True
+
+
+@pytest.mark.asyncio
+async def test_assembly_discards_native_audio():
+    """The reason native audio defaults off -- concat strips it outright."""
+    import inspect
+
+    from pipelines.script2video import concatenate_videos
+
+    assert '"-an"' in inspect.getsource(concatenate_videos)
 
 
 @pytest.mark.asyncio
