@@ -121,14 +121,15 @@ async def test_estimate_warns_for_long_jobs():
     from fastapi.testclient import TestClient
 
     with patch.object(_api, "DEMO_FLAG", False), \
-         patch.dict(os.environ, {"MUAPI_KEY": "real_key"}):
+         patch.dict(os.environ, {"MUAPI_KEY": "real_key",
+                                 "MUSEFORGE_SCENE_CONCURRENCY": "1"}):
         with patch.object(_api, "SECONDS_PER_SCENE", 100.0), \
              patch.object(_api, "ESTIMATE_BASE_SECONDS", 90.0), \
              patch.object(_api, "ESTIMATE_MUSIC_SECONDS", 45.0), \
              patch.object(_api, "ESTIMATE_DIALOGUE_PER_SCENE", 20.0), \
              patch.object(_api, "WAIT_WARNING_MINUTES", 15):
             tc = TestClient(_api.app, raise_server_exceptions=False)
-            # 16 scenes → 90 + 16*100 = 1690s ≈ 28 min → warning
+            # Concurrency pinned to 1: 16 scenes → 90 + 16*100 = 1690s ≈ 28 min → warning
             resp = tc.post(
                 "/api/estimate",
                 json={"num_scenes": 16, "plan": "creator"},
@@ -146,9 +147,22 @@ async def test_estimate_warns_for_long_jobs():
             ).json()
             assert with_music["estimated_seconds"] == 1690 + 45
 
-            # Short jobs stay quiet
+    # Default (parallel) rendering estimates by BATCH, so the same job is
+    # promised far sooner: 16 scenes / concurrency 3 → 6 batches → 90+600.
+    with patch.object(_api, "DEMO_FLAG", False), \
+         patch.dict(os.environ, {"MUAPI_KEY": "real_key"}, clear=False):
+        os.environ.pop("MUSEFORGE_SCENE_CONCURRENCY", None)
+        with patch.object(_api, "SECONDS_PER_SCENE", 100.0), \
+             patch.object(_api, "ESTIMATE_BASE_SECONDS", 90.0):
+            tc = TestClient(_api.app, raise_server_exceptions=False)
+            parallel = tc.post(
+                "/api/estimate", json={"num_scenes": 16, "plan": "creator"}
+            ).json()
+            assert parallel["estimated_seconds"] == 690
+
+            # Short jobs stay quiet (3 scenes / concurrency 3 → 1 batch)
             short = tc.post("/api/estimate", json={"num_scenes": 3, "plan": "free"})
-            assert short.json()["estimated_seconds"] == 90 + 3 * 100
+            assert short.json()["estimated_seconds"] == 90 + 1 * 100
             assert short.json().get("wait_warning_minutes") is None
 
 

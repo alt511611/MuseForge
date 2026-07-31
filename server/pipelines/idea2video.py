@@ -98,6 +98,52 @@ def _scene_emotion(scene: Any) -> str:
     return _scene_field(scene, "emotion")
 
 
+def _scene_tension(scene: Any) -> int:
+    """Dramatic tension 1-10, or 0 when the script does not carry one."""
+    raw = _scene_field(scene, "tension").strip()
+    if not raw:
+        return 0
+    try:
+        return max(0, min(10, int(float(raw))))
+    except ValueError:
+        return 0
+
+
+#: How many scenes may render at once. Scenes are independent by default, and
+#: each is a multi-minute Kling call, so this is the single biggest lever on
+#: wall-clock time. Capped to keep a burst of simultaneous requests off the
+#: provider (and to bound peak memory during download/assembly).
+DEFAULT_SCENE_CONCURRENCY = 3
+
+
+def _scene_concurrency(total_scenes: int) -> int:
+    """Resolve how many scenes to render in parallel.
+
+    Forced to 1 when identity references are chained forward, because in that
+    mode scene N's reference image is scene N-1's finished frame -- rendering
+    them together would race and silently fall back to the locked portrait,
+    quietly discarding the very continuity that mode exists to provide.
+    """
+    from pipelines.script2video import is_dynamic_reference_enabled
+
+    if is_dynamic_reference_enabled():
+        return 1
+    raw = os.environ.get("MUSEFORGE_SCENE_CONCURRENCY", "").strip()
+    if raw:
+        try:
+            configured = int(raw)
+        except ValueError:
+            logger.warning(
+                "Invalid MUSEFORGE_SCENE_CONCURRENCY=%r, using %s",
+                raw,
+                DEFAULT_SCENE_CONCURRENCY,
+            )
+            configured = DEFAULT_SCENE_CONCURRENCY
+    else:
+        configured = DEFAULT_SCENE_CONCURRENCY
+    return max(1, min(configured, max(1, total_scenes)))
+
+
 def _format_scene_direction(scene: Any) -> str:
     """Render a scene's director-level notes for the storyboard artist.
 
@@ -981,24 +1027,43 @@ class Idea2VideoPipeline:
         # Drama-wide direction: identical for every scene, so build it once.
         character_direction = _format_character_direction(script)
 
-        try:
-            for idx, scene in enumerate(script.scenes):
+        # Scene rendering is the whole cost of a job: each scene is a Kling
+        # call that takes 1-3+ minutes, and with one shot per scene the
+        # existing per-shot concurrency never engaged, so a 5-scene drama
+        # spent 5 x that time strictly in series.
+        #
+        # Scenes are only independent when identity references are NOT chained
+        # forward (the default -- see is_dynamic_reference_enabled). With
+        # chaining on, scene N's reference is scene N-1's finished frame, so
+        # that mode stays strictly sequential and simply renders as before.
+        scene_concurrency = _scene_concurrency(total_scenes)
+        scene_slots: List[Optional[Dict[str, Any]]] = [None] * len(script.scenes)
+        scene_semaphore = asyncio.Semaphore(scene_concurrency)
+        progress_lock = asyncio.Lock()
+        completed_scenes = 0
+
+        async def _render_scene(idx: int, scene: Any) -> None:
+            nonlocal completed_scenes
+            async with scene_semaphore:
                 _check_cancel()
-                base_pct = 15 + (idx / total_scenes) * 65
-                scene_script = _scene_action(scene)
-                scene_dialogue = _scene_dialogue(scene)
+                scene_dialogue_lines = _scene_dialogue(scene)
 
-                async def scene_progress(stage, message, pct, data=None, _base=base_pct):
-                    scaled = _base + (pct / 100) * (65 / total_scenes)
-                    await progress(stage, message, scaled, data)
+                async def scene_progress(stage, message, pct, data=None, _idx=idx):
+                    # Scenes may finish out of order, so progress tracks how
+                    # many have COMPLETED rather than which one is running --
+                    # a percentage that jumps backwards reads as a bug.
+                    async with progress_lock:
+                        base = 15 + (completed_scenes / total_scenes) * 65
+                        await progress(
+                            stage, f"[{_idx + 1}/{total_scenes}] {message}", base, data
+                        )
 
-                scene_dir = os.path.join(working_dir, f"scene_{idx}")
-                scene_result = await self.script2video.run(
-                    script=scene_script,
+                scene_slots[idx] = await self.script2video.run(
+                    script=_scene_action(scene),
                     characters=characters,
                     user_requirement=user_requirement,
                     style=style,
-                    working_dir=scene_dir,
+                    working_dir=os.path.join(working_dir, f"scene_{idx}"),
                     progress_callback=scene_progress,
                     scene_idx=idx,
                     total_scenes=total_scenes,
@@ -1010,26 +1075,67 @@ class Idea2VideoPipeline:
                     setting_location=getattr(script, "setting_location", "") or "",
                     setting_time_of_day=getattr(script, "setting_time_of_day", "") or "",
                     setting_era=getattr(script, "setting_era", "") or "",
-                    has_dialogue=dialogue_requested and bool(scene_dialogue),
+                    has_dialogue=dialogue_requested and bool(scene_dialogue_lines),
                     last_frame_by_character=self._last_frame_by_character,
                     scene_emotion=_scene_emotion(scene),
                     # Always pass the words themselves to the storyboard step,
                     # independent of whether VOICE generation is enabled --
                     # dialogue is what tells the artist which moment matters.
-                    scene_dialogue=_format_scene_dialogue(scene_dialogue),
+                    scene_dialogue=_format_scene_dialogue(scene_dialogue_lines),
                     scene_direction=_format_scene_direction(scene),
+                    scene_tension=_scene_tension(scene),
                     character_direction=character_direction,
                     theme=getattr(script, "theme", "") or "",
                     visual_motif=getattr(script, "visual_motif", "") or "",
                 )
+                async with progress_lock:
+                    completed_scenes += 1
+                    await progress(
+                        "video",
+                        f"Scene {completed_scenes}/{total_scenes} complete",
+                        15 + (completed_scenes / total_scenes) * 65,
+                    )
+
+        try:
+            if scene_concurrency <= 1:
+                # Strictly sequential: preserves the exact previous ordering,
+                # which the reference-chaining mode depends on.
+                for idx, scene in enumerate(script.scenes):
+                    await _render_scene(idx, scene)
+            else:
+                scene_tasks = [
+                    asyncio.create_task(_render_scene(idx, scene))
+                    for idx, scene in enumerate(script.scenes)
+                ]
+                try:
+                    await asyncio.gather(*scene_tasks)
+                except BaseException:
+                    # gather() propagates the first failure but does NOT stop
+                    # the siblings -- left alone they would keep polling the
+                    # provider (and burning credits) behind a failed job.
+                    for task in scene_tasks:
+                        task.cancel()
+                    await asyncio.gather(*scene_tasks, return_exceptions=True)
+                    raise
+
+            # Collect results in SCENE order regardless of completion order --
+            # scene_paths feeds concatenation, so a shuffled list would splice
+            # the drama out of sequence.
+            for idx, scene in enumerate(script.scenes):
+                scene_result = scene_slots[idx]
+                if scene_result is None:
+                    continue
                 assembled_scene_index = None
                 if scene_result.get("path"):
                     scene_paths.append(scene_result["path"])
                     assembled_scene_index = len(scene_paths) - 1
 
-                if voice_gen is not None and scene_dialogue and assembled_scene_index is not None:
+                scene_dialogue_lines = _scene_dialogue(scene)
+                if voice_gen is not None and scene_dialogue_lines and assembled_scene_index is not None:
                     task = asyncio.create_task(
-                        voice_gen.generate_scene_dialogue(scene_dialogue, is_cancelled=is_cancelled)
+                        voice_gen.generate_scene_dialogue(
+                            scene_dialogue_lines, is_cancelled=is_cancelled
+                        )
                     )
                     dialogue_tasks.append((assembled_scene_index, idx, task))
 

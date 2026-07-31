@@ -68,9 +68,39 @@ Respond ONLY with valid JSON array containing a single shot object:
     # Non-finale scenes are capped well below the model's max so a run of
     # "important" scenes can't each independently land on 13-15s -- that
     # both defeats the intended variety and multiplies total Kling render
-    # time, since every scene is generated sequentially.
+    # time and cost, which scale with generated seconds.
     NON_FINALE_MAX_DURATION = 9.0
     FINALE_MAX_DURATION = 15.0
+
+    # When the script carries a dramatic tension, the cap follows the BEAT
+    # rather than being one flat ceiling every scene drifts up to. A quiet
+    # setup gets ~5s and a climax ~10s, which is both better filmmaking (a
+    # varied rhythm instead of uniform blocks) and cheaper: a run of scenes
+    # can no longer each sit at the flat maximum.
+    TENSION_MIN_DURATION = 5.0
+    TENSION_MAX_DURATION = 10.0
+    # A finale needs room to land even when its tension is low (a quiet
+    # resolution is still the ending), so it gets extra headroom.
+    FINALE_EXTRA_DURATION = 3.0
+    FINALE_MIN_DURATION = 8.0
+
+    @classmethod
+    def duration_cap(cls, is_finale: bool, tension: int = 0) -> float:
+        """Maximum shot length for a scene, in seconds.
+
+        Without a tension value (legacy scripts) this is exactly the previous
+        flat behavior. With one, the cap scales linearly across the tension
+        range so screen time is spent where the drama is.
+        """
+        if not tension:
+            return cls.FINALE_MAX_DURATION if is_finale else cls.NON_FINALE_MAX_DURATION
+        tension = max(1, min(10, int(tension)))
+        span = cls.TENSION_MAX_DURATION - cls.TENSION_MIN_DURATION
+        cap = cls.TENSION_MIN_DURATION + ((tension - 1) / 9.0) * span
+        if is_finale:
+            cap = max(cap + cls.FINALE_EXTRA_DURATION, cls.FINALE_MIN_DURATION)
+            return min(cap, cls.FINALE_MAX_DURATION)
+        return min(cap, cls.NON_FINALE_MAX_DURATION)
 
     async def design_storyboard(
         self,
@@ -85,6 +115,7 @@ Respond ONLY with valid JSON array containing a single shot object:
         scene_emotion: str = "",
         scene_dialogue: str = "",
         scene_direction: str = "",
+        scene_tension: int = 0,
         character_direction: str = "",
         theme: str = "",
         visual_motif: str = "",
@@ -97,6 +128,7 @@ Respond ONLY with valid JSON array containing a single shot object:
             return self._clamp_durations(
                 self._design_template(script, characters, preset, scene_emotion),
                 is_finale,
+                scene_tension,
             )
 
         char_desc = ", ".join(f"{c.name}: {c.static_features}" for c in characters if c.is_visible)
@@ -130,7 +162,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                     # the same cap already applied to the direct-Anthropic
                     # fallback below, silently defeating the cost fix
                     # since MuAPI is the PRIMARY path, tried first.
-                    return self._clamp_durations(shots[:1], is_finale)
+                    return self._clamp_durations(shots[:1], is_finale, scene_tension)
             except Exception as exc:
                 raw_snippet = locals().get("content", "<no content received>")
                 logger.warning(
@@ -159,18 +191,20 @@ Respond ONLY with valid JSON array containing a single shot object:
             self._ensure_expression(shots, scene_emotion)
             if shots:
                 # Hard cap: never produce more than 1 shot per scene (cost control).
-                return self._clamp_durations(shots[:1], is_finale)
+                return self._clamp_durations(shots[:1], is_finale, scene_tension)
 
         # 3) Last resort: deterministic template, never crashes generation.
         return self._clamp_durations(
-            self._design_template(script, characters, preset, scene_emotion), is_finale
+            self._design_template(script, characters, preset, scene_emotion),
+            is_finale,
+            scene_tension,
         )
 
     @classmethod
     def _clamp_durations(
-        cls, shots: List[StoryboardShot], is_finale: bool
+        cls, shots: List[StoryboardShot], is_finale: bool, tension: int = 0
     ) -> List[StoryboardShot]:
-        cap = cls.FINALE_MAX_DURATION if is_finale else cls.NON_FINALE_MAX_DURATION
+        cap = cls.duration_cap(is_finale, tension)
         for shot in shots:
             shot.duration_seconds = min(float(shot.duration_seconds or 0), cap)
         return shots
