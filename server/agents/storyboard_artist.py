@@ -37,6 +37,14 @@ PLAY THE SUBTEXT, NOT THE LINE. When the notes give subtext that contradicts the
 dialogue, the expression must play the subtext — a character insisting they are fine
 while their face says otherwise is the shot worth making.
 
+RESPECT THE 180° LINE. Screen direction is LOCKED for the whole drama: in any
+two-character conversation the FIRST character listed always occupies frame-left
+looking screen-RIGHT, and the SECOND always occupies frame-right looking
+screen-LEFT — in every scene, including singles and over-the-shoulder shots (a
+character alone in frame still looks toward where the other one is). Never cross
+the line or mirror the composition between scenes; reversed eyelines make a
+conversation read as two people facing away from each other.
+
 SHOW THE EMOTION ON THE FACE. The scene's emotional beat is given to you. "expression_desc"
 must state the concrete, visible facial expression AND body language for the character(s)
 in frame (e.g. "eyes brimming with tears, trembling chin, shoulders finally dropping as

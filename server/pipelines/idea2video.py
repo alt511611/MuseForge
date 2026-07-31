@@ -1136,6 +1136,11 @@ class Idea2VideoPipeline:
             dialogue_enabled and is_dialogue_enabled() and not self.demo
         )
         voice_gen = MuAPIVoiceGenerator(self.api_key, demo=self.demo) if dialogue_requested else None
+        if voice_gen is not None:
+            # Cast the whole ensemble up front, gender-matched to each
+            # character's description -- otherwise the per-line hash fallback
+            # can voice a mother with a male voice.
+            voice_gen.cast_characters(characters)
         total_scenes = max(1, len(script.scenes))
 
         # Kick off background music as soon as the mood is known (it needs

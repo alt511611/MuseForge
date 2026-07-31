@@ -119,6 +119,35 @@ def build_character_identity_clause(characters, matched_char=None) -> str:
     return clause
 
 
+def build_screen_direction_clause(characters) -> str:
+    """Deterministic 180°-rule axis for a two-hander, stated in the prompt.
+
+    Scenes are storyboarded and rendered independently (and, by default, in
+    parallel), so screen direction cannot be left to each scene's own
+    judgement -- the axis is derived from character ORDER, which is identical
+    for every scene of the drama: first visible character frame-left looking
+    screen-right, second frame-right looking screen-left. Without this, shots
+    of a conversation flip sides between scenes and the cut reads as two
+    people facing away from each other. Only emitted for exactly two visible
+    characters; singles have no axis to hold and ensembles need real blocking.
+    """
+    visible = [
+        c
+        for c in (characters or [])
+        if getattr(c, "is_visible", True) and (getattr(c, "name", "") or "").strip()
+    ]
+    if len(visible) != 2:
+        return ""
+    left, right = visible[0].name, visible[1].name
+    return (
+        f"Screen direction (LOCKED for the entire story, 180-degree rule): "
+        f"{left} is on frame-left facing screen-right; {right} is on "
+        f"frame-right facing screen-left. Keep this orientation even when "
+        f"only one of them is in frame — they look toward the other's side. "
+        f"Never mirror or flip the composition. "
+    )
+
+
 def build_frame_prompt(
     style: str,
     shot,
@@ -174,8 +203,10 @@ def build_frame_prompt(
         "silhouette, not backlit into shadow, not turned away from camera. "
     )
     identity_clause = build_character_identity_clause(characters, matched_char)
+    direction_clause = build_screen_direction_clause(characters)
     return (
-        f"{style} style. {setting_clause}{identity_clause}{shot.visual_desc}. "
+        f"{style} style. {setting_clause}{identity_clause}{direction_clause}"
+        f"{shot.visual_desc}. "
         f"{expression_clause}{face_clause}"
         f"{dialogue_clause}Shot type: {shot.shot_type}. Lens: {shot.lens}. "
         f"{IMAGE_QUALITY_SUFFIX}"
@@ -210,6 +241,8 @@ def build_motion_prompt(shot, matched_char=None) -> str:
     parts.append(
         f"Keep {subject}'s facial identity EXACTLY as in the source image "
         f"throughout the shot — no morphing, no face changes. "
+        f"Preserve the source image's screen direction: characters keep "
+        f"facing the same way, never mirror the composition. "
         f"Natural, subtle human motion; no warping or distortion."
     )
     return " ".join(parts)

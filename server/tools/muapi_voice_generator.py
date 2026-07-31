@@ -46,11 +46,100 @@ class MuAPIVoiceGenerator:
         "Callum - Husky Trickster",
         "Laura - Enthusiast, Quirky Attitude",
     )
+    # Gender pools over the same enum, for description-aware casting: a
+    # character described as a woman must not be voiced by "George - Warm".
+    FEMALE_VOICE_IDS = (
+        "Sarah - Soft",
+        "Charlotte - Clear",
+        "Laura - Enthusiast, Quirky Attitude",
+    )
+    MALE_VOICE_IDS = (
+        "George - Warm",
+        "Brian - Deep, Resonant and Comforting",
+        "Callum - Husky Trickster",
+    )
+
+    # Case-insensitive WHOLE-WORD description keywords -> pool (substring
+    # matching is a trap: "the" contains "he", "woman" contains "man").
+    # Turkish terms included because scripts are frequently written in Turkish.
+    _FEMALE_MARKERS = (
+        "woman", "female", "girl", "mother", "mom", "mum", "daughter",
+        "sister", "aunt", "grandmother", "wife", "lady", "she", "her",
+        "kadın", "kadin", "anne", "kız", "kiz", "abla", "teyze", "hala",
+        "babaanne", "anneanne", "gelin",
+    )
+    _MALE_MARKERS = (
+        "man", "male", "boy", "father", "dad", "son", "brother", "uncle",
+        "grandfather", "husband", "gentleman", "he", "his",
+        "adam", "erkek", "baba", "oğul", "ogul", "oğlan", "oglan",
+        "abi", "ağabey", "agabey", "amca", "dayı", "dayi", "dede", "damat",
+    )
 
     def __init__(self, api_key: str, demo: bool = False):
         self.demo = demo
         self.client = MuAPIClient(api_key)
         self._character_voices: Dict[str, str] = {}
+
+    @classmethod
+    def _infer_gender(cls, description: str) -> str:
+        """"female" / "male" / "" from a visual description.
+
+        Whole words only, earliest match wins (a description usually leads
+        with the defining noun: "52-year-old woman, ...").
+        """
+        import re
+
+        words = re.findall(r"[^\W\d_]+", (description or "").casefold(), re.UNICODE)
+        female = set(cls._FEMALE_MARKERS)
+        male = set(cls._MALE_MARKERS)
+        for word in words:
+            if word in female:
+                return "female"
+            if word in male:
+                return "male"
+        return ""
+
+    def cast_characters(self, characters: Iterable[Any]) -> Dict[str, str]:
+        """Assign every named character a voice UP FRONT, matched to the
+        gender implied by their visual description.
+
+        Called once per drama before any dialogue is generated. Without this
+        the per-line hash fallback picks from the full enum, which can voice
+        a mother with "George - Warm" — instantly amateurish. Characters
+        whose description implies no gender keep the hash-based fallback
+        (still stable and collision-avoiding).
+        """
+        for char in characters or []:
+            name = str(getattr(char, "name", "") or "").strip()
+            if not name:
+                continue
+            key = name.casefold()
+            if key in self._character_voices:
+                continue
+            description = str(
+                getattr(char, "static_features", "")
+                or getattr(char, "description", "")
+                or ""
+            )
+            gender = self._infer_gender(f"{name} {description}")
+            pool = (
+                self.FEMALE_VOICE_IDS
+                if gender == "female"
+                else self.MALE_VOICE_IDS if gender == "male" else None
+            )
+            if pool is None:
+                continue  # hash fallback assigns on first line, as before
+            used = set(self._character_voices.values())
+            digest = hashlib.sha256(key.encode("utf-8")).digest()
+            start = int.from_bytes(digest[:4], "big") % len(pool)
+            voice_id = pool[start]
+            for offset in range(len(pool)):
+                candidate = pool[(start + offset) % len(pool)]
+                if candidate not in used:
+                    voice_id = candidate
+                    break
+            self._character_voices[key] = voice_id
+        return dict(self._character_voices)
 
     def voice_id_for_character(self, character: str) -> str:
         """Return a stable voice ID, assigning it on the character's first line."""

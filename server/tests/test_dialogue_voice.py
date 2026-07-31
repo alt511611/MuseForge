@@ -109,6 +109,9 @@ async def test_pipeline_routes_structured_dialogue_to_voice_layer(tmp_path, monk
         def __init__(self, api_key, demo=False):
             pass
 
+        def cast_characters(self, characters):
+            return {}
+
         async def generate_scene_dialogue(self, dialogue, is_cancelled=None):
             captured["character"] = dialogue[0].character
             return [
