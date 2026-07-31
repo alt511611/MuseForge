@@ -400,6 +400,12 @@ async def health():
             or os.environ.get("ANTHROPIC_API_KEY")
         ),
         "auth_configured": bool(SUPABASE_URL),
+        # Whether the server will honour dialogue_enabled at all. The client
+        # cannot infer this from the plan alone -- character dialogue is ALSO
+        # behind a server feature flag, so the toggle must stay hidden when
+        # the deployment has it off rather than offering something that would
+        # be silently dropped (and, worse, billed for).
+        "dialogue_available": is_dialogue_enabled(),
     }
 
 

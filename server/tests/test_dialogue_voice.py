@@ -156,3 +156,50 @@ async def test_pipeline_routes_structured_dialogue_to_voice_layer(tmp_path, monk
     assert captured["character"] == "Kemal"
     assert assembly_call["dialogue_tracks"][0]["scene_index"] == 0
     assert assembly_call["dialogue_tracks"][0]["voice_id"] == "George - Warm"
+
+
+# --- the UI gate --------------------------------------------------------
+
+
+def test_health_exposes_dialogue_availability(monkeypatch):
+    """The client cannot infer the server feature flag from the plan alone,
+    so /api/health must surface it -- otherwise the toggle would offer
+    something the server silently drops (and bills for)."""
+    import api as _api
+    from fastapi.testclient import TestClient
+
+    tc = TestClient(_api.app, raise_server_exceptions=False)
+
+    monkeypatch.setenv("MUSEFORGE_DIALOGUE_ENABLED", "1")
+    assert tc.get("/api/health").json()["dialogue_available"] is True
+
+    monkeypatch.setenv("MUSEFORGE_DIALOGUE_ENABLED", "0")
+    assert tc.get("/api/health").json()["dialogue_available"] is False
+
+
+def test_dialogue_stays_pro_only_and_flag_gated(monkeypatch):
+    """Both gates must hold: the server drops dialogue for a non-Pro plan
+    and when the feature flag is off, regardless of what the client sends."""
+    import api as _api
+
+    monkeypatch.setenv("MUSEFORGE_DIALOGUE_ENABLED", "1")
+    with_pro = _api.estimate_generation_seconds(
+        3, dialogue_enabled=True, plan="pro", demo=False
+    )
+    without = _api.estimate_generation_seconds(
+        3, dialogue_enabled=False, plan="pro", demo=False
+    )
+    assert with_pro > without, "Pro + flag on must cost extra wall-clock"
+
+    # Non-Pro plan: silently ignored.
+    assert _api.estimate_generation_seconds(
+        3, dialogue_enabled=True, plan="creator", demo=False
+    ) == _api.estimate_generation_seconds(
+        3, dialogue_enabled=False, plan="creator", demo=False
+    )
+
+    # Flag off: ignored even for Pro.
+    monkeypatch.setenv("MUSEFORGE_DIALOGUE_ENABLED", "0")
+    assert _api.estimate_generation_seconds(
+        3, dialogue_enabled=True, plan="pro", demo=False
+    ) == without

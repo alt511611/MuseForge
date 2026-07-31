@@ -13,6 +13,7 @@ import {
   Upload,
   X,
   Music,
+  MessagesSquare,
 } from "lucide-react";
 
 import { useLanguage } from "../contexts/LanguageContext";
@@ -24,6 +25,12 @@ import { API_BASE } from "../lib/apiBase";
 // server-side gate in server/api.py (music_enabled is silently ignored for
 // any other plan).
 const MUSIC_ELIGIBLE_PLANS = ["creator", "pro"];
+
+// Plans allowed to attach spoken character dialogue. Kept in sync with the
+// server-side gate in server/api.py (dialogue_enabled is Pro-only there).
+// Dialogue is ALSO behind a server feature flag, surfaced as
+// health.dialogue_available -- both must hold before the toggle is offered.
+const DIALOGUE_ELIGIBLE_PLANS = ["pro"];
 
 // Real, currently-enforced scene caps. Kept in sync with server/api.py's
 // PLAN_MAX_SCENES — this just avoids the user hitting a 400 after the fact.
@@ -85,6 +92,8 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
   const [uploadError, setUploadError] = useState(null);
   const [plan, setPlan] = useState(null);
   const [musicEnabled, setMusicEnabled] = useState(false);
+  const [dialogueEnabled, setDialogueEnabled] = useState(false);
+  const [dialogueAvailable, setDialogueAvailable] = useState(false);
   const [requireScriptApproval, setRequireScriptApproval] = useState(false);
   const [libraryCharacters, setLibraryCharacters] = useState([]);
   const [selectedLibraryIds, setSelectedLibraryIds] = useState([]);
@@ -128,6 +137,8 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
   }, [user]);
 
   const musicEligible = MUSIC_ELIGIBLE_PLANS.includes(plan);
+  const dialogueEligible =
+    dialogueAvailable && DIALOGUE_ELIGIBLE_PLANS.includes(plan);
   const maxScenes = PLAN_MAX_SCENES[plan] ?? PLAN_MAX_SCENES.free;
   const libraryEligible = plan === "pro";
 
@@ -168,6 +179,10 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
   }, [musicEligible, musicEnabled]);
 
   useEffect(() => {
+    if (!dialogueEligible && dialogueEnabled) setDialogueEnabled(false);
+  }, [dialogueEligible, dialogueEnabled]);
+
+  useEffect(() => {
     if (numScenes > maxScenes) setNumScenes(maxScenes);
   }, [maxScenes, numScenes]);
 
@@ -187,7 +202,11 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
   useEffect(() => {
     fetch(`${API_BASE}/api/health`)
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => d && setDemoMode(!!d.demo_mode))
+      .then((d) => {
+        if (!d) return;
+        setDemoMode(!!d.demo_mode);
+        setDialogueAvailable(!!d.dialogue_available);
+      })
       .catch(() => {});
   }, []);
 
@@ -199,7 +218,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
       body: JSON.stringify({
         num_scenes: numScenes,
         music_enabled: musicEligible && musicEnabled,
-        dialogue_enabled: false,
+        dialogue_enabled: dialogueEligible && dialogueEnabled,
         plan: plan || "free",
       }),
     })
@@ -209,7 +228,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
     return () => {
       cancelled = true;
     };
-  }, [numScenes, musicEligible, musicEnabled, plan]);
+  }, [numScenes, musicEligible, musicEnabled, dialogueEligible, dialogueEnabled, plan]);
 
   const handlePhotoUpload = (e) => {
     const file = e.target.files?.[0];
@@ -259,6 +278,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
       character_image: characterImage,
       character_name: characterImage ? characterName.trim() : "",
       music_enabled: musicEligible && musicEnabled,
+      dialogue_enabled: dialogueEligible && dialogueEnabled,
       require_script_approval: requireScriptApproval,
       library_characters: selectedLibraryCharacters,
     });
@@ -565,6 +585,46 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
               <span
                 className="inline-block h-4 w-4 transform rounded-full bg-white transition-transform"
                 style={{ transform: musicEnabled ? "translateX(18px)" : "translateX(2px)" }}
+              />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {dialogueEligible && (
+        <div className="flex items-center justify-between gap-3 mb-4 px-4 py-3 rounded-xl" style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a" }}>
+          <label className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: "#94a3b8" }}>
+            <MessagesSquare size={16} style={{ color: "#a78bfa" }} />
+            <span>
+              {t("form_dialogue_toggle")}
+              <span className="block text-[11px] mt-0.5" style={{ color: "#475569" }}>
+                {t("form_dialogue_hint")}
+              </span>
+            </span>
+          </label>
+          <div className="flex items-center gap-3">
+            {dialogueEnabled && !demoMode && (
+              <span className="text-xs" style={{ color: "#fbbf24" }}>
+                {t("form_dialogue_credit_note", {
+                  n:
+                    numScenes +
+                    numScenes +
+                    (musicEligible && musicEnabled ? 1 : 0),
+                })}
+              </span>
+            )}
+            <button
+              type="button"
+              role="switch"
+              aria-checked={dialogueEnabled}
+              onClick={() => setDialogueEnabled((v) => !v)}
+              disabled={isSubmitting}
+              className="relative inline-flex h-5 w-9 items-center rounded-full transition-colors"
+              style={{ backgroundColor: dialogueEnabled ? "#7c3aed" : "#22223a" }}
+            >
+              <span
+                className="inline-block h-4 w-4 transform rounded-full bg-white transition-transform"
+                style={{ transform: dialogueEnabled ? "translateX(18px)" : "translateX(2px)" }}
               />
             </button>
           </div>
