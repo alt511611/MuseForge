@@ -13,36 +13,83 @@ logger = logging.getLogger(__name__)
 
 
 class ScreenwriterAgent:
-    SYSTEM_PROMPT = """You are an award-winning screenwriter specializing in micro-dramas and cinematic short films.
-Given a user's idea, write a compelling script broken into 3-5 short scenes (each 1-2 sentences of action).
-For every scene, write the exact spoken dialogue as character/line pairs. Use an empty dialogue list for silent scenes.
-For every scene, also set "emotion": a short (2-4 word) tag for the scene's emotional beat, driven by
-what actually happens in that scene's action/dialogue (e.g. "tearful reconciliation", "cold resentment",
-"joyful reunion", "tense confrontation", "quiet resignation") -- this is what a later storyboard step
-uses to pick the character's facial expression, so it must never default to something neutral/flat
-unless the scene is genuinely emotionless (e.g. a pure establishing shot).
-Extract named characters with visual descriptions for AI image generation.
-Also define ONE locked setting for the ENTIRE drama (not per scene): location, time of day, and era.
-Every scene must take place in that same setting — do not invent a different place or time per scene.
-When the user message includes PRESET CHARACTERS, those characters already exist — do NOT redefine or rename them.
-Use their exact names and visual descriptions in the characters array and weave them into the story. You may add extra supporting characters only if needed.
+    SYSTEM_PROMPT = """You are an award-winning writer-director of micro-dramas and cinematic short films.
+You are not summarizing a plot — you are directing a film. Work like a director:
+
+STRUCTURE. Build 3-5 scenes into ONE dramatic shape, not a list of events. Assign each
+scene a "dramatic_function" from: setup, inciting_incident, rising_action, turning_point,
+climax, resolution. A drama needs a climax; do not write five scenes of rising_action.
+Give each scene a "tension" from 1-10 that rises across the story and peaks at the climax.
+
+EVERY SCENE MUST TURN. Set "turn" to the thing that actually CHANGES in the scene — a
+decision made, a truth admitted, a hope broken, a distance closed. If you cannot name the
+turn, the scene has no reason to exist: rewrite it. This single field decides which moment
+gets filmed, so make it concrete and physical, not abstract ("she finally takes her
+mother's hand", not "they grow closer").
+
+WRITE SUBTEXT. People in drama rarely say what they mean. Set "subtext" to what is
+really going on underneath the spoken lines. When the subtext contradicts the dialogue,
+say so — that contradiction is what the actor plays.
+
+STAGE IT PHYSICALLY. Set "staging" to concrete blocking: who is where, what their hands
+are doing, and the ONE object the scene turns on. Never leave characters abstractly
+"talking"; give the camera something to see.
+
+DIRECT THE PERFORMANCE. For each character give "want" (the external goal they pursue on
+screen), "need" (the internal truth they avoid), and "arc" (how they change from first
+scene to last). Keep "description" to face, build and age ONLY, and put clothing in
+"wardrobe" — these are used separately downstream.
+
+FIND THE THROUGH-LINE. Give the drama a "theme" (its controlling idea in one sentence)
+and a "visual_motif": one recurring visual element — an object, a gesture, a quality of
+light — that you deliberately restage across scenes so the film reads as a whole.
+
+EMOTION. Set "emotion" to a short (2-4 word) tag for each scene's emotional beat, driven
+by what actually happens in that scene (e.g. "tearful reconciliation", "cold resentment",
+"tense confrontation", "quiet resignation"). A later storyboard step uses it to pick the
+character's facial expression, so it must never be neutral or flat unless the scene is
+genuinely emotionless.
+
+DIALOGUE. Write the exact spoken words as character/line pairs. Keep lines short and
+speakable. Use an empty dialogue list for silent scenes — silence is a legitimate choice.
+
+SETTING. Define ONE locked setting for the ENTIRE drama (not per scene): location, time
+of day, era. Every scene takes place there — do not invent a different place or time per
+scene.
+
+PRESET CHARACTERS in the user message already exist: do NOT redefine or rename them.
+Use their exact names and visual descriptions, and weave them into the story. You may
+add extra supporting characters only if needed.
+
 Respond ONLY with valid JSON matching this schema:
 {
   "title": "string",
   "logline": "string",
+  "theme": "the controlling idea in one sentence",
+  "visual_motif": "one recurring visual element restaged across scenes",
   "mood": "string",
   "estimated_duration_seconds": 30,
   "setting_location": "e.g. coastal village wooden pier",
   "setting_time_of_day": "e.g. sunset, night, midday",
   "setting_era": "e.g. present day, 1950s",
-  "characters": [{"name": "string", "description": "visual appearance for AI", "role": "protagonist|antagonist|supporting"}],
+  "characters": [{
+    "name": "string",
+    "description": "face, build and age ONLY - no clothing",
+    "wardrobe": "what they wear",
+    "role": "protagonist|antagonist|supporting",
+    "want": "external goal", "need": "internal truth", "arc": "how they change"
+  }],
   "scenes": [
     {
       "action": "scene 1 action...",
       "dialogue": [{"character": "Kemal", "line": "The exact words Kemal says."}],
-      "emotion": "e.g. tearful reconciliation"
-    },
-    {"action": "silent scene action...", "dialogue": [], "emotion": "e.g. quiet dread"}
+      "emotion": "e.g. tearful reconciliation",
+      "dramatic_function": "setup|inciting_incident|rising_action|turning_point|climax|resolution",
+      "turn": "the concrete thing that changes in this scene",
+      "subtext": "what they really mean underneath the lines",
+      "staging": "blocking: who is where, hands, the object the scene turns on",
+      "tension": 4
+    }
   ]
 }"""
 
@@ -154,7 +201,12 @@ Respond ONLY with valid JSON matching this schema:
                     },
                     json={
                         "model": "claude-sonnet-4-20250514",
-                        "max_tokens": 2048,
+                        # A director-level script carries per-scene turn,
+                        # subtext, staging and per-character want/need/arc, so
+                        # 5 scenes no longer fit the old 2048 budget -- a
+                        # truncated response is unparseable JSON and silently
+                        # drops the whole script to the template fallback.
+                        "max_tokens": 8192,
                         "system": self.SYSTEM_PROMPT,
                         "messages": [{"role": "user", "content": prompt}],
                     },
@@ -208,36 +260,75 @@ Respond ONLY with valid JSON matching this schema:
                 )
             ]
 
-        scene_templates = [
-            (
-                f"{protagonist} enters the scene. The {style.lower()} atmosphere sets the tone.",
-                "guarded anticipation",
-            ),
-            (
-                f"Tension builds as {protagonist} faces an unexpected challenge.",
-                "rising alarm",
-            ),
-            (
-                f"A pivotal moment — {protagonist} makes a decisive choice.",
-                "steeled resolve",
-            ),
-            (
-                f"The aftermath: consequences ripple through the environment.",
-                "stunned aftermath",
-            ),
-            (
-                f"Final frame: {protagonist} walks away, transformed.",
-                "quiet release",
-            ),
-        ]
+        # The offline fallback still has to be a DRAMA, not five flat captions:
+        # it carries the same structure the LLM path is asked for (a function,
+        # a turn, a tension value), so a key-less run degrades in polish rather
+        # than losing the shape of the story.
+        #
+        # Each beat is keyed by its dramatic function and carries its OWN
+        # action line, so a beat can never end up describing one thing while
+        # its function and turn describe another.
+        beats = {
+            "setup": {
+                "action": f"{protagonist} enters. The {style.lower()} atmosphere sets the tone.",
+                "emotion": "guarded anticipation",
+                "turn": f"{protagonist} decides to stay instead of turning back",
+                "subtext": "wanting to be here and not wanting to admit it",
+                "staging": f"{protagonist} stops in the doorway, one hand still on the frame",
+                "tension": 3,
+            },
+            "inciting_incident": {
+                "action": f"An unexpected challenge finds {protagonist}.",
+                "emotion": "rising alarm",
+                "turn": f"{protagonist} realises this cannot be avoided",
+                "subtext": "pretending to be steadier than they are",
+                "staging": f"{protagonist} sets an object down too carefully",
+                "tension": 6,
+            },
+            "rising_action": {
+                "action": f"The cost of going on becomes clear to {protagonist}.",
+                "emotion": "mounting dread",
+                "turn": f"{protagonist} sees what this will take and does not turn back",
+                "subtext": "counting the price and staying anyway",
+                "staging": f"{protagonist} stands very still while the room settles",
+                "tension": 8,
+            },
+            "climax": {
+                "action": f"A pivotal moment — {protagonist} makes a decisive choice.",
+                "emotion": "steeled resolve",
+                "turn": f"{protagonist} commits, out loud, and cannot take it back",
+                "subtext": "the fear underneath the decision has not gone away",
+                "staging": f"{protagonist} steps forward into the light, hands open",
+                "tension": 10,
+            },
+            "resolution": {
+                "action": f"Final frame: {protagonist} is changed by what was said.",
+                "emotion": "quiet release",
+                "turn": f"{protagonist} finally lets the held breath go",
+                "subtext": "grief and relief arriving at the same time",
+                "staging": f"{protagonist} turns from the window, shoulders dropping",
+                "tension": 4,
+            },
+        }
+        # Every shape opens somewhere, peaks at the climax and lands on the
+        # resolution -- so no scene count can produce a drama that never peaks
+        # or that stops mid-escalation.
+        shapes = {
+            2: ["climax", "resolution"],
+            3: ["setup", "climax", "resolution"],
+            4: ["setup", "inciting_incident", "climax", "resolution"],
+            5: ["setup", "inciting_incident", "rising_action", "climax", "resolution"],
+        }
+        shape = shapes[max(2, min(num_scenes, 5))]
         scenes = [
-            ScriptScene(action=action, dialogue=[], emotion=emotion)
-            for action, emotion in scene_templates[: max(2, min(num_scenes, 5))]
+            ScriptScene(dialogue=[], dramatic_function=fn, **beats[fn]) for fn in shape
         ]
 
         return DramaScript(
             title=title,
             logline=idea,
+            theme="A choice made too late still counts as a choice.",
+            visual_motif="light through a window, falling differently in each scene",
             mood=style.lower(),
             estimated_duration_seconds=len(scenes) * 8,
             setting_location="generic cinematic location",

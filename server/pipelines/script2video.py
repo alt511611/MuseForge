@@ -77,11 +77,16 @@ def build_character_identity_clause(characters, matched_char=None) -> str:
     anchor across the whole drama.
     """
     visible = [c for c in (characters or []) if getattr(c, "is_visible", True)]
-    described = [
-        f"{c.name} ({c.static_features.strip()})"
-        for c in visible
-        if (getattr(c, "static_features", "") or "").strip()
-    ]
+    described = []
+    for c in visible:
+        features = (getattr(c, "static_features", "") or "").strip()
+        if not features:
+            continue
+        # Wardrobe is stated alongside the face: the reference image fixes
+        # identity but not costume, so an unstated outfit drifts scene to scene.
+        wardrobe = (getattr(c, "wardrobe", "") or "").strip()
+        detail = f"{features}, wearing {wardrobe}" if wardrobe else features
+        described.append(f"{c.name} ({detail})")
     if not described:
         return ""
     clause = (
@@ -538,6 +543,10 @@ class Script2VideoPipeline:
         last_frame_by_character: Optional[Dict[str, str]] = None,
         scene_emotion: str = "",
         scene_dialogue: str = "",
+        scene_direction: str = "",
+        character_direction: str = "",
+        theme: str = "",
+        visual_motif: str = "",
     ) -> Dict[str, Any]:
         os.makedirs(working_dir, exist_ok=True)
         portraits = character_portraits or {}
@@ -578,6 +587,10 @@ class Script2VideoPipeline:
             is_finale=(scene_idx == total_scenes - 1),
             scene_emotion=scene_emotion,
             scene_dialogue=scene_dialogue,
+            scene_direction=scene_direction,
+            character_direction=character_direction,
+            theme=theme,
+            visual_motif=visual_motif,
         )
 
         shot_videos: List[Optional[str]] = [None] * len(shots)
