@@ -112,7 +112,7 @@ async def test_color_grade_inserted_between_concat_and_music(tmp_path, monkeypat
             f.write(b"concatenated")
         return output_path
 
-    async def _fake_grade(video_path, output_path, style="cinematic"):
+    async def _fake_grade(video_path, output_path, director_style="cinematic_balanced"):
         calls.append(("grade", video_path))
         with open(output_path, "wb") as f:
             f.write(b"graded")
@@ -169,7 +169,7 @@ async def test_transitions_default_off_uses_plain_concat(tmp_path, monkeypatch):
             f.write(b"concatenated")
         return output_path
 
-    async def _fake_grade(video_path, output_path, style="cinematic"):
+    async def _fake_grade(video_path, output_path, director_style="cinematic_balanced"):
         with open(output_path, "wb") as f:
             f.write(b"graded")
         return output_path
@@ -207,7 +207,7 @@ async def test_transitions_enabled_routes_through_crossfade_concat(tmp_path, mon
             f.write(b"concatenated-with-transitions")
         return output_path
 
-    async def _fake_grade(video_path, output_path, style="cinematic"):
+    async def _fake_grade(video_path, output_path, director_style="cinematic_balanced"):
         with open(output_path, "wb") as f:
             f.write(b"graded")
         return output_path
@@ -276,63 +276,191 @@ async def test_crossfade_concat_fails_open_to_plain_concat(tmp_path, monkeypatch
 # --- grade strength ----------------------------------------------------
 
 
-def test_grade_strength_defaults_below_full():
-    """Full-strength cross_process crushed skin tones and hid facial
-    expression, so the default must keep the look dialed back."""
-    from pipelines.script2video import DEFAULT_GRADE_STRENGTH, _grade_strength
+def test_grade_strength_uses_preset_value_by_default():
+    """Each preset tunes its own strength to how aggressive its chain is."""
+    from pipelines.script2video import _grade_strength
 
-    assert 0.0 < DEFAULT_GRADE_STRENGTH < 1.0
-    assert _grade_strength() == DEFAULT_GRADE_STRENGTH
+    assert _grade_strength(0.8) == pytest.approx(0.8)
+    assert _grade_strength(1.0) == pytest.approx(1.0)
 
 
-def test_grade_strength_reads_and_clamps_env(monkeypatch):
-    from pipelines.script2video import DEFAULT_GRADE_STRENGTH, _grade_strength
+def test_grade_strength_env_overrides_and_clamps(monkeypatch):
+    from pipelines.script2video import _grade_strength
 
     monkeypatch.setenv("MUSEFORGE_GRADE_STRENGTH", "0.8")
-    assert _grade_strength() == pytest.approx(0.8)
+    assert _grade_strength(0.2) == pytest.approx(0.8)
 
     monkeypatch.setenv("MUSEFORGE_GRADE_STRENGTH", "5")
-    assert _grade_strength() == 1.0
+    assert _grade_strength(0.2) == 1.0
     monkeypatch.setenv("MUSEFORGE_GRADE_STRENGTH", "-2")
-    assert _grade_strength() == 0.0
+    assert _grade_strength(0.2) == 0.0
 
-    # Fail open rather than breaking rendering on a typo.
+    # Fail open to the preset rather than breaking rendering on a typo.
     monkeypatch.setenv("MUSEFORGE_GRADE_STRENGTH", "not-a-number")
-    assert _grade_strength() == DEFAULT_GRADE_STRENGTH
+    assert _grade_strength(0.35) == pytest.approx(0.35)
+
+
+def test_full_strength_grade_skips_the_blend_chain():
+    """At full strength there is nothing to blend, so the chain stays simple."""
+    from interfaces.color_grade import ColorGrade
+    from pipelines.script2video import build_grade_filter_chain
+
+    grade = ColorGrade(label="T", filter_chain="eq=contrast=1.1", strength=1.0)
+    assert build_grade_filter_chain(grade) == "eq=contrast=1.1"
+
+
+def test_partial_strength_blends_ungraded_over_graded():
+    """The blend opacity applies to the UNGRADED top layer, so it must be
+    (1 - strength). An inverted opacity made strength=0.0 emit a FULLY
+    graded image -- the exact face-crushing look being dialed back."""
+    from interfaces.color_grade import ColorGrade
+    from pipelines.script2video import build_grade_filter_chain
+
+    grade = ColorGrade(label="T", filter_chain="eq=contrast=1.1", strength=0.25)
+    chain = build_grade_filter_chain(grade)
+    assert "all_opacity=0.750" in chain, chain
+    assert "[grade_a]eq=contrast=1.1[graded]" in chain
 
 
 @pytest.mark.asyncio
-async def test_partial_grade_preserves_skin_tone(tmp_path, monkeypatch):
-    """Regression: the blend opacity applies to the UNGRADED top layer, so
-    it must be (1 - strength). An inverted opacity made strength=0.0 emit a
-    FULLY graded image -- the exact face-crushing look being dialed back.
-    """
+async def test_grade_strength_zero_leaves_picture_ungraded(tmp_path, monkeypatch):
+    """End-to-end guard on the opacity direction, through real ffmpeg."""
     from moviepy import ColorClip, VideoFileClip
 
     from pipelines.script2video import apply_color_grade
 
     src = str(tmp_path / "flat.mp4")
-    skin = (200, 150, 120)  # RGB skin tone
-    clip = ColorClip(size=(160, 90), color=skin, duration=1.0)
+    skin = (200, 150, 120)  # RGB
+    clip = ColorClip(size=(160, 90), color=skin, duration=0.6)
     clip.write_videofile(src, fps=10, codec="libx264", audio=False, logger=None)
     clip.close()
 
-    def _green(path):
+    def _rgb(path):
         with VideoFileClip(path) as graded:
-            return float(graded.get_frame(0.3)[:, :, 1].mean())
+            frame = graded.get_frame(0.2)
+            return [float(frame[:, :, c].mean()) for c in range(3)]
 
-    results = {}
-    for strength in ("0.0", "1.0"):
-        monkeypatch.setenv("MUSEFORGE_GRADE_STRENGTH", strength)
-        out = str(tmp_path / f"out_{strength}.mp4")
-        await apply_color_grade(src, out)
-        results[strength] = _green(out)
+    monkeypatch.setenv("MUSEFORGE_GRADE_STRENGTH", "0.0")
+    out = str(tmp_path / "ungraded.mp4")
+    # noir_mystery is the most aggressive preset -- at strength 0 even it
+    # must leave the picture essentially untouched.
+    await apply_color_grade(src, out, director_style="noir_mystery")
 
-    # strength 0 must stay near the source; strength 1 pushes green hard.
-    assert abs(results["0.0"] - skin[1]) < 12, (
-        f"strength=0.0 should be ~ungraded (green {skin[1]}), got {results['0.0']}"
+    for channel, (got, want) in enumerate(zip(_rgb(out), skin)):
+        assert abs(got - want) < 12, (
+            f"strength=0.0 must be ~ungraded; channel {channel} got {got}, want ~{want}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_director_style_selects_a_distinct_grade(tmp_path):
+    """The reported issue: every drama got one hardcoded look regardless of
+    director style. Noir must finish monochrome and Anime must finish more
+    saturated than the source -- through real ffmpeg, not just config."""
+    from moviepy import ColorClip, VideoFileClip
+
+    from pipelines.script2video import apply_color_grade
+
+    src = str(tmp_path / "src.mp4")
+    clip = ColorClip(size=(160, 90), color=(200, 150, 120), duration=0.6)
+    clip.write_videofile(src, fps=10, codec="libx264", audio=False, logger=None)
+    clip.close()
+
+    def _rgb(path):
+        with VideoFileClip(path) as graded:
+            frame = graded.get_frame(0.2)
+            return [float(frame[:, :, c].mean()) for c in range(3)]
+
+    def _spread(rgb):
+        return max(rgb) - min(rgb)
+
+    source_spread = _spread(_rgb(src))
+
+    noir = str(tmp_path / "noir.mp4")
+    await apply_color_grade(src, noir, director_style="noir_mystery")
+    assert _spread(_rgb(noir)) < 15, (
+        f"noir_mystery must be near-monochrome, got {_rgb(noir)}"
     )
-    assert results["1.0"] > results["0.0"] + 20, (
-        "strength=1.0 must be visibly more graded than strength=0.0; "
-        f"got {results['1.0']} vs {results['0.0']}"
+
+    anime = str(tmp_path / "anime.mp4")
+    await apply_color_grade(src, anime, director_style="anime_expressive")
+    assert _spread(_rgb(anime)) > source_spread + 10, (
+        f"anime_expressive must be more saturated than source, got {_rgb(anime)}"
     )
+
+
+def test_every_director_style_resolves_to_a_real_grade():
+    """No style may silently fall through to the neutral default."""
+    from interfaces.camera import DIRECTOR_STYLES
+    from interfaces.color_grade import COLOR_GRADES
+
+    for name, style in DIRECTOR_STYLES.items():
+        assert style.color_grade in COLOR_GRADES, (
+            f"director style {name!r} names grade {style.color_grade!r}, "
+            "which has no ColorGrade preset"
+        )
+
+
+def test_unknown_grade_falls_back_instead_of_raising():
+    from interfaces.color_grade import COLOR_GRADES, FALLBACK_GRADE, get_color_grade
+
+    assert get_color_grade("no-such-grade") is COLOR_GRADES[FALLBACK_GRADE]
+    assert get_color_grade("") is COLOR_GRADES[FALLBACK_GRADE]
+
+
+@pytest.mark.asyncio
+async def test_unknown_director_style_still_grades(tmp_path):
+    """A bad style name must degrade to a sane picture, not fail the render."""
+    from moviepy import ColorClip
+
+    from pipelines.script2video import apply_color_grade
+
+    src = str(tmp_path / "src.mp4")
+    clip = ColorClip(size=(160, 90), color=(200, 150, 120), duration=0.6)
+    clip.write_videofile(src, fps=10, codec="libx264", audio=False, logger=None)
+    clip.close()
+
+    out = str(tmp_path / "out.mp4")
+    assert await apply_color_grade(src, out, director_style="bogus") == out
+    assert os.path.getsize(out) > 0
+
+
+@pytest.mark.asyncio
+async def test_assembly_passes_director_style_to_the_grade(tmp_path, monkeypatch):
+    """Regression: the grade call site never forwarded the director style, so
+    the parameter existed but nothing could ever reach it."""
+    import pipelines.idea2video as idea2video_mod
+
+    seen = {}
+
+    async def _fake_grade(video_path, output_path, director_style="cinematic_balanced"):
+        seen["director_style"] = director_style
+        with open(output_path, "wb") as f:
+            f.write(b"graded")
+        return output_path
+
+    async def _fake_concat(paths, out_path):
+        with open(out_path, "wb") as f:
+            f.write(b"concat")
+        return out_path
+
+    async def _fake_music(video_path, output_path, music_url=None, **_kw):
+        with open(output_path, "wb") as f:
+            f.write(b"music")
+        return output_path
+
+    monkeypatch.setattr(idea2video_mod, "apply_color_grade", _fake_grade)
+    monkeypatch.setattr(idea2video_mod, "concatenate_videos", _fake_concat)
+    monkeypatch.setattr(idea2video_mod, "add_background_music", _fake_music)
+
+    pipeline = idea2video_mod.Idea2VideoPipeline(api_key="k", demo=True)
+    scene = str(tmp_path / "scene.mp4")
+    with open(scene, "wb") as f:
+        f.write(b"scene")
+
+    await pipeline._assemble_final_drama(
+        [scene], str(tmp_path / "job"), None, None, "pro",
+        director_style="noir_mystery",
+    )
+
+    assert seen["director_style"] == "noir_mystery"

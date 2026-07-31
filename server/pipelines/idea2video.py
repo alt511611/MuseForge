@@ -666,6 +666,7 @@ class Idea2VideoPipeline:
         plan: str = "free",
         is_cancelled: Optional[Callable[[], bool]] = None,
         dialogue_tracks: Optional[List[Dict[str, Any]]] = None,
+        director_style: str = "cinematic_balanced",
     ) -> str:
         """Concatenate all scene videos, color-grade, add background music,
         burn dialogue captions (when tracks present), then watermark
@@ -703,7 +704,9 @@ class Idea2VideoPipeline:
             await progress_callback("grade", "Applying color grade", 89)
 
         graded_path = os.path.join(working_dir, "drama_graded.mp4")
-        await apply_color_grade(concatenated_path, graded_path)
+        await apply_color_grade(
+            concatenated_path, graded_path, director_style=director_style
+        )
 
         # Before music mix
         _check_cancel()
@@ -1000,6 +1003,7 @@ class Idea2VideoPipeline:
                 plan,
                 is_cancelled=is_cancelled,
                 dialogue_tracks=dialogue_tracks,
+                director_style=director_style,
             )
             # Measure the real assembled length before upload/cleanup — the
             # screenwriter's estimated_duration_seconds is a pre-generation

@@ -10,7 +10,9 @@ from typing import Any, Callable, Dict, List, Optional
 import httpx
 
 from agents.storyboard_artist import StoryboardArtist
+from interfaces.camera import get_director_style
 from interfaces.character import CharacterInScene
+from interfaces.color_grade import get_color_grade
 from tools.character_qa import (
     format_expected_setting,
     is_character_qa_enabled,
@@ -381,44 +383,69 @@ async def concatenate_videos_with_transitions(
     return await concatenate_videos(paths, out_path)
 
 
-#: How much of the stylized cross-process grade to keep. Deliberately well
-#: below 1.0: at full strength the grade overwhelms skin tones and hides
-#: facial expression, which defeats the emotional read of a scene.
-DEFAULT_GRADE_STRENGTH = 0.45
+def _grade_strength(preset_strength: float) -> float:
+    """Resolve grade blend strength in [0, 1].
 
+    Each ColorGrade preset carries a strength tuned to how aggressive its own
+    chain is. MUSEFORGE_GRADE_STRENGTH overrides that globally when an
+    operator wants to dial the whole product's look up or down.
 
-def _grade_strength() -> float:
-    """Grade blend strength in [0, 1], from MUSEFORGE_GRADE_STRENGTH.
-
-    Fails open to the default on anything unparseable rather than letting a
-    typo'd env var break rendering.
+    Fails open to the preset value on anything unparseable rather than letting
+    a typo'd env var break rendering.
     """
     raw = os.environ.get("MUSEFORGE_GRADE_STRENGTH", "").strip()
     if not raw:
-        return DEFAULT_GRADE_STRENGTH
+        return max(0.0, min(1.0, preset_strength))
     try:
         return max(0.0, min(1.0, float(raw)))
     except ValueError:
         logger.warning(
-            "Invalid MUSEFORGE_GRADE_STRENGTH=%r, using default %s",
+            "Invalid MUSEFORGE_GRADE_STRENGTH=%r, using preset strength %s",
             raw,
-            DEFAULT_GRADE_STRENGTH,
+            preset_strength,
         )
-        return DEFAULT_GRADE_STRENGTH
+        return max(0.0, min(1.0, preset_strength))
+
+
+def build_grade_filter_chain(grade) -> str:
+    """Render a ColorGrade into the ffmpeg -vf chain that applies it.
+
+    Below full strength the graded image is blended back over the ungraded
+    original so the look never fully overwrites skin tones and facial detail.
+    """
+    strength = _grade_strength(grade.strength)
+    if strength >= 0.999:
+        return grade.filter_chain
+    # ffmpeg's blend takes the FIRST input as the top layer, and all_opacity
+    # is the weight of that top layer:
+    #     result = opacity * top + (1 - opacity) * bottom
+    # Here top is the UNGRADED stream, so the opacity that keeps `strength`
+    # worth of grade is (1 - strength) -- not `strength`.
+    ungraded_opacity = 1.0 - strength
+    return (
+        "split[grade_a][grade_b];"
+        f"[grade_a]{grade.filter_chain}[graded];"
+        f"[grade_b][graded]blend=all_mode=normal:all_opacity={ungraded_opacity:.3f}"
+    )
 
 
 async def apply_color_grade(
-    video_path: str, output_path: str, style: str = "cinematic"
+    video_path: str, output_path: str, director_style: str = "cinematic_balanced"
 ) -> str:
-    """Apply a cinematic "teal & orange" color grade via ffmpeg's eq/curves
-    filters -- pure ffmpeg, no extra API calls or cost.
+    """Color-grade the drama according to its DIRECTOR STYLE -- pure ffmpeg,
+    no extra API calls or cost.
+
+    Each DirectorStyle names a grade (DirectorStyle.color_grade); that name
+    resolves to a ColorGrade preset with its own filter chain and strength.
+    Noir Mystery therefore finishes monochrome, Anime Expressive finishes
+    vivid, and Slow Cinematic gets the desaturated teal-and-orange look --
+    instead of every style receiving one hardcoded cross-process grade.
 
     Fails open: if the filter chain errors (e.g. unsupported build of
     ffmpeg), the original video is copied through ungraded rather than
     failing the job, matching add_watermark()/add_background_music()'s
     existing fallback pattern.
     """
-    _ = style  # only one preset exists today; kept for a future style param
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
     def _copy_through() -> str:
@@ -429,35 +456,14 @@ async def apply_color_grade(
                 dst.write(data)
         return output_path
 
-    # "cinematic" is currently the only preset; kept as a parameter so a
-    # future style (e.g. "warm", "desaturated") can be added without
-    # changing the call site. curves=preset=cross_process leans the
-    # shadows/mids toward teal-orange; eq nudges contrast/saturation up
-    # slightly on top of that.
-    #
-    # cross_process applied at FULL strength crushed skin tones into a flat
-    # yellow-green cast that made faces — and therefore the actors'
-    # expressions — unreadable, which is a large part of why finished dramas
-    # were reported as feeling "neutral/emotionless". The graded image is now
-    # blended back over the ungraded one so the look survives without
-    # destroying the performance. Tunable via MUSEFORGE_GRADE_STRENGTH
-    # (0 = ungraded, 1 = the previous full-strength look).
-    strength = _grade_strength()
-    if strength >= 0.999:
-        filter_chain = "eq=contrast=1.05:saturation=1.1,curves=preset=cross_process"
-    else:
-        # ffmpeg's blend takes the FIRST input as the top layer, and
-        # all_opacity is the weight of that top layer:
-        #   result = opacity * top + (1 - opacity) * bottom
-        # Here top is the UNGRADED stream, so the opacity that keeps
-        # `strength` worth of grade is (1 - strength) -- not `strength`.
-        ungraded_opacity = 1.0 - strength
-        filter_chain = (
-            "split[grade_a][grade_b];"
-            "[grade_a]eq=contrast=1.05:saturation=1.1,"
-            "curves=preset=cross_process[graded];"
-            f"[grade_b][graded]blend=all_mode=normal:all_opacity={ungraded_opacity:.3f}"
-        )
+    grade = get_color_grade(get_director_style(director_style).color_grade)
+    filter_chain = build_grade_filter_chain(grade)
+    logger.info(
+        "Color grading with %r (%s) for director style %r",
+        grade.label,
+        grade.filter_chain,
+        director_style,
+    )
 
     ffmpeg_binary = os.environ.get("MUSEFORGE_FFMPEG_BINARY") or shutil.which("ffmpeg")
     if not ffmpeg_binary:
