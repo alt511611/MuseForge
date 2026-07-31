@@ -1,9 +1,15 @@
-"""Dynamic character reference selection across scenes (adapted from ViMax's
-"previous timeline" technique): from the second scene onward, the MOST
-RECENTLY generated frame for a character should be used as the identity
-reference, not the static locked portrait -- so outfit/pose/lighting drift
-introduced in an earlier scene carries forward instead of always snapping
-back to the original portrait.
+"""Character identity reference selection across scenes.
+
+DEFAULT (MUSEFORGE_DYNAMIC_REFERENCE unset): every scene anchors to the
+character's LOCKED PORTRAIT. Each generated frame is only an approximation of
+its reference, so chaining frame N in as the reference for frame N+1 lets
+identity error compound into a random walk -- the reported "mother and
+daughter look like different people in different scenes". Re-anchoring bounds
+that error and is what the product's "locked portrait" guarantee promises.
+
+OPT-IN (MUSEFORGE_DYNAMIC_REFERENCE=1): restores the previous chain-forward
+behavior (adapted from ViMax's "previous timeline" technique), where the most
+recently generated frame wins so outfit/pose/lighting drift carries forward.
 """
 import os
 import sys
@@ -46,10 +52,9 @@ class FakeShot:
         }
 
 
-@pytest.mark.asyncio
-async def test_second_scene_references_first_scenes_generated_frame(monkeypatch):
-    """3-scene script, one shot per scene: scene 2's reference must be
-    scene 1's GENERATED FRAME, not scene 1's locked portrait."""
+async def _run_three_scene_drama(monkeypatch, working_dir):
+    """3-scene script, one shot per scene. Returns the reference URL used for
+    each scene's frame generation, in scene order."""
     reference_calls = []
 
     async def fake_generate_image(self, prompt, aspect_ratio="1:1", is_cancelled=None):
@@ -117,12 +122,41 @@ async def test_second_scene_references_first_scenes_generated_frame(monkeypatch)
         idea="Maya walks through the frozen city.",
         style="Cinematic",
         num_scenes=3,
-        working_dir="/tmp/_museforge_test_dynamic_ref",
+        working_dir=working_dir,
     )
 
     assert len(reference_calls) == 3, f"Expected exactly 3 frame generations, got {reference_calls}"
+    assert result["scene_count"] == 3
+    return reference_calls
 
-    # Scene 1 (first-ever shot for Maya): unchanged behavior -- the locked portrait.
+
+@pytest.mark.asyncio
+async def test_every_scene_re_anchors_to_locked_portrait_by_default(monkeypatch):
+    """Default: identity drift must not compound -- every scene references the
+    SAME locked portrait rather than the previous scene's generated frame."""
+    monkeypatch.delenv("MUSEFORGE_DYNAMIC_REFERENCE", raising=False)
+
+    reference_calls = await _run_three_scene_drama(
+        monkeypatch, "/tmp/_museforge_test_locked_ref"
+    )
+
+    assert reference_calls == ["https://fake.cdn/maya_portrait.png"] * 3, (
+        "Every scene must re-anchor to the locked portrait; chaining to the "
+        "previous frame lets identity error compound across scenes"
+    )
+
+
+@pytest.mark.asyncio
+async def test_second_scene_references_first_scenes_generated_frame(monkeypatch):
+    """Opt-in MUSEFORGE_DYNAMIC_REFERENCE=1: scene 2's reference must be
+    scene 1's GENERATED FRAME, not scene 1's locked portrait."""
+    monkeypatch.setenv("MUSEFORGE_DYNAMIC_REFERENCE", "1")
+
+    reference_calls = await _run_three_scene_drama(
+        monkeypatch, "/tmp/_museforge_test_dynamic_ref"
+    )
+
+    # Scene 1 (first-ever shot for Maya): the locked portrait either way.
     assert reference_calls[0] == "https://fake.cdn/maya_portrait.png"
 
     # Scene 2: must be scene 1's GENERATED FRAME, NOT the portrait again.
@@ -131,8 +165,6 @@ async def test_second_scene_references_first_scenes_generated_frame(monkeypatch)
 
     # Scene 3: must chain forward to scene 2's generated frame.
     assert reference_calls[2] == "https://fake.cdn/frame_2.png"
-
-    assert result["scene_count"] == 3
 
 
 @pytest.mark.asyncio

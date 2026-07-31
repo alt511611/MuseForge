@@ -271,3 +271,68 @@ async def test_crossfade_concat_fails_open_to_plain_concat(tmp_path, monkeypatch
     assert os.path.isfile(output)
     # Fallback used the plain concat path (real ffmpeg concat demuxer).
     assert abs(_duration_seconds(output) - 0.8) < 0.3
+
+
+# --- grade strength ----------------------------------------------------
+
+
+def test_grade_strength_defaults_below_full():
+    """Full-strength cross_process crushed skin tones and hid facial
+    expression, so the default must keep the look dialed back."""
+    from pipelines.script2video import DEFAULT_GRADE_STRENGTH, _grade_strength
+
+    assert 0.0 < DEFAULT_GRADE_STRENGTH < 1.0
+    assert _grade_strength() == DEFAULT_GRADE_STRENGTH
+
+
+def test_grade_strength_reads_and_clamps_env(monkeypatch):
+    from pipelines.script2video import DEFAULT_GRADE_STRENGTH, _grade_strength
+
+    monkeypatch.setenv("MUSEFORGE_GRADE_STRENGTH", "0.8")
+    assert _grade_strength() == pytest.approx(0.8)
+
+    monkeypatch.setenv("MUSEFORGE_GRADE_STRENGTH", "5")
+    assert _grade_strength() == 1.0
+    monkeypatch.setenv("MUSEFORGE_GRADE_STRENGTH", "-2")
+    assert _grade_strength() == 0.0
+
+    # Fail open rather than breaking rendering on a typo.
+    monkeypatch.setenv("MUSEFORGE_GRADE_STRENGTH", "not-a-number")
+    assert _grade_strength() == DEFAULT_GRADE_STRENGTH
+
+
+@pytest.mark.asyncio
+async def test_partial_grade_preserves_skin_tone(tmp_path, monkeypatch):
+    """Regression: the blend opacity applies to the UNGRADED top layer, so
+    it must be (1 - strength). An inverted opacity made strength=0.0 emit a
+    FULLY graded image -- the exact face-crushing look being dialed back.
+    """
+    from moviepy import ColorClip, VideoFileClip
+
+    from pipelines.script2video import apply_color_grade
+
+    src = str(tmp_path / "flat.mp4")
+    skin = (200, 150, 120)  # RGB skin tone
+    clip = ColorClip(size=(160, 90), color=skin, duration=1.0)
+    clip.write_videofile(src, fps=10, codec="libx264", audio=False, logger=None)
+    clip.close()
+
+    def _green(path):
+        with VideoFileClip(path) as graded:
+            return float(graded.get_frame(0.3)[:, :, 1].mean())
+
+    results = {}
+    for strength in ("0.0", "1.0"):
+        monkeypatch.setenv("MUSEFORGE_GRADE_STRENGTH", strength)
+        out = str(tmp_path / f"out_{strength}.mp4")
+        await apply_color_grade(src, out)
+        results[strength] = _green(out)
+
+    # strength 0 must stay near the source; strength 1 pushes green hard.
+    assert abs(results["0.0"] - skin[1]) < 12, (
+        f"strength=0.0 should be ~ungraded (green {skin[1]}), got {results['0.0']}"
+    )
+    assert results["1.0"] > results["0.0"] + 20, (
+        "strength=1.0 must be visibly more graded than strength=0.0; "
+        f"got {results['1.0']} vs {results['0.0']}"
+    )

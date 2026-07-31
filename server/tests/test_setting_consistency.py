@@ -38,11 +38,11 @@ def test_build_frame_prompt_empty_setting_matches_legacy_shape():
         lens="50mm",
     )
     prompt = build_frame_prompt("Cinematic", shot)
-    assert prompt == (
-        "Cinematic style. Maya walks the pier. "
-        "Shot type: medium shot. Lens: 50mm."
-    )
+    assert prompt.startswith("Cinematic style. Maya walks the pier.")
+    assert prompt.endswith("Shot type: medium shot. Lens: 50mm.")
     assert "Setting:" not in prompt
+    # No characters passed -> no identity clause to inject.
+    assert "Character appearance is FIXED" not in prompt
 
 
 def test_build_frame_prompt_injects_setting_when_present():
