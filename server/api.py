@@ -904,15 +904,23 @@ async def approve_script(
     demo = job.demo or _is_demo()
     api_key = os.environ.get("MUAPI_KEY", "")
 
+    # Bill and limit-check against the APPROVED script, not the scene count
+    # the job was created with. The approval step lets the caller edit the
+    # script freely, so a 2-scene job whose script is edited to 12 scenes
+    # would otherwise render 12 while paying for 2 -- and skip the plan's
+    # scene ceiling entirely.
+    approved_scenes = max(1, len(script.scenes))
+    job.num_scenes = approved_scenes  # keeps refunds/estimates consistent
+
     # Charge credits here — script phase was free.
     if current_user and not demo and job.user_id:
         plan = (job.plan or await _get_user_plan(job.user_id) or "free").lower()
-        _enforce_plan_scene_limit(plan, job.num_scenes)
+        _enforce_plan_scene_limit(plan, approved_scenes)
         credit_cost = (
-            job.num_scenes
+            approved_scenes
             + (MUSIC_EXTRA_CREDIT_COST if job.music_enabled else 0)
             + (
-                job.num_scenes * DIALOGUE_EXTRA_CREDIT_COST
+                approved_scenes * DIALOGUE_EXTRA_CREDIT_COST
                 if job.dialogue_enabled
                 else 0
             )

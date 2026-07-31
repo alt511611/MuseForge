@@ -331,10 +331,32 @@ class JobStore:
         self._max_jobs = max_jobs
         self._lock = asyncio.Lock()
 
+    #: Statuses that mean a job is done and safe to drop from memory.
+    _TERMINAL_STATUSES = (
+        JobStatus.COMPLETED,
+        JobStatus.FAILED,
+        JobStatus.CANCELLED,
+    )
+
     async def create(self, **kwargs) -> Job:
         async with self._lock:
             if len(self._jobs) >= self._max_jobs:
-                oldest = min(self._jobs.values(), key=lambda j: j.created_at)
+                # Evict a FINISHED job first. Evicting purely by age drops
+                # whichever job is oldest even while it is still running --
+                # its SSE stream and cancel endpoint then 404 while the work
+                # (and the spend) carries on invisibly.
+                finished = [
+                    j for j in self._jobs.values()
+                    if j.status in self._TERMINAL_STATUSES
+                ]
+                pool = finished or list(self._jobs.values())
+                if not finished:
+                    logger.warning(
+                        "Job store full (%s) with no finished jobs; evicting a "
+                        "live job — raise max_jobs if this recurs.",
+                        self._max_jobs,
+                    )
+                oldest = min(pool, key=lambda j: j.created_at)
                 del self._jobs[oldest.id]
 
             job_id = str(uuid.uuid4())[:12]
@@ -718,6 +740,7 @@ async def run_generation_job(job: Job, api_key: str):
                 asyncio.create_task(
                     _sb_refund_credits(job.user_id, _job_refund_amount(job), job.id)
                 )
+            cleanup_working_dir(working_dir)
         except asyncio.TimeoutError:
             job.status = JobStatus.FAILED
             job.error = "Generation timed out — please try again."
@@ -747,6 +770,9 @@ async def run_generation_job(job: Job, api_key: str):
             asyncio.create_task(
                 _sb_refund_credits(job.user_id, _job_refund_amount(job), job.id)
             )
+        # A failed job's partial renders are never served -- leaving them on
+        # disk fills a fixed-size container long before the 24h orphan sweep.
+        cleanup_working_dir(working_dir)
 
 async def run_continue_from_script_job(job: Job, api_key: str, script_data: Dict[str, Any]):
     """Resume after script approval — charges already taken by the API layer."""
@@ -801,6 +827,7 @@ async def run_continue_from_script_job(job: Job, api_key: str, script_data: Dict
                 asyncio.create_task(
                     _sb_refund_credits(job.user_id, _job_refund_amount(job), job.id)
                 )
+            cleanup_working_dir(working_dir)
             return
         # Keep approved script alongside final result for the UI.
         result = {**result, "script": script_data}
@@ -818,6 +845,7 @@ async def run_continue_from_script_job(job: Job, api_key: str, script_data: Dict
             asyncio.create_task(
                 _sb_refund_credits(job.user_id, _job_refund_amount(job), job.id)
             )
+        cleanup_working_dir(working_dir)
     except asyncio.TimeoutError:
         job.status = JobStatus.FAILED
         job.error = "Generation timed out — please try again."
@@ -839,3 +867,4 @@ async def run_continue_from_script_job(job: Job, api_key: str, script_data: Dict
             asyncio.create_task(
                 _sb_refund_credits(job.user_id, _job_refund_amount(job), job.id)
             )
+        cleanup_working_dir(working_dir)
