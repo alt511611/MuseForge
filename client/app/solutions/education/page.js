@@ -12,7 +12,7 @@ export default function EducationPage() {
       icon={<BookOpen size={12} />}
       accentColor="#0891b2"
       badge="Educational Institutions"
-      heading={<><span style={{ color: "#e2e8f0" }}>AI Video for</span><br /><span className="gradient-text">Classrooms &amp; Campuses</span></>}
+      heading={<><span style={{ color: "var(--mf-ink)" }}>AI Video for</span><br /><span className="gradient-text">Classrooms &amp; Campuses</span></>}
       subheading="Give students a professional-grade AI studio for their projects. Create institutional promotional content without a production budget. MuseForge scales from a single teacher to an entire university."
       useCases={[
         {

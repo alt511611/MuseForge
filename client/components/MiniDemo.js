@@ -1,22 +1,22 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { Sparkles, Loader2, CheckCircle2, Pen, Layout, Image as ImageIcon } from "lucide-react";
 import { useLanguage } from "../contexts/LanguageContext";
 
 const MOCK_STAGES = [
-  { icon: Pen,        label: "Writing screenplay...",  ms: 900 },
-  { icon: Layout,     label: "Designing storyboard...", ms: 1100 },
-  { icon: ImageIcon,  label: "Generating frames...",    ms: 1300 },
-  { icon: CheckCircle2, label: "Done!",                 ms: 0 },
+  { icon: Pen,          label: "Writing screenplay...",   ms: 900 },
+  { icon: Layout,       label: "Designing storyboard...", ms: 1100 },
+  { icon: ImageIcon,    label: "Generating frames...",    ms: 1300 },
+  { icon: CheckCircle2, label: "Done!",                   ms: 0 },
 ];
 
 function buildMockScenes(idea) {
   const topic = idea.trim().split(/\s+/).slice(0, 4).join(" ") || "your story";
   return [
-    { scene: "Scene 1", desc: `Opening shot: we meet the world of "${topic}".`, color: "#1e3a8a" },
-    { scene: "Scene 2", desc: `Rising action: tension builds around "${topic}".`, color: "#7c3aed" },
-    { scene: "Scene 3", desc: `Climax: "${topic}" reaches its turning point.`, color: "#be185d" },
+    { scene: "Scene 1", tc: "00:00", desc: `Opening shot: we meet the world of "${topic}".`, color: "#3b5bdb" },
+    { scene: "Scene 2", tc: "00:08", desc: `Rising action: tension builds around "${topic}".`, color: "#8b5cf6" },
+    { scene: "Scene 3", tc: "00:16", desc: `Climax: "${topic}" reaches its turning point.`, color: "#be185d" },
   ];
 }
 
@@ -47,43 +47,43 @@ export default function MiniDemo({ onTryReal }) {
   const reset = () => { setPhase("idle"); setStageIdx(0); setIdea(""); };
 
   return (
-    <div
-      className="rounded-2xl p-6 max-w-2xl mx-auto"
-      style={{ backgroundColor: "#12121a", border: "1px solid rgba(124,58,237,0.25)" }}
-    >
-      <div className="flex items-center gap-2 mb-4">
-        <Sparkles size={16} style={{ color: "#a78bfa" }} />
-        <span className="text-sm font-semibold" style={{ color: "#e2e8f0" }}>
-          Live Preview — no account needed
+    <div className="mf-card p-6 max-w-2xl mx-auto" style={{ borderColor: "rgba(139,92,246,0.28)" }}>
+      {/* Slate header — reads like a take marker on set */}
+      <div className="flex items-center gap-2 mb-5 pb-4" style={{ borderBottom: "1px solid var(--mf-line)" }}>
+        <Sparkles size={15} style={{ color: "var(--mf-violet-soft)" }} />
+        <span className="text-sm font-semibold" style={{ color: "var(--mf-ink)" }}>
+          Live preview — no account needed
         </span>
         <span
-          className="ml-auto text-xs px-2 py-0.5 rounded-full"
-          style={{ backgroundColor: "rgba(124,58,237,0.15)", color: "#a78bfa" }}
+          className="slate-label ml-auto px-2 py-0.5 rounded-full"
+          style={{ fontSize: "9px", backgroundColor: "rgba(232,182,76,0.12)", color: "var(--mf-gold)" }}
         >
           Mock
         </span>
       </div>
 
       {phase === "idle" && (
-        <div className="flex gap-2">
+        <div className="flex flex-col sm:flex-row gap-2">
           <input
             type="text"
             value={idea}
             onChange={(e) => setIdea(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && run()}
             placeholder="Type any idea and see the pipeline in action..."
-            className="flex-1 px-4 py-2.5 rounded-xl text-sm focus:outline-none"
-            style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#e2e8f0" }}
+            className="flex-1 px-4 py-3 rounded-xl text-sm focus:outline-none transition-colors"
+            style={{ backgroundColor: "var(--mf-stage)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink)" }}
+            onFocus={(e) => (e.target.style.borderColor = "var(--mf-violet)")}
+            onBlur={(e) => (e.target.style.borderColor = "var(--mf-line-strong)")}
           />
           <button
             onClick={run}
             disabled={!idea.trim()}
-            className="px-4 py-2.5 rounded-xl text-sm font-semibold transition-all"
-            style={{
-              background: idea.trim() ? "linear-gradient(135deg,#7c3aed,#6d28d9)" : "#1a1a26",
-              color: idea.trim() ? "#fff" : "#4b5563",
-              cursor: idea.trim() ? "pointer" : "not-allowed",
-            }}
+            className={idea.trim() ? "mf-btn-primary px-5 py-3 rounded-xl text-sm font-semibold" : "px-5 py-3 rounded-xl text-sm font-semibold"}
+            style={
+              idea.trim()
+                ? undefined
+                : { backgroundColor: "var(--mf-panel-2)", color: "var(--mf-ink-4)", cursor: "not-allowed", border: "1px solid var(--mf-line)" }
+            }
           >
             Preview
           </button>
@@ -91,15 +91,18 @@ export default function MiniDemo({ onTryReal }) {
       )}
 
       {phase === "running" && (
-        <div className="space-y-2">
+        <div className="space-y-2.5">
           {MOCK_STAGES.slice(0, stageIdx + 1).map((s, i) => {
             const done = i < stageIdx;
             return (
               <div key={i} className="flex items-center gap-3 text-sm animate-fade-in">
                 {done
-                  ? <CheckCircle2 size={16} style={{ color: "#4ade80" }} />
-                  : <Loader2 size={16} className="animate-spin" style={{ color: "#a78bfa" }} />}
-                <span style={{ color: done ? "#4ade80" : "#e2e8f0" }}>{s.label}</span>
+                  ? <CheckCircle2 size={16} style={{ color: "var(--mf-ok)" }} />
+                  : <Loader2 size={16} className="animate-spin" style={{ color: "var(--mf-violet-soft)" }} />}
+                <span style={{ color: done ? "var(--mf-ok)" : "var(--mf-ink)" }}>{s.label}</span>
+                <span className="slate-label ml-auto" style={{ fontSize: "9px" }}>
+                  {String(i + 1).padStart(2, "0")}
+                </span>
               </div>
             );
           })}
@@ -108,37 +111,35 @@ export default function MiniDemo({ onTryReal }) {
 
       {phase === "done" && (
         <div className="animate-fade-in">
-          <p className="text-xs mb-3" style={{ color: "#64748b" }}>
-            Mock storyboard for: <span style={{ color: "#a78bfa" }}>"{idea}"</span>
+          <p className="text-xs mb-3" style={{ color: "var(--mf-ink-3)" }}>
+            Mock storyboard for: <span style={{ color: "var(--mf-violet-soft)" }}>&quot;{idea}&quot;</span>
           </p>
-          <div className="grid grid-cols-3 gap-2 mb-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 mb-5">
             {buildMockScenes(idea).map((c) => (
               <div
                 key={c.scene}
-                className="rounded-xl p-3 text-xs"
+                className="relative rounded-xl overflow-hidden p-3 text-xs film-grain"
                 style={{
-                  background: `linear-gradient(135deg, ${c.color}55 0%, #12121a 100%)`,
-                  border: `1px solid ${c.color}66`,
+                  background: `linear-gradient(160deg, ${c.color}4d 0%, var(--mf-panel) 100%)`,
+                  border: `1px solid ${c.color}59`,
                 }}
               >
-                <p className="font-semibold mb-1" style={{ color: "#e2e8f0" }}>{c.scene}</p>
-                <p style={{ color: "#94a3b8" }}>{c.desc}</p>
+                <div className="flex items-center justify-between mb-1.5">
+                  <p className="font-semibold" style={{ color: "var(--mf-ink)" }}>{c.scene}</p>
+                  <span className="slate-label" style={{ fontSize: "9px" }}>{c.tc}</span>
+                </div>
+                <p style={{ color: "var(--mf-ink-2)" }}>{c.desc}</p>
               </div>
             ))}
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-col sm:flex-row gap-2">
             <button
               onClick={() => onTryReal && onTryReal(idea)}
-              className="flex-1 py-2.5 rounded-xl text-sm font-semibold transition-all"
-              style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}
+              className="mf-btn-primary flex-1 py-3 rounded-xl text-sm font-semibold"
             >
               {t("form_generate")} →
             </button>
-            <button
-              onClick={reset}
-              className="px-4 py-2.5 rounded-xl text-sm transition-all"
-              style={{ backgroundColor: "#1a1a26", border: "1px solid #22223a", color: "#64748b" }}
-            >
+            <button onClick={reset} className="mf-btn-ghost px-5 py-3 rounded-xl text-sm">
               Reset
             </button>
           </div>

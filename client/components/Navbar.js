@@ -27,11 +27,11 @@ function LanguageSelector() {
       <button
         onClick={() => setOpen((v) => !v)}
         className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs transition-all"
-        style={{ backgroundColor: "#12121a", border: "1px solid #22223a", color: "#94a3b8" }}
+        style={{ backgroundColor: "var(--mf-panel)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink-2)" }}
         aria-label={t("nav_select_language")}
         title={t("nav_language")}
       >
-        <Globe size={13} style={{ color: "#7c3aed" }} />
+        <Globe size={13} style={{ color: "var(--mf-violet)" }} />
         <span className="hidden sm:block font-medium">{current.flag} {locale.toUpperCase()}</span>
         <ChevronDown size={11} className={open ? "rotate-180" : ""} style={{ transition: "transform 0.2s" }} />
       </button>
@@ -39,7 +39,7 @@ function LanguageSelector() {
       {open && (
         <div
           className="absolute right-0 mt-2 w-52 rounded-xl py-1 z-50 animate-fade-in overflow-y-auto"
-          style={{ backgroundColor: "#12121a", border: "1px solid #22223a", maxHeight: "320px" }}
+          style={{ backgroundColor: "var(--mf-panel)", border: "1px solid var(--mf-line-strong)", maxHeight: "320px" }}
         >
           {LOCALE_CODES.map((code) => {
             const meta = LOCALES[code];
@@ -49,11 +49,11 @@ function LanguageSelector() {
                 key={code}
                 onClick={() => { setLocale(code); setOpen(false); }}
                 className="w-full flex items-center gap-2.5 px-4 py-2 text-xs text-left transition-colors hover:bg-white/5"
-                style={{ color: active ? "#a78bfa" : "#94a3b8", backgroundColor: active ? "rgba(124,58,237,0.08)" : "transparent" }}
+                style={{ color: active ? "var(--mf-violet-soft)" : "var(--mf-ink-2)", backgroundColor: active ? "rgba(139,92,246,0.08)" : "transparent" }}
               >
                 <span className="text-base leading-none">{meta.flag}</span>
                 <span>{meta.nativeName}</span>
-                {active && <span className="ml-auto text-purple-400">✓</span>}
+                {active && <span className="ml-auto" style={{ color: "var(--mf-violet-soft)" }}>✓</span>}
               </button>
             );
           })}
@@ -85,8 +85,8 @@ function SolutionsDropdown() {
     <div className="relative hidden sm:block" ref={ref}>
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-1 text-sm transition-colors hover:text-purple-400"
-        style={{ color: "#64748b" }}
+        className="flex items-center gap-1 text-sm transition-colors hover:text-violet-soft"
+        style={{ color: "var(--mf-ink-3)" }}
       >
         {t("nav_solutions")}
         <ChevronDown size={13} className={open ? "rotate-180" : ""} style={{ transition: "transform 0.2s" }} />
@@ -94,13 +94,13 @@ function SolutionsDropdown() {
       {open && (
         <div
           className="absolute left-0 mt-2 w-52 rounded-xl py-1 z-50 animate-fade-in"
-          style={{ backgroundColor: "#12121a", border: "1px solid #22223a" }}
+          style={{ backgroundColor: "var(--mf-panel)", border: "1px solid var(--mf-line-strong)" }}
         >
           {LINKS.map(({ icon: Icon, key, href }) => (
             <Link key={href} href={href} onClick={() => setOpen(false)}
               className="flex items-center gap-2.5 px-4 py-2.5 text-sm transition-colors hover:bg-white/5"
-              style={{ color: "#94a3b8" }}>
-              <Icon size={14} style={{ color: "#7c3aed" }} />
+              style={{ color: "var(--mf-ink-2)" }}>
+              <Icon size={14} style={{ color: "var(--mf-violet)" }} />
               {t(key)}
             </Link>
           ))}
@@ -171,15 +171,15 @@ export default function Navbar() {
     <nav
       className="sticky top-0 z-50 transition-all duration-300"
       style={{
-        backgroundColor: scrolled ? "rgba(10,10,15,0.95)" : "rgba(10,10,15,0.85)",
+        backgroundColor: scrolled ? "rgba(7,7,11,0.95)" : "rgba(7,7,11,0.82)",
         backdropFilter: scrolled ? "blur(20px)" : "blur(12px)",
-        borderBottom: "1px solid #12121a",
+        borderBottom: "1px solid var(--mf-line)",
         boxShadow: scrolled ? "0 4px 24px rgba(0,0,0,0.4)" : "none",
       }}
     >
       <div className="flex items-center justify-between px-4 sm:px-6 py-3">
       <Link href="/" className="flex items-center gap-2 min-w-0">
-        <Film size={20} style={{ color: "#7c3aed" }} className="flex-shrink-0" />
+        <Film size={20} style={{ color: "var(--mf-violet)" }} className="flex-shrink-0" />
         <span className="font-black tracking-tight gradient-text text-lg truncate">MuseForge</span>
       </Link>
 
@@ -187,8 +187,8 @@ export default function Navbar() {
         <SolutionsDropdown />
 
         <Link href="/pricing"
-          className="hidden sm:inline-flex items-center text-sm transition-colors hover:text-purple-400"
-          style={{ color: "#64748b" }}>
+          className="hidden sm:inline-flex items-center text-sm transition-colors hover:text-violet-soft"
+          style={{ color: "var(--mf-ink-3)" }}>
           {t("nav_pricing")}
         </Link>
 
@@ -196,7 +196,7 @@ export default function Navbar() {
           <Link
             href="/dashboard"
             className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium"
-            style={{ backgroundColor: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.35)", color: "#fbbf24" }}
+            style={{ backgroundColor: "rgba(232,182,76,0.12)", border: "1px solid rgba(232,182,76,0.35)", color: "var(--mf-gold)" }}
             title={t("credits_low_banner", { n: creditCount ?? 0 })}
           >
             <AlertTriangle size={11} />
@@ -209,7 +209,7 @@ export default function Navbar() {
         <button
           type="button"
           className="sm:hidden p-2 rounded-lg"
-          style={{ color: "#94a3b8", backgroundColor: "#12121a", border: "1px solid #22223a" }}
+          style={{ color: "var(--mf-ink-2)", backgroundColor: "var(--mf-panel)", border: "1px solid var(--mf-line-strong)" }}
           aria-label={mobileOpen ? "Close menu" : "Open menu"}
           onClick={() => setMobileOpen((v) => !v)}
         >
@@ -223,18 +223,18 @@ export default function Navbar() {
                 <button
                   onClick={() => setOpen(!open)}
                   className="flex items-center gap-2 px-3 py-1.5 rounded-xl text-sm transition-all relative"
-                  style={{ backgroundColor: "#12121a", border: "1px solid #22223a", color: "#94a3b8" }}
+                  style={{ backgroundColor: "var(--mf-panel)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink-2)" }}
                 >
                   {lowCredits && (
                     <span
                       className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full"
-                      style={{ backgroundColor: "#fbbf24", boxShadow: "0 0 0 2px #0a0a0f" }}
+                      style={{ backgroundColor: "var(--mf-gold)", boxShadow: "0 0 0 2px var(--mf-stage)" }}
                       aria-hidden
                     />
                   )}
                   <div
                     className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold"
-                    style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}
+                    style={{ background: "linear-gradient(135deg,var(--mf-violet),var(--mf-violet-deep))", color: "#fff" }}
                   >
                     {avatarLetter}
                   </div>
@@ -245,16 +245,16 @@ export default function Navbar() {
                 {open && (
                   <div
                     className="absolute right-0 mt-2 w-52 rounded-xl py-1 z-50 animate-fade-in"
-                    style={{ backgroundColor: "#12121a", border: "1px solid #22223a" }}
+                    style={{ backgroundColor: "var(--mf-panel)", border: "1px solid var(--mf-line-strong)" }}
                   >
-                    <div className="px-4 py-2 border-b" style={{ borderColor: "#22223a" }}>
-                      <p className="text-xs font-medium truncate" style={{ color: "#e2e8f0" }}>{user.email}</p>
+                    <div className="px-4 py-2 border-b" style={{ borderColor: "var(--mf-line-strong)" }}>
+                      <p className="text-xs font-medium truncate" style={{ color: "var(--mf-ink)" }}>{user.email}</p>
                       {isAdmin && (
-                        <p className="text-[10px] mt-0.5" style={{ color: "#a78bfa" }}>{t("nav_admin_badge")}</p>
+                        <p className="text-[10px] mt-0.5" style={{ color: "var(--mf-violet-soft)" }}>{t("nav_admin_badge")}</p>
                       )}
                       {lowCredits && (
                         <Link href="/pricing" onClick={() => setOpen(false)}
-                          className="block text-[10px] mt-1" style={{ color: "#fbbf24" }}>
+                          className="block text-[10px] mt-1" style={{ color: "var(--mf-gold)" }}>
                           {t("credits_low_banner", { n: creditCount ?? 0 })}
                         </Link>
                       )}
@@ -263,7 +263,7 @@ export default function Navbar() {
                       href="/dashboard"
                       onClick={() => setOpen(false)}
                       className="flex items-center gap-2 px-4 py-2 text-sm transition-colors hover:bg-white/5"
-                      style={{ color: "#94a3b8" }}
+                      style={{ color: "var(--mf-ink-2)" }}
                     >
                       <LayoutDashboard size={14} />
                       {t("nav_dashboard")}
@@ -273,7 +273,7 @@ export default function Navbar() {
                         href="/admin"
                         onClick={() => setOpen(false)}
                         className="flex items-center gap-2 px-4 py-2 text-sm transition-colors hover:bg-white/5"
-                        style={{ color: "#a78bfa" }}
+                        style={{ color: "var(--mf-violet-soft)" }}
                       >
                         <Shield size={14} />
                         {t("nav_admin")}
@@ -282,7 +282,7 @@ export default function Navbar() {
                     <button
                       onClick={handleSignOut}
                       className="w-full flex items-center gap-2 px-4 py-2 text-sm transition-colors hover:bg-white/5"
-                      style={{ color: "#f87171" }}
+                      style={{ color: "var(--mf-err)" }}
                     >
                       <LogOut size={14} />
                       {t("nav_signout")}
@@ -294,7 +294,7 @@ export default function Navbar() {
               <Link
                 href="/login"
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all"
-                style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}
+                style={{ background: "linear-gradient(135deg,var(--mf-violet),var(--mf-violet-deep))", color: "#fff" }}
               >
                 <User size={14} />
                 {t("nav_signin")}
@@ -306,12 +306,12 @@ export default function Navbar() {
       </div>
 
       {mobileOpen && (
-        <div className="sm:hidden px-4 pb-4 space-y-1 border-t" style={{ borderColor: "#1a1a26" }}>
+        <div className="sm:hidden px-4 pb-4 space-y-1 border-t" style={{ borderColor: "var(--mf-line)" }}>
           <Link href="/pricing" onClick={() => setMobileOpen(false)}
-            className="block px-3 py-2.5 rounded-lg text-sm" style={{ color: "#94a3b8" }}>
+            className="block px-3 py-2.5 rounded-lg text-sm" style={{ color: "var(--mf-ink-2)" }}>
             {t("nav_pricing")}
           </Link>
-          <p className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide" style={{ color: "#475569" }}>{t("nav_solutions")}</p>
+          <p className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide" style={{ color: "var(--mf-ink-4)" }}>{t("nav_solutions")}</p>
           {[
             { href: "/solutions/agencies", key: "sol_agencies" },
             { href: "/solutions/creators", key: "sol_creators" },
@@ -319,36 +319,36 @@ export default function Navbar() {
             { href: "/solutions/education", key: "sol_education" },
           ].map(({ href, key }) => (
             <Link key={href} href={href} onClick={() => setMobileOpen(false)}
-              className="block px-3 py-2 rounded-lg text-sm" style={{ color: "#94a3b8" }}>
+              className="block px-3 py-2 rounded-lg text-sm" style={{ color: "var(--mf-ink-2)" }}>
               {t(key)}
             </Link>
           ))}
           {user ? (
             <>
               <Link href="/dashboard" onClick={() => setMobileOpen(false)}
-                className="block px-3 py-2.5 rounded-lg text-sm" style={{ color: "#94a3b8" }}>
+                className="block px-3 py-2.5 rounded-lg text-sm" style={{ color: "var(--mf-ink-2)" }}>
                 {t("nav_dashboard")}
               </Link>
               {isAdmin && (
                 <Link href="/admin" onClick={() => setMobileOpen(false)}
-                  className="block px-3 py-2.5 rounded-lg text-sm" style={{ color: "#a78bfa" }}>
+                  className="block px-3 py-2.5 rounded-lg text-sm" style={{ color: "var(--mf-violet-soft)" }}>
                   {t("nav_admin")}
                 </Link>
               )}
               {lowCredits && (
                 <Link href="/pricing" onClick={() => setMobileOpen(false)}
-                  className="block px-3 py-2 text-xs" style={{ color: "#fbbf24" }}>
+                  className="block px-3 py-2 text-xs" style={{ color: "var(--mf-gold)" }}>
                   {t("credits_low_banner", { n: creditCount ?? 0 })}
                 </Link>
               )}
               <button type="button" onClick={() => { setMobileOpen(false); handleSignOut(); }}
-                className="w-full text-left px-3 py-2.5 rounded-lg text-sm" style={{ color: "#f87171" }}>
+                className="w-full text-left px-3 py-2.5 rounded-lg text-sm" style={{ color: "var(--mf-err)" }}>
                 {t("nav_signout")}
               </button>
             </>
           ) : (
             <Link href="/login" onClick={() => setMobileOpen(false)}
-              className="block px-3 py-2.5 rounded-lg text-sm font-medium" style={{ color: "#a78bfa" }}>
+              className="block px-3 py-2.5 rounded-lg text-sm font-medium" style={{ color: "var(--mf-violet-soft)" }}>
               {t("nav_signin")}
             </Link>
           )}

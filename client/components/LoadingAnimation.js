@@ -28,7 +28,7 @@ export default function LoadingAnimation({ size = 80, progress = 0, stage = "" }
       // Track
       ctx.beginPath();
       ctx.arc(cx, cy, r, 0, Math.PI * 2);
-      ctx.strokeStyle = "rgba(124,58,237,0.15)";
+      ctx.strokeStyle = "rgba(139,92,246,0.15)";
       ctx.lineWidth = 4;
       ctx.stroke();
 
@@ -37,8 +37,8 @@ export default function LoadingAnimation({ size = 80, progress = 0, stage = "" }
         const start = -Math.PI / 2;
         const end = start + (progress / 100) * Math.PI * 2;
         const grad = ctx.createLinearGradient(0, 0, size, size);
-        grad.addColorStop(0, "#7c3aed");
-        grad.addColorStop(1, "#a78bfa");
+        grad.addColorStop(0, "var(--mf-violet)");
+        grad.addColorStop(1, "var(--mf-violet-soft)");
         ctx.beginPath();
         ctx.arc(cx, cy, r, start, end);
         ctx.strokeStyle = grad;
@@ -62,7 +62,7 @@ export default function LoadingAnimation({ size = 80, progress = 0, stage = "" }
 
       ctx.beginPath();
       ctx.arc(dotX, dotY, 4, 0, Math.PI * 2);
-      ctx.fillStyle = "#a78bfa";
+      ctx.fillStyle = "var(--mf-violet-soft)";
       ctx.fill();
 
       angleRef.current += 0.04;
@@ -77,7 +77,7 @@ export default function LoadingAnimation({ size = 80, progress = 0, stage = "" }
     <div className="flex flex-col items-center gap-3">
       <canvas ref={canvasRef} style={{ borderRadius: "50%" }} />
       {stage && (
-        <span className="text-xs animate-pulse" style={{ color: "#7c3aed" }}>
+        <span className="text-xs animate-pulse" style={{ color: "var(--mf-violet)" }}>
           {stage}
         </span>
       )}

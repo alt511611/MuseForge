@@ -27,33 +27,33 @@ export default function CookieConsent() {
       role="dialog"
       aria-label="Cookie consent"
     >
-      <div className="glass rounded-2xl p-5 shadow-2xl" style={{ border: "1px solid rgba(124,58,237,0.3)" }}>
+      <div className="glass rounded-2xl p-5 shadow-2xl" style={{ border: "1px solid rgba(139,92,246,0.3)" }}>
         <div className="flex items-start gap-3">
           <div className="flex-shrink-0 w-9 h-9 rounded-xl flex items-center justify-center mt-0.5"
-            style={{ backgroundColor: "rgba(124,58,237,0.15)" }}>
-            <Cookie size={18} style={{ color: "#a78bfa" }} />
+            style={{ backgroundColor: "rgba(139,92,246,0.15)" }}>
+            <Cookie size={18} style={{ color: "var(--mf-violet-soft)" }} />
           </div>
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-semibold mb-1" style={{ color: "#e2e8f0" }}>{t("cookie_title")}</p>
-            <p className="text-xs leading-relaxed mb-3" style={{ color: "#64748b" }}>
+            <p className="text-sm font-semibold mb-1" style={{ color: "var(--mf-ink)" }}>{t("cookie_title")}</p>
+            <p className="text-xs leading-relaxed mb-3" style={{ color: "var(--mf-ink-3)" }}>
               {t("cookie_body")}{" "}
-              <Link href="/legal/privacy" className="underline" style={{ color: "#a78bfa" }}>
+              <Link href="/legal/privacy" className="underline" style={{ color: "var(--mf-violet-soft)" }}>
                 {t("cookie_privacy_link")}
               </Link>
             </p>
             <div className="flex gap-2">
               <button onClick={accept} className="flex-1 py-2 rounded-xl text-xs font-semibold transition-all"
-                style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}>
+                style={{ background: "linear-gradient(135deg,var(--mf-violet),var(--mf-violet-deep))", color: "#fff" }}>
                 {t("cookie_accept")}
               </button>
               <button onClick={reject} className="flex-1 py-2 rounded-xl text-xs font-medium transition-all"
-                style={{ backgroundColor: "#12121a", border: "1px solid #22223a", color: "#64748b" }}>
+                style={{ backgroundColor: "var(--mf-panel)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink-3)" }}>
                 {t("cookie_reject")}
               </button>
             </div>
           </div>
           <button onClick={reject} className="flex-shrink-0 p-1 rounded-lg transition-colors hover:bg-white/5"
-            style={{ color: "#475569" }} aria-label="Close">
+            style={{ color: "var(--mf-ink-4)" }} aria-label="Close">
             <X size={16} />
           </button>
         </div>

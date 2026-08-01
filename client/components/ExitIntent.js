@@ -41,12 +41,12 @@ export default function ExitIntent() {
     >
       <div
         className="relative max-w-sm w-full rounded-2xl p-7 animate-fade-in text-center"
-        style={{ backgroundColor: "#12121a", border: "1px solid rgba(124,58,237,0.4)" }}
+        style={{ backgroundColor: "var(--mf-panel)", border: "1px solid rgba(139,92,246,0.4)" }}
       >
         <button
           onClick={() => setVisible(false)}
           className="absolute top-3 right-3 p-1.5 rounded-lg transition-colors hover:bg-white/5"
-          style={{ color: "#475569" }}
+          style={{ color: "var(--mf-ink-4)" }}
           aria-label="Close"
         >
           <X size={16} />
@@ -54,15 +54,15 @@ export default function ExitIntent() {
 
         <div
           className="w-12 h-12 rounded-2xl flex items-center justify-center mx-auto mb-4"
-          style={{ backgroundColor: "rgba(124,58,237,0.15)", border: "1px solid rgba(124,58,237,0.3)" }}
+          style={{ backgroundColor: "rgba(139,92,246,0.15)", border: "1px solid rgba(139,92,246,0.3)" }}
         >
-          <Sparkles size={22} style={{ color: "#a78bfa" }} />
+          <Sparkles size={22} style={{ color: "var(--mf-violet-soft)" }} />
         </div>
 
-        <h3 className="text-lg font-bold mb-2" style={{ color: "#e2e8f0" }}>
+        <h3 className="text-lg font-bold mb-2" style={{ color: "var(--mf-ink)" }}>
           Wait — try it free first! ✨
         </h3>
-        <p className="text-sm mb-5" style={{ color: "#94a3b8" }}>
+        <p className="text-sm mb-5" style={{ color: "var(--mf-ink-2)" }}>
           No API key needed. See how MuseForge turns a single sentence into a
           cinematic video with demo mode.
         </p>
@@ -72,14 +72,14 @@ export default function ExitIntent() {
             href="/"
             onClick={() => setVisible(false)}
             className="block w-full py-3 rounded-xl text-sm font-semibold transition-all text-center"
-            style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}
+            style={{ background: "linear-gradient(135deg,var(--mf-violet),var(--mf-violet-deep))", color: "#fff" }}
           >
             Try Demo Mode Free →
           </Link>
           <button
             onClick={() => setVisible(false)}
             className="text-xs py-2"
-            style={{ color: "#4b5563" }}
+            style={{ color: "var(--mf-ink-4)" }}
           >
             No thanks, I'll pass
           </button>

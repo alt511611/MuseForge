@@ -3,12 +3,13 @@
 import { useSearchParams, useRouter } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
-import { Check, Zap, Film, Crown, Building2, Loader2, Settings, CreditCard, X, Sparkles, Users, BookOpen, Clapperboard } from "lucide-react";
+import { Check, Zap, Film, Crown, Building2, Loader2, Settings, CreditCard, X, Sparkles, Users, BookOpen, Clapperboard, Plus } from "lucide-react";
 import CheckoutButton from "../../components/CheckoutButton";
 import { useAuth } from "../../contexts/AuthContext";
 import { useLanguage } from "../../contexts/LanguageContext";
 import Confetti from "../../components/Confetti";
 import { API_BASE } from "../../lib/apiBase";
+import { friendlyError } from "../../utils/errorMessages";
 
 // ── Credit package buy button ─────────────────────────────────────────────────
 function BuyCreditsButton({ pkg, label, price, credits, highlight }) {
@@ -35,7 +36,7 @@ function BuyCreditsButton({ pkg, label, price, credits, highlight }) {
       if (!res.ok) { const e = await res.json(); throw new Error(e.detail || "Error"); }
       const { url } = await res.json();
       window.location.href = url;
-    } catch (e) { setErr(e.message); setLoading(false); }
+    } catch (e) { setErr(friendlyError(e.message)); setLoading(false); }
   };
 
   return (
@@ -43,17 +44,13 @@ function BuyCreditsButton({ pkg, label, price, credits, highlight }) {
       <button
         onClick={handle}
         disabled={loading}
-        className="px-4 py-2 rounded-xl text-sm font-semibold transition-all"
-        style={
-          highlight
-            ? { background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff", opacity: loading ? 0.7 : 1 }
-            : { backgroundColor: "#1a1a26", border: "1px solid #22223a", color: "#94a3b8", opacity: loading ? 0.7 : 1 }
-        }
+        className={`px-4 py-2 rounded-xl text-sm font-semibold ${highlight ? "mf-btn-primary" : "mf-btn-ghost"}`}
+        style={{ opacity: loading ? 0.7 : 1 }}
       >
         {loading ? <Loader2 size={14} className="animate-spin inline mr-1" /> : null}
         {t("pricing_credits_buy")}
       </button>
-      {err && <p className="text-[11px] text-red-400">{err}</p>}
+      {err && <p className="text-[11px]" style={{ color: "var(--mf-err-soft)" }}>{err}</p>}
     </div>
   );
 }
@@ -75,18 +72,18 @@ function ManagePortalButton({ getAccessToken }) {
       if (!res.ok) { const e = await res.json(); throw new Error(e.detail || "Error"); }
       const { url } = await res.json();
       window.location.href = url;
-    } catch (e) { setErr(e.message); setLoading(false); }
+    } catch (e) { setErr(friendlyError(e.message)); setLoading(false); }
   };
   return (
     <div className="text-center mt-8">
       <button onClick={handle} disabled={loading}
-        className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-medium transition-all"
-        style={{ backgroundColor: "#12121a", border: "1px solid #22223a", color: "#94a3b8", opacity: loading ? 0.6 : 1 }}>
+        className="mf-btn-ghost inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-medium"
+        style={{ opacity: loading ? 0.6 : 1 }}>
         {loading ? <Loader2 size={14} className="animate-spin" /> : <Settings size={14} />}
         {t("pricing_manage")}
       </button>
-      {err && <p className="text-xs mt-2 text-center" style={{ color: "#fca5a5" }}>{err}</p>}
-      <p className="text-xs mt-2" style={{ color: "#374151" }}>{t("pricing_portal_hint")}</p>
+      {err && <p className="text-xs mt-2 text-center" style={{ color: "var(--mf-err-soft)" }}>{err}</p>}
+      <p className="text-xs mt-2" style={{ color: "var(--mf-ink-4)" }}>{t("pricing_portal_hint")}</p>
     </div>
   );
 }
@@ -191,12 +188,12 @@ function PricingContent() {
   ];
 
   return (
-    <main className="min-h-screen" style={{ backgroundColor: "#0a0a0f" }}>
+    <main className="min-h-screen" style={{ backgroundColor: "var(--mf-stage)" }}>
       <Confetti active={confetti} />
 
       {success && (
         <div className="py-3 text-center text-sm font-medium animate-fade-in"
-          style={{ background: "linear-gradient(90deg,rgba(34,197,94,0.2),rgba(34,197,94,0.1))", color: "#86efac", borderBottom: "1px solid rgba(34,197,94,0.2)" }}>
+          style={{ background: "linear-gradient(90deg,rgba(52,211,153,0.18),rgba(52,211,153,0.08))", color: "var(--mf-ok)", borderBottom: "1px solid rgba(52,211,153,0.25)" }}>
           🎉 {creditsBought
             ? `${creditsBought} credits added to your account!`
             : successPlan
@@ -205,31 +202,41 @@ function PricingContent() {
         </div>
       )}
 
-      <div className="max-w-6xl mx-auto px-6 py-16">
-        {/* Header */}
-        <div className="text-center mb-14">
-          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium mb-5"
-            style={{ backgroundColor: "rgba(124,58,237,0.15)", border: "1px solid rgba(124,58,237,0.3)", color: "#a78bfa" }}>
+      {/* Stage lighting, matching the landing hero so the two pages read as
+          one product rather than two templates. */}
+      <div className="relative overflow-hidden film-grain">
+        <div className="absolute inset-0 pointer-events-none" aria-hidden="true">
+          <div
+            className="absolute -top-40 left-1/2 -translate-x-1/2 w-[900px] h-[500px] rounded-full"
+            style={{ background: "radial-gradient(ellipse at center, rgba(139,92,246,0.26) 0%, transparent 68%)", filter: "blur(90px)" }}
+          />
+        </div>
+
+        <div className="relative max-w-6xl mx-auto px-6 pt-16 pb-10 text-center animate-rise">
+          <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-medium mb-6"
+            style={{ backgroundColor: "rgba(139,92,246,0.12)", border: "1px solid rgba(139,92,246,0.32)", color: "var(--mf-violet-soft)" }}>
             <Zap size={12} /> {t("pricing_badge")}
           </div>
-          <h1 className="text-4xl md:text-5xl font-black tracking-tight mb-4">
-            <span className="gradient-text">{t("pricing_header")}</span>
+          <h1 className="display text-display-sm md:text-display-md mb-5" style={{ color: "var(--mf-ink)" }}>
+            {t("pricing_header")}
           </h1>
-          <p className="text-base max-w-xl mx-auto mb-3" style={{ color: "#64748b" }}>{t("pricing_sub")}</p>
-          <p className="text-xs font-medium mb-8" style={{ color: "#a78bfa" }}>{t("pricing_cancel_anytime")}</p>
+          <p className="text-base md:text-lg max-w-xl mx-auto mb-3" style={{ color: "var(--mf-ink-2)" }}>{t("pricing_sub")}</p>
+          <p className="slate-label mb-8" style={{ color: "var(--mf-gold)" }}>{t("pricing_cancel_anytime")}</p>
 
           {/* Segment links */}
           <div className="flex flex-wrap justify-center gap-2">
             {SEGMENT_LINKS.map(({ icon: Icon, label, href }) => (
               <Link key={href} href={href}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all hover:border-purple-500/50"
-                style={{ backgroundColor: "#12121a", border: "1px solid #22223a", color: "#64748b" }}>
-                <Icon size={12} style={{ color: "#7c3aed" }} />
+                className="mf-btn-ghost inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-medium">
+                <Icon size={12} style={{ color: "var(--mf-violet)" }} />
                 {label}
               </Link>
             ))}
           </div>
         </div>
+      </div>
+
+      <div className="max-w-6xl mx-auto px-6 pb-16">
 
         {/* Plans grid */}
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-6 mb-16">
@@ -237,43 +244,43 @@ function PricingContent() {
             const Icon = plan.icon;
             const SegIcon = plan.segIcon;
             return (
-              <div key={plan.id} className="relative glass rounded-2xl p-7 flex flex-col transition-all hover:scale-[1.01]"
+              <div key={plan.id} className="relative mf-card mf-card-hover p-7 flex flex-col"
                 style={{
-                  border: plan.highlight ? "1px solid rgba(124,58,237,0.5)" : "1px solid rgba(124,58,237,0.1)",
-                  boxShadow: plan.highlight ? "0 0 40px rgba(124,58,237,0.12)" : "none",
+                  borderColor: plan.highlight ? "rgba(139,92,246,0.5)" : "var(--mf-line)",
+                  boxShadow: plan.highlight ? "var(--mf-glow)" : "none",
                 }}>
                 {plan.badge && (
                   <div className="absolute -top-3.5 left-1/2 -translate-x-1/2 px-4 py-1 rounded-full text-xs font-semibold whitespace-nowrap"
-                    style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}>
+                    style={{ background: "linear-gradient(135deg,var(--mf-violet),var(--mf-violet-deep))", color: "#fff" }}>
                     {plan.badge}
                   </div>
                 )}
 
                 <div className="flex items-center gap-3 mb-3">
                   <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
-                    style={{ backgroundColor: plan.highlight ? "rgba(124,58,237,0.2)" : "#1a1a26" }}>
-                    <Icon size={20} style={{ color: plan.highlight ? "#a78bfa" : "#64748b" }} />
+                    style={{ backgroundColor: plan.highlight ? "rgba(139,92,246,0.2)" : "var(--mf-line)" }}>
+                    <Icon size={20} style={{ color: plan.highlight ? "var(--mf-violet-soft)" : "var(--mf-ink-3)" }} />
                   </div>
                   <div>
-                    <h2 className="text-base font-bold" style={{ color: "#e2e8f0" }}>{plan.name}</h2>
-                    <p className="text-xs" style={{ color: "#64748b" }}>{plan.description}</p>
+                    <h2 className="text-base font-bold" style={{ color: "var(--mf-ink)" }}>{plan.name}</h2>
+                    <p className="text-xs" style={{ color: "var(--mf-ink-3)" }}>{plan.description}</p>
                   </div>
                 </div>
 
                 {/* For who */}
                 <Link href={plan.segHref}
                   className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg mb-4 transition-colors hover:bg-white/5"
-                  style={{ backgroundColor: "rgba(124,58,237,0.06)", color: "#a78bfa", border: "1px solid rgba(124,58,237,0.15)" }}>
+                  style={{ backgroundColor: "rgba(139,92,246,0.06)", color: "var(--mf-violet-soft)", border: "1px solid rgba(139,92,246,0.15)" }}>
                   <SegIcon size={11} />
                   {plan.forWho}
                 </Link>
 
                 <div className="mb-6">
-                  <span className="text-4xl font-black" style={{ color: "#e2e8f0" }}>{plan.price}</span>
-                  {!plan.isEnterprise && <span className="text-sm ml-1" style={{ color: "#64748b" }}>{t("plan_period")}</span>}
+                  <span className="display text-4xl" style={{ color: "var(--mf-ink)" }}>{plan.price}</span>
+                  {!plan.isEnterprise && <span className="text-sm ml-1.5" style={{ color: "var(--mf-ink-3)" }}>{t("plan_period")}</span>}
                   {plan.credits && (
-                    <p className="text-xs mt-1 font-medium" style={{ color: "#7c3aed" }}>
-                      <Sparkles size={10} className="inline mr-1" />
+                    <p className="slate-label mt-2 flex items-center gap-1.5" style={{ color: "var(--mf-violet-soft)" }}>
+                      <Sparkles size={10} />
                       {plan.credits} credits / mo
                     </p>
                   )}
@@ -281,14 +288,14 @@ function PricingContent() {
 
                 <ul className="space-y-2 mb-6 flex-1">
                   {plan.features.map((f) => f && (
-                    <li key={f} className="flex items-start gap-2 text-sm" style={{ color: "#94a3b8" }}>
-                      <Check size={13} className="mt-0.5 flex-shrink-0" style={{ color: "#22c55e" }} />
+                    <li key={f} className="flex items-start gap-2 text-sm" style={{ color: "var(--mf-ink-2)" }}>
+                      <Check size={13} className="mt-0.5 flex-shrink-0" style={{ color: "var(--mf-ok)" }} />
                       {f}
                     </li>
                   ))}
                   {plan.unavailable.map((f) => f && (
-                    <li key={f} className="flex items-center gap-2 text-sm line-through" style={{ color: "#374151" }}>
-                      <X size={13} className="flex-shrink-0" style={{ color: "#374151" }} />
+                    <li key={f} className="flex items-center gap-2 text-sm line-through" style={{ color: "var(--mf-ink-4)" }}>
+                      <X size={13} className="flex-shrink-0" style={{ color: "var(--mf-ink-4)" }} />
                       {f}
                     </li>
                   ))}
@@ -296,25 +303,18 @@ function PricingContent() {
 
                 {plan.isEnterprise ? (
                   <Link href="mailto:enterprise@museforge.ai"
-                    className="w-full py-3 rounded-xl text-sm font-semibold text-center block transition-all"
-                    style={{ backgroundColor: "#1a1a26", border: "1px solid #22223a", color: "#94a3b8" }}>
+                    className="mf-btn-ghost w-full py-3 rounded-xl text-sm font-semibold text-center block">
                     {plan.cta}
                   </Link>
                 ) : plan.id === "free" ? (
                   <Link href={user ? "/" : "/login"}
-                    className="w-full py-3 rounded-xl text-sm font-semibold text-center block transition-all"
-                    style={{ backgroundColor: "#12121a", border: "1px solid #22223a", color: "#64748b" }}>
+                    className="mf-btn-ghost w-full py-3 rounded-xl text-sm font-semibold text-center block">
                     {plan.cta}
                   </Link>
                 ) : (
                   <CheckoutButton
                     plan={plan.id}
-                    className="w-full py-3 rounded-xl text-sm font-semibold"
-                    style={
-                      plan.highlight
-                        ? { background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }
-                        : { backgroundColor: "#1a1a26", border: "1px solid #22223a", color: "#94a3b8" }
-                    }
+                    className={`w-full py-3 rounded-xl text-sm font-semibold ${plan.highlight ? "mf-btn-primary" : "mf-btn-ghost"}`}
                   >
                     {plan.cta}
                   </CheckoutButton>
@@ -325,18 +325,17 @@ function PricingContent() {
         </div>
 
         {/* Credit Packages strip */}
-        <div className="glass rounded-2xl p-8 mb-16" style={{ border: "1px solid rgba(124,58,237,0.15)" }}>
+        <div className="mf-card p-8 mb-16" style={{ borderColor: "rgba(139,92,246,0.2)" }}>
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-6">
             <div>
-              <h2 className="text-xl font-bold" style={{ color: "#e2e8f0" }}>
-                <CreditCard size={18} className="inline mr-2" style={{ color: "#7c3aed" }} />
+              <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: "var(--mf-ink)" }}>
+                <CreditCard size={18} style={{ color: "var(--mf-violet)" }} />
                 {t("pricing_credits_title")}
               </h2>
-              <p className="text-sm mt-1" style={{ color: "#64748b" }}>{t("pricing_credits_sub")}</p>
+              <p className="text-sm mt-1" style={{ color: "var(--mf-ink-3)" }}>{t("pricing_credits_sub")}</p>
             </div>
             <Link href="/solutions/filmmakers"
-              className="text-xs px-3 py-1.5 rounded-xl transition-colors hover:border-purple-500/40"
-              style={{ backgroundColor: "#12121a", border: "1px solid #22223a", color: "#a78bfa" }}>
+              className="mf-btn-ghost text-xs px-3.5 py-2 rounded-xl">
               {t("sol_filmmakers")} →
             </Link>
           </div>
@@ -345,13 +344,13 @@ function PricingContent() {
               <div key={pkg.key}
                 className="flex items-center justify-between p-4 rounded-xl"
                 style={{
-                  backgroundColor: pkg.highlight ? "rgba(124,58,237,0.08)" : "#0d0d14",
-                  border: pkg.highlight ? "1px solid rgba(124,58,237,0.35)" : "1px solid #1a1a26",
+                  backgroundColor: pkg.highlight ? "rgba(139,92,246,0.08)" : "var(--mf-bg)",
+                  border: pkg.highlight ? "1px solid rgba(139,92,246,0.35)" : "1px solid var(--mf-line)",
                 }}>
                 <div>
-                  <p className="text-sm font-bold" style={{ color: "#e2e8f0" }}>{pkg.label}</p>
-                  <p className="text-2xl font-black mt-0.5" style={{ color: pkg.highlight ? "#a78bfa" : "#64748b" }}>{pkg.price}</p>
-                  <p className="text-xs mt-0.5" style={{ color: "#475569" }}>${(parseFloat(pkg.price.replace("$","")) / pkg.credits).toFixed(2)}/credit</p>
+                  <p className="slate-label" style={{ fontSize: "10px" }}>{pkg.label}</p>
+                  <p className="display text-2xl mt-1.5" style={{ color: pkg.highlight ? "var(--mf-violet-soft)" : "var(--mf-ink)" }}>{pkg.price}</p>
+                  <p className="text-xs mt-1" style={{ color: "var(--mf-ink-4)" }}>${(parseFloat(pkg.price.replace("$","")) / pkg.credits).toFixed(2)}/credit</p>
                 </div>
                 <BuyCreditsButton
                   pkg={pkg.key}
@@ -363,22 +362,39 @@ function PricingContent() {
           </div>
         </div>
 
-        {/* FAQ */}
+        {/* FAQ — same accordion pattern as the landing page */}
         <div className="max-w-2xl mx-auto mb-12">
-          <h2 className="text-xl font-bold text-center mb-8" style={{ color: "#e2e8f0" }}>{t("pricing_faq_title")}</h2>
-          {PRICING_FAQ.map(({ q, a }) => (
-            <div key={q} className="border-b py-5" style={{ borderColor: "#1a1a26" }}>
-              <p className="text-sm font-medium mb-1.5" style={{ color: "#e2e8f0" }}>{q}</p>
-              <p className="text-sm" style={{ color: "#64748b" }}>{a}</p>
-            </div>
-          ))}
+          <p className="slate-label text-center">Questions</p>
+          <h2 className="display text-3xl text-center mt-3 mb-8" style={{ color: "var(--mf-ink)" }}>{t("pricing_faq_title")}</h2>
+          <div className="mf-card overflow-hidden">
+            {PRICING_FAQ.map(({ q, a }, i, arr) => (
+              <details
+                key={q}
+                className="group px-6"
+                style={{ borderBottom: i === arr.length - 1 ? "none" : "1px solid var(--mf-line)" }}
+              >
+                <summary
+                  className="flex items-center justify-between gap-4 py-5 cursor-pointer list-none text-sm font-medium"
+                  style={{ color: "var(--mf-ink)" }}
+                >
+                  {q}
+                  <Plus
+                    size={16}
+                    className="flex-shrink-0 transition-transform duration-300 group-open:rotate-45"
+                    style={{ color: "var(--mf-violet-soft)" }}
+                  />
+                </summary>
+                <p className="text-sm leading-relaxed pb-5 -mt-1" style={{ color: "var(--mf-ink-3)" }}>{a}</p>
+              </details>
+            ))}
+          </div>
         </div>
 
         {user && <ManagePortalButton getAccessToken={getAccessToken} />}
 
-        <div className="text-center mt-12 text-xs space-x-4" style={{ color: "#374151" }}>
-          <Link href="/legal/terms" className="hover:text-purple-400">{t("pricing_legal_terms")}</Link>
-          <Link href="/legal/privacy" className="hover:text-purple-400">{t("pricing_legal_privacy")}</Link>
+        <div className="text-center mt-12 text-xs space-x-4" style={{ color: "var(--mf-ink-4)" }}>
+          <Link href="/legal/terms" className="hover:text-violet-soft">{t("pricing_legal_terms")}</Link>
+          <Link href="/legal/privacy" className="hover:text-violet-soft">{t("pricing_legal_privacy")}</Link>
         </div>
       </div>
     </main>

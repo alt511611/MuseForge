@@ -9,7 +9,7 @@ import { useLanguage } from "../contexts/LanguageContext";
  *
  * Props:
  *   icon        — pre-rendered JSX icon
- *   accentColor — e.g. "#7c3aed"
+ *   accentColor — e.g. "var(--mf-violet)"
  *   badge       — small badge text above heading
  *   heading     — main h1 (can be JSX)
  *   subheading  — paragraph under h1
@@ -20,7 +20,7 @@ import { useLanguage } from "../contexts/LanguageContext";
  */
 export default function SolutionPage({
   icon: HeadlineIcon,
-  accentColor = "#7c3aed",
+  accentColor = "var(--mf-violet)",
   badge,
   heading,
   subheading,
@@ -31,7 +31,7 @@ export default function SolutionPage({
 }) {
   const { t } = useLanguage();
   return (
-    <main className="min-h-screen" style={{ backgroundColor: "#0a0a0f" }}>
+    <main className="min-h-screen" style={{ backgroundColor: "var(--mf-stage)" }}>
       {/* Hero */}
       <div className="relative overflow-hidden">
         <div className="absolute inset-0 pointer-events-none"
@@ -47,7 +47,7 @@ export default function SolutionPage({
           <h1 className="text-4xl md:text-6xl font-black tracking-tight mb-5 leading-tight">
             {heading}
           </h1>
-          <p className="text-lg max-w-2xl mx-auto" style={{ color: "#64748b" }}>{subheading}</p>
+          <p className="text-lg max-w-2xl mx-auto" style={{ color: "var(--mf-ink-3)" }}>{subheading}</p>
         </div>
       </div>
 
@@ -57,16 +57,16 @@ export default function SolutionPage({
           <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
             {useCases.map(({ icon, title, desc, sample }, i) => (
               <div key={i} className="glass rounded-2xl p-6 group hover:border-purple-600/30 transition-all"
-                style={{ border: "1px solid rgba(124,58,237,0.1)" }}>
+                style={{ border: "1px solid rgba(139,92,246,0.1)" }}>
                 <div className="w-10 h-10 rounded-xl flex items-center justify-center mb-4"
                   style={{ backgroundColor: `${accentColor}18` }}>
                   {icon}
                 </div>
-                <h3 className="text-base font-bold mb-2" style={{ color: "#e2e8f0" }}>{title}</h3>
-                <p className="text-sm leading-relaxed" style={{ color: "#64748b" }}>{desc}</p>
+                <h3 className="text-base font-bold mb-2" style={{ color: "var(--mf-ink)" }}>{title}</h3>
+                <p className="text-sm leading-relaxed" style={{ color: "var(--mf-ink-3)" }}>{desc}</p>
                 {sample && (
                   <div className="mt-4 rounded-xl overflow-hidden aspect-video relative"
-                    style={{ backgroundColor: "#12121a", border: "1px solid #22223a" }}>
+                    style={{ backgroundColor: "var(--mf-panel)", border: "1px solid var(--mf-line-strong)" }}>
                     <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
                       <div className="w-12 h-12 rounded-full flex items-center justify-center"
                         style={{ backgroundColor: `${accentColor}25`, border: `1px solid ${accentColor}40` }}>
@@ -76,7 +76,7 @@ export default function SolutionPage({
                         style={{ backgroundColor: `${accentColor}20`, color: accentColor }}>
                         {t("sol_example_output")}
                       </span>
-                      <p className="text-xs text-center max-w-[180px]" style={{ color: "#475569" }}>{sample}</p>
+                      <p className="text-xs text-center max-w-[180px]" style={{ color: "var(--mf-ink-4)" }}>{sample}</p>
                     </div>
                   </div>
                 )}
@@ -89,15 +89,15 @@ export default function SolutionPage({
       {/* Differentiators */}
       {differentiators.length > 0 && (
         <section className="max-w-5xl mx-auto px-6 py-8">
-          <div className="glass rounded-2xl p-8" style={{ border: "1px solid rgba(124,58,237,0.12)" }}>
+          <div className="glass rounded-2xl p-8" style={{ border: "1px solid rgba(139,92,246,0.12)" }}>
             <h2 className="text-2xl font-black mb-6 gradient-text">{t("sol_diff_title")}</h2>
             <div className="space-y-4">
               {differentiators.map(({ title, desc }, i) => (
                 <div key={i} className="flex items-start gap-3">
-                  <Check size={16} className="mt-1 flex-shrink-0" style={{ color: "#22c55e" }} />
+                  <Check size={16} className="mt-1 flex-shrink-0" style={{ color: "var(--mf-ok)" }} />
                   <div>
-                    <p className="text-sm font-semibold" style={{ color: "#e2e8f0" }}>{title}</p>
-                    <p className="text-sm" style={{ color: "#64748b" }}>{desc}</p>
+                    <p className="text-sm font-semibold" style={{ color: "var(--mf-ink)" }}>{title}</p>
+                    <p className="text-sm" style={{ color: "var(--mf-ink-3)" }}>{desc}</p>
                   </div>
                 </div>
               ))}
@@ -109,26 +109,26 @@ export default function SolutionPage({
       {/* Plan card */}
       {planCard && (
         <section className="max-w-5xl mx-auto px-6 py-10">
-          <h2 className="text-xl font-bold mb-5" style={{ color: "#e2e8f0" }}>{t("sol_recommended_plan")}</h2>
+          <h2 className="text-xl font-bold mb-5" style={{ color: "var(--mf-ink)" }}>{t("sol_recommended_plan")}</h2>
           <div className="glass rounded-2xl p-7 max-w-sm"
             style={{
-              border: planCard.highlight ? "1px solid rgba(124,58,237,0.4)" : "1px solid rgba(124,58,237,0.12)",
-              boxShadow: planCard.highlight ? "0 0 32px rgba(124,58,237,0.12)" : "none",
+              border: planCard.highlight ? "1px solid rgba(139,92,246,0.4)" : "1px solid rgba(139,92,246,0.12)",
+              boxShadow: planCard.highlight ? "0 0 32px rgba(139,92,246,0.12)" : "none",
             }}>
-            <p className="text-xl font-black mb-1" style={{ color: "#e2e8f0" }}>{planCard.name}</p>
+            <p className="text-xl font-black mb-1" style={{ color: "var(--mf-ink)" }}>{planCard.name}</p>
             {planCard.credits && (
-              <p className="text-xs font-medium mb-3" style={{ color: "#7c3aed" }}>
+              <p className="text-xs font-medium mb-3" style={{ color: "var(--mf-violet)" }}>
                 {t("sol_credits_mo", { n: planCard.credits })}
               </p>
             )}
             <div className="mb-4">
-              <span className="text-3xl font-black" style={{ color: "#e2e8f0" }}>{planCard.price}</span>
-              {planCard.period && <span className="text-sm ml-1" style={{ color: "#64748b" }}>{planCard.period}</span>}
+              <span className="text-3xl font-black" style={{ color: "var(--mf-ink)" }}>{planCard.price}</span>
+              {planCard.period && <span className="text-sm ml-1" style={{ color: "var(--mf-ink-3)" }}>{planCard.period}</span>}
             </div>
             <ul className="space-y-1.5 mb-6">
               {(planCard.features || []).map((f, i) => f && (
-                <li key={i} className="flex items-center gap-2 text-sm" style={{ color: "#94a3b8" }}>
-                  <Check size={13} style={{ color: "#22c55e", flexShrink: 0 }} /> {f}
+                <li key={i} className="flex items-center gap-2 text-sm" style={{ color: "var(--mf-ink-2)" }}>
+                  <Check size={13} style={{ color: "var(--mf-ok)", flexShrink: 0 }} /> {f}
                 </li>
               ))}
             </ul>
@@ -136,8 +136,8 @@ export default function SolutionPage({
               className="w-full py-2.5 rounded-xl text-sm font-semibold text-center block transition-all"
               style={
                 planCard.highlight
-                  ? { background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }
-                  : { backgroundColor: "#1a1a26", border: "1px solid #22223a", color: "#94a3b8" }
+                  ? { background: "linear-gradient(135deg,var(--mf-violet),var(--mf-violet-deep))", color: "#fff" }
+                  : { backgroundColor: "var(--mf-panel-2)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink-2)" }
               }>
               {planCard.cta} <ArrowRight size={14} className="inline ml-1" />
             </Link>
@@ -149,12 +149,12 @@ export default function SolutionPage({
       {ctaBanner && (
         <section className="max-w-5xl mx-auto px-6 py-10 pb-20">
           <div className="rounded-2xl p-10 text-center"
-            style={{ background: "linear-gradient(135deg,rgba(124,58,237,0.15),rgba(109,40,217,0.08))", border: "1px solid rgba(124,58,237,0.2)" }}>
+            style={{ background: "linear-gradient(135deg,rgba(139,92,246,0.15),rgba(109,40,217,0.08))", border: "1px solid rgba(139,92,246,0.2)" }}>
             <h2 className="text-2xl font-black mb-3 gradient-text">{ctaBanner.title}</h2>
-            <p className="text-sm mb-6" style={{ color: "#64748b" }}>{ctaBanner.desc}</p>
+            <p className="text-sm mb-6" style={{ color: "var(--mf-ink-3)" }}>{ctaBanner.desc}</p>
             <Link href={ctaBanner.btnHref || "/"}
               className="inline-flex items-center gap-2 px-6 py-3 rounded-xl text-sm font-semibold"
-              style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}>
+              style={{ background: "linear-gradient(135deg,var(--mf-violet),var(--mf-violet-deep))", color: "#fff" }}>
               {ctaBanner.btnText}
               <ArrowRight size={14} />
             </Link>

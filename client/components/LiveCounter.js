@@ -52,10 +52,10 @@ export default function LiveCounter() {
     <div className="flex items-center justify-center gap-3 py-4">
       <div
         className="flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-medium"
-        style={{ backgroundColor: "rgba(124,58,237,0.1)", border: "1px solid rgba(124,58,237,0.25)", color: "#a78bfa" }}
+        style={{ backgroundColor: "rgba(139,92,246,0.1)", border: "1px solid rgba(139,92,246,0.25)", color: "var(--mf-violet-soft)" }}
       >
         <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse inline-block" />
-        <span className="text-xl font-black" style={{ color: "#c4b5fd" }}>
+        <span className="text-xl font-black" style={{ color: "var(--mf-violet-soft)" }}>
           {displayed.toLocaleString()}+
         </span>
         <span>{t("live_counter_label")}</span>

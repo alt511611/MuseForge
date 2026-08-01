@@ -17,16 +17,16 @@ import { API_BASE } from "../../../lib/apiBase";
 import { useLanguage } from "../../../contexts/LanguageContext";
 
 const STAGE_CONFIG = {
-  screenwriting: { icon: Pen, labelKey: "stage_screenwriting", color: "#a78bfa" },
+  screenwriting: { icon: Pen, labelKey: "stage_screenwriting", color: "var(--mf-violet-soft)" },
   portraits: { icon: ImageIcon, labelKey: "stage_portraits", color: "#c084fc" },
   storyboard: { icon: Layout, labelKey: "stage_storyboard", color: "#818cf8" },
   frames: { icon: ImageIcon, labelKey: "stage_frames", color: "#60a5fa" },
   video: { icon: Video, labelKey: "stage_video", color: "#34d399" },
-  assembly: { icon: Film, labelKey: "stage_assembly", color: "#fbbf24" },
+  assembly: { icon: Film, labelKey: "stage_assembly", color: "var(--mf-gold)" },
   music: { icon: Music, labelKey: "stage_music", color: "#f472b6" },
-  scene_complete: { icon: CheckCircle2, labelKey: "stage_scene_complete", color: "#4ade80" },
-  complete: { icon: CheckCircle2, labelKey: "stage_complete", color: "#22c55e" },
-  cancelled: { icon: Ban, labelKey: "stage_cancelled", color: "#f59e0b" },
+  scene_complete: { icon: CheckCircle2, labelKey: "stage_scene_complete", color: "var(--mf-ok)" },
+  complete: { icon: CheckCircle2, labelKey: "stage_complete", color: "var(--mf-ok)" },
+  cancelled: { icon: Ban, labelKey: "stage_cancelled", color: "var(--mf-gold)" },
   error: { icon: XCircle, labelKey: "stage_error", color: "#ef4444" },
 };
 
@@ -35,7 +35,7 @@ const PIPELINE_STAGES = ["screenwriting", "portraits", "storyboard", "frames", "
 function SkeletonBlock({ className = "" }) {
   return (
     <div className={`rounded-2xl animate-pulse ${className}`}
-      style={{ backgroundColor: "#12121a", border: "1px solid #1a1a26" }} />
+      style={{ backgroundColor: "var(--mf-panel)", border: "1px solid var(--mf-line)" }} />
   );
 }
 
@@ -49,13 +49,13 @@ function LiveGallery({ events }) {
   if (!frames.length) return null;
   return (
     <div className="glass rounded-2xl p-4 mb-5 animate-fade-in">
-      <p className="text-xs font-medium mb-3" style={{ color: "#64748b" }}>{t("live_gallery")}</p>
+      <p className="text-xs font-medium mb-3" style={{ color: "var(--mf-ink-3)" }}>{t("live_gallery")}</p>
       <div className="grid grid-cols-3 gap-2">
         {frames.map((url, i) => (
           // eslint-disable-next-line @next/next/no-img-element
           <img key={i} src={url} alt={`Ara çıktı ${i + 1}`}
             className="w-full aspect-video object-cover rounded-lg animate-fade-in"
-            style={{ border: "1px solid #22223a" }} />
+            style={{ border: "1px solid var(--mf-line-strong)" }} />
         ))}
       </div>
     </div>
@@ -284,7 +284,7 @@ export default function GeneratePage() {
 
   if (initialLoading) {
     return (
-      <main className="min-h-screen" style={{ backgroundColor: "#0a0a0f" }}>
+      <main className="min-h-screen" style={{ backgroundColor: "var(--mf-stage)" }}>
         <div className="max-w-4xl mx-auto px-6 py-12 space-y-6">
           <SkeletonBlock className="h-8 w-32" />
           <SkeletonBlock className="h-32" />
@@ -296,18 +296,18 @@ export default function GeneratePage() {
   }
 
   return (
-    <main className="min-h-screen" style={{ backgroundColor: "#0a0a0f" }}>
+    <main className="min-h-screen" style={{ backgroundColor: "var(--mf-stage)" }}>
       <div className="max-w-4xl mx-auto px-4 sm:px-6 py-8 sm:py-12">
 
         {/* Header */}
         <div className="flex items-center justify-between mb-8">
-          <Link href="/" className="inline-flex items-center gap-2 text-sm transition-colors hover:text-purple-400" style={{ color: "#64748b" }}>
+          <Link href="/" className="inline-flex items-center gap-2 text-sm transition-colors hover:text-violet-soft" style={{ color: "var(--mf-ink-3)" }}>
             <ArrowLeft size={16} /> {t("gen_home")}
           </Link>
           {isRunning && (
             <button onClick={handleCancel} disabled={cancelling}
               className="inline-flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg transition-colors"
-              style={{ backgroundColor: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", color: "#fca5a5", cursor: cancelling ? "not-allowed" : "pointer" }}>
+              style={{ backgroundColor: "rgba(248,113,113,0.1)", border: "1px solid rgba(248,113,113,0.3)", color: "var(--mf-err-soft)", cursor: cancelling ? "not-allowed" : "pointer" }}>
               <Ban size={14} />
               {cancelling ? t("gen_cancelling") : t("gen_cancel")}
             </button>
@@ -319,15 +319,15 @@ export default function GeneratePage() {
           <h1 className="text-3xl font-bold mb-2">
             {status === "completed" ? null
               : status === "failed" ? <span style={{ color: "#ef4444" }}>{t("gen_failed")}</span>
-              : status === "cancelled" ? <span style={{ color: "#f59e0b" }}>{t("gen_cancelled_title")}</span>
+              : status === "cancelled" ? <span style={{ color: "var(--mf-gold)" }}>{t("gen_cancelled_title")}</span>
               : isAwaitingScript ? <span className="gradient-text">{t("gen_script_review_title")}</span>
               : <span className="gradient-text">{t("gen_running")}</span>}
           </h1>
-          <p className="text-sm flex items-center justify-center gap-2" style={{ color: "#64748b" }}>
+          <p className="text-sm flex items-center justify-center gap-2" style={{ color: "var(--mf-ink-3)" }}>
             {t("gen_job_id")}: {job_id}
             {job?.demo && (
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px]"
-                style={{ backgroundColor: "rgba(124,58,237,0.15)", color: "#a78bfa" }}>
+                style={{ backgroundColor: "rgba(139,92,246,0.15)", color: "var(--mf-violet-soft)" }}>
                 <FlaskConical size={10} /> DEMO
               </span>
             )}
@@ -342,53 +342,53 @@ export default function GeneratePage() {
         {/* Script approval */}
         {isAwaitingScript && editScript && (
           <div className="glass rounded-2xl p-5 sm:p-6 mb-6 space-y-4">
-            <p className="text-sm" style={{ color: "#94a3b8" }}>{t("gen_script_review_desc")}</p>
+            <p className="text-sm" style={{ color: "var(--mf-ink-2)" }}>{t("gen_script_review_desc")}</p>
             <div>
-              <label className="text-xs mb-1 block" style={{ color: "#64748b" }}>{t("gen_script_title")}</label>
+              <label className="text-xs mb-1 block" style={{ color: "var(--mf-ink-3)" }}>{t("gen_script_title")}</label>
               <input
                 value={editScript.title || ""}
                 onChange={(e) => setEditScript({ ...editScript, title: e.target.value })}
                 className="w-full px-3 py-2 rounded-lg text-sm"
-                style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#e2e8f0" }}
+                style={{ backgroundColor: "var(--mf-stage)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink)" }}
               />
             </div>
             <div>
-              <label className="text-xs mb-1 block" style={{ color: "#64748b" }}>{t("gen_script_mood")}</label>
+              <label className="text-xs mb-1 block" style={{ color: "var(--mf-ink-3)" }}>{t("gen_script_mood")}</label>
               <input
                 value={editScript.mood || ""}
                 onChange={(e) => setEditScript({ ...editScript, mood: e.target.value })}
                 className="w-full px-3 py-2 rounded-lg text-sm"
-                style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#e2e8f0" }}
+                style={{ backgroundColor: "var(--mf-stage)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink)" }}
               />
             </div>
             <div>
-              <label className="text-xs mb-1 block" style={{ color: "#64748b" }}>{t("gen_script_setting")}</label>
+              <label className="text-xs mb-1 block" style={{ color: "var(--mf-ink-3)" }}>{t("gen_script_setting")}</label>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 <input
                   value={editScript.setting_location || ""}
                   onChange={(e) => setEditScript({ ...editScript, setting_location: e.target.value })}
                   placeholder={t("gen_script_location")}
                   className="w-full px-3 py-2 rounded-lg text-sm"
-                  style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#e2e8f0" }}
+                  style={{ backgroundColor: "var(--mf-stage)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink)" }}
                 />
                 <input
                   value={editScript.setting_time_of_day || ""}
                   onChange={(e) => setEditScript({ ...editScript, setting_time_of_day: e.target.value })}
                   placeholder={t("gen_script_time")}
                   className="w-full px-3 py-2 rounded-lg text-sm"
-                  style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#e2e8f0" }}
+                  style={{ backgroundColor: "var(--mf-stage)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink)" }}
                 />
                 <input
                   value={editScript.setting_era || ""}
                   onChange={(e) => setEditScript({ ...editScript, setting_era: e.target.value })}
                   placeholder={t("gen_script_era")}
                   className="w-full px-3 py-2 rounded-lg text-sm"
-                  style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#e2e8f0" }}
+                  style={{ backgroundColor: "var(--mf-stage)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink)" }}
                 />
               </div>
             </div>
             <div>
-              <label className="text-xs mb-2 block" style={{ color: "#64748b" }}>{t("gen_script_scenes")}</label>
+              <label className="text-xs mb-2 block" style={{ color: "var(--mf-ink-3)" }}>{t("gen_script_scenes")}</label>
               <div className="space-y-2">
                 {(editScript.scenes || []).map((scene, idx) => (
                   <textarea
@@ -397,18 +397,18 @@ export default function GeneratePage() {
                     onChange={(e) => updateSceneText(idx, e.target.value)}
                     rows={2}
                     className="w-full px-3 py-2 rounded-lg text-sm"
-                    style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#e2e8f0" }}
+                    style={{ backgroundColor: "var(--mf-stage)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink)" }}
                   />
                 ))}
               </div>
             </div>
             {(editScript.characters || []).length > 0 && (
               <div>
-                <label className="text-xs mb-2 block" style={{ color: "#64748b" }}>{t("gen_script_characters")}</label>
+                <label className="text-xs mb-2 block" style={{ color: "var(--mf-ink-3)" }}>{t("gen_script_characters")}</label>
                 <ul className="space-y-1">
                   {editScript.characters.map((c, i) => (
-                    <li key={i} className="text-sm" style={{ color: "#94a3b8" }}>
-                      <span style={{ color: "#a78bfa" }}>{c.name}</span>
+                    <li key={i} className="text-sm" style={{ color: "var(--mf-ink-2)" }}>
+                      <span style={{ color: "var(--mf-violet-soft)" }}>{c.name}</span>
                       {c.description ? ` — ${c.description}` : ""}
                     </li>
                   ))}
@@ -421,7 +421,7 @@ export default function GeneratePage() {
                 onClick={handleApproveScript}
                 disabled={approving || cancelling}
                 className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-sm font-medium disabled:opacity-50"
-                style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}
+                style={{ background: "linear-gradient(135deg,var(--mf-violet),var(--mf-violet-deep))", color: "#fff" }}
               >
                 {approving ? t("gen_approving") : t("gen_approve_produce")}
               </button>
@@ -430,7 +430,7 @@ export default function GeneratePage() {
                 onClick={handleCancel}
                 disabled={cancelling}
                 className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-sm font-medium disabled:opacity-50"
-                style={{ backgroundColor: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", color: "#fca5a5" }}
+                style={{ backgroundColor: "rgba(248,113,113,0.1)", border: "1px solid rgba(248,113,113,0.3)", color: "var(--mf-err-soft)" }}
               >
                 {cancelling ? t("gen_cancelling") : t("gen_discard_script")}
               </button>
@@ -443,7 +443,7 @@ export default function GeneratePage() {
           <>
             {/* Inspiration */}
             <div className="text-center mb-6">
-              <p className="text-sm animate-pulse" style={{ color: "#7c3aed" }}>
+              <p className="text-sm animate-pulse" style={{ color: "var(--mf-violet)" }}>
                 {stageMessage || getInspirationMessage(inspoIdx, t)}
               </p>
             </div>
@@ -453,15 +453,15 @@ export default function GeneratePage() {
               <LoadingAnimation size={96} progress={progress} stage="" />
               <div className="w-full max-w-md">
                 <div className="flex justify-between items-center mb-2">
-                  <span className="text-sm" style={{ color: "#94a3b8" }}>
+                  <span className="text-sm" style={{ color: "var(--mf-ink-2)" }}>
                     {nonHB.length > 0 ? nonHB[nonHB.length - 1].message : t("gen_starting")}
                   </span>
                   <div className="flex items-center gap-2">
-                    {etaLabel && <span className="text-xs" style={{ color: "#475569" }}>{etaLabel}</span>}
-                    <span className="text-sm font-mono" style={{ color: "#7c3aed" }}>{Math.round(progress)}%</span>
+                    {etaLabel && <span className="text-xs" style={{ color: "var(--mf-ink-4)" }}>{etaLabel}</span>}
+                    <span className="text-sm font-mono" style={{ color: "var(--mf-violet)" }}>{Math.round(progress)}%</span>
                   </div>
                 </div>
-                <div className="w-full h-2 rounded-full overflow-hidden" style={{ backgroundColor: "#1a1a2e" }}>
+                <div className="w-full h-2 rounded-full overflow-hidden" style={{ backgroundColor: "var(--mf-line)" }}>
                   <div className="h-full rounded-full transition-all duration-700 ease-out"
                     style={{ width: `${progress}%`, background: "linear-gradient(90deg,#7c3aed,#a78bfa)" }} />
                 </div>
@@ -470,7 +470,7 @@ export default function GeneratePage() {
 
             {/* Pipeline timeline */}
             <div className="glass rounded-2xl p-5 mb-6">
-              <h2 className="text-sm font-medium mb-4 flex items-center gap-2" style={{ color: "#a78bfa" }}>
+              <h2 className="text-sm font-medium mb-4 flex items-center gap-2" style={{ color: "var(--mf-violet-soft)" }}>
                 <Sparkles size={15} /> {t("gen_pipeline")}
               </h2>
               <div className="grid grid-cols-4 md:grid-cols-8 gap-1.5 sm:gap-2">
@@ -482,11 +482,11 @@ export default function GeneratePage() {
                   return (
                     <div key={stage} className="flex flex-col items-center gap-1.5">
                       <div className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all ${isActive ? "animate-pulse" : ""}`}
-                        style={{ backgroundColor: isDone ? "rgba(34,197,94,0.15)" : isActive ? "rgba(124,58,237,0.25)" : "#12121a", border: isDone ? "1px solid #22c55e" : isActive ? "1px solid #7c3aed" : "1px solid #22223a" }}>
-                        <Icon size={17} style={{ color: isDone ? "#22c55e" : isActive ? "#a78bfa" : "#64748b" }} />
+                        style={{ backgroundColor: isDone ? "rgba(52,211,153,0.15)" : isActive ? "rgba(139,92,246,0.25)" : "var(--mf-panel)", border: isDone ? "1px solid var(--mf-ok)" : isActive ? "1px solid var(--mf-violet)" : "1px solid var(--mf-line-strong)" }}>
+                        <Icon size={17} style={{ color: isDone ? "var(--mf-ok)" : isActive ? "var(--mf-violet-soft)" : "var(--mf-ink-3)" }} />
                       </div>
                       <span className="text-[10px] text-center leading-tight"
-                        style={{ color: isDone ? "#22c55e" : isActive ? "#a78bfa" : "#64748b" }}>
+                        style={{ color: isDone ? "var(--mf-ok)" : isActive ? "var(--mf-violet-soft)" : "var(--mf-ink-3)" }}>
                         {(config?.labelKey && t(config.labelKey)) || stage}
                       </span>
                     </div>
@@ -503,10 +503,10 @@ export default function GeneratePage() {
         {/* Error */}
         {error && status !== "completed" && (
           <div className="glass rounded-2xl px-5 py-4 mb-6 flex items-start justify-between gap-4">
-            <p className="text-sm" style={{ color: "#fca5a5" }}>{error}</p>
+            <p className="text-sm" style={{ color: "var(--mf-err-soft)" }}>{error}</p>
             <button onClick={handleRetry}
               className="flex-shrink-0 flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg"
-              style={{ backgroundColor: "rgba(124,58,237,0.15)", color: "#a78bfa", border: "1px solid rgba(124,58,237,0.3)" }}>
+              style={{ backgroundColor: "rgba(139,92,246,0.15)", color: "var(--mf-violet-soft)", border: "1px solid rgba(139,92,246,0.3)" }}>
               <RefreshCw size={13} /> {t("gen_retry")}
             </button>
           </div>
@@ -515,15 +515,15 @@ export default function GeneratePage() {
         {/* Log (always shown while running, collapsible otherwise) */}
         {nonHB.length > 0 && (
           <div className="glass rounded-2xl p-5">
-            <h2 className="text-sm font-medium mb-3" style={{ color: "#64748b" }}>{t("gen_live_log")}</h2>
+            <h2 className="text-sm font-medium mb-3" style={{ color: "var(--mf-ink-3)" }}>{t("gen_live_log")}</h2>
             <div ref={logRef} className="space-y-1.5 max-h-48 overflow-y-auto font-mono text-xs">
               {nonHB.map((evt, i) => {
                 const config = STAGE_CONFIG[evt.stage] || {};
                 return (
                   <div key={evt.seq ?? i} className="flex gap-2 py-0.5">
-                    <span style={{ color: "#475569" }}>{evt.timestamp?.slice(11, 19) || ""}</span>
-                    <span style={{ color: config.color || "#94a3b8" }}>[{config.label || evt.stage}]</span>
-                    <span style={{ color: "#cbd5e1" }}>{evt.message}</span>
+                    <span style={{ color: "var(--mf-ink-4)" }}>{evt.timestamp?.slice(11, 19) || ""}</span>
+                    <span style={{ color: config.color || "var(--mf-ink-2)" }}>[{config.label || evt.stage}]</span>
+                    <span style={{ color: "var(--mf-ink-2)" }}>{evt.message}</span>
                   </div>
                 );
               })}
