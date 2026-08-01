@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from agents.screenwriter import ScreenwriterAgent
 from interfaces.character import CharacterInScene, DramaScript
+from interfaces.second_budget import billable_seconds, distribute_budget
 from pipelines.script2video import (
     PipelineCancelled,
     Script2VideoPipeline,
@@ -1172,6 +1173,20 @@ class Idea2VideoPipeline:
         # Drama-wide direction: identical for every scene, so build it once.
         character_direction = _format_character_direction(script)
 
+        # Fixed second budget for the whole drama, split by tension. The total
+        # is decided here -- before any provider call -- so the cost of the job
+        # is known at charge time and cannot drift with what the story turns
+        # out to be. Tension still shapes the RHYTHM within that total.
+        scene_durations = distribute_budget(
+            [_scene_tension(scene) for scene in script.scenes]
+        )
+        logger.info(
+            "Second budget for job: %s (total %ss across %s scenes)",
+            scene_durations,
+            billable_seconds(scene_durations),
+            len(script.scenes),
+        )
+
         # Scene rendering is the whole cost of a job: each scene is a Kling
         # call that takes 1-3+ minutes, and with one shot per scene the
         # existing per-shot concurrency never engaged, so a 5-scene drama
@@ -1229,6 +1244,7 @@ class Idea2VideoPipeline:
                     scene_dialogue=_format_scene_dialogue(scene_dialogue_lines),
                     scene_direction=_format_scene_direction(scene),
                     scene_tension=_scene_tension(scene),
+                    scene_duration=scene_durations[idx] if idx < len(scene_durations) else 0.0,
                     character_direction=character_direction,
                     theme=getattr(script, "theme", "") or "",
                     visual_motif=getattr(script, "visual_motif", "") or "",

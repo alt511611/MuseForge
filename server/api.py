@@ -28,6 +28,7 @@ from auth import (
     get_optional_user,
 )
 from interfaces.camera import DIRECTOR_STYLES
+from interfaces.second_budget import SECONDS_PER_CREDIT, total_budget_seconds
 from tools.muapi_voice_generator import is_dialogue_enabled
 from jobs import (
     JOBS_DIR,
@@ -355,9 +356,14 @@ def build_credit_breakdown(
         bool(dialogue_enabled) and plan == "pro" and is_dialogue_enabled()
     )
 
+    # Each credit buys a fixed number of seconds of finished video (see
+    # interfaces/second_budget). Stating that here turns a vague promise
+    # ("5 scenes") into one the pipeline actually keeps ("40 seconds"), and
+    # keeps the quote aligned with what the provider will bill.
+    video_seconds = int(total_budget_seconds(num_scenes))
     breakdown = [
         {
-            "label": f"Temel üretim ({num_scenes} sahne)",
+            "label": f"Temel üretim ({num_scenes} sahne, {video_seconds} sn video)",
             "credits": num_scenes,
         }
     ]
@@ -372,7 +378,12 @@ def build_credit_breakdown(
         breakdown.append({"label": "Diyalog", "credits": dialogue_credits})
         total += dialogue_credits
 
-    return {"total_credits": total, "breakdown": breakdown}
+    return {
+        "total_credits": total,
+        "breakdown": breakdown,
+        "video_seconds": video_seconds,
+        "seconds_per_credit": SECONDS_PER_CREDIT,
+    }
 
 
 # ── Public endpoints ──────────────────────────────────────────────────────────

@@ -132,12 +132,12 @@ function PricingContent() {
       id: "creator",
       name: t("plan_creator_name"),
       icon: Zap,
-      price: "$49",
+      price: "$59",
       description: t("plan_creator_desc"),
       forWho: "Content creators, small businesses & educators",
       segHref: "/solutions/creators",
       segIcon: Users,
-      credits: 25,
+      credits: 16,
       features: t("plan_creator_features").split(","),
       unavailable: t("plan_creator_unavailable").split(",").filter(Boolean),
       cta: t("plan_creator_cta"),
@@ -147,12 +147,12 @@ function PricingContent() {
       id: "pro",
       name: t("plan_pro_name"),
       icon: Crown,
-      price: "$99",
+      price: "$129",
       description: t("plan_pro_desc"),
       forWho: "Agencies & corporate communications teams",
       segHref: "/solutions/agencies",
       segIcon: Building2,
-      credits: 55,
+      credits: 36,
       features: t("plan_pro_features").split(","),
       unavailable: t("plan_pro_unavailable").split(",").filter(Boolean),
       cta: t("plan_pro_cta"),
@@ -178,9 +178,9 @@ function PricingContent() {
   ];
 
   const CREDIT_PACKAGES = [
-    { key: "SMALL",  label: t("pricing_credits_small"),  price: "$9",  credits: 4,  highlight: false },
-    { key: "MEDIUM", label: t("pricing_credits_medium"), price: "$19", credits: 12, highlight: true },
-    { key: "LARGE",  label: t("pricing_credits_large"),  price: "$39", credits: 30, highlight: false },
+    { key: "SMALL",  label: t("pricing_credits_small"),  price: "$19", credits: 4,  highlight: false },
+    { key: "MEDIUM", label: t("pricing_credits_medium"), price: "$49", credits: 12, highlight: true },
+    { key: "LARGE",  label: t("pricing_credits_large"),  price: "$99", credits: 26, highlight: false },
   ];
 
   const PRICING_FAQ = [
