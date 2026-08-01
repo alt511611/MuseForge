@@ -1066,6 +1066,27 @@ class Idea2VideoPipeline:
             if progress_callback:
                 await progress_callback(stage, message, pct, data)
 
+        # A template script means every LLM provider failed: the user's idea
+        # was effectively discarded and they are about to get a generic drama
+        # about "Alex" in a "generic cinematic location". Shipping that
+        # silently is the worst outcome -- it looks like the product simply
+        # cannot follow a prompt. Surface it on the job so the UI and the
+        # logs both show WHY the result is generic.
+        if getattr(script, "generated_by", "llm") == "template":
+            logger.error(
+                "Screenwriter fell back to the deterministic template for this "
+                "job -- no LLM provider answered. The user's idea is NOT "
+                "reflected in the script. Check MUAPI_KEY's LLM access and "
+                "ANTHROPIC_API_KEY."
+            )
+            await progress(
+                "screenwriting",
+                "Script model unavailable — using a generic outline; "
+                "the result will not follow your idea closely.",
+                8,
+                {"script_degraded": True},
+            )
+
         characters = self._characters_from_script(script)
         if not characters:
             characters = [
@@ -1416,6 +1437,9 @@ class Idea2VideoPipeline:
             "setting_location": getattr(script, "setting_location", "") or "",
             "setting_time_of_day": getattr(script, "setting_time_of_day", "") or "",
             "setting_era": getattr(script, "setting_era", "") or "",
+            # Lets the UI explain a generic result instead of leaving the
+            # user to guess why their prompt was ignored.
+            "script_degraded": getattr(script, "generated_by", "llm") == "template",
         }
 
     async def run(

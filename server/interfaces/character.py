@@ -97,6 +97,12 @@ class DramaScript(BaseModel):
     # scene pulling in the same direction instead of being three unrelated
     # vignettes that happen to share a room.
     theme: str = ""
+    # How this script was produced: "llm" when a model actually wrote it,
+    # "template" when every provider failed and the deterministic fallback
+    # ran. The fallback ignores the user's idea almost entirely (generic
+    # setting, a character named "Alex"), so shipping that silently makes
+    # the product look broken for reasons the user cannot see.
+    generated_by: str = "llm"
     # One recurring visual element (an object, a gesture, a quality of light)
     # deliberately restaged across scenes. This is what makes a set of shots
     # read as a single film rather than a slideshow.

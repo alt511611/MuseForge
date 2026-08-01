@@ -68,6 +68,11 @@ Respond ONLY with valid JSON array containing a single shot object:
   "lens": "50mm", "duration_seconds": 8}]
 (duration_seconds is an example — vary 3-15 by scene; do not always use 5.)"""
 
+    #: One shot's JSON is small, but the director's notes make the RESPONSE
+    #: longer than the old default allowed. Same lesson as the screenwriter:
+    #: both provider paths must share the budget.
+    MAX_SHOT_TOKENS = 2048
+
     def __init__(self, api_key: Optional[str] = None, demo: bool = False):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self.muapi_key = os.environ.get("MUAPI_KEY", "")
@@ -162,7 +167,9 @@ Respond ONLY with valid JSON array containing a single shot object:
         #    caveat on why this isn't 100% guaranteed to work yet).
         if self.muapi_key:
             try:
-                content = await complete_via_muapi(self.SYSTEM_PROMPT, prompt)
+                content = await complete_via_muapi(
+                    self.SYSTEM_PROMPT, prompt, max_tokens=self.MAX_SHOT_TOKENS
+                )
                 data = json.loads(re.search(r"\[[\s\S]*\]", content).group())
                 shots = [StoryboardShot(**s) for s in data]
                 self._ensure_expression(shots, scene_emotion)
