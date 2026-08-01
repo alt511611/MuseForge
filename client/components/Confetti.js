@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 
-const COLORS = ["#7c3aed", "#a78bfa", "#c084fc", "#f472b6", "#fbbf24", "#34d399", "#60a5fa"];
+const COLORS = ["var(--mf-violet)", "var(--mf-violet-soft)", "#c084fc", "#f472b6", "var(--mf-gold)", "#34d399", "#60a5fa"];
 
 function randomBetween(a, b) {
   return a + Math.random() * (b - a);

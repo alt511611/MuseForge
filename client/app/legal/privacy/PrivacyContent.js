@@ -5,8 +5,8 @@ import { useLanguage } from "../../../contexts/LanguageContext";
 
 const Section = ({ title, children }) => (
   <section className="mb-8">
-    <h2 className="text-lg font-semibold mb-3" style={{ color: "#a78bfa" }}>{title}</h2>
-    <div className="text-sm leading-relaxed space-y-2" style={{ color: "#94a3b8" }}>{children}</div>
+    <h2 className="text-lg font-semibold mb-3" style={{ color: "var(--mf-violet-soft)" }}>{title}</h2>
+    <div className="text-sm leading-relaxed space-y-2" style={{ color: "var(--mf-ink-2)" }}>{children}</div>
   </section>
 );
 
@@ -17,14 +17,14 @@ export default function PrivacyContent() {
   });
 
   return (
-    <main className="min-h-screen" style={{ backgroundColor: "#0a0a0f" }}>
+    <main className="min-h-screen" style={{ backgroundColor: "var(--mf-stage)" }}>
       <div className="max-w-3xl mx-auto px-6 py-16">
-        <Link href="/" className="text-sm mb-8 inline-block hover:text-purple-400 transition-colors" style={{ color: "#64748b" }}>
+        <Link href="/" className="text-sm mb-8 inline-block hover:text-violet-soft transition-colors" style={{ color: "var(--mf-ink-3)" }}>
           {t("privacy_home")}
         </Link>
 
         <h1 className="text-3xl font-black gradient-text mb-2">{t("privacy_title")}</h1>
-        <p className="text-xs mb-10" style={{ color: "#475569" }}>{t("privacy_updated")}: {updated}</p>
+        <p className="text-xs mb-10" style={{ color: "var(--mf-ink-4)" }}>{t("privacy_updated")}: {updated}</p>
 
         <div className="glass rounded-2xl p-8">
           <Section title="1. Data We Collect">
@@ -52,13 +52,13 @@ export default function PrivacyContent() {
           </Section>
 
           <Section title="7. Contact">
-            <p>Privacy questions: <a href="mailto:privacy@museforge.ai" className="underline" style={{ color: "#a78bfa" }}>privacy@museforge.ai</a></p>
+            <p>Privacy questions: <a href="mailto:privacy@museforge.ai" className="underline" style={{ color: "var(--mf-violet-soft)" }}>privacy@museforge.ai</a></p>
           </Section>
         </div>
 
-        <div className="mt-8 flex gap-4 text-xs" style={{ color: "#64748b" }}>
-          <Link href="/legal/terms" className="hover:text-purple-400">{t("terms_title")}</Link>
-          <Link href="/pricing" className="hover:text-purple-400">{t("footer_pricing")}</Link>
+        <div className="mt-8 flex gap-4 text-xs" style={{ color: "var(--mf-ink-3)" }}>
+          <Link href="/legal/terms" className="hover:text-violet-soft">{t("terms_title")}</Link>
+          <Link href="/pricing" className="hover:text-violet-soft">{t("footer_pricing")}</Link>
         </div>
       </div>
     </main>

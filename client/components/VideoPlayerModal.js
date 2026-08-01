@@ -32,13 +32,13 @@ export default function VideoPlayerModal({ src, onClose }) {
     >
       <div
         className="relative w-full max-w-3xl rounded-2xl overflow-hidden"
-        style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a" }}
+        style={{ backgroundColor: "var(--mf-stage)", border: "1px solid var(--mf-line-strong)" }}
       >
         <button
           type="button"
           onClick={onClose}
           className="absolute top-3 right-3 z-10 p-1.5 rounded-lg transition-colors hover:bg-white/10"
-          style={{ color: "#e2e8f0", backgroundColor: "rgba(0,0,0,0.45)" }}
+          style={{ color: "var(--mf-ink)", backgroundColor: "rgba(0,0,0,0.45)" }}
           aria-label="Close"
         >
           <X size={18} />

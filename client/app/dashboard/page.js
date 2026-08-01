@@ -10,17 +10,18 @@ import { createClient } from "../../lib/supabase";
 import { isLowCredits } from "../../lib/credits";
 import { API_BASE, resolveJobVideoUrl } from "../../lib/apiBase";
 import VideoPlayerModal from "../../components/VideoPlayerModal";
+import { friendlyError } from "../../utils/errorMessages";
 
 const PAGE_SIZE = 12;
 
 function StatusBadge({ status }) {
   const { t } = useLanguage();
   const META = {
-    completed: { key: "status_completed", color: "#22c55e", Icon: CheckCircle2 },
+    completed: { key: "status_completed", color: "var(--mf-ok)", Icon: CheckCircle2 },
     failed:    { key: "status_failed",    color: "#ef4444", Icon: XCircle },
     running:   { key: "status_running",   color: "#60a5fa", Icon: Loader2, pulse: true },
-    queued:    { key: "status_queued",    color: "#94a3b8", Icon: Clock },
-    cancelled: { key: "status_cancelled", color: "#f59e0b", Icon: XCircle },
+    queued:    { key: "status_queued",    color: "var(--mf-ink-2)", Icon: Clock },
+    cancelled: { key: "status_cancelled", color: "var(--mf-gold)", Icon: XCircle },
   };
   const meta = META[status] || META.queued;
   const { key, color, Icon, pulse } = meta;
@@ -42,21 +43,21 @@ function JobCard({ job, onPlayVideo }) {
   const isActive = ["queued", "running"].includes(job.status);
 
   return (
-    <div className="glass rounded-2xl p-5 flex flex-col gap-3 hover:border-purple-600/40 transition-all"
-      style={{ border: "1px solid rgba(124,58,237,0.1)" }}>
+    <div className="mf-card mf-card-hover p-5 flex flex-col gap-3"
+      style={{ border: "1px solid rgba(139,92,246,0.1)" }}>
       <div className="flex items-start justify-between gap-2">
         <StatusBadge status={job.status} />
         {job.demo && (
-          <span className="text-[10px] px-2 py-0.5 rounded-full font-medium" style={{ backgroundColor: "rgba(251,191,36,0.15)", color: "#fbbf24" }}>
+          <span className="text-[10px] px-2 py-0.5 rounded-full font-medium" style={{ backgroundColor: "rgba(232,182,76,0.15)", color: "var(--mf-gold)" }}>
             {t("dash_demo_badge")}
           </span>
         )}
       </div>
-      <p className="text-sm leading-relaxed flex-1" style={{ color: "#cbd5e1" }}>
-        {idea || <span style={{ color: "#475569" }}>—</span>}
+      <p className="text-sm leading-relaxed flex-1" style={{ color: "var(--mf-ink-2)" }}>
+        {idea || <span style={{ color: "var(--mf-ink-4)" }}>—</span>}
       </p>
-      <div className="flex items-center justify-between mt-auto pt-2 border-t" style={{ borderColor: "#1a1a26" }}>
-        <span className="text-xs" style={{ color: "#475569" }}>{date}</span>
+      <div className="flex items-center justify-between mt-auto pt-2 border-t" style={{ borderColor: "var(--mf-line)" }}>
+        <span className="text-xs" style={{ color: "var(--mf-ink-4)" }}>{date}</span>
         <div className="flex items-center gap-2">
           {isActive && (
             <Link href={`/generate/${job.id}`}
@@ -73,7 +74,7 @@ function JobCard({ job, onPlayVideo }) {
                   type="button"
                   onClick={() => onPlayVideo?.(videoUrl)}
                   className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg transition-colors"
-                  style={{ backgroundColor: "rgba(34,197,94,0.12)", color: "#22c55e" }}
+                  style={{ backgroundColor: "rgba(52,211,153,0.12)", color: "var(--mf-ok)" }}
                 >
                   <Video size={11} />
                   {t("dash_watch")}
@@ -81,7 +82,7 @@ function JobCard({ job, onPlayVideo }) {
               )}
               <Link href={`/generate/${job.id}`}
                 className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg transition-colors"
-                style={{ backgroundColor: "#1a1a26", color: "#94a3b8", border: "1px solid #22223a" }}>
+                style={{ backgroundColor: "var(--mf-panel-2)", color: "var(--mf-ink-2)", border: "1px solid var(--mf-line-strong)" }}>
                 <ExternalLink size={11} />
                 {t("dash_detail")}
               </Link>
@@ -90,7 +91,7 @@ function JobCard({ job, onPlayVideo }) {
           {job.status === "failed" && (
             <Link href={`/?idea=${encodeURIComponent(job.idea || "")}`}
               className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg transition-colors"
-              style={{ backgroundColor: "rgba(239,68,68,0.12)", color: "#fca5a5" }}>
+              style={{ backgroundColor: "rgba(248,113,113,0.12)", color: "var(--mf-err-soft)" }}>
               <RefreshCw size={11} />
               {t("dash_retry")}
             </Link>
@@ -103,11 +104,11 @@ function JobCard({ job, onPlayVideo }) {
 
 function SkeletonCard() {
   return (
-    <div className="glass rounded-2xl p-5 animate-pulse" style={{ border: "1px solid rgba(124,58,237,0.05)" }}>
-      <div className="h-5 w-24 rounded-full mb-3" style={{ backgroundColor: "#1a1a26" }} />
-      <div className="h-3 w-full rounded mb-2" style={{ backgroundColor: "#1a1a26" }} />
-      <div className="h-3 w-3/4 rounded mb-4" style={{ backgroundColor: "#1a1a26" }} />
-      <div className="h-3 w-20 rounded" style={{ backgroundColor: "#1a1a26" }} />
+    <div className="mf-card p-5 animate-pulse" style={{ border: "1px solid rgba(139,92,246,0.05)" }}>
+      <div className="h-5 w-24 rounded-full mb-3" style={{ backgroundColor: "var(--mf-panel-2)" }} />
+      <div className="h-3 w-full rounded mb-2" style={{ backgroundColor: "var(--mf-panel-2)" }} />
+      <div className="h-3 w-3/4 rounded mb-4" style={{ backgroundColor: "var(--mf-panel-2)" }} />
+      <div className="h-3 w-20 rounded" style={{ backgroundColor: "var(--mf-panel-2)" }} />
     </div>
   );
 }
@@ -139,45 +140,45 @@ function BuyCreditsModal({ onClose, getAccessToken }) {
       if (!res.ok) { const e = await res.json(); throw new Error(e.detail || "Error"); }
       const { url } = await res.json();
       window.location.href = url;
-    } catch (e) { setErr(e.message); setLoading(null); }
+    } catch (e) { setErr(friendlyError(e.message)); setLoading(null); }
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center px-4"
       style={{ backgroundColor: "rgba(0,0,0,0.7)" }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="w-full max-w-md glass rounded-2xl p-7" style={{ border: "1px solid rgba(124,58,237,0.3)" }}>
+      <div className="w-full max-w-md mf-card p-7" style={{ border: "1px solid rgba(139,92,246,0.3)" }}>
         <div className="flex items-center justify-between mb-5">
-          <h3 className="text-lg font-bold" style={{ color: "#e2e8f0" }}>
-            <Sparkles size={16} className="inline mr-2" style={{ color: "#7c3aed" }} />
+          <h3 className="text-lg font-bold" style={{ color: "var(--mf-ink)" }}>
+            <Sparkles size={16} className="inline mr-2" style={{ color: "var(--mf-violet)" }} />
             {t("dash_buy_credits")}
           </h3>
-          <button onClick={onClose} style={{ color: "#64748b" }}><X size={18} /></button>
+          <button onClick={onClose} style={{ color: "var(--mf-ink-3)" }}><X size={18} /></button>
         </div>
-        <p className="text-xs mb-5" style={{ color: "#64748b" }}>No subscription required. Credits never expire.</p>
+        <p className="text-xs mb-5" style={{ color: "var(--mf-ink-3)" }}>No subscription required. Credits never expire.</p>
         <div className="space-y-3">
           {PACKAGES.map((pkg) => (
             <div key={pkg.key}
               className="flex items-center justify-between p-4 rounded-xl"
               style={{
-                backgroundColor: pkg.highlight ? "rgba(124,58,237,0.08)" : "#0d0d14",
-                border: pkg.highlight ? "1px solid rgba(124,58,237,0.35)" : "1px solid #1a1a26",
+                backgroundColor: pkg.highlight ? "rgba(139,92,246,0.08)" : "var(--mf-bg)",
+                border: pkg.highlight ? "1px solid rgba(139,92,246,0.35)" : "1px solid var(--mf-line)",
               }}>
               <div>
-                <p className="text-sm font-bold" style={{ color: "#e2e8f0" }}>{pkg.label}</p>
-                <p className="text-xl font-black" style={{ color: pkg.highlight ? "#a78bfa" : "#64748b" }}>{pkg.price}</p>
+                <p className="text-sm font-bold" style={{ color: "var(--mf-ink)" }}>{pkg.label}</p>
+                <p className="display text-xl" style={{ color: pkg.highlight ? "var(--mf-violet-soft)" : "var(--mf-ink-3)" }}>{pkg.price}</p>
               </div>
               <button onClick={() => buy(pkg.key)} disabled={!!loading}
                 className="px-4 py-2 rounded-xl text-sm font-semibold transition-all"
                 style={pkg.highlight
-                  ? { background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff", opacity: loading ? 0.7 : 1 }
-                  : { backgroundColor: "#1a1a26", border: "1px solid #22223a", color: "#94a3b8", opacity: loading ? 0.7 : 1 }}>
+                  ? { background: "linear-gradient(135deg,var(--mf-violet),var(--mf-violet-deep))", color: "#fff", opacity: loading ? 0.7 : 1 }
+                  : { backgroundColor: "var(--mf-panel-2)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink-2)", opacity: loading ? 0.7 : 1 }}>
                 {loading === pkg.key ? <Loader2 size={14} className="animate-spin inline" /> : t("pricing_credits_buy")}
               </button>
             </div>
           ))}
         </div>
-        {err && <p className="text-xs mt-3" style={{ color: "#fca5a5" }}>{err}</p>}
+        {err && <p className="text-xs mt-3" style={{ color: "var(--mf-err-soft)" }}>{err}</p>}
       </div>
     </div>
   );
@@ -200,18 +201,18 @@ function ManageSubscriptionButton({ getAccessToken }) {
       if (!res.ok) { const err = await res.json(); throw new Error(err.detail || "Portal unavailable"); }
       const { url } = await res.json();
       window.location.href = url;
-    } catch (err) { setError(err.message); setLoading(false); }
+    } catch (err) { setError(friendlyError(err.message)); setLoading(false); }
   };
 
   return (
     <div>
       <button onClick={handleClick} disabled={loading}
         className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all"
-        style={{ backgroundColor: "#12121a", border: "1px solid #22223a", color: "#94a3b8", opacity: loading ? 0.6 : 1 }}>
+        style={{ backgroundColor: "var(--mf-panel)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink-2)", opacity: loading ? 0.6 : 1 }}>
         {loading ? <Loader2 size={14} className="animate-spin" /> : <CreditCard size={14} />}
         {t("dash_manage_sub")}
       </button>
-      {error && <p className="text-xs mt-1" style={{ color: "#fca5a5" }}>{error}</p>}
+      {error && <p className="text-xs mt-1" style={{ color: "var(--mf-err-soft)" }}>{error}</p>}
     </div>
   );
 }
@@ -253,7 +254,7 @@ export default function DashboardPage() {
       if (pageNum === 0) setJobs(slice);
       else setJobs((prev) => [...prev, ...slice]);
     } catch (err) {
-      setError(err.message);
+      setError(friendlyError(err.message));
     } finally {
       setFetching(false);
     }
@@ -294,8 +295,8 @@ export default function DashboardPage() {
 
   if (authLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: "#0a0a0f" }}>
-        <Loader2 className="animate-spin" size={32} style={{ color: "#7c3aed" }} />
+      <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: "var(--mf-stage)" }}>
+        <Loader2 className="animate-spin" size={32} style={{ color: "var(--mf-violet)" }} />
       </div>
     );
   }
@@ -303,8 +304,8 @@ export default function DashboardPage() {
 
   const LEDGER_COLORS = {
     video_generation: "#ef4444",
-    subscription_renewal: "#22c55e",
-    credit_purchase: "#a78bfa",
+    subscription_renewal: "var(--mf-ok)",
+    credit_purchase: "var(--mf-violet-soft)",
     refund: "#60a5fa",
   };
 
@@ -320,20 +321,19 @@ export default function DashboardPage() {
   const PLAN_LABEL_KEYS = { free: "dash_plan_free", creator: "dash_plan_creator", pro: "dash_plan_pro" };
 
   return (
-    <main className="min-h-screen" style={{ backgroundColor: "#0a0a0f" }}>
+    <main className="min-h-screen" style={{ backgroundColor: "var(--mf-stage)" }}>
       {showBuyModal && <BuyCreditsModal onClose={() => setShowBuyModal(false)} getAccessToken={getAccessToken} />}
       <div className="max-w-5xl mx-auto px-6 py-12">
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-10">
           <div>
-            <h1 className="text-3xl font-black gradient-text">{t("dash_title")}</h1>
-            <p className="text-sm mt-1" style={{ color: "#64748b" }}>{user.email}</p>
+            <h1 className="display text-3xl gradient-text">{t("dash_title")}</h1>
+            <p className="text-sm mt-1" style={{ color: "var(--mf-ink-3)" }}>{user.email}</p>
           </div>
           <div className="flex items-center gap-3 flex-wrap">
             <ManageSubscriptionButton getAccessToken={getAccessToken} />
             <Link href="/"
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold"
-              style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}>
+              className="mf-btn-primary inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold">
               <Plus size={15} />
               {t("dash_new")}
             </Link>
@@ -343,16 +343,16 @@ export default function DashboardPage() {
         {lowCredits && (
           <div
             className="mb-6 px-5 py-4 rounded-xl flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
-            style={{ backgroundColor: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.35)" }}
+            style={{ backgroundColor: "rgba(232,182,76,0.08)", border: "1px solid rgba(232,182,76,0.35)" }}
           >
-            <p className="text-sm font-medium" style={{ color: "#fbbf24" }}>
+            <p className="text-sm font-medium" style={{ color: "var(--mf-gold)" }}>
               {t("credits_low_banner", { n: profile.credits })}
             </p>
             <button
               type="button"
               onClick={() => setShowBuyModal(true)}
               className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold"
-              style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}
+              style={{ background: "linear-gradient(135deg,var(--mf-violet),var(--mf-violet-deep))", color: "#fff" }}
             >
               <Sparkles size={13} />
               {t("credits_low_buy")}
@@ -362,28 +362,27 @@ export default function DashboardPage() {
 
         {/* Profile / plan card */}
         {profile && (
-          <div className="glass rounded-2xl p-5 mb-8 flex flex-wrap gap-6 items-center"
-            style={{ border: "1px solid rgba(124,58,237,0.15)" }}>
+          <div className="mf-card p-5 mb-8 flex flex-wrap gap-6 items-center"
+            style={{ border: "1px solid rgba(139,92,246,0.15)" }}>
             <div>
-              <p className="text-xs mb-0.5" style={{ color: "#64748b" }}>{t("dash_plan")}</p>
-              <p className="text-base font-bold" style={{ color: "#a78bfa" }}>
+              <p className="text-xs mb-0.5" style={{ color: "var(--mf-ink-3)" }}>{t("dash_plan")}</p>
+              <p className="text-base font-bold" style={{ color: "var(--mf-violet-soft)" }}>
                 {t(PLAN_LABEL_KEYS[profile.plan] || "dash_plan_free")}
               </p>
             </div>
             <div>
-              <p className="text-xs mb-0.5" style={{ color: "#64748b" }}>{t("dash_credits")}</p>
-              <p className="text-base font-bold" style={{ color: "#e2e8f0" }}>{profile.credits ?? "—"}</p>
+              <p className="text-xs mb-0.5" style={{ color: "var(--mf-ink-3)" }}>{t("dash_credits")}</p>
+              <p className="text-base font-bold" style={{ color: "var(--mf-ink)" }}>{profile.credits ?? "—"}</p>
             </div>
             <div className="ml-auto flex items-center gap-2">
               <button onClick={() => setShowBuyModal(true)}
                 className="text-xs px-3 py-1.5 rounded-xl font-medium inline-flex items-center gap-1.5 transition-all"
-                style={{ backgroundColor: "#12121a", border: "1px solid rgba(124,58,237,0.35)", color: "#a78bfa" }}>
+                style={{ backgroundColor: "var(--mf-panel)", border: "1px solid rgba(139,92,246,0.35)", color: "var(--mf-violet-soft)" }}>
                 <Sparkles size={11} /> {t("dash_buy_credits")}
               </button>
               {profile.plan === "free" && (
                 <Link href="/pricing"
-                  className="text-xs px-3 py-1.5 rounded-xl font-medium"
-                  style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}>
+                  className="mf-btn-primary text-xs px-3 py-1.5 rounded-xl font-medium">
                   {t("dash_upgrade")}
                 </Link>
               )}
@@ -394,36 +393,36 @@ export default function DashboardPage() {
         {/* Stats bar */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-8">
           {[
-            { key: "dash_total",          value: stats.total,     color: "#a78bfa" },
-            { key: "dash_completed_stat", value: stats.completed, color: "#22c55e" },
+            { key: "dash_total",          value: stats.total,     color: "var(--mf-violet-soft)" },
+            { key: "dash_completed_stat", value: stats.completed, color: "var(--mf-ok)" },
             { key: "dash_generating_stat",value: stats.running,   color: "#60a5fa" },
             { key: "dash_failed_stat",    value: stats.failed,    color: "#ef4444" },
           ].map(({ key, value, color }) => (
-            <div key={key} className="glass rounded-xl p-4 text-center"
-              style={{ border: "1px solid rgba(124,58,237,0.08)" }}>
-              <p className="text-2xl font-black" style={{ color }}>{value}</p>
-              <p className="text-xs mt-0.5" style={{ color: "#64748b" }}>{t(key)}</p>
+            <div key={key} className="mf-card p-4 text-center"
+              style={{ border: "1px solid rgba(139,92,246,0.08)" }}>
+              <p className="display text-2xl" style={{ color }}>{value}</p>
+              <p className="text-xs mt-0.5" style={{ color: "var(--mf-ink-3)" }}>{t(key)}</p>
             </div>
           ))}
         </div>
 
         {/* Credit ledger */}
         {ledger.length > 0 && (
-          <div className="glass rounded-2xl p-5 mb-8" style={{ border: "1px solid rgba(124,58,237,0.08)" }}>
-            <p className="text-sm font-semibold mb-4" style={{ color: "#e2e8f0" }}>{t("dash_credit_history")}</p>
+          <div className="mf-card p-5 mb-8" style={{ border: "1px solid rgba(139,92,246,0.08)" }}>
+            <p className="text-sm font-semibold mb-4" style={{ color: "var(--mf-ink)" }}>{t("dash_credit_history")}</p>
             <div className="space-y-2">
               {ledger.slice(0, 8).map((entry, i) => {
-                const color = LEDGER_COLORS[entry.reason] || "#64748b";
+                const color = LEDGER_COLORS[entry.reason] || "var(--mf-ink-3)";
                 const sign = entry.amount > 0 ? "+" : "";
                 const date = entry.created_at
                   ? new Date(entry.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })
                   : "";
                 return (
                   <div key={i} className="flex items-center justify-between text-xs py-1.5 border-b last:border-0"
-                    style={{ borderColor: "#1a1a26" }}>
-                    <span style={{ color: "#94a3b8" }}>{entry.reason?.replace(/_/g, " ")}</span>
+                    style={{ borderColor: "var(--mf-line)" }}>
+                    <span style={{ color: "var(--mf-ink-2)" }}>{entry.reason?.replace(/_/g, " ")}</span>
                     <div className="flex items-center gap-3">
-                      <span style={{ color: "#475569" }}>{date}</span>
+                      <span style={{ color: "var(--mf-ink-4)" }}>{date}</span>
                       <span className="font-bold" style={{ color }}>{sign}{entry.amount}</span>
                     </div>
                   </div>
@@ -436,7 +435,7 @@ export default function DashboardPage() {
         {/* Error */}
         {error && (
           <div className="flex items-center gap-2 p-4 rounded-xl mb-6 text-sm"
-            style={{ backgroundColor: "rgba(239,68,68,0.08)", color: "#fca5a5", border: "1px solid rgba(239,68,68,0.2)" }}>
+            style={{ backgroundColor: "rgba(248,113,113,0.08)", color: "var(--mf-err-soft)", border: "1px solid rgba(248,113,113,0.2)" }}>
             <AlertCircle size={16} />
             {error}
           </div>
@@ -450,14 +449,13 @@ export default function DashboardPage() {
         ) : jobs.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 text-center">
             <div className="w-16 h-16 rounded-2xl flex items-center justify-center mb-5"
-              style={{ background: "rgba(124,58,237,0.12)", border: "1px solid rgba(124,58,237,0.2)" }}>
-              <Film size={28} style={{ color: "#7c3aed" }} />
+              style={{ background: "rgba(139,92,246,0.12)", border: "1px solid rgba(139,92,246,0.2)" }}>
+              <Film size={28} style={{ color: "var(--mf-violet)" }} />
             </div>
-            <h2 className="text-xl font-bold mb-2" style={{ color: "#e2e8f0" }}>{t("dash_empty_title")}</h2>
-            <p className="text-sm mb-6" style={{ color: "#475569" }}>{t("dash_empty_desc")}</p>
+            <h2 className="text-xl font-bold mb-2" style={{ color: "var(--mf-ink)" }}>{t("dash_empty_title")}</h2>
+            <p className="text-sm mb-6" style={{ color: "var(--mf-ink-4)" }}>{t("dash_empty_desc")}</p>
             <Link href="/"
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold"
-              style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}>
+              className="mf-btn-primary inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold">
               <Plus size={15} />
               {t("dash_create")}
             </Link>
@@ -474,7 +472,7 @@ export default function DashboardPage() {
               <div className="text-center mt-8">
                 <button onClick={loadMore}
                   className="px-6 py-2.5 rounded-xl text-sm font-medium transition-all"
-                  style={{ backgroundColor: "#12121a", border: "1px solid #22223a", color: "#94a3b8" }}>
+                  style={{ backgroundColor: "var(--mf-panel)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink-2)" }}>
                   {t("dash_load_more")}
                 </button>
               </div>

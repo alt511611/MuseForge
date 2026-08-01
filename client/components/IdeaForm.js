@@ -290,7 +290,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
         <label
           htmlFor="idea"
           className="flex items-center gap-2 text-sm font-medium mb-3"
-          style={{ color: "#a78bfa" }}
+          style={{ color: "var(--mf-violet-soft)" }}
         >
           <Sparkles size={16} />
           {t("form_idea_label")}
@@ -304,13 +304,13 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
           maxLength={2000}
           className="w-full px-4 py-3 rounded-xl text-base resize-none transition-all focus:outline-none"
           style={{
-            backgroundColor: "#0a0a0f",
-            border: "1px solid #22223a",
-            color: "#e2e8f0",
+            backgroundColor: "var(--mf-stage)",
+            border: "1px solid var(--mf-line-strong)",
+            color: "var(--mf-ink)",
           }}
           disabled={isSubmitting}
         />
-        <div className="flex justify-between mt-2 text-xs" style={{ color: "#64748b" }}>
+        <div className="flex justify-between mt-2 text-xs" style={{ color: "var(--mf-ink-3)" }}>
           <span>{t("form_idea_hint")}</span>
           <span>{charCount}/2000</span>
         </div>
@@ -318,7 +318,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
         <div>
-          <label className="text-sm font-medium mb-2 block" style={{ color: "#94a3b8" }}>
+          <label className="text-sm font-medium mb-2 block" style={{ color: "var(--mf-ink-2)" }}>
             {t("form_style_label")}
           </label>
           <select
@@ -326,9 +326,9 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
             onChange={(e) => setStyle(e.target.value)}
             className="w-full px-4 py-2.5 rounded-xl text-sm focus:outline-none"
             style={{
-              backgroundColor: "#0a0a0f",
-              border: "1px solid #22223a",
-              color: "#e2e8f0",
+              backgroundColor: "var(--mf-stage)",
+              border: "1px solid var(--mf-line-strong)",
+              color: "var(--mf-ink)",
             }}
             disabled={isSubmitting}
           >
@@ -341,7 +341,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
         </div>
 
         <div>
-          <label className="text-sm font-medium mb-2 block" style={{ color: "#94a3b8" }}>
+          <label className="text-sm font-medium mb-2 block" style={{ color: "var(--mf-ink-2)" }}>
             {t("form_director_label")}
           </label>
           <select
@@ -349,9 +349,9 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
             onChange={(e) => setDirectorStyle(e.target.value)}
             className="w-full px-4 py-2.5 rounded-xl text-sm focus:outline-none"
             style={{
-              backgroundColor: "#0a0a0f",
-              border: "1px solid #22223a",
-              color: "#e2e8f0",
+              backgroundColor: "var(--mf-stage)",
+              border: "1px solid var(--mf-line-strong)",
+              color: "var(--mf-ink)",
             }}
             disabled={isSubmitting}
           >
@@ -365,7 +365,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
       </div>
 
       <div className="mb-6">
-        <label className="text-sm font-medium mb-3 block" style={{ color: "#94a3b8" }}>
+        <label className="text-sm font-medium mb-3 block" style={{ color: "var(--mf-ink-2)" }}>
           {t("form_ratio_label")}
         </label>
         <div className="grid grid-cols-3 gap-3">
@@ -376,9 +376,9 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
               onClick={() => setAspectRatio(id)}
               className="flex flex-col items-center gap-2 px-4 py-3 rounded-xl text-sm transition-all"
               style={{
-                backgroundColor: aspectRatio === id ? "rgba(124, 58, 237, 0.15)" : "#0a0a0f",
-                border: aspectRatio === id ? "1px solid #7c3aed" : "1px solid #22223a",
-                color: aspectRatio === id ? "#a78bfa" : "#94a3b8",
+                backgroundColor: aspectRatio === id ? "rgba(139, 92, 246, 0.15)" : "var(--mf-stage)",
+                border: aspectRatio === id ? "1px solid var(--mf-violet)" : "1px solid var(--mf-line-strong)",
+                color: aspectRatio === id ? "var(--mf-violet-soft)" : "var(--mf-ink-2)",
               }}
               disabled={isSubmitting}
             >
@@ -390,11 +390,11 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
       </div>
 
       <div className="mb-6">
-        <label className="text-sm font-medium mb-2 block" style={{ color: "#94a3b8" }}>
+        <label className="text-sm font-medium mb-2 block" style={{ color: "var(--mf-ink-2)" }}>
           {t("form_char_label")}{" "}
-          <span style={{ color: "#4b5563", fontWeight: 400 }}>{t("form_char_optional")}</span>
+          <span style={{ color: "var(--mf-ink-4)", fontWeight: 400 }}>{t("form_char_optional")}</span>
         </label>
-        <p className="text-xs mb-3" style={{ color: "#64748b" }}>
+        <p className="text-xs mb-3" style={{ color: "var(--mf-ink-3)" }}>
           {t("form_char_desc")}
         </p>
         {!characterImage ? (
@@ -410,7 +410,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
             <label
               htmlFor="character-photo-upload"
               className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm cursor-pointer transition-all"
-              style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#94a3b8" }}
+              style={{ backgroundColor: "var(--mf-stage)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink-2)" }}
             >
               <Upload size={15} />
               {t("form_upload_btn")}
@@ -422,7 +422,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
               src={characterImage}
               alt="Karakter önizleme"
               className="w-12 h-12 rounded-full object-cover"
-              style={{ border: "2px solid #7c3aed" }}
+              style={{ border: "2px solid var(--mf-violet)" }}
             />
             <input
               type="text"
@@ -431,14 +431,14 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
               placeholder={t("form_char_name_ph")}
               maxLength={60}
               className="flex-1 px-4 py-2.5 rounded-xl text-sm focus:outline-none"
-              style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#e2e8f0" }}
+              style={{ backgroundColor: "var(--mf-stage)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink)" }}
               disabled={isSubmitting}
             />
             <button
               type="button"
               onClick={clearPhoto}
               className="p-2 rounded-lg transition-colors"
-              style={{ color: "#64748b" }}
+              style={{ color: "var(--mf-ink-3)" }}
               disabled={isSubmitting}
               aria-label="Fotoğrafı kaldır"
             >
@@ -447,10 +447,10 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
           </div>
         )}
         {uploadError && (
-          <p className="text-xs mt-2" style={{ color: "#fca5a5" }}>{uploadError}</p>
+          <p className="text-xs mt-2" style={{ color: "var(--mf-err-soft)" }}>{uploadError}</p>
         )}
         {characterImage && !characterName.trim() && (
-          <p className="text-xs mt-2" style={{ color: "#fde047" }}>
+          <p className="text-xs mt-2" style={{ color: "var(--mf-gold)" }}>
             {t("form_char_name_warning") || "Enter the character name so the script can match this photo to the right character."}
           </p>
         )}
@@ -458,10 +458,10 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
 
       {libraryEligible && libraryCharacters.length > 0 && (
         <div className="mb-6">
-          <label className="text-sm font-medium mb-2 block" style={{ color: "#94a3b8" }}>
+          <label className="text-sm font-medium mb-2 block" style={{ color: "var(--mf-ink-2)" }}>
             {t("form_library_chars") || "Kayıtlı karakterlerimden seç"}
           </label>
-          <p className="text-xs mb-3" style={{ color: "#64748b" }}>
+          <p className="text-xs mb-3" style={{ color: "var(--mf-ink-3)" }}>
             {t("form_library_chars_hint") || "Seçilen karakterler senaryoya doğrudan dahil edilir."}
           </p>
           <div className="flex flex-wrap gap-3">
@@ -479,8 +479,8 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
                   }
                   className="flex items-center gap-2 px-3 py-2 rounded-xl text-left transition-all"
                   style={{
-                    backgroundColor: selected ? "rgba(124, 58, 237, 0.15)" : "#0a0a0f",
-                    border: selected ? "1px solid #7c3aed" : "1px solid #22223a",
+                    backgroundColor: selected ? "rgba(139, 92, 246, 0.15)" : "var(--mf-stage)",
+                    border: selected ? "1px solid var(--mf-violet)" : "1px solid var(--mf-line-strong)",
                   }}
                 >
                   {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -488,9 +488,9 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
                     src={c.portrait_url}
                     alt={c.name}
                     className="w-9 h-9 rounded-full object-cover"
-                    style={{ border: "1px solid #7c3aed" }}
+                    style={{ border: "1px solid var(--mf-violet)" }}
                   />
-                  <span className="text-xs" style={{ color: selected ? "#a78bfa" : "#94a3b8" }}>
+                  <span className="text-xs" style={{ color: selected ? "var(--mf-violet-soft)" : "var(--mf-ink-2)" }}>
                     {c.name}
                   </span>
                 </button>
@@ -504,7 +504,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
         type="button"
         onClick={() => setShowAdvanced(!showAdvanced)}
         className="flex items-center gap-2 text-sm mb-4 transition-colors"
-        style={{ color: "#64748b" }}
+        style={{ color: "var(--mf-ink-3)" }}
       >
         <ChevronDown
           size={16}
@@ -516,7 +516,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
       {showAdvanced && (
         <div className="mb-6 space-y-4 animate-fade-in">
           <div>
-            <label className="text-sm font-medium mb-2 block" style={{ color: "#94a3b8" }}>
+            <label className="text-sm font-medium mb-2 block" style={{ color: "var(--mf-ink-2)" }}>
               {t("form_scenes_label")} ({numScenes})
             </label>
             <input
@@ -528,20 +528,20 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
               className="w-full accent-purple-500"
               disabled={isSubmitting}
             />
-            <div className="flex justify-between text-xs mt-1" style={{ color: "#64748b" }}>
+            <div className="flex justify-between text-xs mt-1" style={{ color: "var(--mf-ink-3)" }}>
               <span>2 scenes ({formatVideoDuration(2)})</span>
               <span>
                 {maxScenes} scenes ({formatVideoDuration(maxScenes)})
               </span>
             </div>
             {plan !== "pro" && numScenes >= maxScenes && (
-              <p className="text-xs mt-2" style={{ color: "#fbbf24" }}>
+              <p className="text-xs mt-2" style={{ color: "var(--mf-gold)" }}>
                 {t("form_scenes_upgrade_hint", { max: maxScenes })}
               </p>
             )}
           </div>
           <div>
-            <label className="text-sm font-medium mb-2 block" style={{ color: "#94a3b8" }}>
+            <label className="text-sm font-medium mb-2 block" style={{ color: "var(--mf-ink-2)" }}>
               {t("form_req_label")}
             </label>
             <input
@@ -551,9 +551,9 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
               placeholder={t("form_req_ph")}
               className="w-full px-4 py-2.5 rounded-xl text-sm focus:outline-none"
               style={{
-                backgroundColor: "#0a0a0f",
-                border: "1px solid #22223a",
-                color: "#e2e8f0",
+                backgroundColor: "var(--mf-stage)",
+                border: "1px solid var(--mf-line-strong)",
+                color: "var(--mf-ink)",
               }}
               disabled={isSubmitting}
             />
@@ -562,14 +562,14 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
       )}
 
       {musicEligible && (
-        <div className="flex items-center justify-between gap-3 mb-4 px-4 py-3 rounded-xl" style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a" }}>
-          <label className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: "#94a3b8" }}>
-            <Music size={16} style={{ color: "#a78bfa" }} />
+        <div className="flex items-center justify-between gap-3 mb-4 px-4 py-3 rounded-xl" style={{ backgroundColor: "var(--mf-stage)", border: "1px solid var(--mf-line-strong)" }}>
+          <label className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: "var(--mf-ink-2)" }}>
+            <Music size={16} style={{ color: "var(--mf-violet-soft)" }} />
             {t("form_music_toggle")}
           </label>
           <div className="flex items-center gap-3">
             {musicEnabled && !demoMode && (
-              <span className="text-xs" style={{ color: "#fbbf24" }}>
+              <span className="text-xs" style={{ color: "var(--mf-gold)" }}>
                 {t("form_music_credit_note", { n: numScenes + 1 })}
               </span>
             )}
@@ -580,7 +580,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
               onClick={() => setMusicEnabled((v) => !v)}
               disabled={isSubmitting}
               className="relative inline-flex h-5 w-9 items-center rounded-full transition-colors"
-              style={{ backgroundColor: musicEnabled ? "#7c3aed" : "#22223a" }}
+              style={{ backgroundColor: musicEnabled ? "var(--mf-violet)" : "var(--mf-line-strong)" }}
             >
               <span
                 className="inline-block h-4 w-4 transform rounded-full bg-white transition-transform"
@@ -592,19 +592,19 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
       )}
 
       {dialogueEligible && (
-        <div className="flex items-center justify-between gap-3 mb-4 px-4 py-3 rounded-xl" style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a" }}>
-          <label className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: "#94a3b8" }}>
-            <MessagesSquare size={16} style={{ color: "#a78bfa" }} />
+        <div className="flex items-center justify-between gap-3 mb-4 px-4 py-3 rounded-xl" style={{ backgroundColor: "var(--mf-stage)", border: "1px solid var(--mf-line-strong)" }}>
+          <label className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: "var(--mf-ink-2)" }}>
+            <MessagesSquare size={16} style={{ color: "var(--mf-violet-soft)" }} />
             <span>
               {t("form_dialogue_toggle")}
-              <span className="block text-[11px] mt-0.5" style={{ color: "#475569" }}>
+              <span className="block text-[11px] mt-0.5" style={{ color: "var(--mf-ink-4)" }}>
                 {t("form_dialogue_hint")}
               </span>
             </span>
           </label>
           <div className="flex items-center gap-3">
             {dialogueEnabled && !demoMode && (
-              <span className="text-xs" style={{ color: "#fbbf24" }}>
+              <span className="text-xs" style={{ color: "var(--mf-gold)" }}>
                 {t("form_dialogue_credit_note", {
                   n:
                     numScenes +
@@ -620,7 +620,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
               onClick={() => setDialogueEnabled((v) => !v)}
               disabled={isSubmitting}
               className="relative inline-flex h-5 w-9 items-center rounded-full transition-colors"
-              style={{ backgroundColor: dialogueEnabled ? "#7c3aed" : "#22223a" }}
+              style={{ backgroundColor: dialogueEnabled ? "var(--mf-violet)" : "var(--mf-line-strong)" }}
             >
               <span
                 className="inline-block h-4 w-4 transform rounded-full bg-white transition-transform"
@@ -631,12 +631,12 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
         </div>
       )}
 
-      <div className="flex items-center justify-between gap-3 mb-4 px-4 py-3 rounded-xl" style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a" }}>
-        <label className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: "#94a3b8" }}>
-          <Clapperboard size={16} style={{ color: "#a78bfa" }} />
+      <div className="flex items-center justify-between gap-3 mb-4 px-4 py-3 rounded-xl" style={{ backgroundColor: "var(--mf-stage)", border: "1px solid var(--mf-line-strong)" }}>
+        <label className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: "var(--mf-ink-2)" }}>
+          <Clapperboard size={16} style={{ color: "var(--mf-violet-soft)" }} />
           <span>
             {t("form_script_approval_toggle")}
-            <span className="block text-[11px] mt-0.5" style={{ color: "#475569" }}>
+            <span className="block text-[11px] mt-0.5" style={{ color: "var(--mf-ink-4)" }}>
               {t("form_script_approval_hint")}
             </span>
           </span>
@@ -648,7 +648,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
           onClick={() => setRequireScriptApproval((v) => !v)}
           disabled={isSubmitting}
           className="relative inline-flex h-5 w-9 flex-shrink-0 items-center rounded-full transition-colors"
-          style={{ backgroundColor: requireScriptApproval ? "#7c3aed" : "#22223a" }}
+          style={{ backgroundColor: requireScriptApproval ? "var(--mf-violet)" : "var(--mf-line-strong)" }}
         >
           <span
             className="inline-block h-4 w-4 transform rounded-full bg-white transition-transform"
@@ -657,7 +657,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
         </button>
       </div>
 
-      <div className="flex flex-col gap-1.5 mb-4 text-xs" style={{ color: "#64748b" }}>
+      <div className="flex flex-col gap-1.5 mb-4 text-xs" style={{ color: "var(--mf-ink-3)" }}>
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
           <span className="inline-flex items-center gap-1.5">
             <Clock size={13} />
@@ -672,14 +672,14 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
           {demoMode ? (
             <span
               className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full"
-              style={{ backgroundColor: "rgba(124,58,237,0.15)", color: "#a78bfa" }}
+              style={{ backgroundColor: "rgba(139,92,246,0.15)", color: "var(--mf-violet-soft)" }}
             >
               <FlaskConical size={11} /> {t("form_demo_badge")}
             </span>
           ) : (
             <span
               className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full"
-              style={{ backgroundColor: "rgba(251,191,36,0.12)", color: "#fbbf24" }}
+              style={{ backgroundColor: "rgba(232,182,76,0.12)", color: "var(--mf-gold)" }}
             >
               <Sparkles size={11} />{" "}
               {t("form_credit_cost", {
@@ -694,7 +694,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
           )}
         </div>
         {!demoMode && Array.isArray(estimate?.breakdown) && estimate.breakdown.length > 0 && (
-          <ul className="sm:self-end space-y-0.5 text-[11px] leading-relaxed" style={{ color: "#64748b" }}>
+          <ul className="sm:self-end space-y-0.5 text-[11px] leading-relaxed" style={{ color: "var(--mf-ink-3)" }}>
             {estimate.breakdown.map((row) => (
               <li key={row.label}>
                 {row.label}: {row.credits}
@@ -703,7 +703,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
           </ul>
         )}
         {!demoMode && estimate?.wait_warning_minutes != null && (
-          <p className="text-[11px] leading-relaxed" style={{ color: "#fbbf24" }}>
+          <p className="text-[11px] leading-relaxed" style={{ color: "var(--mf-gold)" }}>
             {t("form_long_job_warning", { minutes: estimate.wait_warning_minutes })}
           </p>
         )}
@@ -715,8 +715,8 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
         className="w-full py-4 rounded-xl font-semibold text-base transition-all flex items-center justify-center gap-2"
         style={{
           background: isSubmitting
-            ? "#4c1d95"
-            : "linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%)",
+            ? "var(--mf-violet-deep)"
+            : "linear-gradient(135deg, var(--mf-violet) 0%, var(--mf-violet-deep) 100%)",
           color: "#fff",
           opacity: !idea.trim() ? 0.5 : 1,
           cursor: !idea.trim() || isSubmitting ? "not-allowed" : "pointer",

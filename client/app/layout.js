@@ -81,7 +81,7 @@ export const viewport = {
 export default function RootLayout({ children }) {
   return (
     <html lang="en" dir="ltr">
-      <body className="antialiased min-h-screen" style={{ backgroundColor: "#0a0a0f" }}>
+      <body className="antialiased min-h-screen" style={{ backgroundColor: "var(--mf-stage)" }}>
         <AuthProvider>
           <LanguageProvider>
             <Navbar />

@@ -54,9 +54,9 @@ function SaveCharacterButton({ character }) {
         disabled={saving || saved}
         className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-md disabled:opacity-70"
         style={{
-          backgroundColor: saved ? "rgba(34,197,94,0.15)" : "rgba(124,58,237,0.12)",
-          color: saved ? "#86efac" : "#a78bfa",
-          border: "1px solid #22223a",
+          backgroundColor: saved ? "rgba(52,211,153,0.15)" : "rgba(139,92,246,0.12)",
+          color: saved ? "var(--mf-ok)" : "var(--mf-violet-soft)",
+          border: "1px solid var(--mf-line-strong)",
         }}
       >
         {saving ? (
@@ -70,7 +70,7 @@ function SaveCharacterButton({ character }) {
           ? (t("result_char_saved") || "Kaydedildi")
           : (t("result_save_char") || "Bu karakteri kaydet")}
       </button>
-      {error && <span className="text-[9px] text-center" style={{ color: "#fca5a5" }}>{error}</span>}
+      {error && <span className="text-[9px] text-center" style={{ color: "var(--mf-err-soft)" }}>{error}</span>}
     </div>
   );
 }
@@ -91,23 +91,23 @@ function NextSteps({ jobId, videoUrl }) {
 
   return (
     <div className="glass rounded-2xl p-6">
-      <h3 className="text-sm font-semibold mb-4" style={{ color: "#a78bfa" }}>{t("result_whats_next")}</h3>
+      <h3 className="text-sm font-semibold mb-4" style={{ color: "var(--mf-violet-soft)" }}>{t("result_whats_next")}</h3>
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <Link href="/"
           className="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all hover:scale-[1.02]"
-          style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}>
+          style={{ background: "linear-gradient(135deg,var(--mf-violet),var(--mf-violet-deep))", color: "#fff" }}>
           <Plus size={16} />
           {t("result_new_video")}
         </Link>
         <a href={openUrl} target="_blank" rel="noopener noreferrer"
           className="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all hover:scale-[1.02]"
-          style={{ backgroundColor: "#12121a", border: "1px solid #22223a", color: "#94a3b8" }}>
+          style={{ backgroundColor: "var(--mf-panel)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink-2)" }}>
           <ExternalLink size={16} />
           {t("result_open_video")}
         </a>
         <button onClick={handleShare}
           className="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all hover:scale-[1.02]"
-          style={{ backgroundColor: "#12121a", border: "1px solid #22223a", color: "#94a3b8" }}>
+          style={{ backgroundColor: "var(--mf-panel)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink-2)" }}>
           <Share2 size={16} />
           {t("result_share")}
         </button>
@@ -206,7 +206,7 @@ export default function VideoResult({ job, jobId }) {
       <div className="text-center mb-6 animate-slide-up">
         <div className="text-4xl mb-2">🎉</div>
         <h2 className="text-2xl font-black gradient-text">{t("result_ready")}</h2>
-        <p className="text-sm mt-1" style={{ color: "#64748b" }}>
+        <p className="text-sm mt-1" style={{ color: "var(--mf-ink-3)" }}>
           {result.title} · {t("result_scenes_count", { n: result.scene_count })} · {result.aspect_ratio}
         </p>
       </div>
@@ -220,11 +220,11 @@ export default function VideoResult({ job, jobId }) {
           src={videoSrc}
         />
         <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
-          <p className="text-xs truncate" style={{ color: "#475569" }}>{result.logline}</p>
+          <p className="text-xs truncate" style={{ color: "var(--mf-ink-4)" }}>{result.logline}</p>
           <div className="flex flex-wrap items-center gap-2 flex-shrink-0 ml-auto">
             <a href={videoSrc} download
               className="inline-flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg font-medium"
-              style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)", color: "#fff" }}>
+              style={{ background: "linear-gradient(135deg,var(--mf-violet),var(--mf-violet-deep))", color: "#fff" }}>
               <Download size={13} />
               {t("result_download")}
             </a>
@@ -234,7 +234,7 @@ export default function VideoResult({ job, jobId }) {
                 disabled={!!exporting}
                 onClick={() => handleExport("9:16")}
                 className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg font-medium disabled:opacity-50"
-                style={{ backgroundColor: "#12121a", border: "1px solid #22223a", color: "#94a3b8" }}
+                style={{ backgroundColor: "var(--mf-panel)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink-2)" }}
                 title={t("result_export_crop_note")}
               >
                 {exporting === "9:16" ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
@@ -247,7 +247,7 @@ export default function VideoResult({ job, jobId }) {
                 disabled={!!exporting}
                 onClick={() => handleExport("1:1")}
                 className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg font-medium disabled:opacity-50"
-                style={{ backgroundColor: "#12121a", border: "1px solid #22223a", color: "#94a3b8" }}
+                style={{ backgroundColor: "var(--mf-panel)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink-2)" }}
                 title={t("result_export_crop_note")}
               >
                 {exporting === "1:1" ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
@@ -256,9 +256,9 @@ export default function VideoResult({ job, jobId }) {
             )}
           </div>
         </div>
-        <p className="text-[10px] mt-2" style={{ color: "#475569" }}>{t("result_export_crop_note")}</p>
+        <p className="text-[10px] mt-2" style={{ color: "var(--mf-ink-4)" }}>{t("result_export_crop_note")}</p>
         {exportError && (
-          <p className="text-xs mt-1" style={{ color: "#fca5a5" }}>{exportError}</p>
+          <p className="text-xs mt-1" style={{ color: "var(--mf-err-soft)" }}>{exportError}</p>
         )}
       </div>
 
@@ -272,18 +272,18 @@ export default function VideoResult({ job, jobId }) {
             onClick={() => setStoryboardOpen(!storyboardOpen)}
             className="w-full flex items-center justify-between px-5 py-4"
           >
-            <span className="text-sm font-medium flex items-center gap-2" style={{ color: "#a78bfa" }}>
+            <span className="text-sm font-medium flex items-center gap-2" style={{ color: "var(--mf-violet-soft)" }}>
               <Layout size={15} />
               {t("result_storyboard")}
             </span>
-            {storyboardOpen ? <ChevronUp size={15} style={{ color: "#64748b" }} /> : <ChevronDown size={15} style={{ color: "#64748b" }} />}
+            {storyboardOpen ? <ChevronUp size={15} style={{ color: "var(--mf-ink-3)" }} /> : <ChevronDown size={15} style={{ color: "var(--mf-ink-3)" }} />}
           </button>
 
           {storyboardOpen && (
             <div className="px-5 pb-5 animate-fade-in">
               {Object.keys(portraits).length > 0 && (
                 <div className="mb-4">
-                  <p className="text-xs mb-2" style={{ color: "#64748b" }}>{t("result_locked_chars")}</p>
+                  <p className="text-xs mb-2" style={{ color: "var(--mf-ink-3)" }}>{t("result_locked_chars")}</p>
                   <div className="flex flex-wrap gap-3">
                     {(result.characters?.length
                       ? result.characters
@@ -300,8 +300,8 @@ export default function VideoResult({ job, jobId }) {
                         <div key={name} className="flex flex-col items-center gap-1 max-w-[88px]">
                           {/* eslint-disable-next-line @next/next/no-img-element */}
                           <img src={url} alt={name} className="w-14 h-14 rounded-full object-cover"
-                            style={{ border: "2px solid #7c3aed" }} />
-                          <span className="text-[10px] text-center" style={{ color: "#94a3b8" }}>{name}</span>
+                            style={{ border: "2px solid var(--mf-violet)" }} />
+                          <span className="text-[10px] text-center" style={{ color: "var(--mf-ink-2)" }}>{name}</span>
                           { (job?.plan === "pro" || result?.plan === "pro") && (
                             <SaveCharacterButton
                               character={{
@@ -319,7 +319,7 @@ export default function VideoResult({ job, jobId }) {
               )}
               {scenes.map((scene) => (
                 <div key={scene.index} className="mb-4">
-                  <p className="text-xs mb-2" style={{ color: "#64748b" }}>
+                  <p className="text-xs mb-2" style={{ color: "var(--mf-ink-3)" }}>
                     Scene {scene.index + 1}: {scene.script}
                   </p>
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
@@ -327,7 +327,7 @@ export default function VideoResult({ job, jobId }) {
                       // eslint-disable-next-line @next/next/no-img-element
                       <img key={i} src={shot.frame_url} alt={shot.visual_desc || `Frame ${i + 1}`}
                         className="w-full aspect-video object-cover rounded-lg"
-                        style={{ border: "1px solid #22223a" }} />
+                        style={{ border: "1px solid var(--mf-line-strong)" }} />
                     ))}
                   </div>
                 </div>

@@ -21,9 +21,9 @@ export default function StickyCtaButton({ onScrollToForm }) {
       onClick={onScrollToForm}
       className="fixed bottom-6 right-6 z-40 flex items-center gap-2 px-5 py-3 rounded-full text-sm font-semibold shadow-2xl transition-all animate-fade-in hover:scale-105 active:scale-95"
       style={{
-        background: "linear-gradient(135deg,#7c3aed,#6d28d9)",
+        background: "linear-gradient(135deg,var(--mf-violet),var(--mf-violet-deep))",
         color: "#fff",
-        boxShadow: "0 0 24px rgba(124,58,237,0.4)",
+        boxShadow: "0 0 24px rgba(139,92,246,0.4)",
       }}
       aria-label="Try Now"
     >

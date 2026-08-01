@@ -11,11 +11,11 @@ import { useAuth } from "../../contexts/AuthContext";
 import { useLanguage } from "../../contexts/LanguageContext";
 
 const STATUS_COLOR = {
-  completed: "#22c55e",
+  completed: "var(--mf-ok)",
   failed: "#ef4444",
-  running: "#a78bfa",
-  queued: "#fbbf24",
-  cancelled: "#64748b",
+  running: "var(--mf-violet-soft)",
+  queued: "var(--mf-gold)",
+  cancelled: "var(--mf-ink-3)",
 };
 
 function StatCard({ icon: Icon, label, value, color }) {
@@ -26,8 +26,8 @@ function StatCard({ icon: Icon, label, value, color }) {
         <Icon size={22} style={{ color }} />
       </div>
       <div>
-        <p className="text-2xl font-bold" style={{ color: "#e2e8f0" }}>{value}</p>
-        <p className="text-xs" style={{ color: "#64748b" }}>{label}</p>
+        <p className="text-2xl font-bold" style={{ color: "var(--mf-ink)" }}>{value}</p>
+        <p className="text-xs" style={{ color: "var(--mf-ink-3)" }}>{label}</p>
       </div>
     </div>
   );
@@ -48,43 +48,43 @@ function JobModal({ job, onClose, onRetry, onDelete }) {
       >
         <div className="flex items-start justify-between mb-4">
           <div>
-            <h2 className="text-lg font-bold" style={{ color: "#e2e8f0" }}>Job #{job.id}</h2>
-            <p className="text-xs mt-0.5" style={{ color: "#64748b" }}>{job.created_at?.slice(0, 19).replace("T", " ")} UTC</p>
+            <h2 className="text-lg font-bold" style={{ color: "var(--mf-ink)" }}>Job #{job.id}</h2>
+            <p className="text-xs mt-0.5" style={{ color: "var(--mf-ink-3)" }}>{job.created_at?.slice(0, 19).replace("T", " ")} UTC</p>
           </div>
-          <span className="text-xs px-2 py-1 rounded-full" style={{ backgroundColor: `${STATUS_COLOR[job.status] || "#94a3b8"}20`, color: STATUS_COLOR[job.status] || "#94a3b8" }}>
+          <span className="text-xs px-2 py-1 rounded-full" style={{ backgroundColor: `${STATUS_COLOR[job.status] || "var(--mf-ink-2)"}20`, color: STATUS_COLOR[job.status] || "var(--mf-ink-2)" }}>
             {job.status}
           </span>
         </div>
 
-        <p className="text-sm mb-4 px-3 py-2 rounded-lg" style={{ backgroundColor: "#12121a", color: "#94a3b8" }}>
+        <p className="text-sm mb-4 px-3 py-2 rounded-lg" style={{ backgroundColor: "var(--mf-panel)", color: "var(--mf-ink-2)" }}>
           &ldquo;{job.idea}&rdquo;
         </p>
 
-        <div className="grid grid-cols-2 gap-2 text-xs mb-4" style={{ color: "#64748b" }}>
-          <div>{t("admin_style")}: <span style={{ color: "#94a3b8" }}>{job.style}</span></div>
-          <div>{t("admin_director")}: <span style={{ color: "#94a3b8" }}>{job.director_style}</span></div>
-          <div>{t("admin_ratio")}: <span style={{ color: "#94a3b8" }}>{job.aspect_ratio}</span></div>
-          <div>{t("admin_scenes")}: <span style={{ color: "#94a3b8" }}>{job.num_scenes}</span></div>
-          <div>{t("admin_user")}: <span style={{ color: "#94a3b8" }}>{job.user_email || t("admin_anon")}</span></div>
-          <div>{t("admin_demo")}: <span style={{ color: "#94a3b8" }}>{job.demo ? t("admin_yes") : t("admin_no")}</span></div>
+        <div className="grid grid-cols-2 gap-2 text-xs mb-4" style={{ color: "var(--mf-ink-3)" }}>
+          <div>{t("admin_style")}: <span style={{ color: "var(--mf-ink-2)" }}>{job.style}</span></div>
+          <div>{t("admin_director")}: <span style={{ color: "var(--mf-ink-2)" }}>{job.director_style}</span></div>
+          <div>{t("admin_ratio")}: <span style={{ color: "var(--mf-ink-2)" }}>{job.aspect_ratio}</span></div>
+          <div>{t("admin_scenes")}: <span style={{ color: "var(--mf-ink-2)" }}>{job.num_scenes}</span></div>
+          <div>{t("admin_user")}: <span style={{ color: "var(--mf-ink-2)" }}>{job.user_email || t("admin_anon")}</span></div>
+          <div>{t("admin_demo")}: <span style={{ color: "var(--mf-ink-2)" }}>{job.demo ? t("admin_yes") : t("admin_no")}</span></div>
         </div>
 
         {job.error && (
-          <div className="text-xs px-3 py-2 rounded-lg mb-4" style={{ backgroundColor: "rgba(239,68,68,0.1)", color: "#fca5a5" }}>
+          <div className="text-xs px-3 py-2 rounded-lg mb-4" style={{ backgroundColor: "rgba(248,113,113,0.1)", color: "var(--mf-err-soft)" }}>
             {job.error}
           </div>
         )}
 
         {job.events?.length > 0 && (
           <div>
-            <p className="text-xs font-medium mb-2" style={{ color: "#64748b" }}>{t("admin_event_log")}</p>
+            <p className="text-xs font-medium mb-2" style={{ color: "var(--mf-ink-3)" }}>{t("admin_event_log")}</p>
             <div className="space-y-1 max-h-48 overflow-y-auto font-mono text-xs"
-              style={{ backgroundColor: "#0a0a0f", borderRadius: 8, padding: "8px 12px" }}>
+              style={{ backgroundColor: "var(--mf-stage)", borderRadius: 8, padding: "8px 12px" }}>
               {job.events.map((ev, i) => (
                 <div key={i} className="flex gap-2">
-                  <span style={{ color: "#475569" }}>{ev.timestamp?.slice(11, 19)}</span>
-                  <span style={{ color: "#7c3aed" }}>[{ev.stage}]</span>
-                  <span style={{ color: "#94a3b8" }}>{ev.message}</span>
+                  <span style={{ color: "var(--mf-ink-4)" }}>{ev.timestamp?.slice(11, 19)}</span>
+                  <span style={{ color: "var(--mf-violet)" }}>[{ev.stage}]</span>
+                  <span style={{ color: "var(--mf-ink-2)" }}>{ev.message}</span>
                 </div>
               ))}
             </div>
@@ -95,18 +95,18 @@ function JobModal({ job, onClose, onRetry, onDelete }) {
           {job.status !== "running" && (
             <button onClick={() => onRetry(job.id)}
               className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium transition-all"
-              style={{ backgroundColor: "rgba(124,58,237,0.15)", color: "#a78bfa", border: "1px solid rgba(124,58,237,0.3)" }}>
+              style={{ backgroundColor: "rgba(139,92,246,0.15)", color: "var(--mf-violet-soft)", border: "1px solid rgba(139,92,246,0.3)" }}>
               <RefreshCw size={14} /> {t("admin_retry")}
             </button>
           )}
           <button onClick={() => onDelete(job.id)}
             className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium transition-all"
-            style={{ backgroundColor: "rgba(239,68,68,0.1)", color: "#fca5a5", border: "1px solid rgba(239,68,68,0.3)" }}>
+            style={{ backgroundColor: "rgba(248,113,113,0.1)", color: "var(--mf-err-soft)", border: "1px solid rgba(248,113,113,0.3)" }}>
             <Trash2 size={14} /> Sil
           </button>
           <button onClick={onClose}
             className="ml-auto px-4 py-2 rounded-xl text-sm"
-            style={{ color: "#64748b" }}>
+            style={{ color: "var(--mf-ink-3)" }}>
             Kapat
           </button>
         </div>
@@ -174,8 +174,8 @@ export default function AdminPage() {
 
   if (authLoading || (!isAdmin && user === null)) {
     return (
-      <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: "#0a0a0f" }}>
-        <Loader2 className="animate-spin" size={32} style={{ color: "#7c3aed" }} />
+      <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: "var(--mf-stage)" }}>
+        <Loader2 className="animate-spin" size={32} style={{ color: "var(--mf-violet)" }} />
       </div>
     );
   }
@@ -183,19 +183,19 @@ export default function AdminPage() {
   const totalPages = Math.ceil(total / LIMIT);
 
   return (
-    <main className="min-h-screen" style={{ backgroundColor: "#0a0a0f" }}>
+    <main className="min-h-screen" style={{ backgroundColor: "var(--mf-stage)" }}>
       <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8 sm:py-10">
         <div className="flex items-center justify-between mb-8">
           <div className="flex items-center gap-3">
-            <Link href="/" className="text-sm flex items-center gap-1.5 transition-colors hover:text-purple-400" style={{ color: "#64748b" }}>
+            <Link href="/" className="text-sm flex items-center gap-1.5 transition-colors hover:text-violet-soft" style={{ color: "var(--mf-ink-3)" }}>
               <ArrowLeft size={14} /> {t("admin_home")}
             </Link>
-            <span style={{ color: "#22223a" }}>/</span>
+            <span style={{ color: "var(--mf-line-strong)" }}>/</span>
             <h1 className="text-xl font-bold gradient-text">{t("admin_title")}</h1>
           </div>
           <button onClick={loadData} disabled={fetching}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-all"
-            style={{ color: "#64748b", border: "1px solid #22223a" }}>
+            style={{ color: "var(--mf-ink-3)", border: "1px solid var(--mf-line-strong)" }}>
             <RefreshCw size={14} className={fetching ? "animate-spin" : ""} />
             {t("admin_refresh")}
           </button>
@@ -204,52 +204,52 @@ export default function AdminPage() {
         {/* Stats */}
         {stats && (
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-            <StatCard icon={Film} label={t("admin_stat_total")} value={stats.total} color="#7c3aed" />
-            <StatCard icon={CheckCircle2} label={t("admin_stat_completed")} value={stats.completed} color="#22c55e" />
+            <StatCard icon={Film} label={t("admin_stat_total")} value={stats.total} color="var(--mf-violet)" />
+            <StatCard icon={CheckCircle2} label={t("admin_stat_completed")} value={stats.completed} color="var(--mf-ok)" />
             <StatCard icon={XCircle} label={t("admin_stat_failed")} value={stats.failed} color="#ef4444" />
-            <StatCard icon={Activity} label={t("admin_stat_running")} value={stats.running} color="#a78bfa" />
+            <StatCard icon={Activity} label={t("admin_stat_running")} value={stats.running} color="var(--mf-violet-soft)" />
           </div>
         )}
 
         {/* Jobs table */}
         <div className="glass rounded-2xl overflow-hidden">
-          <div className="flex items-center justify-between px-6 py-4" style={{ borderBottom: "1px solid #1a1a26" }}>
-            <h2 className="text-sm font-medium flex items-center gap-2" style={{ color: "#a78bfa" }}>
+          <div className="flex items-center justify-between px-6 py-4" style={{ borderBottom: "1px solid var(--mf-line)" }}>
+            <h2 className="text-sm font-medium flex items-center gap-2" style={{ color: "var(--mf-violet-soft)" }}>
               <BarChart3 size={16} /> {t("admin_jobs_title")}
             </h2>
-            <span className="text-xs" style={{ color: "#475569" }}>{t("admin_records", { n: total })}</span>
+            <span className="text-xs" style={{ color: "var(--mf-ink-4)" }}>{t("admin_records", { n: total })}</span>
           </div>
 
           {fetching ? (
             <div className="flex justify-center py-12">
-              <Loader2 className="animate-spin" size={24} style={{ color: "#7c3aed" }} />
+              <Loader2 className="animate-spin" size={24} style={{ color: "var(--mf-violet)" }} />
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm min-w-[640px]">
                 <thead>
-                  <tr style={{ borderBottom: "1px solid #1a1a26" }}>
+                  <tr style={{ borderBottom: "1px solid var(--mf-line)" }}>
                     {[t("admin_col_id"), t("admin_col_user"), t("admin_col_idea"), t("admin_col_status"), t("admin_col_date"), ""].map((h) => (
-                      <th key={h} className="text-left px-4 py-3 text-xs font-medium" style={{ color: "#475569" }}>{h}</th>
+                      <th key={h} className="text-left px-4 py-3 text-xs font-medium" style={{ color: "var(--mf-ink-4)" }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   {jobs.map((job) => (
-                    <tr key={job.id} style={{ borderBottom: "1px solid #12121a" }} className="hover:bg-white/[0.02] transition-colors">
-                      <td className="px-4 py-3 font-mono text-xs" style={{ color: "#94a3b8" }}>{job.id}</td>
-                      <td className="px-4 py-3 text-xs max-w-[140px] truncate" style={{ color: "#64748b" }}>{job.user_email || t("admin_anon")}</td>
-                      <td className="px-4 py-3 text-xs max-w-[200px] truncate" style={{ color: "#94a3b8" }}>{job.idea}</td>
+                    <tr key={job.id} style={{ borderBottom: "1px solid var(--mf-line)" }} className="hover:bg-white/[0.02] transition-colors">
+                      <td className="px-4 py-3 font-mono text-xs" style={{ color: "var(--mf-ink-2)" }}>{job.id}</td>
+                      <td className="px-4 py-3 text-xs max-w-[140px] truncate" style={{ color: "var(--mf-ink-3)" }}>{job.user_email || t("admin_anon")}</td>
+                      <td className="px-4 py-3 text-xs max-w-[200px] truncate" style={{ color: "var(--mf-ink-2)" }}>{job.idea}</td>
                       <td className="px-4 py-3">
-                        <span className="text-xs px-2 py-0.5 rounded-full" style={{ backgroundColor: `${STATUS_COLOR[job.status] || "#94a3b8"}15`, color: STATUS_COLOR[job.status] || "#94a3b8" }}>
+                        <span className="text-xs px-2 py-0.5 rounded-full" style={{ backgroundColor: `${STATUS_COLOR[job.status] || "var(--mf-ink-2)"}15`, color: STATUS_COLOR[job.status] || "var(--mf-ink-2)" }}>
                           {job.status}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-xs" style={{ color: "#475569" }}>{job.created_at?.slice(0, 10)}</td>
+                      <td className="px-4 py-3 text-xs" style={{ color: "var(--mf-ink-4)" }}>{job.created_at?.slice(0, 10)}</td>
                       <td className="px-4 py-3">
                         <button onClick={() => openJobDetail(job.id)}
                           className="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg transition-all"
-                          style={{ backgroundColor: "rgba(124,58,237,0.1)", color: "#a78bfa" }}>
+                          style={{ backgroundColor: "rgba(139,92,246,0.1)", color: "var(--mf-violet-soft)" }}>
                           <Eye size={12} /> {t("admin_detail")}
                         </button>
                       </td>
@@ -262,16 +262,16 @@ export default function AdminPage() {
 
           {/* Pagination */}
           {totalPages > 1 && (
-            <div className="flex items-center justify-between px-6 py-4" style={{ borderTop: "1px solid #1a1a26" }}>
+            <div className="flex items-center justify-between px-6 py-4" style={{ borderTop: "1px solid var(--mf-line)" }}>
               <button disabled={page === 0} onClick={() => setPage(p => p - 1)}
                 className="text-xs px-3 py-1.5 rounded-lg transition-all disabled:opacity-40"
-                style={{ color: "#94a3b8", border: "1px solid #22223a" }}>
+                style={{ color: "var(--mf-ink-2)", border: "1px solid var(--mf-line-strong)" }}>
                 {t("admin_prev")}
               </button>
-              <span className="text-xs" style={{ color: "#475569" }}>{page + 1} / {totalPages}</span>
+              <span className="text-xs" style={{ color: "var(--mf-ink-4)" }}>{page + 1} / {totalPages}</span>
               <button disabled={page >= totalPages - 1} onClick={() => setPage(p => p + 1)}
                 className="text-xs px-3 py-1.5 rounded-lg transition-all disabled:opacity-40"
-                style={{ color: "#94a3b8", border: "1px solid #22223a" }}>
+                style={{ color: "var(--mf-ink-2)", border: "1px solid var(--mf-line-strong)" }}>
                 {t("admin_next")}
               </button>
             </div>

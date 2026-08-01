@@ -5,9 +5,12 @@ import { useAuth } from "../contexts/AuthContext";
 import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
 import { API_BASE } from "../lib/apiBase";
+import { useLanguage } from "../contexts/LanguageContext";
+import { friendlyError } from "../utils/errorMessages";
 
 export default function CheckoutButton({ plan, children, className = "", style = {} }) {
   const { user, getAccessToken } = useAuth();
+  const { t } = useLanguage();
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -40,13 +43,13 @@ export default function CheckoutButton({ plan, children, className = "", style =
 
       if (!res.ok) {
         const err = await res.json();
-        throw new Error(err.detail || "Ödeme oturumu başlatılamadı");
+        throw new Error(err.detail || t("checkout_failed"));
       }
 
       const { url } = await res.json();
       window.location.href = url;
     } catch (err) {
-      setError(err.message);
+      setError(friendlyError(err.message));
       setLoading(false);
     }
   };
@@ -63,7 +66,7 @@ export default function CheckoutButton({ plan, children, className = "", style =
         {children}
       </button>
       {error && (
-        <p className="text-xs mt-2 text-center" style={{ color: "#fca5a5" }}>{error}</p>
+        <p className="text-xs mt-2 text-center" style={{ color: "var(--mf-err-soft)" }}>{error}</p>
       )}
     </div>
   );

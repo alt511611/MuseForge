@@ -8,13 +8,20 @@ const ERROR_MAP = [
   { match: /403|forbidden/i, msg: "You do not have permission for this action." },
   { match: /404|not found/i, msg: "Job not found. Refresh the page and try again." },
   { match: /402|insufficient credits/i, msg: "CREDITS_EXHAUSTED" },
+  // Keep upstream provider names out of the UI. This sits last so the
+  // specific cases above (cancelled, rate limit, timeout) still win.
+  { match: /muapi|fal\.?ai|anthropic|claude/i, msg: "The video service is temporarily unavailable. Please try again." },
 ];
+
+// Belt-and-braces: even an unmatched error must not surface a provider name
+// when it reaches the user through the raw-text fallthrough below.
+const PROVIDER_NAMES = /\b(muapi|fal\.?ai|anthropic|claude|kling|flux)\b/gi;
 
 export function friendlyError(raw) {
   if (!raw) return "An unexpected error occurred.";
   for (const { match, msg } of ERROR_MAP) {
     if (match.test(raw)) return msg;
   }
-  const trimmed = raw.length > 120 ? raw.slice(0, 120) + "…" : raw;
-  return trimmed;
+  const scrubbed = raw.replace(PROVIDER_NAMES, "the render service");
+  return scrubbed.length > 120 ? scrubbed.slice(0, 120) + "…" : scrubbed;
 }

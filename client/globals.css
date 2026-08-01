@@ -2,9 +2,48 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ──────────────────────────────────────────────────────────────────────────
+   MuseForge design tokens
+   Direction: "cinematic AI studio" — near-black stage, violet as the product
+   accent, film-gold as the craft/director accent, mono micro-labels as a
+   slate motif. Every value below is referenced from Tailwind config too, so
+   components can use either `var(--mf-*)` or the Tailwind class name.
+   ────────────────────────────────────────────────────────────────────────── */
 :root {
-  --background: #0a0a0f;
-  --surface: #12121a;
+  /* Stage — the surfaces, darkest to lightest */
+  --mf-stage: #07070b;
+  --mf-bg: #0a0a0f;
+  --mf-panel: #101018;
+  --mf-panel-2: #16161f;
+  --mf-line: #1e1e2b;
+  --mf-line-strong: #2a2a3d;
+
+  /* Ink — text, brightest to dimmest */
+  --mf-ink: #f1f3f8;
+  --mf-ink-2: #a8b0c2;
+  --mf-ink-3: #6b7488;
+  --mf-ink-4: #454c5e;
+
+  /* Accents */
+  --mf-violet: #8b5cf6;
+  --mf-violet-deep: #6d28d9;
+  --mf-violet-soft: #b9a5fb;
+  --mf-gold: #e8b64c;
+  --mf-gold-soft: #f3d38a;
+
+  /* Semantic */
+  --mf-ok: #34d399;
+  --mf-warn: #e8b64c;
+  --mf-err: #f87171;
+  --mf-err-soft: #fca5a5;
+
+  /* Effects */
+  --mf-glow: 0 0 40px rgba(139, 92, 246, 0.28);
+  --mf-lift: 0 18px 40px -18px rgba(0, 0, 0, 0.9);
+
+  /* Legacy aliases — older components still read these */
+  --background: var(--mf-bg);
+  --surface: var(--mf-panel);
 }
 
 * {
@@ -17,29 +56,239 @@ html,
 body {
   max-width: 100vw;
   overflow-x: hidden;
-  background-color: var(--background);
-  color: #e2e8f0;
+  background-color: var(--mf-stage);
+  color: var(--mf-ink);
+  font-feature-settings: "ss01", "cv01";
+}
+
+::selection {
+  background: rgba(139, 92, 246, 0.35);
+  color: #fff;
 }
 
 ::-webkit-scrollbar {
   width: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #12121a;
+  background: var(--mf-panel);
 }
 ::-webkit-scrollbar-thumb {
-  background: #3b3b5c;
+  background: var(--mf-line-strong);
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #7c3aed;
+  background: var(--mf-violet);
+}
+
+/* ── Type ────────────────────────────────────────────────────────────────── */
+
+.display {
+  letter-spacing: -0.035em;
+  line-height: 0.95;
+  font-weight: 800;
+}
+
+/* Film-slate micro-label: "01 / SCREENWRITER". Used for every section eyebrow
+   so the page reads like a production document. */
+.slate-label {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--mf-ink-3);
 }
 
 .gradient-text {
-  background: linear-gradient(135deg, #a78bfa 0%, #7c3aed 50%, #6d28d9 100%);
+  background: linear-gradient(135deg, #d8ccff 0%, var(--mf-violet) 55%, var(--mf-violet-deep) 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+}
+
+.gold-text {
+  background: linear-gradient(135deg, var(--mf-gold-soft) 0%, var(--mf-gold) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ── Surfaces ────────────────────────────────────────────────────────────── */
+
+/* Frosted-glass card surface used by forms (IdeaForm, login card, etc.). */
+.glass {
+  background: rgba(16, 16, 24, 0.82);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(139, 92, 246, 0.16);
+}
+
+/* The standard content card. Hairline border, faint top highlight so cards
+   catch light like a physical surface. */
+.mf-card {
+  position: relative;
+  background: linear-gradient(180deg, var(--mf-panel-2) 0%, var(--mf-panel) 100%);
+  border: 1px solid var(--mf-line);
+  border-radius: 16px;
+}
+.mf-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.09), transparent);
+}
+
+.mf-card-hover {
+  transition: border-color 0.3s, transform 0.3s, box-shadow 0.3s;
+}
+.mf-card-hover:hover {
+  border-color: rgba(139, 92, 246, 0.35);
+  transform: translateY(-3px);
+  box-shadow: var(--mf-lift);
+}
+
+/* Animated gradient border glow shown on focus-within, used alongside
+   .glass on the main idea form. */
+.border-glow {
+  position: relative;
+}
+.border-glow::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  background: linear-gradient(135deg, var(--mf-violet-deep), var(--mf-violet-soft), var(--mf-violet-deep));
+  border-radius: inherit;
+  z-index: -1;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+.border-glow:focus-within::before {
+  opacity: 1;
+}
+
+/* ── Cinematic texture ───────────────────────────────────────────────────── */
+
+/* Film grain. An SVG fractal-noise data URI so it costs no network request
+   and stays crisp at any DPR. Sits above content backgrounds, below text. */
+.film-grain::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.5;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.35'/%3E%3C/svg%3E");
+}
+
+/* Lens vignette — darkens the frame edges so imagery reads as "shot". */
+.vignette::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 45%, transparent 45%, rgba(0, 0, 0, 0.6) 100%);
+}
+
+/* Letterbox bars for 2.39:1 framing inside a 16:9 box. */
+.letterbox::before,
+.letterbox::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 11%;
+  background: #000;
+  z-index: 2;
+  pointer-events: none;
+}
+.letterbox::before {
+  top: 0;
+}
+.letterbox::after {
+  bottom: 0;
+}
+
+/* Sprocket-hole strip used as a divider between major sections. */
+.sprockets {
+  height: 22px;
+  background-image: radial-gradient(circle at 8px 50%, var(--mf-line) 3.5px, transparent 4px);
+  background-size: 22px 22px;
+  opacity: 0.85;
+}
+
+/* Hairline rule that fades at both ends. */
+.hairline {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--mf-line-strong), transparent);
+}
+
+/* ── Controls ────────────────────────────────────────────────────────────── */
+
+.mf-btn-primary {
+  background: linear-gradient(135deg, var(--mf-violet) 0%, var(--mf-violet-deep) 100%);
+  color: #fff;
+  box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.5), 0 12px 30px -12px rgba(139, 92, 246, 0.85);
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+.mf-btn-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.7), 0 16px 38px -12px rgba(139, 92, 246, 1);
+}
+.mf-btn-primary:active {
+  transform: translateY(0) scale(0.985);
+}
+
+.mf-btn-ghost {
+  background: var(--mf-panel-2);
+  border: 1px solid var(--mf-line-strong);
+  color: var(--mf-ink-2);
+  transition: border-color 0.2s, color 0.2s;
+}
+.mf-btn-ghost:hover {
+  border-color: rgba(139, 92, 246, 0.5);
+  color: var(--mf-ink);
+}
+
+/* ── Motion ──────────────────────────────────────────────────────────────── */
+
+@keyframes mfRise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-rise {
+  animation: mfRise 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes mfSweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+/* Light sweep across the pipeline rail — signals "processing" without a spinner. */
+.rail-sweep {
+  animation: mfSweep 3.2s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-rise,
+  .rail-sweep,
+  .animate-fade-in,
+  .animate-slide-up {
+    animation: none !important;
+  }
+  .mf-card-hover:hover {
+    transform: none;
+  }
 }
 
 @media (max-width: 640px) {

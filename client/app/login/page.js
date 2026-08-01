@@ -102,8 +102,8 @@ function LoginForm() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: "#0a0a0f" }}>
-        <Loader2 className="animate-spin" size={32} style={{ color: "#7c3aed" }} />
+      <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: "var(--mf-stage)" }}>
+        <Loader2 className="animate-spin" size={32} style={{ color: "var(--mf-violet)" }} />
       </div>
     );
   }
@@ -111,19 +111,28 @@ function LoginForm() {
   const modeTitle = mode === "login" ? t("login_title_login") : mode === "signup" ? t("login_title_signup") : t("login_title_forgot");
 
   return (
-    <main className="min-h-screen flex items-center justify-center px-4" style={{ backgroundColor: "#0a0a0f" }}>
-      <div className="w-full max-w-md">
+    <main className="relative min-h-screen flex items-center justify-center px-4 overflow-hidden film-grain" style={{ backgroundColor: "var(--mf-stage)" }}>
+      {/* Same stage lighting as the landing hero, so signing in doesn't feel
+          like a different product. */}
+      <div className="absolute inset-0 pointer-events-none" aria-hidden="true">
+        <div
+          className="absolute -top-32 left-1/2 -translate-x-1/2 w-[800px] h-[500px] rounded-full"
+          style={{ background: "radial-gradient(ellipse at center, rgba(139,92,246,0.22) 0%, transparent 68%)", filter: "blur(90px)" }}
+        />
+      </div>
+
+      <div className="relative w-full max-w-md animate-rise">
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl mb-4"
-            style={{ background: "linear-gradient(135deg,#7c3aed,#6d28d9)" }}>
+            style={{ background: "linear-gradient(135deg,var(--mf-violet),var(--mf-violet-deep))" }}>
             <Film size={28} color="#fff" />
           </div>
           <h1 className="text-3xl font-black tracking-tight gradient-text">MuseForge</h1>
-          <p className="text-sm mt-1" style={{ color: "#64748b" }}>{t("login_tagline")}</p>
+          <p className="text-sm mt-1" style={{ color: "var(--mf-ink-3)" }}>{t("login_tagline")}</p>
         </div>
 
         <div className="glass rounded-2xl p-8">
-          <h2 className="text-xl font-semibold mb-6 text-center" style={{ color: "#e2e8f0" }}>
+          <h2 className="text-xl font-semibold mb-6 text-center" style={{ color: "var(--mf-ink)" }}>
             {modeTitle}
           </h2>
 
@@ -132,32 +141,31 @@ function LoginForm() {
               <button
                 onClick={handleGoogle}
                 disabled={busy}
-                className="w-full flex items-center justify-center gap-3 py-3 rounded-xl text-sm font-medium mb-4 transition-all"
-                style={{ backgroundColor: "#1a1a26", border: "1px solid #22223a", color: "#e2e8f0" }}
+                className="mf-btn-ghost w-full flex items-center justify-center gap-3 py-3 rounded-xl text-sm font-medium mb-4"
               >
                 <Chrome size={18} />
                 {t("login_google")}
               </button>
               <div className="flex items-center gap-3 mb-4">
-                <div className="flex-1 h-px" style={{ backgroundColor: "#22223a" }} />
-                <span className="text-xs" style={{ color: "#475569" }}>{t("login_or")}</span>
-                <div className="flex-1 h-px" style={{ backgroundColor: "#22223a" }} />
+                <div className="flex-1 h-px" style={{ backgroundColor: "var(--mf-line-strong)" }} />
+                <span className="text-xs" style={{ color: "var(--mf-ink-4)" }}>{t("login_or")}</span>
+                <div className="flex-1 h-px" style={{ backgroundColor: "var(--mf-line-strong)" }} />
               </div>
             </>
           )}
 
           <form onSubmit={handleEmailAuth} className="space-y-4">
             <div>
-              <label className="text-xs font-medium block mb-1.5" style={{ color: "#94a3b8" }}>
+              <label className="text-xs font-medium block mb-1.5" style={{ color: "var(--mf-ink-2)" }}>
                 {t("login_email")}
               </label>
               <div className="relative">
-                <Mail size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: "#475569" }} />
+                <Mail size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: "var(--mf-ink-4)" }} />
                 <input
                   type="email" value={email} onChange={(e) => setEmail(e.target.value)}
                   placeholder="you@example.com" required
                   className="w-full pl-9 pr-4 py-2.5 rounded-xl text-sm focus:outline-none"
-                  style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#e2e8f0" }}
+                  style={{ backgroundColor: "var(--mf-stage)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink)" }}
                 />
               </div>
             </div>
@@ -165,28 +173,28 @@ function LoginForm() {
             {mode !== "forgot" && (
               <div>
                 <div className="flex items-center justify-between mb-1.5">
-                  <label className="text-xs font-medium" style={{ color: "#94a3b8" }}>{t("login_password")}</label>
+                  <label className="text-xs font-medium" style={{ color: "var(--mf-ink-2)" }}>{t("login_password")}</label>
                   {mode === "login" && (
                     <button type="button" onClick={() => switchMode("forgot")}
-                      className="text-xs underline" style={{ color: "#a78bfa" }}>
+                      className="text-xs underline" style={{ color: "var(--mf-violet-soft)" }}>
                       {t("login_forgot")}
                     </button>
                   )}
                 </div>
                 <div className="relative">
-                  <Lock size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: "#475569" }} />
+                  <Lock size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: "var(--mf-ink-4)" }} />
                   <input
                     type="password" value={password} onChange={(e) => setPassword(e.target.value)}
                     placeholder="••••••••" required minLength={6}
                     className="w-full pl-9 pr-4 py-2.5 rounded-xl text-sm focus:outline-none"
-                    style={{ backgroundColor: "#0a0a0f", border: "1px solid #22223a", color: "#e2e8f0" }}
+                    style={{ backgroundColor: "var(--mf-stage)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink)" }}
                   />
                 </div>
               </div>
             )}
 
             {mode === "forgot" && (
-              <p className="text-xs" style={{ color: "#64748b" }}>{t("login_forgot_desc")}</p>
+              <p className="text-xs" style={{ color: "var(--mf-ink-3)" }}>{t("login_forgot_desc")}</p>
             )}
 
             {mode === "signup" && (
@@ -196,15 +204,15 @@ function LoginForm() {
                   checked={acceptedTerms}
                   onChange={(e) => setAcceptedTerms(e.target.checked)}
                   className="mt-0.5 rounded"
-                  style={{ accentColor: "#7c3aed" }}
+                  style={{ accentColor: "var(--mf-violet)" }}
                 />
-                <span className="text-xs leading-relaxed" style={{ color: "#94a3b8" }}>
+                <span className="text-xs leading-relaxed" style={{ color: "var(--mf-ink-2)" }}>
                   {t("login_accept_prefix")}{" "}
-                  <a href="/legal/terms" target="_blank" rel="noopener noreferrer" className="underline" style={{ color: "#a78bfa" }}>
+                  <a href="/legal/terms" target="_blank" rel="noopener noreferrer" className="underline" style={{ color: "var(--mf-violet-soft)" }}>
                     {t("login_accept_terms")}
                   </a>
                   {" "}{t("login_accept_and")}{" "}
-                  <a href="/legal/privacy" target="_blank" rel="noopener noreferrer" className="underline" style={{ color: "#a78bfa" }}>
+                  <a href="/legal/privacy" target="_blank" rel="noopener noreferrer" className="underline" style={{ color: "var(--mf-violet-soft)" }}>
                     {t("login_accept_privacy")}
                   </a>
                 </span>
@@ -212,12 +220,12 @@ function LoginForm() {
             )}
 
             {error && (
-              <div className="text-xs px-3 py-2 rounded-lg" style={{ backgroundColor: "rgba(239,68,68,0.1)", color: "#fca5a5" }}>
+              <div className="text-xs px-3 py-2 rounded-lg" style={{ backgroundColor: "rgba(248,113,113,0.1)", color: "var(--mf-err-soft)" }}>
                 {error}
               </div>
             )}
             {info && (
-              <div className="text-xs px-3 py-2 rounded-lg" style={{ backgroundColor: "rgba(34,197,94,0.1)", color: "#86efac" }}>
+              <div className="text-xs px-3 py-2 rounded-lg" style={{ backgroundColor: "rgba(52,211,153,0.1)", color: "var(--mf-ok)" }}>
                 {info}
               </div>
             )}
@@ -225,28 +233,24 @@ function LoginForm() {
             <button
               type="submit"
               disabled={busy || (mode === "signup" && !acceptedTerms)}
-              className="w-full py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-all"
-              style={{
-                background: "linear-gradient(135deg,#7c3aed,#6d28d9)",
-                color: "#fff",
-                opacity: busy || (mode === "signup" && !acceptedTerms) ? 0.5 : 1,
-              }}
+              className="mf-btn-primary w-full py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2"
+              style={{ opacity: busy || (mode === "signup" && !acceptedTerms) ? 0.5 : 1 }}
             >
               {busy ? <Loader2 size={16} className="animate-spin" /> : null}
               {mode === "login" ? t("login_submit_login") : mode === "signup" ? t("login_submit_signup") : t("login_submit_forgot")}
             </button>
           </form>
 
-          <p className="text-center text-xs mt-5" style={{ color: "#64748b" }}>
+          <p className="text-center text-xs mt-5" style={{ color: "var(--mf-ink-3)" }}>
             {mode === "forgot" ? (
-              <button onClick={() => switchMode("login")} className="underline" style={{ color: "#a78bfa" }}>
+              <button onClick={() => switchMode("login")} className="underline" style={{ color: "var(--mf-violet-soft)" }}>
                 {t("login_back")}
               </button>
             ) : (
               <>
                 {mode === "login" ? t("login_no_account") : t("login_have_account")}{" "}
                 <button onClick={() => switchMode(mode === "login" ? "signup" : "login")}
-                  className="underline" style={{ color: "#a78bfa" }}>
+                  className="underline" style={{ color: "var(--mf-violet-soft)" }}>
                   {mode === "login" ? t("login_signup_link") : t("login_signin_link")}
                 </button>
               </>
@@ -261,8 +265,8 @@ function LoginForm() {
 export default function LoginPage() {
   return (
     <Suspense fallback={
-      <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: "#0a0a0f" }}>
-        <Loader2 className="animate-spin" size={32} style={{ color: "#7c3aed" }} />
+      <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: "var(--mf-stage)" }}>
+        <Loader2 className="animate-spin" size={32} style={{ color: "var(--mf-violet)" }} />
       </div>
     }>
       <LoginForm />
