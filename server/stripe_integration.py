@@ -14,16 +14,27 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 
 # Plan definitions: plan name → credits granted per renewal cycle
+# Credits included with each subscription tier.
+#
+# Priced against real unit economics: one credit buys SECONDS_PER_CREDIT
+# seconds of finished video (see interfaces/second_budget), which costs
+# ~$0.95 at the provider's linear per-second rate. These allocations put
+# both tiers near a 74% gross margin. Every tier must include at least
+# PLAN_MAX_SCENES credits, otherwise the plan cannot render one
+# full-length drama -- api.PLAN_MAX_SCENES is the constraint to check
+# when changing these.
 PLAN_CREDITS = {
-    "creator": 25,
-    "pro": 55,
+    "creator": 16,
+    "pro": 36,
 }
 
 # One-time credit packages: env var suffix → credit amount
+# One-off packs carry a premium over subscriptions -- they buy flexibility,
+# not commitment -- so their per-credit price is deliberately higher.
 CREDIT_PACKAGES = {
     "SMALL":  {"credits": 4,  "label": "4 Credits"},
     "MEDIUM": {"credits": 12, "label": "12 Credits"},
-    "LARGE":  {"credits": 30, "label": "30 Credits"},
+    "LARGE":  {"credits": 26, "label": "26 Credits"},
 }
 
 stripe.api_key = STRIPE_SECRET_KEY
