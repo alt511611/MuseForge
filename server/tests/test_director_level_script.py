@@ -88,10 +88,27 @@ def test_preset_character_instruction_survives_rewrites():
 def test_max_tokens_raised_for_the_richer_schema():
     """A truncated response is unparseable JSON and silently drops the whole
     script to the template fallback."""
+    assert ScreenwriterAgent.MAX_SCRIPT_TOKENS >= 8192
+
+
+def test_both_provider_paths_share_the_token_budget():
+    """Regression: the budget was raised only on the direct-Anthropic
+    fallback, while the MuAPI route -- which is tried FIRST -- kept the old
+    2048 default and truncated its JSON mid-object. The symptom is a generic
+    template script, with nothing in the output explaining why."""
     import inspect
 
-    source = inspect.getsource(ScreenwriterAgent._write_with_claude)
-    assert '"max_tokens": 8192' in source
+    muapi_call = inspect.getsource(ScreenwriterAgent.write_script)
+    anthropic_call = inspect.getsource(ScreenwriterAgent._write_with_claude)
+    assert "max_tokens=self.MAX_SCRIPT_TOKENS" in muapi_call
+    assert '"max_tokens": self.MAX_SCRIPT_TOKENS' in anthropic_call
+
+
+def test_storyboard_also_passes_its_budget_to_muapi():
+    import inspect
+
+    source = inspect.getsource(StoryboardArtist.design_storyboard)
+    assert "max_tokens=self.MAX_SHOT_TOKENS" in source
 
 
 # --- template fallback still has a dramatic shape ----------------------
@@ -358,3 +375,59 @@ def test_every_director_field_is_actually_consumed():
             f"screenwriter emits {field!r} but no pipeline code reads it -- "
             "either consume it or stop asking the model to produce it"
         )
+
+
+# --- a failed screenwriter must not fail silently -----------------------
+
+
+def test_template_script_is_marked_as_degraded():
+    """The fallback discards the user's idea almost entirely -- generic
+    setting, a character named "Alex". Shipping that unlabelled makes the
+    product look like it cannot follow a prompt."""
+    import asyncio
+
+    script = asyncio.run(
+        ScreenwriterAgent(demo=True).write_script("a forest quest", num_scenes=3)
+    )
+    assert script.generated_by == "template"
+    # An LLM-written script is the default and stays unlabelled.
+    assert DramaScript(title="t", logline="l").generated_by == "llm"
+
+
+def test_degradation_is_surfaced_on_the_job():
+    """It must reach both the progress stream (so the user sees it while
+    waiting) and the result (so the UI can explain the finished video)."""
+    import inspect
+
+    import pipelines.idea2video as mod
+
+    source = inspect.getsource(mod.Idea2VideoPipeline.continue_from_script)
+    assert 'generated_by", "llm") == "template"' in source
+    assert "script_degraded" in source
+    assert "will not follow your idea closely" in source
+
+
+@pytest.mark.asyncio
+async def test_degraded_flag_reaches_the_result(monkeypatch, tmp_path):
+    import pipelines.idea2video as mod
+
+    pipeline = mod.Idea2VideoPipeline(api_key="", demo=True)
+    monkeypatch.setattr(
+        pipeline, "_lock_character_portraits", _async_return({})
+    )
+    monkeypatch.setattr(
+        pipeline.script2video, "run", _async_return({"path": None, "shots": []})
+    )
+
+    template = await ScreenwriterAgent(demo=True).write_script("x", num_scenes=2)
+    result = await pipeline.continue_from_script(
+        template, working_dir=str(tmp_path / "job")
+    )
+    assert result["script_degraded"] is True
+
+
+def _async_return(value):
+    async def _inner(*args, **kwargs):
+        return value
+
+    return _inner

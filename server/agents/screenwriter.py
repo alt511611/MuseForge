@@ -93,6 +93,13 @@ Respond ONLY with valid JSON matching this schema:
   ]
 }"""
 
+    #: Token budget for a director-level script. Shared by BOTH provider
+    #: paths: the MuAPI route is tried FIRST, so raising it only on the
+    #: Anthropic fallback (as an earlier change did) leaves the primary path
+    #: truncating its JSON mid-object -- which parses as failure and drops
+    #: the whole script to the generic template, silently.
+    MAX_SCRIPT_TOKENS = 8192
+
     def __init__(self, api_key: Optional[str] = None, demo: bool = False):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self.muapi_key = os.environ.get("MUAPI_KEY", "")
@@ -137,7 +144,9 @@ Respond ONLY with valid JSON matching this schema:
         #    100% confirmed, so any failure here falls through silently.
         if self.muapi_key:
             try:
-                content = await complete_via_muapi(self.SYSTEM_PROMPT, prompt)
+                content = await complete_via_muapi(
+                    self.SYSTEM_PROMPT, prompt, max_tokens=self.MAX_SCRIPT_TOKENS
+                )
                 return DramaScript(**self._parse_json(content))
             except Exception as exc:
                 # Include a snippet of the RAW MuAPI response so failures
@@ -206,7 +215,7 @@ Respond ONLY with valid JSON matching this schema:
                         # 5 scenes no longer fit the old 2048 budget -- a
                         # truncated response is unparseable JSON and silently
                         # drops the whole script to the template fallback.
-                        "max_tokens": 8192,
+                        "max_tokens": self.MAX_SCRIPT_TOKENS,
                         "system": self.SYSTEM_PROMPT,
                         "messages": [{"role": "user", "content": prompt}],
                     },
@@ -325,6 +334,7 @@ Respond ONLY with valid JSON matching this schema:
         ]
 
         return DramaScript(
+            generated_by="template",
             title=title,
             logline=idea,
             theme="A choice made too late still counts as a choice.",
