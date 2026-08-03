@@ -412,7 +412,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                         "content-type": "application/json",
                     },
                     json={
-                        "model": "claude-sonnet-4-20250514",
+                        "model": "claude-sonnet-5",
                         "max_tokens": 2048,
                         "system": self.SYSTEM_PROMPT,
                         "messages": [{"role": "user", "content": prompt}],
@@ -422,7 +422,18 @@ Respond ONLY with valid JSON array containing a single shot object:
                 content = resp.json()["content"][0]["text"]
                 data = json.loads(re.search(r"\[[\s\S]*\]", content).group())
                 return [StoryboardShot(**s) for s in data]
-        except Exception:
+        except Exception as exc:
+            detail = ""
+            resp = getattr(exc, "response", None)
+            if resp is not None:
+                try:
+                    detail = f" | status={resp.status_code} body={resp.text[:500]}"
+                except Exception:
+                    pass
+            logger.error(
+                f"Anthropic storyboard call failed, falling back to template: "
+                f"{type(exc).__name__}: {exc}{detail}"
+            )
             return []
 
     def _design_template(

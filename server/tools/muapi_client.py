@@ -46,7 +46,9 @@ class MuAPIClient:
     async def _request_with_retry(self, client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
         """Issue an HTTP request, retrying transient failures with exponential backoff + jitter."""
         last_exc: Exception = MuAPIError("request never attempted")
+        attempts = 0
         for attempt in range(self.max_retries + 1):
+            attempts = attempt + 1
             try:
                 resp = await client.request(method, url, headers=self._headers(), **kwargs)
                 if resp.status_code in RETRYABLE_STATUS and attempt < self.max_retries:
@@ -59,10 +61,19 @@ class MuAPIClient:
                 last_exc = exc
                 if attempt >= self.max_retries:
                     break
+                # raise_for_status() above raises on ANY 4xx/5xx, so without
+                # this gate a terminal client error (400 "prediction failed",
+                # 401 bad key, 422 bad payload) was retried the full 4 times
+                # with backoff -- burning ~7s before the caller could fall
+                # back, and never succeeding. Only RETRYABLE_STATUS (and
+                # transport errors, which carry no response) are worth a retry.
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if status is not None and status not in RETRYABLE_STATUS:
+                    break
                 backoff = min(2 ** attempt + random.uniform(0, 0.5), 10.0)
                 await asyncio.sleep(backoff)
         raise MuAPIError(
-            f"MuAPI request failed after {self.max_retries + 1} attempts: "
+            f"MuAPI request failed after {attempts} attempt(s): "
             f"{last_exc}{self._response_detail(last_exc)}"
         )
 

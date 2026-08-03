@@ -6,7 +6,6 @@ import { useRouter } from "next/navigation";
 import { Film, LogOut, Shield, ChevronDown, User, LayoutDashboard, Globe, Building2, Users, Clapperboard, BookOpen, AlertTriangle, Menu, X } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { useLanguage } from "../contexts/LanguageContext";
-import { createClient } from "../lib/supabase";
 import { isLowCredits } from "../lib/credits";
 
 function LanguageSelector() {
@@ -111,7 +110,7 @@ function SolutionsDropdown() {
 }
 
 export default function Navbar() {
-  const { user, isAdmin, signOut, loading } = useAuth();
+  const { user, profile, isAdmin, signOut, loading } = useAuth();
   const { t } = useLanguage();
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -133,32 +132,17 @@ export default function Navbar() {
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
+  // Profile comes from AuthContext, which fetches the row once per user --
+  // this component used to run its own identical query alongside IdeaForm's.
   useEffect(() => {
-    if (!user) {
+    if (!user || !profile) {
       setLowCredits(false);
       setCreditCount(null);
       return;
     }
-    let cancelled = false;
-    (async () => {
-      try {
-        const supabase = createClient();
-        if (!supabase) return;
-        const { data } = await supabase
-          .from("profiles")
-          .select("plan, credits")
-          .eq("id", user.id)
-          .single();
-        if (!cancelled && data) {
-          setCreditCount(data.credits);
-          setLowCredits(isLowCredits(data.credits, data.plan));
-        }
-      } catch {
-        /* ignore */
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [user]);
+    setCreditCount(profile.credits);
+    setLowCredits(isLowCredits(profile.credits, profile.plan));
+  }, [user, profile]);
 
   const handleSignOut = async () => {
     await signOut();
