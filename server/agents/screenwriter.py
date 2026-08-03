@@ -209,7 +209,7 @@ Respond ONLY with valid JSON matching this schema:
                         "content-type": "application/json",
                     },
                     json={
-                        "model": "claude-sonnet-4-20250514",
+                        "model": "claude-sonnet-5",
                         # A director-level script carries per-scene turn,
                         # subtext, staging and per-character want/need/arc, so
                         # 5 scenes no longer fit the old 2048 budget -- a
@@ -224,7 +224,23 @@ Respond ONLY with valid JSON matching this schema:
                 content = resp.json()["content"][0]["text"]
                 data = self._parse_json(content)
                 return DramaScript(**data)
-        except Exception:
+        except Exception as exc:
+            # This used to swallow the exception entirely, so a failing
+            # Anthropic key/model/quota looked identical to "no key
+            # configured" in the logs -- both just produced a generic
+            # template with no explanation. Surface the response body when
+            # there is one; that is where the API states the actual cause.
+            detail = ""
+            resp = getattr(exc, "response", None)
+            if resp is not None:
+                try:
+                    detail = f" | status={resp.status_code} body={resp.text[:500]}"
+                except Exception:
+                    pass
+            logger.error(
+                f"Anthropic screenwriter call failed, falling back to template: "
+                f"{type(exc).__name__}: {exc}{detail}"
+            )
             return self._write_template(idea, style, num_scenes, preset_characters)
 
     def _parse_json(self, text: str) -> dict:

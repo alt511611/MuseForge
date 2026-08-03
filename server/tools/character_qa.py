@@ -88,7 +88,7 @@ async def verify_frame(
                     "content-type": "application/json",
                 },
                 json={
-                    "model": "claude-sonnet-4-20250514",
+                    "model": "claude-sonnet-5",
                     "max_tokens": 256,
                     "messages": [
                         {
