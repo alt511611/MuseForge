@@ -11,6 +11,15 @@ export default function LoadingAnimation({ size = 80, progress = 0, stage = "" }
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
+
+    // Canvas can't parse `var(--x)` — resolve design tokens to real colors.
+    const cssVar = (name, fallback) => {
+      const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+      return v || fallback;
+    };
+    const violet = cssVar("--mf-violet", "#8b5cf6");
+    const violetSoft = cssVar("--mf-violet-soft", "#b9a5fb");
+
     const dpr = window.devicePixelRatio || 1;
     canvas.width = size * dpr;
     canvas.height = size * dpr;
@@ -37,8 +46,8 @@ export default function LoadingAnimation({ size = 80, progress = 0, stage = "" }
         const start = -Math.PI / 2;
         const end = start + (progress / 100) * Math.PI * 2;
         const grad = ctx.createLinearGradient(0, 0, size, size);
-        grad.addColorStop(0, "var(--mf-violet)");
-        grad.addColorStop(1, "var(--mf-violet-soft)");
+        grad.addColorStop(0, violet);
+        grad.addColorStop(1, violetSoft);
         ctx.beginPath();
         ctx.arc(cx, cy, r, start, end);
         ctx.strokeStyle = grad;
@@ -62,7 +71,7 @@ export default function LoadingAnimation({ size = 80, progress = 0, stage = "" }
 
       ctx.beginPath();
       ctx.arc(dotX, dotY, 4, 0, Math.PI * 2);
-      ctx.fillStyle = "var(--mf-violet-soft)";
+      ctx.fillStyle = violetSoft;
       ctx.fill();
 
       angleRef.current += 0.04;
