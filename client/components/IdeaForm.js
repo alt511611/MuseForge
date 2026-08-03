@@ -18,7 +18,6 @@ import {
 
 import { useLanguage } from "../contexts/LanguageContext";
 import { useAuth } from "../contexts/AuthContext";
-import { createClient } from "../lib/supabase";
 import { API_BASE } from "../lib/apiBase";
 
 // Plans allowed to attach optional background music. Kept in sync with the
@@ -48,6 +47,11 @@ function formatVideoDuration(sceneCount) {
 
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024; // 5MB — keep in sync with server/constants.py
 
+// Long enough to absorb the first-paint burst (plan + dialogue availability
+// landing a few ms apart) and slider drags, short enough that the cost
+// estimate still feels live.
+const ESTIMATE_DEBOUNCE_MS = 300;
+
 const STYLES = [
   "Cinematic",
   "Noir",
@@ -76,7 +80,7 @@ const ASPECT_RATIOS = [
 
 export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
   const { t } = useLanguage();
-  const { user, getAccessToken } = useAuth();
+  const { user, profile, getAccessToken } = useAuth();
   const [idea, setIdea] = useState("");
   const [style, setStyle] = useState("Cinematic");
   const [directorStyle, setDirectorStyle] = useState("cinematic_balanced");
@@ -90,7 +94,6 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
   const [characterImage, setCharacterImage] = useState(null);
   const [characterName, setCharacterName] = useState("");
   const [uploadError, setUploadError] = useState(null);
-  const [plan, setPlan] = useState(null);
   const [musicEnabled, setMusicEnabled] = useState(false);
   const [dialogueEnabled, setDialogueEnabled] = useState(false);
   const [dialogueAvailable, setDialogueAvailable] = useState(false);
@@ -98,43 +101,12 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
   const [libraryCharacters, setLibraryCharacters] = useState([]);
   const [selectedLibraryIds, setSelectedLibraryIds] = useState([]);
 
-  // Look up the signed-in user's plan (Creator/Pro unlock optional music +
-  // a higher scene cap). Anonymous/free users simply never see the toggle.
-  useEffect(() => {
-    if (!user) {
-      setPlan(null);
-      return;
-    }
-    let cancelled = false;
-    const supabase = createClient();
-    if (!supabase) return;
-    supabase
-      .from("profiles")
-      .select("plan")
-      .eq("id", user.id)
-      .single()
-      .then(({ data, error }) => {
-        if (cancelled) return;
-        if (error) {
-          // Supabase JS returns query errors (RLS denial, 0/2+ rows from
-          // .single(), etc.) as { data: null, error } -- it does NOT throw
-          // for these, so the .catch() below never fires for them. The
-          // previous code only checked `data`, meaning any such error
-          // silently left `plan` as null forever with zero visibility --
-          // indistinguishable from "you're on the free plan" in the UI,
-          // and nothing logged anywhere to diagnose it.
-          console.error("Failed to fetch user plan (music toggle will stay hidden):", error);
-          return;
-        }
-        if (data) setPlan(data.plan);
-      })
-      .catch((err) => {
-        if (!cancelled) console.error("Failed to fetch user plan (network/client error):", err);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [user]);
+  // The signed-in user's plan (Creator/Pro unlock optional music + a higher
+  // scene cap) comes from AuthContext, which fetches the profile row once per
+  // user -- this component used to run its own query alongside Navbar's,
+  // hitting the same row twice on a single page load. Anonymous/free users
+  // simply never see the toggle.
+  const plan = profile?.plan ?? null;
 
   const musicEligible = MUSIC_ELIGIBLE_PLANS.includes(plan);
   const dialogueEligible =
@@ -182,10 +154,6 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
     if (!dialogueEligible && dialogueEnabled) setDialogueEnabled(false);
   }, [dialogueEligible, dialogueEnabled]);
 
-  useEffect(() => {
-    if (numScenes > maxScenes) setNumScenes(maxScenes);
-  }, [maxScenes, numScenes]);
-
   // Allows landing-page example cards to pre-fill idea + style, and
   // scrolls the form into view so the click feels responsive.
   useEffect(() => {
@@ -210,23 +178,32 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
       .catch(() => {});
   }, []);
 
+  // Debounced: the inputs below settle in a burst on first paint (`plan`
+  // arrives from the profile fetch, `dialogueEligible` flips once
+  // /api/health resolves), which previously fired three separate POSTs for
+  // one page load. Dragging the scene slider had the same problem -- one
+  // request per intermediate value. Waiting out the burst collapses each of
+  // those into a single request.
   useEffect(() => {
     let cancelled = false;
-    fetch(`${API_BASE}/api/estimate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        num_scenes: numScenes,
-        music_enabled: musicEligible && musicEnabled,
-        dialogue_enabled: dialogueEligible && dialogueEnabled,
-        plan: plan || "free",
-      }),
-    })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => !cancelled && d && setEstimate(d))
-      .catch(() => {});
+    const timer = setTimeout(() => {
+      fetch(`${API_BASE}/api/estimate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          num_scenes: numScenes,
+          music_enabled: musicEligible && musicEnabled,
+          dialogue_enabled: dialogueEligible && dialogueEnabled,
+          plan: plan || "free",
+        }),
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => !cancelled && d && setEstimate(d))
+        .catch(() => {});
+    }, ESTIMATE_DEBOUNCE_MS);
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
   }, [numScenes, musicEligible, musicEnabled, dialogueEligible, dialogueEnabled, plan]);
 

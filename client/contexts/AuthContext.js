@@ -14,6 +14,12 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(authConfigured);
+  // The signed-in user's profile row ({ plan, credits }), fetched once per
+  // user here rather than independently in every component that needs it --
+  // Navbar and IdeaForm each used to run their own `.from("profiles")` query
+  // on the same page load, so a single landing-page visit hit the same row
+  // twice. null means "not loaded yet or signed out".
+  const [profile, setProfile] = useState(null);
 
   useEffect(() => {
     if (!supabase) {
@@ -39,6 +45,39 @@ export function AuthProvider({ children }) {
 
     return () => subscription.unsubscribe();
   }, [supabase]);
+
+  useEffect(() => {
+    if (!supabase || !user) {
+      setProfile(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        // Supabase JS returns query errors (RLS denial, 0/2+ rows from
+        // .single()) as { data: null, error } rather than throwing, so check
+        // `error` explicitly -- otherwise a denied read is indistinguishable
+        // from "free plan, no credits" in the UI, with nothing logged to
+        // diagnose it.
+        const { data, error } = await supabase
+          .from("profiles")
+          .select("plan, credits")
+          .eq("id", user.id)
+          .single();
+        if (cancelled) return;
+        if (error) {
+          console.error("Failed to fetch user profile (plan/credits UI will stay hidden):", error);
+          return;
+        }
+        if (data) setProfile(data);
+      } catch (err) {
+        if (!cancelled) console.error("Failed to fetch user profile (network/client error):", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [supabase, user]);
 
   const requireAuth = () => {
     if (!supabase) {
@@ -96,6 +135,7 @@ export function AuthProvider({ children }) {
         user,
         session,
         loading,
+        profile,
         isAdmin,
         authConfigured,
         signInWithEmail,

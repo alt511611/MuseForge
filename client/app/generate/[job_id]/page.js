@@ -68,6 +68,13 @@ export default function GeneratePage() {
   const { t } = useLanguage();
   const [job, setJob] = useState(null);
   const [estimatedTotalSeconds, setEstimatedTotalSeconds] = useState(null);
+  // fetchJob's closure captures estimatedTotalSeconds, and the state is
+  // deliberately not in its dependency list (adding it would tear down and
+  // re-open the EventSource). That made the `=== null` check below always
+  // true, so every re-run of fetchJob -- stream close, stream error, the
+  // cancel-race re-sync -- fired another /api/estimate for a value that
+  // never changes. A ref reads current without re-creating the callback.
+  const estimateRequestedRef = useRef(false);
   const [events, setEvents] = useState([]);
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState("running");
@@ -126,7 +133,8 @@ export default function GeneratePage() {
         // elapsed/progress extrapolation below (which can spike upward
         // whenever progress% stalls relative to wall-clock time -- e.g.
         // during a slow video-generation stage).
-        if (estimatedTotalSeconds === null && typeof data.num_scenes === "number") {
+        if (!estimateRequestedRef.current && typeof data.num_scenes === "number") {
+          estimateRequestedRef.current = true;
           fetch(`${API_BASE}/api/estimate`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
