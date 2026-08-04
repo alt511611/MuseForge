@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import Link from "next/link";
+import Link from "./LocaleLink";
 import { Cookie, X } from "lucide-react";
 import { useLanguage } from "../contexts/LanguageContext";
 

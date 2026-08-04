@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { X, Sparkles } from "lucide-react";
-import Link from "next/link";
+import Link from "./LocaleLink";
 
 const SESSION_KEY = "mf_exit_intent_shown";
 

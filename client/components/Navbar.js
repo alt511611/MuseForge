@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import Link from "next/link";
+import Link from "./LocaleLink";
 import { useRouter } from "next/navigation";
 import { Film, LogOut, Shield, ChevronDown, User, LayoutDashboard, Globe, Building2, Users, Clapperboard, BookOpen, AlertTriangle, Menu, X } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
@@ -111,7 +111,7 @@ function SolutionsDropdown() {
 
 export default function Navbar() {
   const { user, profile, isAdmin, signOut, loading } = useAuth();
-  const { t } = useLanguage();
+  const { t, localeHref } = useLanguage();
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -146,7 +146,7 @@ export default function Navbar() {
 
   const handleSignOut = async () => {
     await signOut();
-    router.push("/login");
+    router.push(localeHref("/login"));
   };
 
   const avatarLetter = user?.email?.[0]?.toUpperCase() || "?";

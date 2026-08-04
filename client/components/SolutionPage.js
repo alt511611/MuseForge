@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import Link from "./LocaleLink";
 import { Check, ArrowRight, Film } from "lucide-react";
 import { useLanguage } from "../contexts/LanguageContext";
 
@@ -8,6 +8,7 @@ import { useLanguage } from "../contexts/LanguageContext";
  * Shared layout for all /solutions/* segment pages.
  *
  * Props:
+ *   breadcrumbs — pre-rendered <Breadcrumbs> element (server component)
  *   icon        — pre-rendered JSX icon
  *   accentColor — e.g. "var(--mf-violet)"
  *   badge       — small badge text above heading
@@ -19,6 +20,7 @@ import { useLanguage } from "../contexts/LanguageContext";
  *   ctaBanner   — { title, desc, btnText, btnHref }
  */
 export default function SolutionPage({
+  breadcrumbs,
   icon: HeadlineIcon,
   accentColor = "var(--mf-violet)",
   badge,
@@ -36,7 +38,8 @@ export default function SolutionPage({
       <div className="relative overflow-hidden">
         <div className="absolute inset-0 pointer-events-none"
           style={{ background: `radial-gradient(ellipse 60% 40% at 50% 0%, ${accentColor}22 0%, transparent 70%)` }} />
-        <div className="relative max-w-4xl mx-auto px-6 pt-20 pb-14 text-center">
+        {breadcrumbs && <div className="relative pt-4">{breadcrumbs}</div>}
+        <div className="relative max-w-4xl mx-auto px-6 pt-14 pb-14 text-center">
           {badge && (
             <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium mb-6"
               style={{ backgroundColor: `${accentColor}20`, border: `1px solid ${accentColor}40`, color: accentColor }}>

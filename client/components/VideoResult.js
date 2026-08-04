@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import Link from "next/link";
+import Link from "./LocaleLink";
 import { Download, Share2, Plus, ExternalLink, Layout, ChevronDown, ChevronUp, Loader2, BookmarkPlus, Check } from "lucide-react";
 import Confetti from "./Confetti";
 import { useLanguage } from "../contexts/LanguageContext";

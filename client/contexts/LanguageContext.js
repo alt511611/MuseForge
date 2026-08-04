@@ -1,39 +1,46 @@
 "use client";
 
-import { createContext, useContext, useState, useEffect, useCallback } from "react";
+import { createContext, useContext, useCallback, useMemo } from "react";
+import { usePathname, useRouter } from "next/navigation";
 import { LOCALES, LOCALE_CODES, DEFAULT_LOCALE, translations } from "../lib/i18n/index";
+import { splitLocale, withLocale } from "../lib/i18n/routing";
 
 const LanguageContext = createContext(null);
 
+/* Remembers the visitor's choice so the middleware-served default (`/`) can be
+   nudged toward their language on a later visit. The URL, not this key, is the
+   source of truth — it exists only to make the switcher sticky. */
 const LS_KEY = "mf_locale";
 
-function detectLocale() {
-  if (typeof window === "undefined") return DEFAULT_LOCALE;
-  const stored = localStorage.getItem(LS_KEY);
-  if (stored && LOCALE_CODES.includes(stored)) return stored;
-  return DEFAULT_LOCALE;
-}
+/**
+ * The active locale comes from the URL segment (app/[locale]), passed down by
+ * the root layout. That makes it available during SSR, so translated markup is
+ * in the initial HTML instead of appearing after hydration.
+ */
+export function LanguageProvider({ children, locale: localeProp }) {
+  const locale = LOCALE_CODES.includes(localeProp) ? localeProp : DEFAULT_LOCALE;
+  const router = useRouter();
+  const pathname = usePathname();
 
-export function LanguageProvider({ children }) {
-  const [locale, setLocaleState] = useState(DEFAULT_LOCALE);
-
-  useEffect(() => {
-    setLocaleState(detectLocale());
-  }, []);
-
-  // Sync html[lang] and html[dir] on locale change
-  useEffect(() => {
-    if (typeof document === "undefined") return;
-    const meta = LOCALES[locale] ?? LOCALES[DEFAULT_LOCALE];
-    document.documentElement.lang = locale;
-    document.documentElement.dir = meta.dir;
-  }, [locale]);
-
-  const setLocale = useCallback((code) => {
-    if (!LOCALE_CODES.includes(code)) return;
-    setLocaleState(code);
-    if (typeof window !== "undefined") localStorage.setItem(LS_KEY, code);
-  }, []);
+  /** Switching language is a navigation: /pricing -> /tr/pricing. */
+  const setLocale = useCallback(
+    (code) => {
+      if (!LOCALE_CODES.includes(code) || code === locale) return;
+      if (typeof window !== "undefined") {
+        try {
+          localStorage.setItem(LS_KEY, code);
+        } catch {
+          /* private mode / storage disabled — the URL still carries the locale */
+        }
+      }
+      const { path } = splitLocale(pathname || "/");
+      // Read the query straight off the URL: useSearchParams() would force a
+      // Suspense boundary here and opt every page out of static rendering.
+      const query = typeof window !== "undefined" ? window.location.search : "";
+      router.push(withLocale(path, code) + query);
+    },
+    [locale, pathname, router]
+  );
 
   const t = useCallback(
     (key, vars) => {
@@ -49,10 +56,16 @@ export function LanguageProvider({ children }) {
     [locale]
   );
 
+  /** Prefix a site-relative href with the active locale. */
+  const localeHref = useCallback((path) => withLocale(path, locale), [locale]);
+
+  const value = useMemo(
+    () => ({ locale, setLocale, t, localeHref, LOCALES, LOCALE_CODES }),
+    [locale, setLocale, t, localeHref]
+  );
+
   return (
-    <LanguageContext.Provider value={{ locale, setLocale, t, LOCALES, LOCALE_CODES }}>
-      {children}
-    </LanguageContext.Provider>
+    <LanguageContext.Provider value={value}>{children}</LanguageContext.Provider>
   );
 }
 

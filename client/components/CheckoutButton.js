@@ -10,14 +10,14 @@ import { friendlyError } from "../utils/errorMessages";
 
 export default function CheckoutButton({ plan, children, className = "", style = {} }) {
   const { user, getAccessToken } = useAuth();
-  const { t } = useLanguage();
+  const { t, localeHref } = useLanguage();
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
   const handleClick = async () => {
     if (!user) {
-      router.push("/login?next=/pricing");
+      router.push(localeHref("/login?next=/pricing"));
       return;
     }
 
