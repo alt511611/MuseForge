@@ -74,6 +74,9 @@ async def test_design_storyboard_caps_muapi_path_too(monkeypatch):
 
     artist = StoryboardArtist(api_key="")
     artist.muapi_key = "fake-muapi-key"  # force the MuAPI branch to be taken
+    # The MuAPI LLM path is opt-in (its slug was only ever a guess), so the
+    # branch is only reachable with a model configured.
+    monkeypatch.setenv("MUAPI_LLM_MODEL", "test-llm-slug")
 
     three_shots_json = json_mod.dumps(
         [
@@ -153,6 +156,7 @@ async def test_varied_duration_seconds_accepted_from_muapi(monkeypatch):
 
     artist = StoryboardArtist(api_key="")
     artist.muapi_key = "fake-muapi-key"
+    monkeypatch.setenv("MUAPI_LLM_MODEL", "test-llm-slug")
 
     shot_json = json_mod.dumps(
         [
@@ -204,6 +208,7 @@ async def test_non_finale_scenes_are_capped_below_finale_max(monkeypatch):
 
     artist = StoryboardArtist(api_key="")
     artist.muapi_key = "fake-muapi-key"
+    monkeypatch.setenv("MUAPI_LLM_MODEL", "test-llm-slug")
 
     shot_json = json_mod.dumps(
         [
@@ -252,6 +257,7 @@ async def test_finale_duration_clamped_to_15(monkeypatch):
 
     artist = StoryboardArtist(demo=False)
     artist.muapi_key = "test-key"
+    monkeypatch.setenv("MUAPI_LLM_MODEL", "test-llm-slug")
     artist.api_key = ""
 
     shot_json = json_mod.dumps(

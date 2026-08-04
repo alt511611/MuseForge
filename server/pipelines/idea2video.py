@@ -7,7 +7,7 @@ import shutil
 import tempfile
 from typing import Any, Callable, Dict, List, Optional
 
-from agents.screenwriter import ScreenwriterAgent
+from agents.screenwriter import ScreenwriterAgent, ScriptGenerationFailed
 from interfaces.character import CharacterInScene, DramaScript
 from interfaces.second_budget import billable_seconds, distribute_budget
 from pipelines.script2video import (
@@ -1068,23 +1068,34 @@ class Idea2VideoPipeline:
 
         # A template script means every LLM provider failed: the user's idea
         # was effectively discarded and they are about to get a generic drama
-        # about "Alex" in a "generic cinematic location". Shipping that
-        # silently is the worst outcome -- it looks like the product simply
-        # cannot follow a prompt. Surface it on the job so the UI and the
-        # logs both show WHY the result is generic.
-        if getattr(script, "generated_by", "llm") == "template":
+        # about "Alex" in a "generic cinematic location", with no dialogue and
+        # no described wardrobe. Rendering it anyway spends the user's credits
+        # on a video of a different person, in a different room, saying
+        # nothing -- and it looks to them like the product cannot follow a
+        # prompt. The job fails instead, which refunds the credits (see
+        # jobs.run_generation_job) and states the real cause.
+        #
+        # Demo mode is exempt: there the template IS the intended offline
+        # fixture, and nothing is charged.
+        if getattr(script, "generated_by", "llm") == "template" and not self.demo:
             logger.error(
                 "Screenwriter fell back to the deterministic template for this "
                 "job -- no LLM provider answered. The user's idea is NOT "
-                "reflected in the script. Check MUAPI_KEY's LLM access and "
-                "ANTHROPIC_API_KEY."
+                "reflected in the script, so the render is being refused. "
+                "Check ANTHROPIC_API_KEY (and MUAPI_LLM_MODEL if the MuAPI LLM "
+                "path is meant to be enabled)."
             )
             await progress(
                 "screenwriting",
-                "Script model unavailable — using a generic outline; "
-                "the result will not follow your idea closely.",
+                "Script model unavailable — the result would not follow your "
+                "idea, so nothing was rendered.",
                 8,
                 {"script_degraded": True},
+            )
+            raise ScriptGenerationFailed(
+                "The script model is unavailable, so your idea could not be "
+                "turned into a script. Your credits have been refunded — "
+                "please try again shortly."
             )
 
         characters = self._characters_from_script(script)
@@ -1269,6 +1280,10 @@ class Idea2VideoPipeline:
                     character_direction=character_direction,
                     theme=getattr(script, "theme", "") or "",
                     visual_motif=getattr(script, "visual_motif", "") or "",
+                    # The user's own words, verbatim. The scene action line is
+                    # the screenwriter's paraphrase; the brief is what the user
+                    # actually asked for, so shot design is held to it.
+                    user_brief=getattr(script, "user_brief", "") or "",
                 )
                 async with progress_lock:
                     completed_scenes += 1

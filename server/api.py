@@ -549,15 +549,39 @@ async def _get_user_plan(user_id: str) -> str:
 # ── Credit helpers ────────────────────────────────────────────────────────────
 
 async def _get_user_credits(user_id: str) -> int:
-    """Return the current credit balance for a user. Returns -1 on Supabase error."""
+    """Return the SPENDABLE credit balance for a user. Returns -1 on error.
+
+    Reads credit_balance(), not profiles.credits: the latter is a cache that
+    only refreshes when credits move or the expiry job runs, so between a lot
+    lapsing and the next sweep it still shows credits the user can no longer
+    spend. The RPC filters expired lots at read time.
+    """
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         return 9999  # unlimited in dev
+    headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+    }
     try:
         async with httpx.AsyncClient(timeout=6.0) as client:
+            resp = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/credit_balance",
+                json={"p_user_id": user_id},
+                headers=headers,
+            )
+            if resp.status_code < 400:
+                balance = resp.json()
+                if isinstance(balance, int):
+                    return balance
+
+            # Fall back to the cache if the RPC is missing -- an install that
+            # has not run the credit_lots migration yet still works, just
+            # without expiry.
             resp = await client.get(
                 f"{SUPABASE_URL}/rest/v1/profiles",
                 params={"id": f"eq.{user_id}", "select": "credits", "limit": "1"},
-                headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+                headers=headers,
             )
             data = resp.json()
             if isinstance(data, list) and data:
@@ -1253,10 +1277,21 @@ async def admin_delete_job(job_id: str, _admin: AuthUser = Depends(get_current_a
 
 @app.get("/api/credits")
 async def get_credits(current_user: AuthUser = Depends(get_current_user)):
-    """Return current credit balance and recent ledger entries."""
+    """Return the balance, the recent ledger, and when the credits lapse.
+
+    `expiring` lists the live lots oldest-expiry-first — the same order they
+    get spent in — so the UI can warn "4 credits expire in 3 days" instead of
+    letting the balance silently drop.
+    """
+    from datetime import datetime, timezone
+
+    from stripe_integration import CREDIT_VALIDITY_DAYS
+
     credits = await _get_user_credits(current_user.user_id)
-    ledger = []
+    ledger: list = []
+    expiring: list = []
     if SUPABASE_URL and SUPABASE_SERVICE_KEY:
+        headers = {"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"}
         try:
             async with httpx.AsyncClient(timeout=6.0) as client:
                 resp = await client.get(
@@ -1267,12 +1302,35 @@ async def get_credits(current_user: AuthUser = Depends(get_current_user)):
                         "order": "created_at.desc",
                         "limit": "20",
                     },
-                    headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+                    headers=headers,
                 )
                 ledger = resp.json() if isinstance(resp.json(), list) else []
         except Exception:
             pass
-    return {"credits": credits, "ledger": ledger}
+        try:
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                resp = await client.get(
+                    f"{SUPABASE_URL}/rest/v1/credit_lots",
+                    params={
+                        "user_id": f"eq.{current_user.user_id}",
+                        "remaining": "gt.0",
+                        "expires_at": f"gt.{datetime.now(timezone.utc).isoformat()}",
+                        "select": "remaining,reason,granted_at,expires_at",
+                        "order": "expires_at.asc",
+                        "limit": "20",
+                    },
+                    headers=headers,
+                )
+                if resp.status_code < 400 and isinstance(resp.json(), list):
+                    expiring = resp.json()
+        except Exception:
+            pass
+    return {
+        "credits": credits,
+        "ledger": ledger,
+        "expiring": expiring,
+        "validity_days": CREDIT_VALIDITY_DAYS,
+    }
 
 
 # ── Stripe endpoints ──────────────────────────────────────────────────────────

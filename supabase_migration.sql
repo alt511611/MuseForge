@@ -270,3 +270,231 @@ create policy "users manage own characters"
 
 grant select, insert, update, delete on public.character_library to authenticated;
 grant all on public.character_library to service_role;
+
+-- ── Credit lots: every grant expires 30 days after it lands ──────────────────
+-- profiles.credits was a single scalar, so it could not answer "when does THIS
+-- credit die?" -- which made two things impossible: honouring a 30-day validity
+-- per purchase, and telling a subscription renewal apart from a pack the user
+-- paid for separately. The renewal path papered over that by RESETTING the
+-- balance to the plan allowance, which silently destroyed purchased packs.
+--
+-- Each grant is now its own row with its own expiry. The balance is the sum of
+-- what is left on lots that have not expired, so an expired credit stops being
+-- spendable the moment it lapses -- even if the housekeeping job below never
+-- runs. profiles.credits is kept in sync as a read cache for the UI and for
+-- older code paths; credit_lots is the authority.
+create table if not exists public.credit_lots (
+  id          bigserial primary key,
+  user_id     uuid references auth.users on delete cascade not null,
+  amount      int not null,               -- granted
+  remaining   int not null,               -- unspent
+  reason      text not null default '',   -- 'credit_purchase' | 'subscription_renewal' | 'signup_grant' | 'migration'
+  granted_at  timestamptz not null default now(),
+  expires_at  timestamptz not null,
+  constraint credit_lots_remaining_sane check (remaining >= 0 and remaining <= amount)
+);
+
+-- The hot path is "oldest-expiring live lot for this user", i.e. FIFO by expiry.
+create index if not exists credit_lots_spendable_idx
+  on public.credit_lots (user_id, expires_at)
+  where remaining > 0;
+
+alter table public.credit_lots enable row level security;
+
+create policy "users_read_own_lots"
+  on public.credit_lots for select using (auth.uid() = user_id);
+
+grant select on public.credit_lots to authenticated;
+grant all on public.credit_lots to service_role;
+
+-- Default validity for a grant. Changing this affects only NEW grants -- lots
+-- already issued keep the expiry they were sold with.
+create or replace function public.credit_validity_days()
+returns int language sql immutable as $$ select 30 $$;
+
+-- Spendable balance: what is left on lots that have not lapsed.
+create or replace function public.credit_balance(p_user_id uuid)
+returns int language sql stable security definer as $$
+  select coalesce(sum(remaining), 0)::int
+  from public.credit_lots
+  where user_id = p_user_id
+    and remaining > 0
+    and expires_at > now();
+$$;
+
+-- Keep the profiles.credits read cache honest after any lot movement.
+create or replace function public.sync_credit_cache(p_user_id uuid)
+returns int language plpgsql security definer as $$
+declare
+  v_balance int;
+begin
+  v_balance := public.credit_balance(p_user_id);
+  update public.profiles set credits = v_balance where id = p_user_id;
+  return v_balance;
+end;
+$$;
+
+-- Grant credits. They are spendable immediately and die p_days later.
+-- Returns the new spendable balance.
+create or replace function public.grant_credits(
+  p_user_id uuid,
+  p_amount int,
+  p_reason text default 'credit_purchase',
+  p_days int default null
+)
+returns int language plpgsql security definer as $$
+declare
+  v_days int;
+begin
+  if p_amount is null or p_amount <= 0 then
+    return public.credit_balance(p_user_id);
+  end if;
+
+  v_days := coalesce(p_days, public.credit_validity_days());
+
+  insert into public.credit_lots (user_id, amount, remaining, reason, expires_at)
+  values (p_user_id, p_amount, p_amount, p_reason, now() + make_interval(days => v_days));
+
+  insert into public.credit_ledger (user_id, amount, reason)
+  values (p_user_id, p_amount, p_reason);
+
+  return public.sync_credit_cache(p_user_id);
+end;
+$$;
+
+-- Atomic FIFO deduction across live lots, soonest-to-expire first, so a credit
+-- about to lapse is spent before one with time left on it.
+-- Returns the new balance, or -1 if the user cannot cover p_amount.
+-- Replaces the single-UPDATE version above; server/api.py:_deduct_credits
+-- calls this by the same name and signature.
+create or replace function public.deduct_credits(p_user_id uuid, p_amount int)
+returns int language plpgsql security definer as $$
+declare
+  v_lot record;
+  v_left int := p_amount;
+  v_take int;
+  v_avail int;
+begin
+  if p_amount is null or p_amount <= 0 then
+    return public.credit_balance(p_user_id);
+  end if;
+
+  -- Lock the user's live lots so two concurrent generations cannot both pass
+  -- the balance check and overdraw. Locking is a separate statement because
+  -- Postgres rejects FOR UPDATE alongside an aggregate.
+  perform 1
+  from public.credit_lots
+  where user_id = p_user_id and remaining > 0 and expires_at > now()
+  for update;
+
+  select coalesce(sum(remaining), 0)::int into v_avail
+  from public.credit_lots
+  where user_id = p_user_id and remaining > 0 and expires_at > now();
+
+  if v_avail < p_amount then
+    return -1;
+  end if;
+
+  for v_lot in
+    select id, remaining
+    from public.credit_lots
+    where user_id = p_user_id and remaining > 0 and expires_at > now()
+    order by expires_at asc, id asc
+  loop
+    exit when v_left <= 0;
+    v_take := least(v_lot.remaining, v_left);
+    update public.credit_lots set remaining = remaining - v_take where id = v_lot.id;
+    v_left := v_left - v_take;
+  end loop;
+
+  return public.sync_credit_cache(p_user_id);
+end;
+$$;
+
+-- Housekeeping: write off lapsed lots and record the loss in the ledger, so a
+-- user can see WHY their balance dropped. Purely cosmetic for correctness --
+-- credit_balance() already ignores expired lots -- but without it the ledger
+-- shows a balance falling with no matching entry.
+-- Schedule hourly, e.g. via pg_cron:
+--   select cron.schedule('expire-credits', '0 * * * *', 'select public.expire_credits()');
+create or replace function public.expire_credits()
+returns int language plpgsql security definer as $$
+declare
+  v_users uuid[];
+  v_user uuid;
+  v_lost int;
+  v_total int := 0;
+begin
+  -- Snapshot the affected users into an array rather than looping over a
+  -- cursor we then write to inside the loop.
+  select coalesce(array_agg(distinct user_id), '{}')
+  into v_users
+  from public.credit_lots
+  where remaining > 0 and expires_at <= now();
+
+  foreach v_user in array v_users loop
+    -- Read what this user is about to lose BEFORE zeroing, so the ledger
+    -- entry carries the real amount.
+    select coalesce(sum(remaining), 0)::int
+    into v_lost
+    from public.credit_lots
+    where user_id = v_user and remaining > 0 and expires_at <= now();
+
+    if v_lost > 0 then
+      update public.credit_lots set remaining = 0
+      where user_id = v_user and remaining > 0 and expires_at <= now();
+
+      insert into public.credit_ledger (user_id, amount, reason)
+      values (v_user, -v_lost, 'credit_expired');
+
+      perform public.sync_credit_cache(v_user);
+      v_total := v_total + v_lost;
+    end if;
+  end loop;
+
+  return v_total;
+end;
+$$;
+
+-- Revoke unspent SUBSCRIPTION credits (used when a subscription is cancelled).
+-- Deliberately leaves 'credit_purchase' lots alone: a pack was bought outright
+-- and is the user's property until it expires on its own schedule.
+create or replace function public.revoke_subscription_credits(p_user_id uuid)
+returns int language plpgsql security definer as $$
+declare
+  v_lost int;
+begin
+  select coalesce(sum(remaining), 0)::int into v_lost
+  from public.credit_lots
+  where user_id = p_user_id and remaining > 0 and reason = 'subscription_renewal';
+
+  if v_lost > 0 then
+    update public.credit_lots set remaining = 0
+    where user_id = p_user_id and remaining > 0 and reason = 'subscription_renewal';
+
+    insert into public.credit_ledger (user_id, amount, reason)
+    values (p_user_id, -v_lost, 'subscription_cancelled');
+  end if;
+
+  return public.sync_credit_cache(p_user_id);
+end;
+$$;
+
+-- Backfill: give every existing balance a lot so nobody's credits vanish when
+-- the balance starts being read from credit_lots. Runs once -- the guard makes
+-- re-running the migration a no-op.
+insert into public.credit_lots (user_id, amount, remaining, reason, expires_at)
+select p.id, p.credits, p.credits, 'migration',
+       now() + make_interval(days => public.credit_validity_days())
+from public.profiles p
+where p.credits > 0
+  and not exists (select 1 from public.credit_lots l where l.user_id = p.id);
+
+-- plan_limits still advertised the retired 25/55 allowances; the real grants
+-- are server/stripe_integration.py PLAN_CREDITS (16 / 36).
+create or replace view public.plan_limits as
+select 'free'    as plan, 3   as monthly_credits, 8 as max_scenes, false as hd_export
+union all
+select 'creator',          16, 16, false
+union all
+select 'pro',              36, 24, true;

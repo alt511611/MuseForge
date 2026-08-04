@@ -600,6 +600,7 @@ async def run_generation_job(job: Job, api_key: str):
     """Start a job. If require_script_approval, stop after screenwriting."""
     logger.info("run_generation_job ENTERED for job %s", job.id)
     try:
+        from agents.screenwriter import ScriptGenerationFailed
         from pipelines.idea2video import Idea2VideoPipeline
         from pipelines.script2video import PipelineCancelled
         from tools.muapi_uploader import InvalidCharacterPhoto, upload_base64_image
@@ -741,6 +742,22 @@ async def run_generation_job(job: Job, api_key: str):
                     _sb_refund_credits(job.user_id, _job_refund_amount(job), job.id)
                 )
             cleanup_working_dir(working_dir)
+        except ScriptGenerationFailed as exc:
+            # No LLM wrote the script, so the render would have ignored the
+            # user's idea entirely. Fail with the real reason (and refund)
+            # rather than shipping a generic video -- the message is already
+            # written for the user, so it is not wrapped in "Internal error".
+            logger.error("Script generation failed for job %s: %s", job.id, exc)
+            job.status = JobStatus.FAILED
+            job.error = str(exc)
+            await job_store.emit(job, "error", job.error, 100)
+            await job_store.persist(job)
+            if job.user_id and not job.demo and not job.require_script_approval:
+                asyncio.create_task(
+                    _sb_refund_credits(job.user_id, _job_refund_amount(job), job.id)
+                )
+            cleanup_working_dir(working_dir)
+            return
         except asyncio.TimeoutError:
             job.status = JobStatus.FAILED
             job.error = "Generation timed out — please try again."

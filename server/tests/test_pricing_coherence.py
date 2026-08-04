@@ -100,8 +100,20 @@ def test_bigger_packs_are_better_value():
 
 
 def _pricing_page():
+    """The plan table lives in the client component, not the route's server
+    page.js -- the latter only carries the JSON-LD mirror (checked below)."""
     path = os.path.join(
-        os.path.dirname(__file__), "..", "..", "client", "app", "pricing", "page.js"
+        os.path.dirname(__file__), "..", "..",
+        "client", "app", "[locale]", "pricing", "PricingContent.js",
+    )
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def _pricing_route():
+    path = os.path.join(
+        os.path.dirname(__file__), "..", "..",
+        "client", "app", "[locale]", "pricing", "page.js",
     )
     with open(path, encoding="utf-8") as f:
         return f.read()
@@ -124,6 +136,78 @@ def test_pricing_page_shows_the_expected_prices():
     page = _pricing_page()
     for price in list(PLAN_PRICES.values()) + list(PACK_PRICES.values()):
         assert f'"${price}"' in page, price
+
+
+def test_pricing_jsonld_mirrors_the_plan_table():
+    """PLAN_OFFERS is hand-kept in sync with the component. When it drifts,
+    search engines quote a price the checkout will not honour."""
+    route = _pricing_route()
+    for plan in PLAN_CREDITS:
+        assert f'price: "{PLAN_PRICES[plan]}"' in route, plan
+        assert f'{PLAN_CREDITS[plan]} credits per month' in route, plan
+
+
+def _solution_pages():
+    root = os.path.join(
+        os.path.dirname(__file__), "..", "..", "client", "app", "[locale]", "solutions"
+    )
+    for name in sorted(os.listdir(root)):
+        path = os.path.join(root, name, "page.js")
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                yield name, f.read()
+
+
+def test_solution_pages_quote_real_plans():
+    """The /solutions/* landing pages each pitch a plan card. Every price and
+    credit figure on them has to be one the checkout actually sells."""
+    prices = {f"${p}" for p in PLAN_PRICES.values()} | {
+        f"${p}" for p in PACK_PRICES.values()
+    }
+    credits = set(PLAN_CREDITS.values())
+
+    for name, page in _solution_pages():
+        for quoted in re.findall(r'price:\s*"(?:From )?(\$\d+)"', page):
+            assert quoted in prices, f"{name}: {quoted} is not a price we charge"
+        for quoted in re.findall(r"credits:\s*(\d+)", page):
+            assert int(quoted) in credits, f"{name}: no plan grants {quoted} credits"
+        for quoted in re.findall(r"(\d+) credits/mo", page):
+            assert int(quoted) in credits, f"{name}: no plan grants {quoted} credits"
+
+
+def test_dashboard_buy_modal_charges_the_advertised_price():
+    """The in-app top-up modal builds its own package list. It quoted $9/$19/
+    $39 against real Stripe prices of $19/$49/$99 -- the user clicked a $9
+    button and was charged $19."""
+    path = os.path.join(
+        os.path.dirname(__file__), "..", "..",
+        "client", "app", "[locale]", "dashboard", "page.js",
+    )
+    with open(path, encoding="utf-8") as f:
+        page = f.read()
+
+    for pack, price in PACK_PRICES.items():
+        assert re.search(
+            rf'key:\s*"{pack}".*?price:\s*"\${price}"', page
+        ), f"{pack} should be ${price}"
+
+
+def test_plan_feature_strings_match_granted_credits():
+    """The pricing page renders its bullet list from these translations, so a
+    stale string contradicts the credit count printed right above it."""
+    path = os.path.join(
+        os.path.dirname(__file__), "..", "..", "client", "lib", "i18n", "t-a.js"
+    )
+    with open(path, encoding="utf-8") as f:
+        strings = f.read()
+
+    for plan in PLAN_CREDITS:
+        for quoted in re.findall(rf"plan_{plan}_features:\s*\"(\d+) [^,]*?/", strings):
+            assert int(quoted) == PLAN_CREDITS[plan], f"{plan}: {quoted}"
+    for pack in ("small", "medium", "large"):
+        expected = CREDIT_PACKAGES[pack.upper()]["credits"]
+        for quoted in re.findall(rf"pricing_credits_{pack}:\s*\"(\d+) ", strings):
+            assert int(quoted) == expected, f"{pack}: {quoted}"
 
 
 def test_env_example_documents_the_same_numbers():
