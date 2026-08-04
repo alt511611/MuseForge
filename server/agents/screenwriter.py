@@ -7,14 +7,36 @@ import re
 from typing import List, Optional
 
 from interfaces.character import CharacterProfile, DramaScript, ScriptScene
-from tools.claude_via_muapi import complete_via_muapi
+from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
 
 logger = logging.getLogger(__name__)
+
+
+class ScriptGenerationFailed(Exception):
+    """No LLM provider could write a script for the user's idea.
+
+    Raised instead of quietly returning the deterministic template: the
+    template ignores the user's prompt almost entirely (generic location,
+    a protagonist with no description, no dialogue), so shipping it renders
+    a paid video that has nothing to do with what was asked for. Failing the
+    job refunds the credits and tells the user the truth.
+    """
 
 
 class ScreenwriterAgent:
     SYSTEM_PROMPT = """You are an award-winning writer-director of micro-dramas and cinematic short films.
 You are not summarizing a plot — you are directing a film. Work like a director:
+
+THE BRIEF IS BINDING. Anything the user states CONCRETELY is a specification, not
+inspiration: named characters and their described age, hair, build and clothing; the
+named location and the props in it; the stated time of day; the exact lines to be
+spoken. Copy those details through verbatim — a described "charcoal crew-neck sweater"
+must appear in that character's "wardrobe", a described "walnut desk in a home study"
+must be the "setting_location". You invent ONLY what the brief leaves open. If the
+brief already reads as a shot list, keep its scenes, their order and their spoken
+lines; your job is then to fill in the fields it does not mention, not to rewrite it.
+If the brief supplies the spoken lines, put them in "dialogue" word for word — never
+replace them with lines of your own and never return an empty dialogue list.
 
 STRUCTURE. Build 3-5 scenes into ONE dramatic shape, not a list of events. Assign each
 scene a "dramatic_function" from: setup, inciting_incident, rising_action, turning_point,
@@ -139,15 +161,18 @@ Respond ONLY with valid JSON matching this schema:
             f"Additional requirements: {user_requirement or 'none'}"
         )
 
-        # 1) Prefer MuAPI (single existing key, no separate Anthropic
-        #    account needed) -- but its exact LLM endpoint/schema isn't
-        #    100% confirmed, so any failure here falls through silently.
-        if self.muapi_key:
+        # 1) MuAPI first, but only when an operator has explicitly named a
+        #    model slug: it is a guess, so by default it must not stand in
+        #    front of the Anthropic path (see tools/claude_via_muapi.py).
+        #    A failure here still falls through to Anthropic.
+        if self.muapi_key and is_muapi_llm_enabled():
             try:
                 content = await complete_via_muapi(
                     self.SYSTEM_PROMPT, prompt, max_tokens=self.MAX_SCRIPT_TOKENS
                 )
-                return DramaScript(**self._parse_json(content))
+                return self._with_brief(
+                    DramaScript(**self._parse_json(content)), idea
+                )
             except Exception as exc:
                 # Include a snippet of the RAW MuAPI response so failures
                 # are diagnosable from logs alone -- the earlier version of
@@ -168,8 +193,23 @@ Respond ONLY with valid JSON matching this schema:
                 idea, style, num_scenes, user_requirement, preset_characters
             )
 
-        # 3) Last resort: deterministic template, never crashes generation.
-        return self._write_template(idea, style, num_scenes, preset_characters)
+        # 3) No provider answered. The deterministic template is NOT an
+        #    acceptable substitute for a paid render -- it discards the user's
+        #    idea (generic location, an undescribed protagonist, no dialogue),
+        #    which is exactly how a job ends up producing a video of a
+        #    different person in a different room saying nothing. Fail loudly
+        #    so the job fails, the credits are refunded, and the operator sees
+        #    a configuration error instead of a mystery-bad video.
+        raise ScriptGenerationFailed(
+            "The script model is unavailable, so your idea could not be turned "
+            "into a script. No credits were spent — please try again shortly."
+        )
+
+    @staticmethod
+    def _with_brief(script: DramaScript, idea: str) -> DramaScript:
+        """Attach the user's verbatim prompt to the script (see user_brief)."""
+        script.user_brief = (idea or "").strip()
+        return script
 
     async def _write_with_claude(
         self,
@@ -223,7 +263,7 @@ Respond ONLY with valid JSON matching this schema:
                 resp.raise_for_status()
                 content = resp.json()["content"][0]["text"]
                 data = self._parse_json(content)
-                return DramaScript(**data)
+                return self._with_brief(DramaScript(**data), idea)
         except Exception as exc:
             # This used to swallow the exception entirely, so a failing
             # Anthropic key/model/quota looked identical to "no key
@@ -238,10 +278,15 @@ Respond ONLY with valid JSON matching this schema:
                 except Exception:
                     pass
             logger.error(
-                f"Anthropic screenwriter call failed, falling back to template: "
+                f"Anthropic screenwriter call failed: "
                 f"{type(exc).__name__}: {exc}{detail}"
             )
-            return self._write_template(idea, style, num_scenes, preset_characters)
+            # Deliberately NOT the template -- see write_script step 3.
+            raise ScriptGenerationFailed(
+                "The script model is unavailable, so your idea could not be "
+                "turned into a script. No credits were spent — please try "
+                "again shortly."
+            ) from exc
 
     def _parse_json(self, text: str) -> dict:
         match = re.search(r"\{[\s\S]*\}", text)
@@ -351,6 +396,7 @@ Respond ONLY with valid JSON matching this schema:
 
         return DramaScript(
             generated_by="template",
+            user_brief=(idea or "").strip(),
             title=title,
             logline=idea,
             theme="A choice made too late still counts as a choice.",

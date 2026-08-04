@@ -103,6 +103,13 @@ class DramaScript(BaseModel):
     # setting, a character named "Alex"), so shipping that silently makes
     # the product look broken for reasons the user cannot see.
     generated_by: str = "llm"
+    # The user's prompt, VERBATIM. The script is a lossy re-telling of it --
+    # the screenwriter rewrites the brief into its own dramatic structure and
+    # drops anything its schema has no field for (a named prop, a required
+    # wardrobe item, a demanded cut count, a camera rule). Carrying the
+    # original text forward lets the storyboard and frame prompts honour those
+    # specifics instead of rendering whatever survived the rewrite.
+    user_brief: str = ""
     # One recurring visual element (an object, a gesture, a quality of light)
     # deliberately restaged across scenes. This is what makes a set of shots
     # read as a single film rather than a slideshow.

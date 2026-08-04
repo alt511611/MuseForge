@@ -111,6 +111,18 @@ def build_character_identity_clause(characters, matched_char=None) -> str:
         "IDENTICAL to previous scenes — same face, same age, same hair length, "
         "colour and style, same build: " + "; ".join(described) + ". "
     )
+    # A character with no stated wardrobe is the outfit-drift case: the
+    # reference image binds a face, not a costume, so with nothing said about
+    # clothing the image model dresses them afresh every scene (observed in
+    # the wild as one character appearing in three different outfits across a
+    # three-scene drama). Pin the costume to the reference instead.
+    if any(not (getattr(c, "wardrobe", "") or "").strip() for c in visible):
+        clause += (
+            "Clothing is also FIXED: every character wears the EXACT SAME "
+            "outfit as in the reference image and in every other scene — same "
+            "garment, same cut, same colour. Never change or restyle the "
+            "costume between scenes. "
+        )
     if matched_char is not None and getattr(matched_char, "name", ""):
         clause += (
             f"The attached reference image is {matched_char.name}; match that "
@@ -162,6 +174,11 @@ def build_frame_prompt(
 
     Empty setting fields (legacy/demo scripts) keep the old prompt shape —
     no bare "Setting: , ." fragment.
+
+    The user's raw brief is deliberately NOT injected here. It reaches the
+    storyboard artist instead (a text model that can reason about "three hard
+    cuts", "24fps", "clean dry audio"); pasting it into an image prompt would
+    only crowd out this shot's own description in a fixed token budget.
     """
     parts = [
         p.strip()
@@ -697,6 +714,7 @@ class Script2VideoPipeline:
         character_direction: str = "",
         theme: str = "",
         visual_motif: str = "",
+        user_brief: str = "",
     ) -> Dict[str, Any]:
         os.makedirs(working_dir, exist_ok=True)
         portraits = character_portraits or {}
@@ -743,6 +761,7 @@ class Script2VideoPipeline:
             character_direction=character_direction,
             theme=theme,
             visual_motif=visual_motif,
+            user_brief=user_brief,
         )
 
         shot_videos: List[Optional[str]] = [None] * len(shots)

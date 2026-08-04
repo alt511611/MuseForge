@@ -37,6 +37,12 @@ CREDIT_PACKAGES = {
     "LARGE":  {"credits": 26, "label": "26 Credits"},
 }
 
+# How long a granted credit stays spendable. Every grant -- pack or renewal --
+# lands immediately and lapses this many days later, whether or not it was
+# used. Must match public.credit_validity_days() in supabase_migration.sql;
+# the database is the enforcer, this constant is what the UI quotes.
+CREDIT_VALIDITY_DAYS = 30
+
 stripe.api_key = STRIPE_SECRET_KEY
 
 
@@ -87,26 +93,31 @@ async def _add_credits_to_profile(
     stripe_subscription_id: Optional[str] = None,
     reason: str = "subscription_renewal",
 ):
-    """Add (or deduct) credits from profiles and write a ledger entry."""
+    """Grant credits as a new lot and update the profile's Stripe fields.
+
+    The grant is spendable the moment this returns and lapses
+    CREDIT_VALIDITY_DAYS later. grant_credits() also writes the ledger entry
+    and refreshes profiles.credits, so this no longer does the read-then-write
+    dance that could lose a concurrent grant.
+    """
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         return
 
-    patch: dict = {"credits": f"credits+{credits_delta}"}  # will use RPC below
-    # Supabase REST doesn't do increments natively; use raw SQL via rpc or a two-step read+write.
-    # We do a simple two-step here since this runs inside webhook (serial).
     async with httpx.AsyncClient(timeout=10.0) as client:
-        # 1. Read current
-        resp = await client.get(
-            f"{SUPABASE_URL}/rest/v1/profiles",
-            params={"id": f"eq.{user_id}", "select": "credits", "limit": "1"},
-            headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
-        )
-        data = resp.json()
-        current = data[0].get("credits", 0) if isinstance(data, list) and data else 0
-        new_credits = max(0, current + credits_delta)
+        if credits_delta > 0:
+            await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/grant_credits",
+                json={
+                    "p_user_id": user_id,
+                    "p_amount": credits_delta,
+                    "p_reason": reason,
+                    "p_days": CREDIT_VALIDITY_DAYS,
+                },
+                headers=_sb_headers(),
+            )
 
-        # 2. Patch
-        patch_body: dict = {"credits": new_credits}
+        # Plan / Stripe identifiers are profile-level, not lot-level.
+        patch_body: dict = {}
         if plan:
             patch_body["plan"] = plan
         if stripe_customer_id:
@@ -114,13 +125,12 @@ async def _add_credits_to_profile(
         if stripe_subscription_id:
             patch_body["stripe_subscription_id"] = stripe_subscription_id
 
-        await client.patch(
-            f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{user_id}",
-            json=patch_body,
-            headers=_sb_headers(),
-        )
-
-    await _add_ledger_entry(user_id, credits_delta, reason)
+        if patch_body:
+            await client.patch(
+                f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{user_id}",
+                json=patch_body,
+                headers=_sb_headers(),
+            )
 
 
 async def create_portal_session(customer_id: str, return_url: str) -> str:
@@ -262,25 +272,46 @@ async def handle_webhook(payload: bytes, sig_header: str) -> dict:
 
             if user_id:
                 credits = PLAN_CREDITS.get(plan, PLAN_CREDITS["creator"])
-                # Reset credits to plan allowance (not additive — prevents hoarding)
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    await client.patch(
-                        f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{user_id}",
-                        json={"credits": credits},
-                        headers=_sb_headers(),
-                    )
-                await _add_ledger_entry(user_id, credits, "subscription_renewal")
+                # Grant the month's allowance as a fresh 30-day lot. This used
+                # to OVERWRITE the balance with the allowance to stop hoarding,
+                # which also wiped credit packs the user had paid for on top of
+                # the subscription. Expiry handles hoarding now: last month's
+                # unused allowance lapses on its own 30 days after it landed.
+                await _add_credits_to_profile(
+                    user_id=user_id,
+                    credits_delta=credits,
+                    reason="subscription_renewal",
+                )
 
     # ── Subscription cancelled ────────────────────────────────────────────────
     elif event_type == "customer.subscription.deleted":
         customer_id = data.get("customer")
         if customer_id and SUPABASE_URL and SUPABASE_SERVICE_KEY:
             async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    f"{SUPABASE_URL}/rest/v1/profiles",
+                    params={"stripe_customer_id": f"eq.{customer_id}", "select": "id", "limit": "1"},
+                    headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+                )
+                rows = resp.json()
+                user_id = rows[0].get("id") if isinstance(rows, list) and rows else None
+
                 await client.patch(
                     f"{SUPABASE_URL}/rest/v1/profiles?stripe_customer_id=eq.{customer_id}",
-                    json={"plan": "free", "credits": 3, "stripe_subscription_id": None},
+                    json={"plan": "free", "stripe_subscription_id": None},
                     headers=_sb_headers(),
                 )
+
+                # Drop the unused part of the subscription allowance -- it was
+                # rented, not bought. Credit PACKS survive: they were paid for
+                # separately and run out their own 30 days. The old code set
+                # credits to a flat 3, which destroyed both.
+                if user_id:
+                    await client.post(
+                        f"{SUPABASE_URL}/rest/v1/rpc/revoke_subscription_credits",
+                        json={"p_user_id": user_id},
+                        headers=_sb_headers(),
+                    )
 
     elif event_type == "invoice.payment_failed":
         pass  # TODO: notify user

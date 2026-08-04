@@ -394,9 +394,10 @@ def test_template_script_is_marked_as_degraded():
     assert DramaScript(title="t", logline="l").generated_by == "llm"
 
 
-def test_degradation_is_surfaced_on_the_job():
-    """It must reach both the progress stream (so the user sees it while
-    waiting) and the result (so the UI can explain the finished video)."""
+def test_degradation_refuses_to_render_instead_of_shipping_a_generic_video():
+    """A template script means the user's idea was discarded. Rendering it
+    anyway charges for a video of a different person in a different place,
+    saying nothing -- so the job is refused (which refunds) instead."""
     import inspect
 
     import pipelines.idea2video as mod
@@ -404,7 +405,25 @@ def test_degradation_is_surfaced_on_the_job():
     source = inspect.getsource(mod.Idea2VideoPipeline.continue_from_script)
     assert 'generated_by", "llm") == "template"' in source
     assert "script_degraded" in source
-    assert "will not follow your idea closely" in source
+    assert "raise ScriptGenerationFailed" in source
+
+
+@pytest.mark.asyncio
+async def test_template_script_is_refused_outside_demo(monkeypatch, tmp_path):
+    import pipelines.idea2video as mod
+    from agents.screenwriter import ScriptGenerationFailed
+
+    pipeline = mod.Idea2VideoPipeline(api_key="", demo=False)
+    monkeypatch.setattr(pipeline, "_lock_character_portraits", _async_return({}))
+    monkeypatch.setattr(
+        pipeline.script2video, "run", _async_return({"path": None, "shots": []})
+    )
+
+    template = await ScreenwriterAgent(demo=True).write_script("x", num_scenes=2)
+    with pytest.raises(ScriptGenerationFailed):
+        await pipeline.continue_from_script(
+            template, working_dir=str(tmp_path / "job")
+        )
 
 
 @pytest.mark.asyncio

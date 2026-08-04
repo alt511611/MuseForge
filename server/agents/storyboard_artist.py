@@ -9,7 +9,7 @@ from typing import List, Optional
 from interfaces.camera import get_director_style
 from interfaces.character import CharacterInScene
 from interfaces.shot import StoryboardShot
-from tools.claude_via_muapi import complete_via_muapi
+from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +17,14 @@ logger = logging.getLogger(__name__)
 class StoryboardArtist:
     SYSTEM_PROMPT = """You are a master storyboard artist for cinematic productions.
 Design exactly 1 shot for the given scene script. Apply the director's style guidance.
+
+THE USER'S BRIEF OUTRANKS EVERYTHING BELOW. When the brief is given it is the
+production's specification: honour its named props, wardrobe, location, framing,
+lens and camera rules exactly, and never design a shot that contradicts it. If the
+brief says the camera is locked off, "camera_movement" is "static locked-off tripod,
+no camera movement" — not a push-in. If the brief names what is in frame (a desk, a
+notepad, a watch), name those things in "visual_desc" so they actually get rendered.
+Only where the brief is silent do the guidelines below decide.
 
 CHOOSE THE RIGHT MOMENT. You only get ONE shot for this scene, so it must capture the
 scene's DRAMATIC PEAK — the single beat that carries the scene's emotional turn (the
@@ -133,6 +141,7 @@ Respond ONLY with valid JSON array containing a single shot object:
         character_direction: str = "",
         theme: str = "",
         visual_motif: str = "",
+        user_brief: str = "",
     ) -> List[StoryboardShot]:
         preset = get_director_style(director_style)
 
@@ -151,6 +160,7 @@ Respond ONLY with valid JSON array containing a single shot object:
             setting_location, setting_time_of_day, setting_era
         )
         prompt = (
+            f"{self._format_user_brief_block(user_brief)}"
             f"Scene script: {script}\n"
             f"{self._format_emotion_line(scene_emotion)}"
             f"{self._format_direction_block(scene_direction)}"
@@ -163,9 +173,10 @@ Respond ONLY with valid JSON array containing a single shot object:
             f"User requirements: {user_requirement or 'none'}"
         )
 
-        # 1) Prefer MuAPI (see tools/claude_via_muapi.py docstring for the
-        #    caveat on why this isn't 100% guaranteed to work yet).
-        if self.muapi_key:
+        # 1) MuAPI first, but opt-in only -- its LLM slug is a guess, so it
+        #    does not stand in front of the Anthropic path unless
+        #    MUAPI_LLM_MODEL is set (see tools/claude_via_muapi.py).
+        if self.muapi_key and is_muapi_llm_enabled():
             try:
                 content = await complete_via_muapi(
                     self.SYSTEM_PROMPT, prompt, max_tokens=self.MAX_SHOT_TOKENS
@@ -204,6 +215,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                 character_direction=character_direction,
                 theme=theme,
                 visual_motif=visual_motif,
+                user_brief=user_brief,
             )
             self._ensure_expression(shots, scene_emotion)
             if shots:
@@ -288,6 +300,33 @@ Respond ONLY with valid JSON array containing a single shot object:
                     # falls back to its face-visibility clause.
                     pass
         return shots
+
+    #: How much of the user's prompt is carried into the shot-design call.
+    #: The API caps an idea at 2000 characters, so this passes it whole; the
+    #: bound exists only so a future cap increase cannot blow the token budget.
+    MAX_BRIEF_CHARS = 2000
+
+    @classmethod
+    def _format_user_brief_block(cls, user_brief: str = "") -> str:
+        """The user's own words, at the TOP of the prompt and marked binding.
+
+        The scene action line is a lossy re-telling: it survives the
+        screenwriter's rewrite, the brief's concrete specifics (props on the
+        desk, the exact sweater, "locked-off tripod, zero camera movement")
+        do not. Restating them here is what stops the shot being designed
+        against a description the user never wrote.
+        """
+        brief = (user_brief or "").strip()
+        if not brief:
+            return ""
+        if len(brief) > cls.MAX_BRIEF_CHARS:
+            brief = brief[: cls.MAX_BRIEF_CHARS].rstrip() + " […]"
+        return (
+            "USER'S ORIGINAL BRIEF — BINDING, outranks every other instruction "
+            "below. Honour its wardrobe, props, location, framing and camera "
+            "rules exactly; never design a shot that contradicts it:\n"
+            f"{brief}\n\n"
+        )
 
     @staticmethod
     def _format_emotion_line(scene_emotion: str = "") -> str:
@@ -383,6 +422,7 @@ Respond ONLY with valid JSON array containing a single shot object:
         character_direction: str = "",
         theme: str = "",
         visual_motif: str = "",
+        user_brief: str = "",
     ) -> List[StoryboardShot]:
         try:
             import httpx
@@ -392,6 +432,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                 setting_location, setting_time_of_day, setting_era
             )
             prompt = (
+                f"{self._format_user_brief_block(user_brief)}"
                 f"Scene script: {script}\n"
                 f"{self._format_emotion_line(scene_emotion)}"
                 f"{self._format_direction_block(scene_direction)}"
