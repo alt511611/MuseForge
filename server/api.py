@@ -29,13 +29,16 @@ from auth import (
 )
 from interfaces.camera import DIRECTOR_STYLES
 from interfaces.second_budget import SECONDS_PER_CREDIT, total_budget_seconds
+from tools.falai_lipsync import is_lipsync_enabled
 from tools.muapi_voice_generator import is_dialogue_enabled
 from jobs import (
     JOBS_DIR,
+    SCENE_RETAKE_CREDIT_COST,
     JobStatus,
     job_store,
     run_continue_from_script_job,
     run_generation_job,
+    run_regenerate_scene_job,
 )
 
 load_dotenv()
@@ -75,6 +78,11 @@ ESTIMATE_MUSIC_SECONDS = float(os.environ.get("MUSEFORGE_ESTIMATE_MUSIC_SECONDS"
 ESTIMATE_DIALOGUE_PER_SCENE = float(
     os.environ.get("MUSEFORGE_ESTIMATE_DIALOGUE_PER_SCENE", "20")
 )
+# Per speaking scene. Unlike dialogue TTS this cannot overlap generation: it
+# needs the finished clip AND the finished voice before it can start.
+ESTIMATE_LIPSYNC_PER_SCENE = float(
+    os.environ.get("MUSEFORGE_ESTIMATE_LIPSYNC_PER_SCENE", "40")
+)
 # Surface a wait warning once estimated wall-clock exceeds this many minutes.
 WAIT_WARNING_MINUTES = int(os.environ.get("MUSEFORGE_WAIT_WARNING_MINUTES", "15"))
 
@@ -104,6 +112,7 @@ def estimate_generation_seconds(
     *,
     music_enabled: bool = False,
     dialogue_enabled: bool = False,
+    lipsync_enabled: bool = False,
     plan: str = "free",
     demo: Optional[bool] = None,
 ) -> int:
@@ -131,6 +140,10 @@ def estimate_generation_seconds(
         seconds += ESTIMATE_MUSIC_SECONDS
     if dialogue_on:
         seconds += num_scenes * ESTIMATE_DIALOGUE_PER_SCENE
+    # Lip sync runs one request per speaking scene, strictly after that
+    # scene's clip and voice both exist, so it is added time, not overlapped.
+    if dialogue_on and bool(lipsync_enabled) and _lipsync_configured():
+        seconds += num_scenes * ESTIMATE_LIPSYNC_PER_SCENE
     return max(1, int(round(seconds)))
 
 
@@ -260,6 +273,10 @@ class GenerateRequest(BaseModel):
     user_requirement: str = ""
     character_image: Optional[str] = None
     character_name: str = ""
+    # Optional base64 photo of the real place the drama is set in. Locks the
+    # set the same way character_image locks a face; when omitted the plate is
+    # generated from the script's own setting_* fields instead.
+    location_image: Optional[str] = None
     # Pro-only: reuse locked portraits from the character library.
     library_characters: List[LibraryCharacterIn] = Field(default_factory=list)
     # Optional instrumental background music. Only honoured for Creator/Pro
@@ -269,6 +286,9 @@ class GenerateRequest(BaseModel):
     # Optional character dialogue. Pro-only and additionally protected by
     # MUSEFORGE_DIALOGUE_ENABLED so the infrastructure can be disabled globally.
     dialogue_enabled: bool = False
+    # Pro-only, and only meaningful with dialogue_enabled: drives each
+    # speaking character's mouth from the generated voice track.
+    lipsync_enabled: bool = False
     # When True: write script only, pause for user edit/approve. No credits
     # charged until POST /api/jobs/{id}/approve-script.
     require_script_approval: bool = False
@@ -300,11 +320,18 @@ class ApproveScriptRequest(BaseModel):
     script: dict
 
 
+class RegenerateSceneRequest(BaseModel):
+    # Why the take was rejected ("too dark", "show his hands"). Optional, but
+    # it is what turns a retake into a direction rather than a re-roll.
+    director_note: str = Field(default="", max_length=500)
+
+
 class EstimateRequest(BaseModel):
     # Absolute ceiling = Pro plan max; estimate is informational only.
     num_scenes: int = Field(default=3, ge=2, le=24)
     music_enabled: bool = False
     dialogue_enabled: bool = False
+    lipsync_enabled: bool = False
     # Client-supplied plan for the credit breakdown preview. The generate
     # path always re-checks the caller's real plan server-side; spoofing
     # here only changes the displayed estimate, not billing.
@@ -323,6 +350,19 @@ PLAN_MAX_SCENES = {"free": 8, "creator": 16, "pro": 24}
 MAX_SCENES_BY_PLAN = PLAN_MAX_SCENES  # alias used by docs / callers
 MUSIC_EXTRA_CREDIT_COST = 1  # flat surcharge on top of scene credits, Creator/Pro only
 DIALOGUE_EXTRA_CREDIT_COST = 1  # per scene, Pro only
+# Per scene, Pro only, on top of dialogue. Lip sync is a second paid provider
+# call on every scene that speaks, so it cannot ride along inside the dialogue
+# charge without eating the margin dialogue was priced for.
+LIPSYNC_EXTRA_CREDIT_COST = 1
+
+
+def _lipsync_configured() -> bool:
+    """Deployment-level readiness: the feature flag AND a usable fal.ai key.
+
+    Kept separate from the per-request opt-in so an unconfigured deployment
+    never quotes (or charges) for a stage it cannot run.
+    """
+    return is_lipsync_enabled() and bool((os.environ.get("FAL_KEY") or "").strip())
 
 
 def _enforce_plan_scene_limit(plan: str, num_scenes: int) -> None:
@@ -343,6 +383,7 @@ def build_credit_breakdown(
     *,
     music_enabled: bool = False,
     dialogue_enabled: bool = False,
+    lipsync_enabled: bool = False,
     plan: str = "free",
 ) -> dict:
     """Line-item credit cost matching what /api/generate will charge.
@@ -355,6 +396,9 @@ def build_credit_breakdown(
     dialogue_on = (
         bool(dialogue_enabled) and plan == "pro" and is_dialogue_enabled()
     )
+    # Lip sync has nothing to sync to without generated speech, so it is
+    # charged only when dialogue is actually being produced.
+    lipsync_on = dialogue_on and bool(lipsync_enabled) and _lipsync_configured()
 
     # Each credit buys a fixed number of seconds of finished video (see
     # interfaces/second_budget). Stating that here turns a vague promise
@@ -377,6 +421,11 @@ def build_credit_breakdown(
         dialogue_credits = num_scenes * DIALOGUE_EXTRA_CREDIT_COST
         breakdown.append({"label": "Diyalog", "credits": dialogue_credits})
         total += dialogue_credits
+
+    if lipsync_on:
+        lipsync_credits = num_scenes * LIPSYNC_EXTRA_CREDIT_COST
+        breakdown.append({"label": "Dudak senkronu", "credits": lipsync_credits})
+        total += lipsync_credits
 
     return {
         "total_credits": total,
@@ -417,6 +466,10 @@ async def health():
         # the deployment has it off rather than offering something that would
         # be silently dropped (and, worse, billed for).
         "dialogue_available": is_dialogue_enabled(),
+        # Lip sync rides on dialogue: with no generated voice there is nothing
+        # to sync a mouth to, so report it as available only when BOTH stages
+        # are switched on and fal.ai is actually configured.
+        "lipsync_available": is_dialogue_enabled() and _lipsync_configured(),
     }
 
 
@@ -483,6 +536,7 @@ async def estimate(req: EstimateRequest):
         req.num_scenes,
         music_enabled=req.music_enabled,
         dialogue_enabled=req.dialogue_enabled,
+        lipsync_enabled=req.lipsync_enabled,
         plan=req.plan,
         demo=demo,
     )
@@ -491,6 +545,7 @@ async def estimate(req: EstimateRequest):
         req.num_scenes,
         music_enabled=req.music_enabled,
         dialogue_enabled=req.dialogue_enabled,
+        lipsync_enabled=req.lipsync_enabled,
         plan=req.plan,
     )
     # Surface wall-clock wait for longer jobs so users know before they start.
@@ -675,6 +730,7 @@ async def generate(
     plan = "free"
     music_enabled = False
     dialogue_enabled = False
+    lipsync_enabled = False
     if current_user and not demo:
         plan = await _get_user_plan(current_user.user_id)
         _enforce_plan_scene_limit(plan, req.num_scenes)
@@ -689,12 +745,20 @@ async def generate(
             and plan == "pro"
             and is_dialogue_enabled()
         )
+        # Requires dialogue: syncing a mouth needs speech to sync it to, so an
+        # opt-in without dialogue is dropped rather than charged for nothing.
+        lipsync_enabled = (
+            dialogue_enabled
+            and bool(req.lipsync_enabled)
+            and _lipsync_configured()
+        )
 
         if not req.require_script_approval:
             credit_cost = build_credit_breakdown(
                 req.num_scenes,
                 music_enabled=music_enabled,
                 dialogue_enabled=dialogue_enabled,
+                lipsync_enabled=lipsync_enabled,
                 plan=plan,
             )["total_credits"]
             ok = await _deduct_credits(current_user.user_id, credit_cost, "video_generation")
@@ -730,8 +794,10 @@ async def generate(
         user_email=current_user.email if current_user else None,
         character_image=req.character_image,
         character_name=req.character_name,
+        location_image=req.location_image,
         music_enabled=music_enabled,
         dialogue_enabled=dialogue_enabled,
+        lipsync_enabled=lipsync_enabled,
         plan=plan,
         require_script_approval=bool(req.require_script_approval),
         library_characters=library_characters,
@@ -834,7 +900,27 @@ async def _resolve_job_source_video(job) -> str:
     if url and isinstance(url, str) and url.startswith(("http://", "https://")):
         local = os.path.join(working_dir, "export_source.mp4")
         if not os.path.isfile(local):
-            await download_video(url, local)
+            # download_video raises httpx errors, which are NOT HTTPException:
+            # left bare they escape past export_job_format's own try/except
+            # (this helper is called before it) and surface as an opaque 500.
+            # A signed Storage URL that has expired, or a Storage outage, is
+            # the common cause -- say so instead.
+            try:
+                await download_video(url, local)
+            except Exception as exc:
+                logger.warning(
+                    "Export source download failed for job %s from %s: %s",
+                    job.id,
+                    url,
+                    exc,
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "The finished video could not be fetched for re-export. "
+                        "Please try again in a moment."
+                    ),
+                ) from exc
         if os.path.isfile(local):
             return local
 
@@ -965,6 +1051,11 @@ async def approve_script(
                 if job.dialogue_enabled
                 else 0
             )
+            + (
+                approved_scenes * LIPSYNC_EXTRA_CREDIT_COST
+                if job.lipsync_enabled
+                else 0
+            )
         )
         ok = await _deduct_credits(
             job.user_id, credit_cost, "video_generation", job_id=job.id
@@ -985,6 +1076,56 @@ async def approve_script(
     background_tasks.add_task(run_continue_from_script_job, job, api_key, script_data)
     logger.info("Successfully scheduled background job %s", job.id)
     return {"job_id": job.id, "status": job.status.value}
+
+
+@app.post("/api/jobs/{job_id}/scenes/{scene_index}/regenerate")
+async def regenerate_scene(
+    job_id: str,
+    scene_index: int,
+    req: RegenerateSceneRequest,
+    background_tasks: BackgroundTasks,
+    current_user: Optional[AuthUser] = Depends(get_optional_user),
+):
+    """Re-shoot ONE scene of a finished video, keeping every other scene.
+
+    Costs a single scene credit. Re-running the whole job would also re-roll
+    the scenes the user was happy with and charge for all of them.
+    """
+    job = job_store.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.user_id and (not current_user or job.user_id != current_user.user_id):
+        if not (current_user and current_user.is_admin):
+            raise HTTPException(status_code=403, detail="Access denied")
+
+    if job.status != JobStatus.COMPLETED or not job.result:
+        raise HTTPException(status_code=400, detail="Job is not completed")
+
+    scenes = (job.result or {}).get("scenes") or []
+    if not any(int(s.get("index", -1)) == scene_index for s in scenes):
+        raise HTTPException(
+            status_code=404, detail=f"Scene {scene_index + 1} is not part of this video."
+        )
+
+    # Charged before the work starts, mirroring /api/generate; run_regenerate_
+    # scene_job refunds it on every failure path.
+    demo = job.demo or _is_demo()
+    if current_user and not demo and job.user_id:
+        ok = await _deduct_credits(
+            current_user.user_id, SCENE_RETAKE_CREDIT_COST, "scene_retake", job_id=job.id
+        )
+        if not ok:
+            raise HTTPException(
+                status_code=402,
+                detail=f"Insufficient credits. A retake costs {SCENE_RETAKE_CREDIT_COST} credit.",
+            )
+
+    api_key = os.environ.get("MUAPI_KEY", "")
+    background_tasks.add_task(
+        run_regenerate_scene_job, job, api_key, scene_index, req.director_note
+    )
+    return {"job_id": job.id, "scene_index": scene_index, "status": JobStatus.RUNNING.value}
 
 
 @app.get("/api/jobs/{job_id}/stream")

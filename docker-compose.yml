@@ -7,6 +7,10 @@ services:
       - MUAPI_KEY=${MUAPI_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - MUSEFORGE_DEMO=${MUSEFORGE_DEMO:-}
+      # Placeholder clip demo mode returns instead of a generated video. Only
+      # override this if the built-in default stops resolving -- a dead fixture
+      # makes demo jobs complete with a video that will not play.
+      - MUSEFORGE_DEMO_VIDEO=${MUSEFORGE_DEMO_VIDEO:-}
       - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
       - MUSEFORGE_JOBS_DIR=/data/jobs
     volumes:

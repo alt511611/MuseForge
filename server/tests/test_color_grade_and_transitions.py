@@ -190,18 +190,20 @@ async def test_transitions_default_off_uses_plain_concat(tmp_path, monkeypatch):
     await pipeline._assemble_final_drama(["scene0.mp4"], str(tmp_path / "job"), plan="free")
 
 
-@pytest.mark.asyncio
-async def test_transitions_enabled_routes_through_crossfade_concat(tmp_path, monkeypatch):
+async def _route_assembly(tmp_path, monkeypatch, transitions):
+    """Run _assemble_final_drama with a transition plan; report which concat ran."""
     monkeypatch.setenv("MUSEFORGE_SCENE_TRANSITIONS", "1")
     from pipelines.idea2video import Idea2VideoPipeline
 
     calls = {"crossfade": 0, "plain": 0}
 
-    async def _must_not_run_plain(*_a, **_k):
+    async def _fake_plain(scene_paths, output_path, *_a, **_k):
         calls["plain"] += 1
-        raise AssertionError("plain concat must not run when transitions enabled")
+        with open(output_path, "wb") as f:
+            f.write(b"concatenated-plain")
+        return output_path
 
-    async def _fake_crossfade_concat(scene_paths, output_path):
+    async def _fake_crossfade_concat(scene_paths, output_path, *_a, **_k):
         calls["crossfade"] += 1
         with open(output_path, "wb") as f:
             f.write(b"concatenated-with-transitions")
@@ -217,7 +219,7 @@ async def test_transitions_enabled_routes_through_crossfade_concat(tmp_path, mon
             f.write(b"with-music")
         return output_path
 
-    monkeypatch.setattr("pipelines.idea2video.concatenate_videos", _must_not_run_plain)
+    monkeypatch.setattr("pipelines.idea2video.concatenate_videos", _fake_plain)
     monkeypatch.setattr(
         "pipelines.idea2video.concatenate_videos_with_transitions", _fake_crossfade_concat
     )
@@ -226,10 +228,27 @@ async def test_transitions_enabled_routes_through_crossfade_concat(tmp_path, mon
 
     pipeline = Idea2VideoPipeline(api_key="", demo=False)
     await pipeline._assemble_final_drama(
-        ["scene0.mp4", "scene1.mp4"], str(tmp_path / "job"), plan="free"
+        ["scene0.mp4", "scene1.mp4"],
+        str(tmp_path / "job"),
+        plan="free",
+        transitions=transitions,
     )
+    return calls
 
+
+@pytest.mark.asyncio
+async def test_planned_dissolve_routes_through_crossfade_concat(tmp_path, monkeypatch):
+    calls = await _route_assembly(tmp_path, monkeypatch, transitions=[0.6])
     assert calls == {"crossfade": 1, "plain": 0}
+
+
+@pytest.mark.asyncio
+async def test_all_cut_plan_skips_the_expensive_compositing_path(tmp_path, monkeypatch):
+    """The flag is the master switch, but a drama whose every boundary is a
+    straight cut has nothing to composite — paying moviepy's memory cost to
+    produce a byte-identical result is pure waste."""
+    calls = await _route_assembly(tmp_path, monkeypatch, transitions=[0.0])
+    assert calls == {"crossfade": 0, "plain": 1}
 
 
 @pytest.mark.asyncio
@@ -258,12 +277,15 @@ async def test_crossfade_concat_fails_open_to_plain_concat(tmp_path, monkeypatch
     paths = _make_clips(tmp_path, count=2, duration=0.4)
     output = str(tmp_path / "crossfade_fallback.mp4")
 
-    def _broken_concatenate_videoclips(*_a, **_k):
+    def _broken_composite(*_a, **_k):
         raise RuntimeError("synthetic compose failure")
 
     import moviepy
 
-    monkeypatch.setattr(moviepy, "concatenate_videoclips", _broken_concatenate_videoclips)
+    # Per-boundary overlaps are laid out on an explicit timeline, so the
+    # compositing step is CompositeVideoClip -- concatenate_videoclips (the
+    # old single-padding call) is no longer on this path at all.
+    monkeypatch.setattr(moviepy, "CompositeVideoClip", _broken_composite)
 
     result = await script2video.concatenate_videos_with_transitions(paths, output)
 

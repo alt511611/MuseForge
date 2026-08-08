@@ -20,6 +20,12 @@ services:
         sync: false
       - key: MUSEFORGE_DEMO
         value: ""
+      # Placeholder clip demo mode serves instead of a generated video. Leave
+      # empty to use the built-in default; set it here the moment that fixture
+      # stops resolving, because a dead URL makes demo jobs complete with a
+      # video that will not play — with no error anywhere to show for it.
+      - key: MUSEFORGE_DEMO_VIDEO
+        value: ""
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_KEY
@@ -46,3 +52,26 @@ services:
         value: "150"
       - key: MUSEFORGE_SECONDS_PER_SCENE
         value: "100"
+      # Lip sync (fal.ai Sync Lipsync). Requires FAL_KEY and dialogue to be on
+      # — with no generated voice there is nothing to sync a mouth to. Off by
+      # default: every synced scene is a paid call on top of generation.
+      - key: MUSEFORGE_LIPSYNC_ENABLED
+        value: ""
+      - key: FAL_KEY
+        sync: false
+      # Film-look finishing (free — folded into the existing finishing encode).
+      # Empty = built-in defaults: 24fps cadence + subtle grain, no matte.
+      # MUSEFORGE_TARGET_FPS=0 keeps the provider's own frame rate.
+      - key: MUSEFORGE_TARGET_FPS
+        value: ""
+      - key: MUSEFORGE_FILM_GRAIN
+        value: ""
+      # 2.39:1 matte. Leave OFF unless this deployment delivers 16:9 only —
+      # the bars are burned into the master, so the 9:16 / 1:1 re-export would
+      # centre-crop a frame that already has them.
+      - key: MUSEFORGE_LETTERBOX
+        value: ""
+      # Per-boundary dissolves (interfaces/transitions decides which joins
+      # earn one). Master switch: compositing costs memory, cuts do not.
+      - key: MUSEFORGE_SCENE_TRANSITIONS
+        value: ""

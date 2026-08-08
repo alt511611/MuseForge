@@ -5,7 +5,7 @@ import logging
 import os
 import shutil
 import tempfile
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import httpx
 
@@ -13,6 +13,7 @@ from agents.storyboard_artist import StoryboardArtist
 from interfaces.camera import get_director_style
 from interfaces.character import CharacterInScene
 from interfaces.color_grade import get_color_grade
+from interfaces.lighting import resolve_lighting
 from tools.character_qa import (
     format_expected_setting,
     is_character_qa_enabled,
@@ -167,6 +168,7 @@ def build_frame_prompt(
     setting_time_of_day: str = "",
     setting_era: str = "",
     has_dialogue: bool = False,
+    lipsync_enabled: bool = False,
     characters=None,
     matched_char=None,
 ) -> str:
@@ -197,12 +199,31 @@ def build_frame_prompt(
         )
     else:
         setting_clause = ""
-    dialogue_clause = (
-        "For this dialogue shot, the speaking character's mouth should be "
-        "naturally obscured, shown in profile, or not be the focal point. "
-        if has_dialogue
-        else ""
-    )
+    # Only lit when the script actually establishes a setting. A legacy/demo
+    # script that declares no location, hour or era at all keeps the exact
+    # prompt shape it had before -- there is no continuity to protect across
+    # scenes that were never placed anywhere.
+    lighting_clause = resolve_lighting(setting_time_of_day).as_clause() if parts else ""
+    # These two instructions are opposites, and which one is right depends
+    # entirely on whether the mouth is about to be driven by a lip-sync pass.
+    # Hiding the mouth was the correct dodge while dialogue was only ever
+    # mixed OVER the picture -- a visible mouth saying nothing reads as a
+    # dubbing error. With lip sync on, that same dodge destroys the feature:
+    # a mouth in profile or out of frame is a mouth the sync model cannot
+    # drive, so the scene is paid for and then silently unsynced.
+    if not has_dialogue:
+        dialogue_clause = ""
+    elif lipsync_enabled:
+        dialogue_clause = (
+            "The speaking character's mouth is fully visible, unobscured and "
+            "facing camera -- their lips will be animated to the dialogue. "
+            "Do not hide the mouth behind hands, props, hair or profile. "
+        )
+    else:
+        dialogue_clause = (
+            "For this dialogue shot, the speaking character's mouth should be "
+            "naturally obscured, shown in profile, or not be the focal point. "
+        )
     # Emotion is stated explicitly (not left implicit in visual_desc) and
     # paired with a face-visibility requirement: flat, unreadable faces were
     # coming from both a missing expression instruction AND from frames
@@ -221,8 +242,12 @@ def build_frame_prompt(
     )
     identity_clause = build_character_identity_clause(characters, matched_char)
     direction_clause = build_screen_direction_clause(characters)
+    # lighting_clause sits next to the setting clause because it makes the
+    # same promise: the room does not change between shots, and neither does
+    # the light in it.
     return (
-        f"{style} style. {setting_clause}{identity_clause}{direction_clause}"
+        f"{style} style. {setting_clause}{lighting_clause}"
+        f"{identity_clause}{direction_clause}"
         f"{shot.visual_desc}. "
         f"{expression_clause}{face_clause}"
         f"{dialogue_clause}Shot type: {shot.shot_type}. Lens: {shot.lens}. "
@@ -488,18 +513,33 @@ def is_scene_transitions_enabled() -> bool:
 
 
 async def concatenate_videos_with_transitions(
-    paths: List[str], out_path: str, transition_duration: float = 0.5
+    paths: List[str], out_path: str, transition_duration: float = 0.5,
+    transitions: Optional[Sequence[float]] = None,
 ) -> str:
-    """Concatenate clips with a ~0.5s crossfade (cross-dissolve) between
-    each pair of adjacent scenes, using moviepy's "compose" method.
+    """Concatenate clips, dissolving only at the boundaries that earn it.
 
-    Opt-in via MUSEFORGE_SCENE_TRANSITIONS (see is_scene_transitions_enabled)
-    -- heavier on memory than the default concatenate_videos() path, so it
-    is never used unless explicitly enabled. Fails open to the plain
-    (transition-less) concatenate_videos() path on ANY error, so a bad
-    transition render never blocks the job.
+    ``transitions`` gives one overlap duration per boundary (see
+    interfaces/transitions.plan_transitions); 0.0 means a straight cut, which
+    is film's default. When it is omitted the old behaviour applies -- the
+    same ``transition_duration`` at every boundary.
+
+    A plan of all cuts needs no compositing at all, so it hands straight back
+    to the cheap ffmpeg stream-copy path rather than paying the memory cost of
+    moviepy's "compose" mode for nothing.
+
+    Fails open to plain concatenate_videos() on ANY error, so a bad transition
+    render never blocks the job.
     """
     if len(paths) < 2:
+        return await concatenate_videos(paths, out_path)
+
+    if transitions is None:
+        overlaps = [float(transition_duration)] * (len(paths) - 1)
+    else:
+        overlaps = [max(0.0, float(t)) for t in transitions][: len(paths) - 1]
+        overlaps += [0.0] * (len(paths) - 1 - len(overlaps))
+
+    if not any(overlaps):
         return await concatenate_videos(paths, out_path)
 
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -510,22 +550,30 @@ async def concatenate_videos_with_transitions(
         from moviepy import VideoFileClip, concatenate_videoclips
         from moviepy.video.fx import CrossFadeIn, CrossFadeOut
 
+        from moviepy import CompositeVideoClip
+
         clips = [VideoFileClip(p) for p in paths]
-        last = len(clips) - 1
+        # Per-boundary overlaps rule out concatenate_videoclips(padding=...),
+        # which takes ONE padding value for the whole sequence. The timeline
+        # is laid out explicitly instead: each clip starts where the previous
+        # one ends, pulled back by however much this particular boundary
+        # overlaps.
+        starts = [0.0]
+        for idx, clip in enumerate(clips[:-1]):
+            starts.append(starts[idx] + float(clip.duration or 0) - overlaps[idx])
+
         for idx, clip in enumerate(clips):
             faded = clip
-            if idx > 0:
-                faded = faded.with_effects([CrossFadeIn(transition_duration)])
-            if idx < last:
-                faded = faded.with_effects([CrossFadeOut(transition_duration)])
-            faded_clips.append(faded)
+            # Fade in only where the boundary BEFORE this clip dissolves, and
+            # out only where the boundary after it does — fading at a hard cut
+            # would dip to black on a join that is meant to be invisible.
+            if idx > 0 and overlaps[idx - 1] > 0:
+                faded = faded.with_effects([CrossFadeIn(overlaps[idx - 1])])
+            if idx < len(clips) - 1 and overlaps[idx] > 0:
+                faded = faded.with_effects([CrossFadeOut(overlaps[idx])])
+            faded_clips.append(faded.with_start(starts[idx]))
 
-        # Negative padding overlaps each clip with the next by the
-        # transition duration so the cross-fades actually blend instead of
-        # playing back-to-back.
-        final = concatenate_videoclips(
-            faded_clips, method="compose", padding=-transition_duration
-        )
+        final = CompositeVideoClip(faded_clips, size=clips[0].size)
         final.write_videofile(
             out_path, codec="libx264", audio=False, logger=None,
             **moviepy_encode_kwargs(),
@@ -704,7 +752,9 @@ class Script2VideoPipeline:
         setting_location: str = "",
         setting_time_of_day: str = "",
         setting_era: str = "",
+        location_plate_url: Optional[str] = None,
         has_dialogue: bool = False,
+        lipsync_enabled: bool = False,
         last_frame_by_character: Optional[Dict[str, str]] = None,
         scene_emotion: str = "",
         scene_dialogue: str = "",
@@ -814,11 +864,21 @@ class Script2VideoPipeline:
                     if named_matches:
                         named_matches.sort(key=lambda pair: pair[0])
                         matched_char = named_matches[0][1]
+                    elif location_plate_url:
+                        # No character name appears in this shot's text at all
+                        # -- an establishing shot, an insert, an object. The
+                        # old fallback handed it visible_chars[0]'s PORTRAIT,
+                        # which is the wrong anchor twice over: it pushes a
+                        # face into a shot the storyboard deliberately wrote
+                        # without one, and it leaves the room itself
+                        # re-invented from the text every time. The locked set
+                        # plate is the right reference for exactly these shots.
+                        reference_url = location_plate_url
                     elif visible_chars:
-                        # No character name appears in this shot's text at
-                        # all (e.g. a pure landscape/establishing shot) --
-                        # fall back to the first visible character, same
-                        # as the previous (unconditional) behavior.
+                        # No plate available (no location in the script, or
+                        # plate generation failed) -- keep the original
+                        # first-visible-character fallback rather than
+                        # dropping to an unreferenced frame.
                         matched_char = visible_chars[0]
 
                     if matched_char:
@@ -854,6 +914,7 @@ class Script2VideoPipeline:
                         setting_time_of_day=setting_time_of_day,
                         setting_era=setting_era,
                         has_dialogue=has_dialogue,
+                        lipsync_enabled=lipsync_enabled,
                         characters=characters,
                         matched_char=matched_char,
                     )
@@ -862,8 +923,13 @@ class Script2VideoPipeline:
                     # SINGLE call (elements + prompt), so the separate
                     # PuLID/Kontext frame step is skipped when that provider
                     # is selected AND we have a character reference.
+                    # Requires a matched CHARACTER, not just any reference: the
+                    # fal.ai path binds the reference as a character element,
+                    # so feeding it the empty location plate would ask the
+                    # model to cast a room as the person in the shot.
                     one_step_reference_video = (
                         getattr(self.video_gen, "uses_character_reference_to_video", False)
+                        and bool(matched_char)
                         and bool(reference_url)
                     )
 
@@ -985,6 +1051,14 @@ class Script2VideoPipeline:
                 # diagnosed from real data (was the wrong character matched,
                 # or did MuAPI itself drift?) instead of guessing blind.
                 meta["reference_character"] = matched_char.name if matched_char else None
+                # Which lock actually anchored this shot. Without it, a
+                # "the room keeps changing" report cannot be told apart from
+                # "the wrong character was matched" after the fact.
+                meta["reference_kind"] = (
+                    "character"
+                    if matched_char
+                    else ("location" if reference_url else None)
+                )
 
                 # QA/repair already ran above (before video generation) so a
                 # detected issue could actually be fixed in the frame that

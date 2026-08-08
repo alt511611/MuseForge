@@ -9,7 +9,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 from agents.screenwriter import ScreenwriterAgent, ScriptGenerationFailed
 from interfaces.character import CharacterInScene, DramaScript
+from interfaces.film_look import build_film_look_filters
 from interfaces.second_budget import billable_seconds, distribute_budget
+from interfaces.transitions import plan_transitions
 from pipelines.script2video import (
     PipelineCancelled,
     Script2VideoPipeline,
@@ -22,9 +24,20 @@ from pipelines.script2video import (
     moviepy_encode_kwargs,
     video_encode_args,
 )
+from tools.falai_lipsync import FalAILipsync, is_lipsync_enabled
 from tools.muapi_voice_generator import MuAPIVoiceGenerator, is_dialogue_enabled
 
 logger = logging.getLogger(__name__)
+
+
+class SceneRegenerationUnavailable(Exception):
+    """A single scene cannot be re-rendered for this job.
+
+    Separate from a generation failure because nothing was attempted and
+    nothing should be charged: the job predates scene archiving, or its clips
+    have already been cleaned up. The API turns this into a 4xx explaining
+    which, rather than a 500.
+    """
 
 
 def _make_music_generator(api_key: str, demo: bool):
@@ -283,6 +296,7 @@ async def finalize_master(video_path: str, output_path: str) -> str:
         with VideoFileClip(video_path) as clip:
             duration = float(clip.duration or 0)
             has_audio = clip.audio is not None
+            width, height = (clip.size or (0, 0))
     except Exception as exc:
         logger.warning("Finishing pass could not probe video, skipping: %s", exc)
         return _copy_through()
@@ -292,9 +306,18 @@ async def finalize_master(video_path: str, output_path: str) -> str:
         return _copy_through()
 
     fade_out_start = max(0.0, duration - FADE_OUT_SECONDS)
-    vf = (
-        f"fade=t=in:st=0:d={FADE_IN_SECONDS},"
-        f"fade=t=out:st={fade_out_start:.3f}:d={FADE_OUT_SECONDS}"
+    # Film-look filters ride along in THIS encode. Cadence, grain and matte
+    # each want a full re-encode of their own; folding them into the pass that
+    # already re-encodes for the fades keeps it at one generation loss instead
+    # of four. Order matters: resample and matte before grain, so the noise is
+    # generated at the delivered frame rate and is not itself resampled.
+    look_filters, look_args = build_film_look_filters(width, height)
+    vf = ",".join(
+        look_filters
+        + [
+            f"fade=t=in:st=0:d={FADE_IN_SECONDS}",
+            f"fade=t=out:st={fade_out_start:.3f}:d={FADE_OUT_SECONDS}",
+        ]
     )
     ffmpeg_binary = os.environ.get("MUSEFORGE_FFMPEG_BINARY") or shutil.which("ffmpeg")
     if not ffmpeg_binary:
@@ -322,7 +345,7 @@ async def finalize_master(video_path: str, output_path: str) -> str:
             "-b:a",
             "192k",
         ]
-    cmd += [*video_encode_args(), output_path]
+    cmd += [*look_args, *video_encode_args(), output_path]
 
     try:
         process = await asyncio.create_subprocess_exec(
@@ -891,6 +914,186 @@ class Idea2VideoPipeline:
             char.portrait_url = url
         return portraits
 
+    async def _lock_location_plate(
+        self,
+        script: DramaScript,
+        style: str = "Cinematic",
+        aspect_ratio: str = "16:9",
+        location_image_override: Optional[str] = None,
+    ) -> Optional[str]:
+        """Generate ONE empty-set plate of the drama's locked setting.
+
+        The character portrait lock solves identity drift; nothing solved
+        PLACE drift. The screenwriter already fixes a single location for the
+        whole drama, but that agreement only ever existed as words in each
+        frame prompt -- so "stone-walled Istanbul coffeehouse" was re-imagined
+        from scratch for every shot, and the room changed between cuts.
+
+        This renders that room ONCE and reuses the image as the visual
+        reference for shots that have no character to anchor to (see
+        script2video: establishing shots, inserts, object shots). Deliberately
+        shot empty -- no people -- because it is a place reference, not a
+        character one; a figure in the plate would leak into every shot that
+        uses it.
+
+        Returns None when the script names no location, which leaves the
+        previous behaviour completely untouched.
+        """
+        if location_image_override:
+            return location_image_override
+
+        location = (getattr(script, "setting_location", "") or "").strip()
+        if not location:
+            return None
+
+        time_of_day = (getattr(script, "setting_time_of_day", "") or "").strip()
+        era = (getattr(script, "setting_era", "") or "").strip()
+        prompt = (
+            f"Empty location plate, {style} style. {location}. "
+            f"{('Time of day: ' + time_of_day + '. ') if time_of_day else ''}"
+            f"{('Era: ' + era + '. ') if era else ''}"
+            "Wide establishing view of the space itself, no people, no figures, "
+            "no characters. Consistent architecture, materials, furniture and "
+            "lighting. High detail."
+        )
+        try:
+            return await self.image_gen.generate_image(prompt, aspect_ratio=aspect_ratio)
+        except Exception as exc:
+            # Fail-open, exactly like music/dialogue: a missing plate costs
+            # continuity, but it must never cost the whole job.
+            logger.warning(
+                "Location plate generation failed, continuing without a "
+                "locked setting reference: %s",
+                exc,
+            )
+            return None
+
+    async def _lipsync_scenes(
+        self,
+        scene_paths: List[str],
+        dialogue_tracks: List[Dict[str, Any]],
+        working_dir: str,
+        progress: Callable,
+        is_cancelled: Optional[Callable[[], bool]] = None,
+        only_scenes: Optional[set] = None,
+        requested: bool = True,
+    ) -> List[int]:
+        """Replace each speaking scene's clip with a lip-synced one, in place.
+
+        Mutates ``scene_paths`` (the list concatenation reads from) and
+        ``dialogue_tracks`` (the list the audio mixer reads from), and returns
+        the scene indices that were successfully synced.
+
+        Fail-open per scene, not per drama: if scene 2 cannot be synced, scenes
+        1 and 3 still are, and scene 2 simply keeps its original clip with its
+        voice mixed over the top exactly as before.
+        """
+        # `requested` is the per-job opt-in (the user paid for it);
+        # is_lipsync_enabled() is the deployment flag. Both must hold.
+        if self.demo or not requested or not is_lipsync_enabled() or not dialogue_tracks:
+            return []
+
+        lipsync = FalAILipsync(os.environ.get("FAL_KEY", ""), demo=self.demo)
+        if not lipsync.available():
+            logger.info("Lip sync enabled but FAL_KEY is not set — skipping.")
+            return []
+
+        # One request per SCENE, keyed off the track that actually carries the
+        # audio (the voice generator returns one combined file per scene and
+        # attaches it to that scene's first line only).
+        audio_by_scene: Dict[int, str] = {}
+        for track in dialogue_tracks:
+            # synced_audio_url is the same file, kept under a name the mixer
+            # ignores, so re-syncing a REGENERATED scene later still has the
+            # voice to sync against instead of finding it deleted.
+            audio_url = track.get("audio_url") or track.get("synced_audio_url")
+            if not audio_url:
+                continue
+            scene_index = int(track.get("scene_index", -1))
+            if only_scenes is not None and scene_index not in only_scenes:
+                continue
+            if 0 <= scene_index < len(scene_paths):
+                audio_by_scene.setdefault(scene_index, audio_url)
+
+        synced: List[int] = []
+        for position, (scene_index, audio_url) in enumerate(sorted(audio_by_scene.items())):
+            if is_cancelled and is_cancelled():
+                break
+            await progress(
+                "lipsync",
+                f"Syncing lips to dialogue ({position + 1}/{len(audio_by_scene)})",
+                88,
+            )
+            synced_url = await lipsync.sync(
+                scene_paths[scene_index], audio_url, is_cancelled=is_cancelled
+            )
+            if not synced_url:
+                continue
+            local_path = os.path.join(working_dir, f"scene_{scene_index}_lipsync.mp4")
+            try:
+                await download_video(synced_url, local_path)
+            except Exception as exc:
+                logger.warning(
+                    "Lip-synced clip for scene %s could not be downloaded, "
+                    "keeping the original: %s",
+                    scene_index,
+                    exc,
+                )
+                continue
+            scene_paths[scene_index] = local_path
+            synced.append(scene_index)
+
+        # Hand the speech over to the picture: drop the audio the mixer would
+        # otherwise overlay, keep every row so subtitles are unaffected.
+        for track in dialogue_tracks:
+            if int(track.get("scene_index", -1)) in synced:
+                audio_url = track.pop("audio_url", None)
+                if audio_url:
+                    track["synced_audio_url"] = audio_url
+                track["lipsynced"] = True
+
+        return synced
+
+    async def _archive_scene_clips(
+        self,
+        scene_results: List[Dict[str, Any]],
+        scene_paths: List[str],
+        working_dir: str,
+    ) -> None:
+        """Persist every scene clip so a single scene can be replaced later.
+
+        Writes ``clip_url`` (and ``clip_path``) onto each scene in
+        ``scene_results``. Fail-open: an upload that does not work leaves the
+        local path behind, which still works until the working dir is cleaned,
+        and simply means that scene cannot be regenerated after cleanup.
+        """
+        if self.demo:
+            return
+
+        from tools.supabase_storage import upload_video
+
+        job_id = os.path.basename(os.path.normpath(working_dir))
+        for scene in scene_results:
+            clip_index = scene.get("clip_index")
+            if clip_index is None or not (0 <= clip_index < len(scene_paths)):
+                continue
+            local_path = scene_paths[clip_index]
+            if not local_path or not os.path.isfile(local_path):
+                continue
+            scene["clip_path"] = local_path
+            try:
+                stored = await upload_video(local_path, f"{job_id}_scene_{scene['index']}")
+            except Exception as exc:
+                logger.warning(
+                    "Scene %s clip could not be archived (regeneration will be "
+                    "unavailable for it once the working dir is cleaned): %s",
+                    scene["index"],
+                    exc,
+                )
+                continue
+            if stored and stored.startswith("http"):
+                scene["clip_url"] = stored
+
     def _characters_from_script(self, script: DramaScript) -> List[CharacterInScene]:
         return [
             CharacterInScene(
@@ -904,6 +1107,230 @@ class Idea2VideoPipeline:
             for i, c in enumerate(script.characters)
         ]
 
+    async def regenerate_scene(
+        self,
+        previous_result: Dict[str, Any],
+        scene_index: int,
+        working_dir: str,
+        director_note: str = "",
+        progress_callback: Optional[Callable] = None,
+        is_cancelled: Optional[Callable[[], bool]] = None,
+    ) -> Dict[str, Any]:
+        """Re-render ONE scene and splice it back into the finished drama.
+
+        Everything else is reused verbatim: the same script, the same locked
+        portraits, the same set plate, the same second budget, the same voice
+        tracks. Only the chosen scene is generated again — which is the whole
+        point, since re-running the job would also re-roll the scenes the user
+        was happy with, and charge for them.
+
+        ``director_note`` is the user's reason for rejecting the take ("too
+        dark", "show his hands"). It is appended to the shot brief for this
+        scene only, so the retry is directed rather than merely a different
+        dice roll.
+        """
+        os.makedirs(working_dir, exist_ok=True)
+
+        def _check_cancel():
+            if is_cancelled and is_cancelled():
+                raise PipelineCancelled("Job cancelled")
+
+        async def progress(stage: str, message: str, pct: float, data=None):
+            if progress_callback:
+                await progress_callback(stage, message, pct, data)
+
+        state = (previous_result or {}).get("_render_state") or {}
+        script_data = state.get("script") or {}
+        if not script_data:
+            raise SceneRegenerationUnavailable(
+                "This video was made before single-scene retakes existed, so "
+                "the information needed to re-render one scene was not kept. "
+                "Generating it again will make retakes available."
+            )
+
+        script = DramaScript(**script_data)
+        scenes = list(previous_result.get("scenes") or [])
+        target = next((s for s in scenes if int(s.get("index", -1)) == scene_index), None)
+        if target is None:
+            raise SceneRegenerationUnavailable(f"Scene {scene_index + 1} is not part of this video.")
+
+        # Every OTHER scene has to be recoverable, or there is nothing to
+        # splice the new take into. Checked up front so the user is told
+        # before a paid generation runs, not after.
+        others = [s for s in scenes if s is not target and s.get("clip_index") is not None]
+        missing = [
+            s["index"] + 1
+            for s in others
+            if not (s.get("clip_url") or (s.get("clip_path") and os.path.isfile(s["clip_path"])))
+        ]
+        if missing:
+            raise SceneRegenerationUnavailable(
+                "The other scenes of this video are no longer stored, so a "
+                f"single scene cannot be replaced (missing: scene {missing[0]}). "
+                "Please generate the video again."
+            )
+
+        characters = self._characters_from_script(script)
+        portraits = dict(previous_result.get("portraits") or {})
+        for char in characters:
+            if portraits.get(char.name):
+                char.portrait_url = portraits[char.name]
+
+        scene_script = script.scenes[scene_index] if scene_index < len(script.scenes) else None
+        if scene_script is None:
+            raise SceneRegenerationUnavailable(f"Scene {scene_index + 1} is not part of this script.")
+
+        durations = state.get("scene_durations") or []
+        user_requirement = state.get("user_requirement") or ""
+        # A retake that ignores the note is just another roll of the dice.
+        note = (director_note or "").strip()
+        if note:
+            user_requirement = (
+                f"{user_requirement}\n\nDIRECTOR'S NOTE FOR THIS RETAKE (binding): {note}"
+            ).strip()
+
+        _check_cancel()
+        await progress("storyboard", f"Re-shooting scene {scene_index + 1}", 15)
+
+        # A fresh sub-directory per take: overwriting the previous take's files
+        # in place would corrupt the old clip while the master still points at
+        # it, leaving the user with neither version if this take then fails.
+        take = int(target.get("take", 1)) + 1
+        scene_dir = os.path.join(working_dir, f"scene_{scene_index}_take{take}")
+
+        scene_result = await self.script2video.run(
+            script=_scene_action(scene_script),
+            characters=characters,
+            user_requirement=user_requirement,
+            style=previous_result.get("style", "Cinematic"),
+            working_dir=scene_dir,
+            progress_callback=progress_callback,
+            scene_idx=scene_index,
+            total_scenes=max(1, len(script.scenes)),
+            character_portraits=portraits,
+            director_style=previous_result.get("director_style", "cinematic_balanced"),
+            aspect_ratio=previous_result.get("aspect_ratio", "16:9"),
+            is_cancelled=is_cancelled,
+            plan=previous_result.get("plan", "free"),
+            setting_location=getattr(script, "setting_location", "") or "",
+            setting_time_of_day=getattr(script, "setting_time_of_day", "") or "",
+            setting_era=getattr(script, "setting_era", "") or "",
+            location_plate_url=previous_result.get("location_plate"),
+            has_dialogue=bool(_scene_dialogue(scene_script)),
+            lipsync_enabled=bool(previous_result.get("lipsynced_scenes")),
+            scene_emotion=_scene_emotion(scene_script),
+            scene_dialogue=_format_scene_dialogue(_scene_dialogue(scene_script)),
+            scene_direction=_format_scene_direction(scene_script),
+            scene_tension=_scene_tension(scene_script),
+            # Same slice of the second budget as the take it replaces, so a
+            # retake can never quietly lengthen (or shorten) the paid runtime.
+            scene_duration=durations[scene_index] if scene_index < len(durations) else 0.0,
+            character_direction=_format_character_direction(script),
+            theme=getattr(script, "theme", "") or "",
+            visual_motif=getattr(script, "visual_motif", "") or "",
+            user_brief=getattr(script, "user_brief", "") or "",
+        )
+        if not scene_result.get("path"):
+            raise SceneRegenerationUnavailable(
+                "The retake did not produce a usable clip. Your credit has "
+                "been refunded — please try again."
+            )
+
+        # Rebuild the full clip list in scene order, pulling the untouched
+        # scenes back down from storage.
+        _check_cancel()
+        await progress("assembly", "Splicing the new take back in", 80)
+        ordered = sorted(
+            [s for s in scenes if s.get("clip_index") is not None],
+            key=lambda s: s["clip_index"],
+        )
+        scene_paths: List[str] = []
+        for scene in ordered:
+            if scene is target:
+                scene_paths.append(scene_result["path"])
+                continue
+            local = scene.get("clip_path")
+            if local and os.path.isfile(local):
+                scene_paths.append(local)
+                continue
+            local = os.path.join(working_dir, f"scene_{scene['index']}_restored.mp4")
+            await download_video(scene["clip_url"], local)
+            scene_paths.append(local)
+
+        dialogue_tracks = [dict(t) for t in (state.get("dialogue_tracks") or [])]
+        target_clip_index = int(target["clip_index"])
+        if any(
+            int(t.get("scene_index", -1)) == target_clip_index and t.get("lipsynced")
+            for t in dialogue_tracks
+        ):
+            # The replacement clip has never been synced. Re-sync THIS scene
+            # only — the others already carry their synced audio in-picture and
+            # re-syncing them would be a second charge for no change.
+            for track in dialogue_tracks:
+                if int(track.get("scene_index", -1)) == target_clip_index:
+                    track.pop("lipsynced", None)
+            await self._lipsync_scenes(
+                scene_paths=scene_paths,
+                dialogue_tracks=dialogue_tracks,
+                working_dir=working_dir,
+                progress=progress,
+                is_cancelled=is_cancelled,
+                only_scenes={target_clip_index},
+            )
+
+        final_path = await self._assemble_final_drama(
+            scene_paths,
+            working_dir,
+            progress_callback,
+            state.get("music_url"),
+            previous_result.get("plan", "free"),
+            is_cancelled=is_cancelled,
+            dialogue_tracks=dialogue_tracks,
+            director_style=previous_result.get("director_style", "cinematic_balanced"),
+            transitions=plan_transitions([s["script"] for s in ordered]),
+        )
+
+        # Update just this scene's record, then re-archive it so the NEXT
+        # retake (of this or any other scene) still finds every clip.
+        target["shots"] = scene_result.get("shots", [])
+        target["take"] = take
+        target.pop("clip_url", None)
+        target.pop("clip_path", None)
+        await self._archive_scene_clips([target], scene_paths, working_dir)
+
+        result = {**previous_result, "scenes": scenes}
+        result["_render_state"] = {**state, "dialogue_tracks": dialogue_tracks}
+
+        actual_duration_seconds = None
+        if final_path and os.path.isfile(final_path):
+            from moviepy import VideoFileClip
+
+            try:
+                with VideoFileClip(final_path) as clip:
+                    actual_duration_seconds = clip.duration
+            except Exception as exc:
+                logger.warning("Could not measure regenerated video duration: %s", exc)
+
+        video_url = None
+        if final_path and os.path.isfile(final_path) and not self.demo:
+            from tools.supabase_storage import upload_video
+
+            job_id = os.path.basename(os.path.normpath(working_dir))
+            # A NEW object key per take: overwriting the old one would leave
+            # every already-issued signed URL (and any cache in front of it)
+            # pointing at a video that silently changed under the viewer.
+            stored = await upload_video(final_path, f"{job_id}_take{take}")
+            if stored and stored.startswith("http"):
+                video_url = stored
+
+        result["video_path"] = final_path
+        result["video_url"] = video_url or f"/api/jobs/{os.path.basename(os.path.normpath(working_dir))}/video"
+        if actual_duration_seconds is not None:
+            result["duration_estimate"] = round(actual_duration_seconds)
+
+        await progress("complete", f"Scene {scene_index + 1} re-shot", 100, {"video_url": result["video_url"]})
+        return result
+
     async def _assemble_final_drama(
         self,
         scene_paths: List[str],
@@ -914,6 +1341,7 @@ class Idea2VideoPipeline:
         is_cancelled: Optional[Callable[[], bool]] = None,
         dialogue_tracks: Optional[List[Dict[str, Any]]] = None,
         director_style: str = "cinematic_balanced",
+        transitions: Optional[List[float]] = None,
     ) -> str:
         """Concatenate all scene videos, color-grade, add background music,
         burn dialogue captions (when tracks present), then watermark
@@ -940,8 +1368,14 @@ class Idea2VideoPipeline:
         # moviepy's "compose" mode they require is heavier on memory than
         # the default ffmpeg stream-copy path, so it stays off unless
         # explicitly enabled.
-        if is_scene_transitions_enabled():
-            await concatenate_videos_with_transitions(scene_paths, concatenated_path)
+        # A planned boundary list decides per join (see interfaces/
+        # transitions); an all-cuts plan hands straight back to the cheap
+        # stream-copy path inside the transition concat itself. The env flag
+        # remains the master switch because compositing costs memory.
+        if is_scene_transitions_enabled() and any(transitions or []):
+            await concatenate_videos_with_transitions(
+                scene_paths, concatenated_path, transitions=transitions
+            )
         else:
             await concatenate_videos(scene_paths, concatenated_path)
 
@@ -1052,8 +1486,10 @@ class Idea2VideoPipeline:
         character_portraits_override: Optional[Dict[str, str]] = None,
         music_enabled: bool = False,
         dialogue_enabled: bool = False,
+        lipsync_enabled: bool = False,
         plan: str = "free",
         library_characters: Optional[List[Dict[str, Any]]] = None,
+        location_image_override: Optional[str] = None,
     ) -> dict:
         """Phase B: everything after screenwriting (portraits → scenes → assemble)."""
         os.makedirs(working_dir, exist_ok=True)
@@ -1150,6 +1586,19 @@ class Idea2VideoPipeline:
             characters, style, character_portraits_override=character_portraits_override
         )
 
+        # Lock the SET the same way the cast is locked. Generated at the
+        # drama's own aspect ratio (unlike portraits, which are square) --
+        # this plate is a background reference, so its framing has to match
+        # the frames it will condition.
+        _check_cancel()
+        await progress("portraits", "Locking the set for consistency", 12)
+        location_plate = await self._lock_location_plate(
+            script,
+            style,
+            aspect_ratio=aspect_ratio,
+            location_image_override=location_image_override,
+        )
+
         # Dynamic reference selection (adapted from ViMax's "previous
         # timeline" technique): as scenes progress, prefer each character's
         # MOST RECENTLY generated frame over the static locked portrait as
@@ -1165,6 +1614,7 @@ class Idea2VideoPipeline:
         scene_paths: List[str] = []
         scene_results: List[Dict[str, Any]] = []
         dialogue_tracks: List[Dict[str, Any]] = []
+        lipsynced_scenes: List[int] = []
         dialogue_requested = (
             dialogue_enabled and is_dialogue_enabled() and not self.demo
         )
@@ -1267,7 +1717,11 @@ class Idea2VideoPipeline:
                     setting_location=getattr(script, "setting_location", "") or "",
                     setting_time_of_day=getattr(script, "setting_time_of_day", "") or "",
                     setting_era=getattr(script, "setting_era", "") or "",
+                    location_plate_url=location_plate,
                     has_dialogue=dialogue_requested and bool(scene_dialogue_lines),
+                    # Decides whether the frame is asked to SHOW the mouth or
+                    # hide it — opposite instructions, see build_frame_prompt.
+                    lipsync_enabled=lipsync_enabled and dialogue_requested,
                     last_frame_by_character=self._last_frame_by_character,
                     scene_emotion=_scene_emotion(scene),
                     # Always pass the words themselves to the storyboard step,
@@ -1338,7 +1792,15 @@ class Idea2VideoPipeline:
 
                 serialized_scene = scene.model_dump() if hasattr(scene, "model_dump") else scene
                 scene_results.append(
-                    {"index": idx, "script": serialized_scene, "shots": scene_result.get("shots", [])}
+                    {
+                        "index": idx,
+                        "script": serialized_scene,
+                        "shots": scene_result.get("shots", []),
+                        # Position in scene_paths, i.e. in the concatenation.
+                        # Not always == index: a scene that produced no clip is
+                        # skipped, which shifts every later scene down one.
+                        "clip_index": assembled_scene_index,
+                    }
                 )
 
             _check_cancel()
@@ -1355,6 +1817,30 @@ class Idea2VideoPipeline:
                         scene_number + 1,
                         exc,
                     )
+            # Drive the mouths from the voice track that is about to be
+            # played. Deliberately placed AFTER dialogue is collected and
+            # BEFORE assembly: the provider works on one clip at a time, and
+            # by this point each scene clip and its audio both exist. A synced
+            # scene's audio is baked into its clip, so its track is stripped
+            # of `audio_url` (keeping the text for subtitles) -- otherwise the
+            # mixer would lay the same speech over it a second time and every
+            # line would be heard twice, slightly out of phase.
+            _check_cancel()
+            lipsynced_scenes = await self._lipsync_scenes(
+                scene_paths=scene_paths,
+                dialogue_tracks=dialogue_tracks,
+                working_dir=working_dir,
+                progress=progress,
+                is_cancelled=is_cancelled,
+                requested=lipsync_enabled,
+            )
+
+            # Archive each finished scene clip individually, not just the
+            # concatenated master. Regenerating scene 3 later has to splice it
+            # back in beside scenes 1, 2 and 4 -- and the working dir is wiped
+            # once the master uploads, so without this the only surviving
+            # artifact is a master that cannot be taken apart again.
+            await self._archive_scene_clips(scene_results, scene_paths, working_dir)
         except BaseException:
             if music_task is not None:
                 music_task.cancel()
@@ -1386,6 +1872,11 @@ class Idea2VideoPipeline:
                 is_cancelled=is_cancelled,
                 dialogue_tracks=dialogue_tracks,
                 director_style=director_style,
+                # Planned from the SCENES THAT MADE IT into the cut, in cut
+                # order -- a scene that produced no clip is not a boundary.
+                transitions=plan_transitions(
+                    [s["script"] for s in scene_results if s.get("clip_index") is not None]
+                ),
             )
             # Measure the real assembled length before upload/cleanup — the
             # screenwriter's estimated_duration_seconds is a pre-generation
@@ -1441,6 +1932,20 @@ class Idea2VideoPipeline:
             ),
             "characters": [c.model_dump() for c in characters],
             "portraits": portraits,
+            "location_plate": location_plate,
+            "lipsynced_scenes": lipsynced_scenes,
+            # Everything regenerate_scene() needs to re-render ONE scene the
+            # same way it was rendered the first time. Underscore-prefixed
+            # because it is machinery, not something the UI should render;
+            # kept on the result (rather than on Job) so it survives the
+            # Supabase round-trip that job rows already do.
+            "_render_state": {
+                "script": script.model_dump() if hasattr(script, "model_dump") else {},
+                "scene_durations": list(scene_durations),
+                "music_url": music_url,
+                "user_requirement": user_requirement,
+                "dialogue_tracks": dialogue_tracks,
+            },
             "scenes": scene_results,
             "director_style": director_style,
             "style": style,
@@ -1472,8 +1977,10 @@ class Idea2VideoPipeline:
         character_portraits_override: Optional[Dict[str, str]] = None,
         music_enabled: bool = False,
         dialogue_enabled: bool = False,
+        lipsync_enabled: bool = False,
         plan: str = "free",
         preset_characters: Optional[List[Dict[str, Any]]] = None,
+        location_image_override: Optional[str] = None,
     ) -> dict:
         """Full end-to-end run (script + production). Default path unchanged."""
         script = await self.write_script_only(
@@ -1498,6 +2005,8 @@ class Idea2VideoPipeline:
             character_portraits_override=character_portraits_override,
             music_enabled=music_enabled,
             dialogue_enabled=dialogue_enabled,
+            lipsync_enabled=lipsync_enabled,
             plan=plan,
             library_characters=preset_characters,
+            location_image_override=location_image_override,
         )
