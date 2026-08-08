@@ -43,6 +43,13 @@ PIPELINE_HARD_TIMEOUT_SECONDS = int(
 )
 # Keep aligned with server/api.py. Dialogue is charged per requested scene.
 DIALOGUE_EXTRA_CREDIT_COST = 1
+# One scene re-shot costs what one scene cost in the first place: a retake is
+# the same frame + clip generation, so pricing it below cost would make the
+# button a way to buy generation at a discount.
+SCENE_RETAKE_CREDIT_COST = 1
+# Keep aligned with server/api.py. Lip sync is charged per scene, on top of
+# dialogue, because it is a separate paid provider call per speaking scene.
+LIPSYNC_EXTRA_CREDIT_COST = 1
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
@@ -101,6 +108,21 @@ def _sb_row(job: "Job") -> dict:
     }
 
 
+def public_result(result: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Strip server-side machinery from a result before it goes over the wire.
+
+    Underscore-prefixed keys hold what the pipeline needs to resume or redo
+    work -- the full script, the voice tracks, the uploaded portrait overrides.
+    They are stored on the result (so they survive the Supabase round-trip a
+    job row already makes) but the browser has no use for them, and _render_
+    state in particular is large enough that shipping it on every status poll
+    and every SSE completion event is a real cost.
+    """
+    if not isinstance(result, dict):
+        return result
+    return {k: v for k, v in result.items() if not k.startswith("_")}
+
+
 def _sb_row_to_dict(row: dict) -> dict:
     """Normalise a Supabase jobs row to the same shape as Job.to_dict()."""
     status = row.get("status", "unknown")
@@ -119,7 +141,7 @@ def _sb_row_to_dict(row: dict) -> dict:
         "user_id": row.get("user_id"),
         "user_email": row.get("user_email"),
         "events": [],  # events are not persisted to DB
-        "result": row.get("result"),
+        "result": public_result(row.get("result")),
         "error": row.get("error"),
         "created_at": row.get("created_at"),
         "progress": 100 if status in ("completed", "failed", "cancelled") else 0,
@@ -286,8 +308,10 @@ class Job:
     user_email: Optional[str] = None
     character_image: Optional[str] = None
     character_name: str = ""
+    location_image: Optional[str] = None
     music_enabled: bool = False
     dialogue_enabled: bool = False
+    lipsync_enabled: bool = False
     plan: str = "free"
     require_script_approval: bool = False
     # Pro-only: [{name, static_features, portrait_url}, ...]
@@ -313,10 +337,11 @@ class Job:
             "user_email": self.user_email,
             "music_enabled": self.music_enabled,
             "dialogue_enabled": self.dialogue_enabled,
+            "lipsync_enabled": self.lipsync_enabled,
             "plan": self.plan,
             "require_script_approval": self.require_script_approval,
             "events": [e.to_dict() for e in self.events] if include_events else [],
-            "result": self.result,
+            "result": public_result(self.result),
             "error": self.error,
             "created_at": self.created_at,
             "progress": self.events[-1].progress if self.events else 0,
@@ -593,6 +618,11 @@ def _job_refund_amount(job: Job) -> int:
             if job.dialogue_enabled
             else 0
         )
+        + (
+            job.num_scenes * LIPSYNC_EXTRA_CREDIT_COST
+            if job.lipsync_enabled
+            else 0
+        )
     )
 
 
@@ -651,6 +681,29 @@ async def run_generation_job(job: Job, api_key: str):
             except Exception as exc:
                 await job_store.emit(
                     job, "portraits", f"Could not use uploaded photo, generating one instead: {exc}", 3
+                )
+
+        # Same treatment for an uploaded location photo: turn the base64 data
+        # URI into a hosted URL once, here, and stash it so the approve-script
+        # path can reuse it without re-uploading. Never fatal -- unlike a
+        # character photo (whose whole point is "this exact face"), a failed
+        # location upload just falls back to a generated plate.
+        location_url: Optional[str] = None
+        if job.location_image:
+            try:
+                await progress_callback("portraits", "Uploading set reference photo...", 3)
+                location_url = await upload_base64_image(
+                    job.location_image, api_key, demo=job.demo
+                )
+                job.result = {
+                    **(job.result or {}),
+                    "_location_override": location_url,
+                }
+            except Exception as exc:
+                await progress_callback(
+                    "portraits",
+                    f"Could not use the uploaded set photo, generating one instead: {exc}",
+                    3,
                 )
 
         if library_characters and not (job.result or {}).get("_library_characters"):
@@ -714,8 +767,10 @@ async def run_generation_job(job: Job, api_key: str):
                     character_portraits_override=character_portraits_override or None,
                     music_enabled=job.music_enabled,
                     dialogue_enabled=job.dialogue_enabled,
+                    lipsync_enabled=job.lipsync_enabled,
                     plan=job.plan,
                     preset_characters=library_characters or None,
+                    location_image_override=location_url,
                 ),
                 timeout=PIPELINE_HARD_TIMEOUT_SECONDS,
             )
@@ -728,7 +783,9 @@ async def run_generation_job(job: Job, api_key: str):
             job.status = JobStatus.COMPLETED
             # Persist COMPLETED + result (includes signed Storage URL when uploaded)
             await job_store.persist(job)
-            await job_store.emit(job, "complete", "Generation finished", 100, result)
+            await job_store.emit(
+                job, "complete", "Generation finished", 100, public_result(result)
+            )
             # Disk cleanup only after a successful remote upload
             if not job.demo and _is_remote_storage_url((result or {}).get("video_url")):
                 cleanup_working_dir(working_dir)
@@ -791,6 +848,96 @@ async def run_generation_job(job: Job, api_key: str):
         # disk fills a fixed-size container long before the 24h orphan sweep.
         cleanup_working_dir(working_dir)
 
+async def run_regenerate_scene_job(
+    job: Job,
+    api_key: str,
+    scene_index: int,
+    director_note: str = "",
+):
+    """Re-shoot one scene of a finished job and splice it back in.
+
+    The job's previous result is kept intact until the new one is complete, so
+    a failed retake leaves the customer with the video they already had rather
+    than nothing. On failure the single retake credit is refunded — the
+    original job's credits are untouched either way.
+    """
+    from pipelines.idea2video import Idea2VideoPipeline, SceneRegenerationUnavailable
+    from pipelines.script2video import PipelineCancelled
+
+    previous_result = dict(job.result or {})
+    job.status = JobStatus.RUNNING
+    await job_store.persist(job)
+
+    working_dir = os.path.join(JOBS_DIR, job.id)
+
+    def is_cancelled() -> bool:
+        return job.status == JobStatus.CANCELLED
+
+    async def progress_callback(stage, message, progress, data=None):
+        await job_store.emit(job, stage, message, progress, data)
+
+    def _refund_retake() -> None:
+        if job.user_id and not job.demo:
+            asyncio.create_task(
+                _sb_refund_credits(job.user_id, SCENE_RETAKE_CREDIT_COST, job.id)
+            )
+
+    def _restore_previous() -> None:
+        """Put the finished video back. Without this, a failed retake would
+        leave the job holding a half-updated result and the UI would show a
+        completed video the user can no longer play."""
+        job.result = previous_result
+        job.status = JobStatus.COMPLETED
+
+    try:
+        pipeline = Idea2VideoPipeline(api_key=api_key, demo=job.demo)
+        result = await asyncio.wait_for(
+            pipeline.regenerate_scene(
+                previous_result=previous_result,
+                scene_index=scene_index,
+                working_dir=working_dir,
+                director_note=director_note,
+                progress_callback=progress_callback,
+                is_cancelled=is_cancelled,
+            ),
+            timeout=PIPELINE_HARD_TIMEOUT_SECONDS,
+        )
+        if is_cancelled():
+            _restore_previous()
+            await job_store.persist(job)
+            await job_store.emit(job, "cancelled", "Retake cancelled", 100)
+            _refund_retake()
+            return
+        job.result = result
+        job.status = JobStatus.COMPLETED
+        await job_store.persist(job)
+        await job_store.emit(job, "complete", "Retake finished", 100, public_result(result))
+    except SceneRegenerationUnavailable as exc:
+        # Nothing was generated, so nothing to refund beyond the retake credit.
+        _restore_previous()
+        job.error = str(exc)
+        await job_store.persist(job)
+        await job_store.emit(job, "error", str(exc), 100)
+        _refund_retake()
+    except PipelineCancelled:
+        _restore_previous()
+        await job_store.persist(job)
+        await job_store.emit(job, "cancelled", "Retake cancelled", 100)
+        _refund_retake()
+    except asyncio.TimeoutError:
+        _restore_previous()
+        job.error = "The retake timed out — your video is unchanged."
+        await job_store.persist(job)
+        await job_store.emit(job, "error", job.error, 100)
+        _refund_retake()
+    except Exception as exc:
+        _restore_previous()
+        job.error = f"The retake failed, your video is unchanged: {exc}"
+        await job_store.persist(job)
+        await job_store.emit(job, "error", job.error, 100)
+        _refund_retake()
+
+
 async def run_continue_from_script_job(job: Job, api_key: str, script_data: Dict[str, Any]):
     """Resume after script approval — charges already taken by the API layer."""
     from interfaces.character import DramaScript
@@ -809,9 +956,13 @@ async def run_continue_from_script_job(job: Job, api_key: str, script_data: Dict
         await job_store.emit(job, stage, message, progress, data)
 
     portraits_override = None
+    location_override = None
     library_characters = list(job.library_characters or [])
     if isinstance(job.result, dict):
         portraits_override = job.result.get("_portraits_override") or None
+        # Uploaded once in run_generation_job's script-only phase; reuse the
+        # hosted URL rather than re-uploading the (large) base64 payload.
+        location_override = job.result.get("_location_override") or None
         if not library_characters:
             library_characters = list(job.result.get("_library_characters") or [])
 
@@ -831,8 +982,10 @@ async def run_continue_from_script_job(job: Job, api_key: str, script_data: Dict
                 character_portraits_override=portraits_override,
                 music_enabled=job.music_enabled,
                 dialogue_enabled=job.dialogue_enabled,
+                lipsync_enabled=job.lipsync_enabled,
                 plan=job.plan,
                 library_characters=library_characters or None,
+                location_image_override=location_override,
             ),
             timeout=PIPELINE_HARD_TIMEOUT_SECONDS,
         )
@@ -851,7 +1004,9 @@ async def run_continue_from_script_job(job: Job, api_key: str, script_data: Dict
         job.result = result
         job.status = JobStatus.COMPLETED
         await job_store.persist(job)
-        await job_store.emit(job, "complete", "Generation finished", 100, result)
+        await job_store.emit(
+                job, "complete", "Generation finished", 100, public_result(result)
+            )
         if not job.demo and _is_remote_storage_url((result or {}).get("video_url")):
             cleanup_working_dir(working_dir)
     except PipelineCancelled:

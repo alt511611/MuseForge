@@ -14,6 +14,8 @@ import {
   X,
   Music,
   MessagesSquare,
+  MapPin,
+  AudioLines,
 } from "lucide-react";
 
 import { useLanguage } from "../contexts/LanguageContext";
@@ -24,6 +26,11 @@ import { API_BASE } from "../lib/apiBase";
 // server-side gate in server/api.py (music_enabled is silently ignored for
 // any other plan).
 const MUSIC_ELIGIBLE_PLANS = ["creator", "pro"];
+
+// Lip sync is Pro-only too, and additionally requires dialogue: with no
+// generated voice there is nothing to sync a mouth to. The deployment-level
+// readiness (feature flag + fal.ai key) arrives as health.lipsync_available.
+const LIPSYNC_ELIGIBLE_PLANS = ["pro"];
 
 // Plans allowed to attach spoken character dialogue. Kept in sync with the
 // server-side gate in server/api.py (dialogue_enabled is Pro-only there).
@@ -94,6 +101,10 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
   const [characterImage, setCharacterImage] = useState(null);
   const [characterName, setCharacterName] = useState("");
   const [uploadError, setUploadError] = useState(null);
+  const [locationImage, setLocationImage] = useState(null);
+  const [locationError, setLocationError] = useState(null);
+  const [lipsyncAvailable, setLipsyncAvailable] = useState(false);
+  const [lipsyncEnabled, setLipsyncEnabled] = useState(false);
   const [musicEnabled, setMusicEnabled] = useState(false);
   const [dialogueEnabled, setDialogueEnabled] = useState(false);
   const [dialogueAvailable, setDialogueAvailable] = useState(false);
@@ -111,6 +122,8 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
   const musicEligible = MUSIC_ELIGIBLE_PLANS.includes(plan);
   const dialogueEligible =
     dialogueAvailable && DIALOGUE_ELIGIBLE_PLANS.includes(plan);
+  const lipsyncEligible =
+    lipsyncAvailable && LIPSYNC_ELIGIBLE_PLANS.includes(plan);
   const maxScenes = PLAN_MAX_SCENES[plan] ?? PLAN_MAX_SCENES.free;
   const libraryEligible = plan === "pro";
 
@@ -154,6 +167,14 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
     if (!dialogueEligible && dialogueEnabled) setDialogueEnabled(false);
   }, [dialogueEligible, dialogueEnabled]);
 
+  // Turning dialogue back off must clear lip sync too, or the estimate would
+  // keep quoting a stage the server is about to drop (it requires dialogue).
+  useEffect(() => {
+    if ((!lipsyncEligible || !dialogueEnabled) && lipsyncEnabled) {
+      setLipsyncEnabled(false);
+    }
+  }, [lipsyncEligible, dialogueEnabled, lipsyncEnabled]);
+
   // Allows landing-page example cards to pre-fill idea + style, and
   // scrolls the form into view so the click feels responsive.
   useEffect(() => {
@@ -174,6 +195,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
         if (!d) return;
         setDemoMode(!!d.demo_mode);
         setDialogueAvailable(!!d.dialogue_available);
+        setLipsyncAvailable(!!d.lipsync_available);
       })
       .catch(() => {});
   }, []);
@@ -194,6 +216,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
           num_scenes: numScenes,
           music_enabled: musicEligible && musicEnabled,
           dialogue_enabled: dialogueEligible && dialogueEnabled,
+          lipsync_enabled: lipsyncEligible && dialogueEnabled && lipsyncEnabled,
           plan: plan || "free",
         }),
       })
@@ -205,7 +228,16 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [numScenes, musicEligible, musicEnabled, dialogueEligible, dialogueEnabled, plan]);
+  }, [
+    numScenes,
+    musicEligible,
+    musicEnabled,
+    dialogueEligible,
+    dialogueEnabled,
+    lipsyncEligible,
+    lipsyncEnabled,
+    plan,
+  ]);
 
   const handlePhotoUpload = (e) => {
     const file = e.target.files?.[0];
@@ -232,6 +264,25 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
     setUploadError(null);
   };
 
+  const handleLocationUpload = (e) => {
+    const file = e.target.files?.[0];
+    setLocationError(null);
+    if (!file) return;
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setLocationError(t("form_photo_size_error") || "Photo must be smaller than 5MB.");
+      e.target.value = "";
+      return;
+    }
+    if (!file.type.startsWith("image/")) {
+      setLocationError(t("form_photo_type_error") || "Please select an image file.");
+      e.target.value = "";
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (ev) => setLocationImage(ev.target.result);
+    reader.readAsDataURL(file);
+  };
+
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!idea.trim() || isSubmitting) return;
@@ -254,8 +305,10 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
       user_requirement: userRequirement.trim(),
       character_image: characterImage,
       character_name: characterImage ? characterName.trim() : "",
+      location_image: locationImage,
       music_enabled: musicEligible && musicEnabled,
       dialogue_enabled: dialogueEligible && dialogueEnabled,
+      lipsync_enabled: lipsyncEligible && dialogueEnabled && lipsyncEnabled,
       require_script_approval: requireScriptApproval,
       library_characters: selectedLibraryCharacters,
     });
@@ -433,6 +486,65 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
         )}
       </div>
 
+      <div className="mb-6">
+        <label className="text-sm font-medium mb-2 block" style={{ color: "var(--mf-ink-2)" }}>
+          {t("form_location_label") || "Mekân fotoğrafı"}{" "}
+          <span style={{ color: "var(--mf-ink-4)", fontWeight: 400 }}>{t("form_char_optional")}</span>
+        </label>
+        <p className="text-xs mb-3" style={{ color: "var(--mf-ink-3)" }}>
+          {t("form_location_desc") ||
+            "Yüklerseniz her sahne bu mekânda geçer. Yüklemezseniz senaryonun mekânı bir kez üretilip tüm sahnelerde aynı kalır."}
+        </p>
+        {!locationImage ? (
+          <>
+            <input
+              type="file"
+              accept="image/*"
+              onChange={handleLocationUpload}
+              className="hidden"
+              id="location-photo-upload"
+              disabled={isSubmitting}
+            />
+            <label
+              htmlFor="location-photo-upload"
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm cursor-pointer transition-all"
+              style={{ backgroundColor: "var(--mf-stage)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink-2)" }}
+            >
+              <MapPin size={15} />
+              {t("form_location_upload_btn") || "Mekân fotoğrafı yükle"}
+            </label>
+          </>
+        ) : (
+          <div className="flex items-center gap-3">
+            <img
+              src={locationImage}
+              alt={t("form_location_preview_alt") || "Mekân önizleme"}
+              className="w-16 h-10 rounded-lg object-cover"
+              style={{ border: "2px solid var(--mf-violet)" }}
+            />
+            <span className="flex-1 text-xs" style={{ color: "var(--mf-ink-3)" }}>
+              {t("form_location_locked") || "Bu mekân tüm sahnelerde kilitlenecek."}
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                setLocationImage(null);
+                setLocationError(null);
+              }}
+              className="p-2 rounded-lg transition-colors"
+              style={{ color: "var(--mf-ink-3)" }}
+              disabled={isSubmitting}
+              aria-label={t("form_location_remove") || "Mekân fotoğrafını kaldır"}
+            >
+              <X size={16} />
+            </button>
+          </div>
+        )}
+        {locationError && (
+          <p className="text-xs mt-2" style={{ color: "var(--mf-err-soft)" }}>{locationError}</p>
+        )}
+      </div>
+
       {libraryEligible && libraryCharacters.length > 0 && (
         <div className="mb-6">
           <label className="text-sm font-medium mb-2 block" style={{ color: "var(--mf-ink-2)" }}>
@@ -602,6 +714,42 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
               <span
                 className="inline-block h-4 w-4 transform rounded-full bg-white transition-transform"
                 style={{ transform: dialogueEnabled ? "translateX(18px)" : "translateX(2px)" }}
+              />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {lipsyncEligible && dialogueEnabled && (
+        <div className="flex items-center justify-between gap-3 mb-4 px-4 py-3 rounded-xl" style={{ backgroundColor: "var(--mf-stage)", border: "1px solid var(--mf-line-strong)" }}>
+          <label className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: "var(--mf-ink-2)" }}>
+            <AudioLines size={16} style={{ color: "var(--mf-violet-soft)" }} />
+            <span>
+              {t("form_lipsync_toggle") || "Dudak senkronu"}
+              <span className="block text-[11px] mt-0.5" style={{ color: "var(--mf-ink-4)" }}>
+                {t("form_lipsync_hint") ||
+                  "Karakterlerin ağzı, üretilen sesle konuşur. Kapalıyken ses görüntünün üstüne bindirilir."}
+              </span>
+            </span>
+          </label>
+          <div className="flex items-center gap-3">
+            {lipsyncEnabled && !demoMode && (
+              <span className="text-xs" style={{ color: "var(--mf-gold)" }}>
+                {t("form_lipsync_credit_note", { n: numScenes }) || `+${numScenes} kredi`}
+              </span>
+            )}
+            <button
+              type="button"
+              role="switch"
+              aria-checked={lipsyncEnabled}
+              onClick={() => setLipsyncEnabled((v) => !v)}
+              disabled={isSubmitting}
+              className="relative inline-flex h-5 w-9 items-center rounded-full transition-colors"
+              style={{ backgroundColor: lipsyncEnabled ? "var(--mf-violet)" : "var(--mf-line-strong)" }}
+            >
+              <span
+                className="inline-block h-4 w-4 transform rounded-full bg-white transition-transform"
+                style={{ transform: lipsyncEnabled ? "translateX(18px)" : "translateX(2px)" }}
               />
             </button>
           </div>

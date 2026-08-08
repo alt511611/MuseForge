@@ -8,9 +8,17 @@ from tools.muapi_client import MuAPIClient, MuAPIError
 
 logger = logging.getLogger(__name__)
 
-DEMO_VIDEO_URL = os.environ.get(
-    "MUSEFORGE_DEMO_VIDEO",
-    "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
+# `or` (not a get() default): deployment files declare MUSEFORGE_DEMO_VIDEO
+# as an optional passthrough, so it commonly arrives as an EMPTY string
+# rather than unset -- and an empty demo URL breaks demo mode outright.
+DEMO_VIDEO_URL = os.environ.get("MUSEFORGE_DEMO_VIDEO", "").strip() or (
+    # The former default (Google's gtv-videos-bucket sample) started
+    # returning 403 when that bucket was made private, which silently
+    # broke demo mode: jobs completed but the "finished" video would not
+    # play. Any third-party fixture can go the same way -- set
+    # MUSEFORGE_DEMO_VIDEO in the deployment env to override without a
+    # code change (render.yaml / docker-compose.yml both declare it).
+    "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4"
 )
 
 # Confirmed MuAPI playground endpoints: Pro vs Standard is the endpoint

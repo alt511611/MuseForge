@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "./LocaleLink";
-import { Download, Share2, Plus, ExternalLink, Layout, ChevronDown, ChevronUp, Loader2, BookmarkPlus, Check } from "lucide-react";
+import { Download, Share2, Plus, ExternalLink, Layout, ChevronDown, ChevronUp, Loader2, BookmarkPlus, Check, RefreshCw } from "lucide-react";
 import Confetti from "./Confetti";
 import { useLanguage } from "../contexts/LanguageContext";
 import { useAuth } from "../contexts/AuthContext";
@@ -112,6 +112,111 @@ function NextSteps({ jobId, videoUrl }) {
           {t("result_share")}
         </button>
       </div>
+    </div>
+  );
+}
+
+/** Re-shoot one scene without re-rolling (and re-paying for) the whole drama.
+ *
+ * Deliberately asks for a reason before firing: the note is passed to the
+ * shot brief as binding direction, so a retake WITH one is a correction while
+ * a retake without one is just another roll of the same dice.
+ */
+function RetakeSceneButton({ jobId, sceneIndex, onStarted }) {
+  const { t } = useLanguage();
+  const { getAccessToken } = useAuth();
+  const [open, setOpen] = useState(false);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const submit = async () => {
+    if (busy) return;
+    setError(null);
+    setBusy(true);
+    try {
+      const token = await getAccessToken();
+      const res = await fetch(
+        `${API_BASE}/api/jobs/${jobId}/scenes/${sceneIndex}/regenerate`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({ director_note: note.trim() }),
+        }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || t("result_retake_failed") || "Retake failed");
+      setOpen(false);
+      setNote("");
+      onStarted?.();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="inline-flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-lg transition-colors"
+        style={{ color: "var(--mf-ink-3)", border: "1px solid var(--mf-line-strong)" }}
+      >
+        <RefreshCw size={12} />
+        {t("result_retake_scene") || "Bu sahneyi yeniden çek"}
+      </button>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-2 mt-1">
+      <textarea
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+        maxLength={500}
+        rows={2}
+        placeholder={
+          t("result_retake_note_ph") ||
+          "Neyi değiştirmeli? Örn: çok karanlık, ellerini göster"
+        }
+        className="w-full px-3 py-2 rounded-lg text-xs focus:outline-none"
+        style={{
+          backgroundColor: "var(--mf-stage)",
+          border: "1px solid var(--mf-line-strong)",
+          color: "var(--mf-ink)",
+        }}
+      />
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={submit}
+          disabled={busy}
+          className="inline-flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded-lg"
+          style={{ backgroundColor: "var(--mf-violet)", color: "white" }}
+        >
+          {busy ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+          {t("result_retake_confirm") || "Yeniden çek (1 kredi)"}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setOpen(false);
+            setError(null);
+          }}
+          className="text-[11px] px-2 py-1.5 rounded-lg"
+          style={{ color: "var(--mf-ink-3)" }}
+        >
+          {t("result_retake_cancel") || "Vazgeç"}
+        </button>
+      </div>
+      {error && (
+        <p className="text-[11px]" style={{ color: "var(--mf-err-soft)" }}>{error}</p>
+      )}
     </div>
   );
 }
@@ -319,9 +424,26 @@ export default function VideoResult({ job, jobId }) {
               )}
               {scenes.map((scene) => (
                 <div key={scene.index} className="mb-4">
-                  <p className="text-xs mb-2" style={{ color: "var(--mf-ink-3)" }}>
-                    Scene {scene.index + 1}: {scene.script}
-                  </p>
+                  <div className="flex items-start justify-between gap-3 mb-2">
+                    <p className="text-xs" style={{ color: "var(--mf-ink-3)" }}>
+                      Scene {scene.index + 1}: {scene.script}
+                      {scene.take > 1 && (
+                        <span className="ml-2" style={{ color: "var(--mf-ink-4)" }}>
+                          · {t("result_take_n", { n: scene.take }) || `çekim ${scene.take}`}
+                        </span>
+                      )}
+                    </p>
+                    {/* Only offered when this job archived its scene clips —
+                        older jobs cannot be spliced, and the server would
+                        refuse the request anyway. */}
+                    {scene.clip_index !== null && scene.clip_index !== undefined && (
+                      <RetakeSceneButton
+                        jobId={jobId}
+                        sceneIndex={scene.index}
+                        onStarted={() => window.location.reload()}
+                      />
+                    )}
+                  </div>
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
                     {(scene.shots || []).filter(s => s.frame_url).map((shot, i) => (
                       // eslint-disable-next-line @next/next/no-img-element
