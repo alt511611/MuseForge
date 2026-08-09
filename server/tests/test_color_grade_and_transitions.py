@@ -112,7 +112,7 @@ async def test_color_grade_inserted_between_concat_and_music(tmp_path, monkeypat
             f.write(b"concatenated")
         return output_path
 
-    async def _fake_grade(video_path, output_path, director_style="cinematic_balanced"):
+    async def _fake_grade(video_path, output_path, director_style="cinematic_balanced", **_kw):
         calls.append(("grade", video_path))
         with open(output_path, "wb") as f:
             f.write(b"graded")
@@ -169,7 +169,7 @@ async def test_transitions_default_off_uses_plain_concat(tmp_path, monkeypatch):
             f.write(b"concatenated")
         return output_path
 
-    async def _fake_grade(video_path, output_path, director_style="cinematic_balanced"):
+    async def _fake_grade(video_path, output_path, director_style="cinematic_balanced", **_kw):
         with open(output_path, "wb") as f:
             f.write(b"graded")
         return output_path
@@ -209,7 +209,7 @@ async def _route_assembly(tmp_path, monkeypatch, transitions):
             f.write(b"concatenated-with-transitions")
         return output_path
 
-    async def _fake_grade(video_path, output_path, director_style="cinematic_balanced"):
+    async def _fake_grade(video_path, output_path, director_style="cinematic_balanced", **_kw):
         with open(output_path, "wb") as f:
             f.write(b"graded")
         return output_path
@@ -455,7 +455,7 @@ async def test_assembly_passes_director_style_to_the_grade(tmp_path, monkeypatch
 
     seen = {}
 
-    async def _fake_grade(video_path, output_path, director_style="cinematic_balanced"):
+    async def _fake_grade(video_path, output_path, director_style="cinematic_balanced", **_kw):
         seen["director_style"] = director_style
         with open(output_path, "wb") as f:
             f.write(b"graded")
