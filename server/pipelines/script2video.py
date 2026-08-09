@@ -5,7 +5,7 @@ import logging
 import os
 import shutil
 import tempfile
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 
@@ -477,6 +477,119 @@ def moviepy_encode_kwargs() -> Dict[str, Any]:
     return {"preset": preset, "ffmpeg_params": passthrough}
 
 
+# --- Delivery geometry ------------------------------------------------------
+#
+# The requested aspect ratio is honoured at GENERATION time: every frame is
+# rendered at that ratio and Kling image-to-video inherits the frame's shape,
+# so a 9:16 job is shot vertically rather than cropped out of a 16:9 master
+# afterwards (that crop is what /api/jobs/{id}/export does, and it throws away
+# the edges of the picture). This pass exists only to GUARANTEE the promise:
+# providers occasionally hand back a clip whose shape drifted from the frame
+# it animated, and a drama whose scenes disagree about their dimensions cannot
+# even be stream-copy concatenated. Conforming rides along inside the colour
+# grade's encode, so it costs no additional generation loss.
+
+#: Delivery resolution per supported ratio -- the ceiling, not a floor (see
+#: resolve_output_dimensions).
+TARGET_RESOLUTIONS: Dict[str, Tuple[int, int]] = {
+    "16:9": (1920, 1080),
+    "9:16": (1080, 1920),
+    "1:1": (1080, 1080),
+}
+
+
+def _even_dimension(value: float) -> int:
+    """Round a pixel dimension DOWN to the nearest even number.
+
+    yuv420p halves both axes, so x264 refuses odd dimensions outright, and
+    fitting a ratio inside an arbitrary source produces fractional sizes
+    routinely.
+    """
+    return max(2, int(value) // 2 * 2)
+
+
+def is_exact_resolution_enabled() -> bool:
+    """Force delivery at exactly TARGET_RESOLUTIONS, upscaling when the
+    provider returned something smaller. OFF by default: upscaling invents no
+    detail, it only spends bitrate to claim a resolution the pixels do not
+    have. Turn on when a distributor demands literal 1080x1920 files.
+    """
+    return os.environ.get("MUSEFORGE_EXACT_RESOLUTION", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def resolve_output_dimensions(
+    source_width: int, source_height: int, aspect_ratio: str
+) -> Optional[Tuple[int, int]]:
+    """Dimensions the delivered video should have for ``aspect_ratio``.
+
+    The ratio is always exact. The resolution is the largest rectangle of that
+    ratio that fits inside the source, capped at the canonical delivery size --
+    so a 9:16 job ships 9:16 without ever being upscaled past what was really
+    generated. Returns None for a ratio we do not deliver, which leaves the
+    video untouched.
+    """
+    target = TARGET_RESOLUTIONS.get((aspect_ratio or "").strip())
+    if not target:
+        return None
+    target_w, target_h = target
+    if source_width <= 0 or source_height <= 0 or is_exact_resolution_enabled():
+        return target
+
+    ratio = target_w / target_h
+    if source_width / source_height > ratio:
+        # Source is wider than the target: height is the binding constraint.
+        height = float(source_height)
+        width = height * ratio
+    else:
+        width = float(source_width)
+        height = width / ratio
+    if width > target_w:
+        width, height = float(target_w), float(target_h)
+    return _even_dimension(width), _even_dimension(height)
+
+
+def build_geometry_filters(
+    source_width: int, source_height: int, aspect_ratio: str
+) -> List[str]:
+    """ffmpeg filters that conform a clip to the delivered geometry.
+
+    Scale-to-cover then centre-crop: a clip that already has the right shape
+    is only ever resized, and one that drifted loses its edges rather than
+    gaining letterbox bars -- black bars in a vertical feed read as a broken
+    upload. Returns [] when the clip is already correct, so the caller can
+    skip the work entirely.
+    """
+    dimensions = resolve_output_dimensions(source_width, source_height, aspect_ratio)
+    if not dimensions:
+        return []
+    width, height = dimensions
+    if (source_width, source_height) == (width, height):
+        return []
+    return [
+        f"scale={width}:{height}:force_original_aspect_ratio=increase",
+        f"crop={width}:{height}",
+        "setsar=1",
+    ]
+
+
+def _probe_dimensions(video_path: str) -> Tuple[int, int]:
+    """(width, height) of ``video_path``, or (0, 0) when it cannot be read."""
+    try:
+        from moviepy import VideoFileClip
+
+        with VideoFileClip(video_path) as clip:
+            width, height = clip.size or (0, 0)
+            return int(width), int(height)
+    except Exception as exc:
+        logger.warning("Could not probe %s for delivery geometry: %s", video_path, exc)
+        return 0, 0
+
+
 def is_dynamic_reference_enabled() -> bool:
     """Opt-in flag for chaining each character's identity reference forward
     to their most recently generated frame (ViMax "previous timeline").
@@ -649,7 +762,10 @@ def build_grade_filter_chain(grade) -> str:
 
 
 async def apply_color_grade(
-    video_path: str, output_path: str, director_style: str = "cinematic_balanced"
+    video_path: str,
+    output_path: str,
+    director_style: str = "cinematic_balanced",
+    aspect_ratio: Optional[str] = None,
 ) -> str:
     """Color-grade the drama according to its DIRECTOR STYLE -- pure ffmpeg,
     no extra API calls or cost.
@@ -683,6 +799,23 @@ async def apply_color_grade(
         grade.filter_chain,
         director_style,
     )
+
+    # Conform the delivered geometry in the SAME encode as the grade -- the
+    # master is graded exactly once, so folding the scale/crop in here costs
+    # nothing extra and guarantees the job ships in the ratio it was ordered
+    # in even if a provider handed back a differently-shaped clip.
+    if aspect_ratio:
+        source_width, source_height = _probe_dimensions(video_path)
+        geometry = build_geometry_filters(source_width, source_height, aspect_ratio)
+        if geometry:
+            logger.info(
+                "Conforming %sx%s master to %s delivery geometry (%s)",
+                source_width,
+                source_height,
+                aspect_ratio,
+                geometry[0],
+            )
+            filter_chain = ",".join(geometry + [filter_chain])
 
     ffmpeg_binary = os.environ.get("MUSEFORGE_FFMPEG_BINARY") or shutil.which("ffmpeg")
     if not ffmpeg_binary:

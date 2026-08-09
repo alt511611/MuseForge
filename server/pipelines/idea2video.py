@@ -1288,6 +1288,7 @@ class Idea2VideoPipeline:
             dialogue_tracks=dialogue_tracks,
             director_style=previous_result.get("director_style", "cinematic_balanced"),
             transitions=plan_transitions([s["script"] for s in ordered]),
+            aspect_ratio=previous_result.get("aspect_ratio", "16:9"),
         )
 
         # Update just this scene's record, then re-archive it so the NEXT
@@ -1342,6 +1343,7 @@ class Idea2VideoPipeline:
         dialogue_tracks: Optional[List[Dict[str, Any]]] = None,
         director_style: str = "cinematic_balanced",
         transitions: Optional[List[float]] = None,
+        aspect_ratio: str = "16:9",
     ) -> str:
         """Concatenate all scene videos, color-grade, add background music,
         burn dialogue captions (when tracks present), then watermark
@@ -1385,8 +1387,14 @@ class Idea2VideoPipeline:
             await progress_callback("grade", "Applying color grade", 89)
 
         graded_path = os.path.join(working_dir, "drama_graded.mp4")
+        # The grade encode also conforms the master to the ordered aspect
+        # ratio (no-op when the clips already carry it, which is the normal
+        # case since every frame was generated at that ratio).
         await apply_color_grade(
-            concatenated_path, graded_path, director_style=director_style
+            concatenated_path,
+            graded_path,
+            director_style=director_style,
+            aspect_ratio=aspect_ratio,
         )
 
         # Before music mix
@@ -1877,6 +1885,7 @@ class Idea2VideoPipeline:
                 transitions=plan_transitions(
                     [s["script"] for s in scene_results if s.get("clip_index") is not None]
                 ),
+                aspect_ratio=aspect_ratio,
             )
             # Measure the real assembled length before upload/cleanup — the
             # screenwriter's estimated_duration_seconds is a pre-generation

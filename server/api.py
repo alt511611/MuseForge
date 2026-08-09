@@ -267,7 +267,10 @@ class GenerateRequest(BaseModel):
     idea: str = Field(..., min_length=3, max_length=2000)
     style: str = "Cinematic"
     director_style: str = "cinematic_balanced"
-    aspect_ratio: str = "16:9"
+    # Validated rather than free-form: an unrecognised ratio used to fall
+    # silently back to 16:9 deep inside the image generator, so a caller who
+    # asked for vertical got a landscape video and no error explaining why.
+    aspect_ratio: str = Field(default="16:9", pattern=r"^(16:9|9:16|1:1)$")
     # Absolute ceiling = Pro plan max; per-plan caps enforced in generate().
     num_scenes: int = Field(default=3, ge=2, le=24)
     user_requirement: str = ""

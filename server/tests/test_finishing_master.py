@@ -185,7 +185,7 @@ async def test_assembly_runs_finishing_before_watermark(tmp_path, monkeypatch):
         open(output_path, "wb").write(b"concat")
         return output_path
 
-    async def _fake_grade(video_path, output_path, director_style="cinematic_balanced"):
+    async def _fake_grade(video_path, output_path, director_style="cinematic_balanced", **_kw):
         calls.append("grade")
         open(output_path, "wb").write(b"graded")
         return output_path
