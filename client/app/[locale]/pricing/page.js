@@ -7,17 +7,22 @@ const PATH = "/pricing";
 
 /* Mirrors the plan table in PricingContent. Kept in sync manually — the
    component builds its plans from client-side translations. */
+/* The page leads with annual, so the structured data does too: `price` is the
+   annual monthly-equivalent (10% off) that a rich result would show, and the
+   monthly rate rides along as a second Offer rather than being the headline. */
 const PLAN_OFFERS = [
-  { name: "Free", price: "0", desc: "Demo mode with placeholder assets — no API key required." },
-  { name: "Creator", price: "59", desc: "16 credits per month for creators and educators." },
-  { name: "Pro", price: "129", desc: "36 credits per month for agencies and corporate teams." },
+  { name: "Free", price: "0", desc: "Demo mode with placeholder assets — no API key required.", period: null },
+  { name: "Creator (annual)", price: "53", desc: "16 credits per month for creators and educators, billed yearly.", period: "P1Y" },
+  { name: "Creator (monthly)", price: "59", desc: "16 credits per month for creators and educators.", period: "P1M" },
+  { name: "Pro (annual)", price: "116", desc: "36 credits per month for agencies and corporate teams, billed yearly.", period: "P1Y" },
+  { name: "Pro (monthly)", price: "129", desc: "36 credits per month for agencies and corporate teams.", period: "P1M" },
 ];
 
 const FAQ_KEYS = [1, 2, 3, 4];
 
 const EN_TITLE = "Pricing — Plans & Credits";
 const EN_DESCRIPTION =
-  "MuseForge pricing: start free with demo mode, then scale to Creator ($59/mo) or Pro ($129/mo). Buy extra credits any time, cancel whenever you like.";
+  "MuseForge pricing: start free with demo mode, then scale to Creator (from $53/mo) or Pro (from $116/mo) — 10% off when billed yearly. One credit is 8 seconds of finished film. Buy extra credits any time, cancel whenever you like.";
 
 export function generateMetadata({ params: { locale } }) {
   if (!isLocale(locale)) return {};
@@ -55,6 +60,18 @@ export default function PricingPage({ params: { locale } }) {
       priceCurrency: "USD",
       url: absoluteUrl("/pricing"),
       availability: "https://schema.org/InStock",
+      ...(p.period
+        ? {
+            priceSpecification: {
+              "@type": "UnitPriceSpecification",
+              price: p.price,
+              priceCurrency: "USD",
+              billingDuration: p.period === "P1Y" ? 12 : 1,
+              billingIncrement: 1,
+              unitCode: "MON",
+            },
+          }
+        : {}),
     })),
   };
 

@@ -121,6 +121,7 @@ class MuAPIVideoGenerator:
         aspect_ratio: str = "16:9",
         plan: str = "free",
         is_cancelled=None,
+        shot_profile: Optional[str] = None,
     ) -> str:
         # aspect_ratio kept in the signature for callers; not sent in payload
         # (Kling i2v derives aspect from the source image).
@@ -128,34 +129,41 @@ class MuAPIVideoGenerator:
         if self.demo:
             return DEMO_VIDEO_URL
 
-        endpoint = endpoint_for_plan(plan)
+        from tools.video_model_router import STANDARD as STANDARD_PROFILE
+        from tools.video_model_router import model_chain
+
+        chain = model_chain(shot_profile or STANDARD_PROFILE, plan)
         payload = self._payload(
             prompt, image_url, duration, generate_audio=is_native_audio_enabled()
         )
 
-        try:
-            return await self.client.generate(
-                endpoint,
-                payload,
-                poll_interval=3.0,
-                max_polls=200,
-                is_cancelled=is_cancelled,
-            )
-        except MuAPIError as exc:
-            # Pro endpoint missing / schema mismatch — fall back to Standard
-            # so the job still completes (same idea as the old mode fallback).
-            if endpoint != STANDARD_ENDPOINT and _is_endpoint_rejected(exc):
-                logger.warning(
-                    "MuAPI rejected endpoint=%r (%s); retrying with %r",
-                    endpoint,
-                    exc,
-                    STANDARD_ENDPOINT,
-                )
+        # Walk the chain: a routed specialist first, the plan's endpoint next,
+        # Standard last. Only endpoint-level rejections (404/422 -- "this model
+        # does not exist here" / "it does not take this payload") are worth
+        # trying the next link for; a cancellation or a genuine generation
+        # failure would fail identically on every model and re-running it would
+        # just spend the customer's time and credits three times over.
+        last_exc: Optional[MuAPIError] = None
+        for position, endpoint in enumerate(chain):
+            try:
                 return await self.client.generate(
-                    STANDARD_ENDPOINT,
+                    endpoint,
                     payload,
                     poll_interval=3.0,
                     max_polls=200,
                     is_cancelled=is_cancelled,
                 )
-            raise
+            except MuAPIError as exc:
+                last_exc = exc
+                is_last = position == len(chain) - 1
+                if is_last or not _is_endpoint_rejected(exc):
+                    raise
+                logger.warning(
+                    "MuAPI rejected endpoint=%r for profile=%r (%s); falling back to %r",
+                    endpoint,
+                    shot_profile or STANDARD_PROFILE,
+                    exc,
+                    chain[position + 1],
+                )
+        # Unreachable: the loop either returns or raises on its last link.
+        raise last_exc or MuAPIError("No video endpoint configured")

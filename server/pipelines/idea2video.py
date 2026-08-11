@@ -870,6 +870,65 @@ async def export_alternate_format(
     return await loop.run_in_executor(None, _crop)
 
 
+#: A clip trimmed below this is not a shot any more, it is a glitch. Guards
+#: against a UI that lets someone drag both handles past each other.
+MIN_TRIMMED_SECONDS = 0.5
+
+
+async def trim_clip(
+    source_path: str,
+    output_path: str,
+    trim_start: float = 0.0,
+    trim_end: float = 0.0,
+) -> str:
+    """Cut ``trim_start``/``trim_end`` seconds off the head/tail of one clip.
+
+    This is the timeline editor's only picture operation, and it deliberately
+    costs nothing but CPU: trimming a clip that already exists is the cheap way
+    to fix "the shot holds two seconds too long", which otherwise forced a paid
+    retake that re-rolled the whole take just to lose its tail.
+
+    Fails open by returning the untrimmed source: a trim that cannot be applied
+    should cost the user a second of runtime, never their video.
+    """
+    trim_start = max(0.0, float(trim_start or 0.0))
+    trim_end = max(0.0, float(trim_end or 0.0))
+    if trim_start <= 0 and trim_end <= 0:
+        return source_path
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+    def _trim() -> str:
+        from moviepy import VideoFileClip
+
+        clip = VideoFileClip(source_path)
+        try:
+            start = min(trim_start, max(0.0, clip.duration - MIN_TRIMMED_SECONDS))
+            end = max(start + MIN_TRIMMED_SECONDS, clip.duration - trim_end)
+            end = min(end, clip.duration)
+            if end - start >= clip.duration - 1e-3:
+                return source_path
+            trimmed = clip.subclipped(start, end)
+            trimmed.write_videofile(
+                output_path,
+                codec="libx264",
+                audio_codec="aac",
+                logger=None,
+                **moviepy_encode_kwargs(),
+            )
+            trimmed.close()
+        finally:
+            clip.close()
+        return output_path
+
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, _trim)
+    except Exception as exc:
+        logger.warning("Trim failed for %s, keeping the full clip: %s", source_path, exc)
+        return source_path
+
+
 class Idea2VideoPipeline:
     def __init__(self, api_key: str, demo: bool = False):
         self.api_key = api_key
@@ -1107,27 +1166,34 @@ class Idea2VideoPipeline:
             for i, c in enumerate(script.characters)
         ]
 
-    async def regenerate_scene(
+    async def _rerender_scenes(
         self,
         previous_result: Dict[str, Any],
-        scene_index: int,
+        scene_indices: List[int],
         working_dir: str,
         director_note: str = "",
         progress_callback: Optional[Callable] = None,
         is_cancelled: Optional[Callable[[], bool]] = None,
+        portraits_override: Optional[Dict[str, str]] = None,
+        location_plate_override: Optional[str] = None,
+        script_override: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Re-render ONE scene and splice it back into the finished drama.
+        """Re-render the named scenes and splice them into the finished drama.
 
-        Everything else is reused verbatim: the same script, the same locked
-        portraits, the same set plate, the same second budget, the same voice
-        tracks. Only the chosen scene is generated again — which is the whole
-        point, since re-running the job would also re-roll the scenes the user
-        was happy with, and charge for them.
+        Everything not named is reused verbatim: the same script, the same
+        locked portraits, the same set plate, the same second budget, the same
+        voice tracks. That is the whole point — re-running the job would also
+        re-roll the scenes the user was happy with, and charge for them.
 
         ``director_note`` is the user's reason for rejecting the take ("too
-        dark", "show his hands"). It is appended to the shot brief for this
-        scene only, so the retry is directed rather than merely a different
-        dice roll.
+        dark", "show his hands"). It is appended to the shot brief for the
+        re-rendered scenes only, so the retry is directed rather than merely a
+        different dice roll.
+
+        The ``*_override`` arguments are what makes a *global* edit different
+        from a retake: a changed portrait, set plate or script is threaded
+        through every re-rendered scene, so "put her in the red coat" moves the
+        lock itself instead of hoping each scene's prompt drifts the same way.
         """
         os.makedirs(working_dir, exist_ok=True)
 
@@ -1140,7 +1206,7 @@ class Idea2VideoPipeline:
                 await progress_callback(stage, message, pct, data)
 
         state = (previous_result or {}).get("_render_state") or {}
-        script_data = state.get("script") or {}
+        script_data = script_override or state.get("script") or {}
         if not script_data:
             raise SceneRegenerationUnavailable(
                 "This video was made before single-scene retakes existed, so "
@@ -1150,14 +1216,25 @@ class Idea2VideoPipeline:
 
         script = DramaScript(**script_data)
         scenes = list(previous_result.get("scenes") or [])
-        target = next((s for s in scenes if int(s.get("index", -1)) == scene_index), None)
-        if target is None:
-            raise SceneRegenerationUnavailable(f"Scene {scene_index + 1} is not part of this video.")
+        wanted = sorted({int(i) for i in scene_indices})
+        if not wanted:
+            raise SceneRegenerationUnavailable("No scenes were selected to re-render.")
 
-        # Every OTHER scene has to be recoverable, or there is nothing to
-        # splice the new take into. Checked up front so the user is told
-        # before a paid generation runs, not after.
-        others = [s for s in scenes if s is not target and s.get("clip_index") is not None]
+        targets: List[Dict[str, Any]] = []
+        for index in wanted:
+            match = next((s for s in scenes if int(s.get("index", -1)) == index), None)
+            if match is None:
+                raise SceneRegenerationUnavailable(
+                    f"Scene {index + 1} is not part of this video."
+                )
+            targets.append(match)
+
+        # Every scene that is NOT being re-rendered has to be recoverable, or
+        # there is nothing to splice the new takes into. Checked up front so
+        # the user is told before a paid generation runs, not after.
+        others = [
+            s for s in scenes if s not in targets and s.get("clip_index") is not None
+        ]
         missing = [
             s["index"] + 1
             for s in others
@@ -1171,14 +1248,22 @@ class Idea2VideoPipeline:
             )
 
         characters = self._characters_from_script(script)
-        portraits = dict(previous_result.get("portraits") or {})
+        portraits = {**(previous_result.get("portraits") or {}), **(portraits_override or {})}
         for char in characters:
             if portraits.get(char.name):
                 char.portrait_url = portraits[char.name]
 
-        scene_script = script.scenes[scene_index] if scene_index < len(script.scenes) else None
-        if scene_script is None:
-            raise SceneRegenerationUnavailable(f"Scene {scene_index + 1} is not part of this script.")
+        location_plate = (
+            location_plate_override
+            if location_plate_override is not None
+            else previous_result.get("location_plate")
+        )
+
+        for index in wanted:
+            if index >= len(script.scenes):
+                raise SceneRegenerationUnavailable(
+                    f"Scene {index + 1} is not part of this script."
+                )
 
         durations = state.get("scene_durations") or []
         user_requirement = state.get("user_requirement") or ""
@@ -1190,64 +1275,86 @@ class Idea2VideoPipeline:
             ).strip()
 
         _check_cancel()
-        await progress("storyboard", f"Re-shooting scene {scene_index + 1}", 15)
-
-        # A fresh sub-directory per take: overwriting the previous take's files
-        # in place would corrupt the old clip while the master still points at
-        # it, leaving the user with neither version if this take then fails.
-        take = int(target.get("take", 1)) + 1
-        scene_dir = os.path.join(working_dir, f"scene_{scene_index}_take{take}")
-
-        scene_result = await self.script2video.run(
-            script=_scene_action(scene_script),
-            characters=characters,
-            user_requirement=user_requirement,
-            style=previous_result.get("style", "Cinematic"),
-            working_dir=scene_dir,
-            progress_callback=progress_callback,
-            scene_idx=scene_index,
-            total_scenes=max(1, len(script.scenes)),
-            character_portraits=portraits,
-            director_style=previous_result.get("director_style", "cinematic_balanced"),
-            aspect_ratio=previous_result.get("aspect_ratio", "16:9"),
-            is_cancelled=is_cancelled,
-            plan=previous_result.get("plan", "free"),
-            setting_location=getattr(script, "setting_location", "") or "",
-            setting_time_of_day=getattr(script, "setting_time_of_day", "") or "",
-            setting_era=getattr(script, "setting_era", "") or "",
-            location_plate_url=previous_result.get("location_plate"),
-            has_dialogue=bool(_scene_dialogue(scene_script)),
-            lipsync_enabled=bool(previous_result.get("lipsynced_scenes")),
-            scene_emotion=_scene_emotion(scene_script),
-            scene_dialogue=_format_scene_dialogue(_scene_dialogue(scene_script)),
-            scene_direction=_format_scene_direction(scene_script),
-            scene_tension=_scene_tension(scene_script),
-            # Same slice of the second budget as the take it replaces, so a
-            # retake can never quietly lengthen (or shorten) the paid runtime.
-            scene_duration=durations[scene_index] if scene_index < len(durations) else 0.0,
-            character_direction=_format_character_direction(script),
-            theme=getattr(script, "theme", "") or "",
-            visual_motif=getattr(script, "visual_motif", "") or "",
-            user_brief=getattr(script, "user_brief", "") or "",
+        label = (
+            f"scene {wanted[0] + 1}"
+            if len(wanted) == 1
+            else f"{len(wanted)} scenes"
         )
-        if not scene_result.get("path"):
-            raise SceneRegenerationUnavailable(
-                "The retake did not produce a usable clip. Your credit has "
-                "been refunded — please try again."
-            )
+        await progress("storyboard", f"Re-shooting {label}", 15)
+
+        # Each target gets a fresh take sub-directory: overwriting the previous
+        # take's files in place would corrupt the old clip while the master
+        # still points at it, leaving the user with neither version if this
+        # take then fails.
+        new_paths: Dict[int, str] = {}
+        new_shots: Dict[int, Any] = {}
+        takes: Dict[int, int] = {}
+        semaphore = asyncio.Semaphore(_scene_concurrency(len(targets)))
+
+        async def _render_target(target: Dict[str, Any]) -> None:
+            index = int(target["index"])
+            scene_script = script.scenes[index]
+            take = int(target.get("take", 1)) + 1
+            takes[index] = take
+            scene_dir = os.path.join(working_dir, f"scene_{index}_take{take}")
+            async with semaphore:
+                _check_cancel()
+                scene_result = await self.script2video.run(
+                    script=_scene_action(scene_script),
+                    characters=characters,
+                    user_requirement=user_requirement,
+                    style=previous_result.get("style", "Cinematic"),
+                    working_dir=scene_dir,
+                    progress_callback=progress_callback,
+                    scene_idx=index,
+                    total_scenes=max(1, len(script.scenes)),
+                    character_portraits=portraits,
+                    director_style=previous_result.get("director_style", "cinematic_balanced"),
+                    aspect_ratio=previous_result.get("aspect_ratio", "16:9"),
+                    is_cancelled=is_cancelled,
+                    plan=previous_result.get("plan", "free"),
+                    setting_location=getattr(script, "setting_location", "") or "",
+                    setting_time_of_day=getattr(script, "setting_time_of_day", "") or "",
+                    setting_era=getattr(script, "setting_era", "") or "",
+                    location_plate_url=location_plate,
+                    has_dialogue=bool(_scene_dialogue(scene_script)),
+                    lipsync_enabled=bool(previous_result.get("lipsynced_scenes")),
+                    scene_emotion=_scene_emotion(scene_script),
+                    scene_dialogue=_format_scene_dialogue(_scene_dialogue(scene_script)),
+                    scene_direction=_format_scene_direction(scene_script),
+                    scene_tension=_scene_tension(scene_script),
+                    # Same slice of the second budget as the take it replaces,
+                    # so a retake can never quietly lengthen (or shorten) the
+                    # paid runtime.
+                    scene_duration=durations[index] if index < len(durations) else 0.0,
+                    character_direction=_format_character_direction(script),
+                    theme=getattr(script, "theme", "") or "",
+                    visual_motif=getattr(script, "visual_motif", "") or "",
+                    user_brief=getattr(script, "user_brief", "") or "",
+                )
+            if not scene_result.get("path"):
+                raise SceneRegenerationUnavailable(
+                    "The retake did not produce a usable clip. Your credit has "
+                    "been refunded — please try again."
+                )
+            new_paths[index] = scene_result["path"]
+            new_shots[index] = scene_result.get("shots", [])
+
+        await asyncio.gather(*(_render_target(t) for t in targets))
 
         # Rebuild the full clip list in scene order, pulling the untouched
         # scenes back down from storage.
         _check_cancel()
-        await progress("assembly", "Splicing the new take back in", 80)
+        await progress("assembly", "Splicing the new takes back in", 80)
         ordered = sorted(
             [s for s in scenes if s.get("clip_index") is not None],
             key=lambda s: s["clip_index"],
         )
         scene_paths: List[str] = []
         for scene in ordered:
-            if scene is target:
-                scene_paths.append(scene_result["path"])
+            index = int(scene["index"])
+            if index in new_paths:
+                scene_paths.append(new_paths[index])
                 continue
             local = scene.get("clip_path")
             if local and os.path.isfile(local):
@@ -1258,16 +1365,19 @@ class Idea2VideoPipeline:
             scene_paths.append(local)
 
         dialogue_tracks = [dict(t) for t in (state.get("dialogue_tracks") or [])]
-        target_clip_index = int(target["clip_index"])
-        if any(
-            int(t.get("scene_index", -1)) == target_clip_index and t.get("lipsynced")
+        target_clip_indices = {int(t["clip_index"]) for t in targets if t.get("clip_index") is not None}
+        resync = {
+            int(t.get("scene_index", -1))
             for t in dialogue_tracks
-        ):
-            # The replacement clip has never been synced. Re-sync THIS scene
-            # only — the others already carry their synced audio in-picture and
-            # re-syncing them would be a second charge for no change.
+            if int(t.get("scene_index", -1)) in target_clip_indices and t.get("lipsynced")
+        }
+        if resync:
+            # The replacement clips have never been synced. Re-sync THOSE
+            # scenes only — the others already carry their synced audio
+            # in-picture and re-syncing them would be a second charge for no
+            # change.
             for track in dialogue_tracks:
-                if int(track.get("scene_index", -1)) == target_clip_index:
+                if int(track.get("scene_index", -1)) in resync:
                     track.pop("lipsynced", None)
             await self._lipsync_scenes(
                 scene_paths=scene_paths,
@@ -1275,7 +1385,7 @@ class Idea2VideoPipeline:
                 working_dir=working_dir,
                 progress=progress,
                 is_cancelled=is_cancelled,
-                only_scenes={target_clip_index},
+                only_scenes=resync,
             )
 
         final_path = await self._assemble_final_drama(
@@ -1291,16 +1401,51 @@ class Idea2VideoPipeline:
             aspect_ratio=previous_result.get("aspect_ratio", "16:9"),
         )
 
-        # Update just this scene's record, then re-archive it so the NEXT
-        # retake (of this or any other scene) still finds every clip.
-        target["shots"] = scene_result.get("shots", [])
-        target["take"] = take
-        target.pop("clip_url", None)
-        target.pop("clip_path", None)
-        await self._archive_scene_clips([target], scene_paths, working_dir)
+        # Update just the re-rendered scenes' records, then re-archive them so
+        # the NEXT retake (of these or any other scene) still finds every clip.
+        for target in targets:
+            index = int(target["index"])
+            target["shots"] = new_shots.get(index, [])
+            target["take"] = takes.get(index, int(target.get("take", 1)))
+            target.pop("clip_url", None)
+            target.pop("clip_path", None)
+        await self._archive_scene_clips(targets, scene_paths, working_dir)
 
         result = {**previous_result, "scenes": scenes}
-        result["_render_state"] = {**state, "dialogue_tracks": dialogue_tracks}
+        result["portraits"] = portraits
+        result["location_plate"] = location_plate
+        result["_render_state"] = {
+            **state,
+            "script": script_data,
+            "dialogue_tracks": dialogue_tracks,
+        }
+
+        highest_take = max(takes.values()) if takes else 1
+        await self._publish_master(
+            result, final_path, working_dir, suffix=f"take{highest_take}"
+        )
+        await progress(
+            "complete", f"Re-shot {label}", 100, {"video_url": result["video_url"]}
+        )
+        return result
+
+    async def _publish_master(
+        self,
+        result: Dict[str, Any],
+        final_path: Optional[str],
+        working_dir: str,
+        suffix: str,
+    ) -> None:
+        """Measure, upload and record a freshly assembled master on ``result``.
+
+        Shared by every post-production path (retake, global edit, timeline
+        edit) because they all have the same two ways to go wrong: reporting
+        the ORIGINAL runtime after the cut changed it, and overwriting the
+        previous master's object key — which leaves every already-issued
+        signed URL (and any cache in front of it) pointing at a video that
+        silently changed under the viewer.
+        """
+        job_id = os.path.basename(os.path.normpath(working_dir))
 
         actual_duration_seconds = None
         if final_path and os.path.isfile(final_path):
@@ -1316,20 +1461,343 @@ class Idea2VideoPipeline:
         if final_path and os.path.isfile(final_path) and not self.demo:
             from tools.supabase_storage import upload_video
 
-            job_id = os.path.basename(os.path.normpath(working_dir))
-            # A NEW object key per take: overwriting the old one would leave
-            # every already-issued signed URL (and any cache in front of it)
-            # pointing at a video that silently changed under the viewer.
-            stored = await upload_video(final_path, f"{job_id}_take{take}")
+            stored = await upload_video(final_path, f"{job_id}_{suffix}")
             if stored and stored.startswith("http"):
                 video_url = stored
 
         result["video_path"] = final_path
-        result["video_url"] = video_url or f"/api/jobs/{os.path.basename(os.path.normpath(working_dir))}/video"
+        result["video_url"] = video_url or f"/api/jobs/{job_id}/video"
         if actual_duration_seconds is not None:
             result["duration_estimate"] = round(actual_duration_seconds)
 
-        await progress("complete", f"Scene {scene_index + 1} re-shot", 100, {"video_url": result["video_url"]})
+    async def regenerate_scene(
+        self,
+        previous_result: Dict[str, Any],
+        scene_index: int,
+        working_dir: str,
+        director_note: str = "",
+        progress_callback: Optional[Callable] = None,
+        is_cancelled: Optional[Callable[[], bool]] = None,
+    ) -> Dict[str, Any]:
+        """Re-render ONE scene and splice it back into the finished drama."""
+        return await self._rerender_scenes(
+            previous_result=previous_result,
+            scene_indices=[scene_index],
+            working_dir=working_dir,
+            director_note=director_note,
+            progress_callback=progress_callback,
+            is_cancelled=is_cancelled,
+        )
+
+    def scenes_featuring(
+        self, previous_result: Dict[str, Any], character_name: str
+    ) -> List[int]:
+        """Indices of the scenes a character actually appears in.
+
+        Read from the recorded per-shot reference (see script2video's
+        ``reference_character``) rather than from the script text, because the
+        reference is what the picture was actually built from — a character
+        named in the prose but never given a shot does not need re-rendering,
+        and charging for those scenes would be charging for nothing.
+
+        Falls back to "every scene" when no shot recorded a reference, which is
+        the case for videos made before that field existed: re-rendering too
+        much is recoverable, missing the character's scenes is not.
+        """
+        wanted = (character_name or "").strip().lower()
+        if not wanted:
+            return []
+        scenes = previous_result.get("scenes") or []
+        matched: List[int] = []
+        saw_any_reference = False
+        for scene in scenes:
+            for shot in scene.get("shots") or []:
+                reference = (shot.get("reference_character") or "").strip()
+                if reference:
+                    saw_any_reference = True
+                if reference.lower() == wanted:
+                    matched.append(int(scene["index"]))
+                    break
+        if not saw_any_reference:
+            return [int(s["index"]) for s in scenes]
+        return matched
+
+    async def apply_global_edit(
+        self,
+        previous_result: Dict[str, Any],
+        instruction: str,
+        target: str,
+        working_dir: str,
+        scene_indices: Optional[List[int]] = None,
+        progress_callback: Optional[Callable] = None,
+        is_cancelled: Optional[Callable[[], bool]] = None,
+    ) -> Dict[str, Any]:
+        """Change one continuity fact everywhere it appears.
+
+        ``target`` is either a character's name or the literal ``"location"``;
+        ``instruction`` is the change in plain words ("put her in a red coat",
+        "make it night"). The edit is applied to the LOCK first — the character
+        portrait or the set plate — and only then are the affected scenes
+        re-rendered against the new lock. Editing scene prompts alone would ask
+        each scene to reinvent the same change independently, which is exactly
+        the drift the locks exist to prevent.
+
+        The script's own description of the target is patched too, because the
+        identity clause built from it is restated in every frame prompt: a
+        stale "wearing a grey coat" in the text would fight the new reference
+        image for the rest of the drama.
+        """
+        instruction = (instruction or "").strip()
+        if not instruction:
+            raise SceneRegenerationUnavailable("Describe the change you want.")
+
+        async def progress(stage: str, message: str, pct: float, data=None):
+            if progress_callback:
+                await progress_callback(stage, message, pct, data)
+
+        if is_cancelled and is_cancelled():
+            raise PipelineCancelled("Job cancelled")
+
+        state = (previous_result or {}).get("_render_state") or {}
+        script_data = dict(state.get("script") or {})
+        if not script_data:
+            raise SceneRegenerationUnavailable(
+                "This video was made before continuity edits existed, so the "
+                "information needed to change it was not kept. Generating it "
+                "again will make edits available."
+            )
+
+        is_location = (target or "").strip().lower() in ("location", "set", "setting")
+        portraits_override: Optional[Dict[str, str]] = None
+        location_override: Optional[str] = None
+
+        await progress("storyboard", "Updating the continuity lock", 8)
+
+        if is_location:
+            plate = previous_result.get("location_plate")
+            if not plate:
+                raise SceneRegenerationUnavailable(
+                    "This video has no locked set to edit — its scenes were "
+                    "not anchored to a single location."
+                )
+            prompt = (
+                "Empty location plate. "
+                f"{script_data.get('setting_location', '')}. "
+                f"CHANGE TO APPLY: {instruction}. "
+                "Keep the same room, the same architecture, materials and camera "
+                "position — change only what the instruction names. No people."
+            )
+            location_override = await self.image_gen.generate_image_with_reference(
+                prompt,
+                plate,
+                previous_result.get("aspect_ratio", "16:9"),
+                is_cancelled=is_cancelled,
+            )
+            # Restate the change in the script's setting so every re-rendered
+            # scene's prompt agrees with the new plate.
+            script_data["setting_location"] = (
+                f"{script_data.get('setting_location', '')} ({instruction})".strip()
+            )
+            affected = (
+                scene_indices
+                if scene_indices is not None
+                else [int(s["index"]) for s in (previous_result.get("scenes") or [])]
+            )
+        else:
+            portraits = previous_result.get("portraits") or {}
+            name = next(
+                (n for n in portraits if n.strip().lower() == (target or "").strip().lower()),
+                None,
+            )
+            if not name:
+                raise SceneRegenerationUnavailable(
+                    f"There is no character called {target!r} in this video."
+                )
+            prompt = (
+                f"Character portrait. CHANGE TO APPLY: {instruction}. "
+                "Same person, same face, same age, same hair colour and length, "
+                "same build — change only what the instruction names. "
+                "Front-facing, neutral expression, studio lighting, high detail."
+            )
+            portraits_override = {
+                name: await self.image_gen.generate_image_with_reference(
+                    prompt, portraits[name], "1:1", is_cancelled=is_cancelled
+                )
+            }
+            for character in script_data.get("characters") or []:
+                if str(character.get("name", "")).strip().lower() == name.strip().lower():
+                    character["description"] = (
+                        f"{character.get('description', '')} ({instruction})".strip()
+                    )
+                    # Wardrobe is its own prompt clause; an edit that changes
+                    # clothing has to land there or the old outfit is restated
+                    # alongside the new reference image on every frame.
+                    if character.get("wardrobe"):
+                        character["wardrobe"] = (
+                            f"{character['wardrobe']} ({instruction})".strip()
+                        )
+                    break
+            affected = (
+                scene_indices
+                if scene_indices is not None
+                else self.scenes_featuring(previous_result, name)
+            )
+
+        if not affected:
+            raise SceneRegenerationUnavailable(
+                f"{target} does not appear in any scene of this video."
+            )
+
+        return await self._rerender_scenes(
+            previous_result=previous_result,
+            scene_indices=affected,
+            working_dir=working_dir,
+            director_note=f"CONTINUITY EDIT (applies to every shot): {instruction}",
+            progress_callback=progress_callback,
+            is_cancelled=is_cancelled,
+            portraits_override=portraits_override,
+            location_plate_override=location_override,
+            script_override=script_data,
+        )
+
+    async def apply_timeline_edit(
+        self,
+        previous_result: Dict[str, Any],
+        timeline: List[Dict[str, Any]],
+        working_dir: str,
+        progress_callback: Optional[Callable] = None,
+        is_cancelled: Optional[Callable[[], bool]] = None,
+    ) -> Dict[str, Any]:
+        """Re-cut a finished drama from clips that already exist.
+
+        ``timeline`` is the new edit, in order: a list of
+        ``{"scene_index": int, "trim_start": float, "trim_end": float}``.
+        Scenes left out are dropped from the cut. Nothing here calls a
+        generation model — reordering, trimming and dropping are pure ffmpeg
+        work on clips the customer has already paid for, so this costs no
+        credits and takes seconds instead of minutes.
+
+        The dropped/reordered scenes' voice tracks follow the picture: dialogue
+        is re-keyed to the new positions, so a scene moved to the front takes
+        its lines with it instead of playing someone else's.
+        """
+        os.makedirs(working_dir, exist_ok=True)
+
+        def _check_cancel():
+            if is_cancelled and is_cancelled():
+                raise PipelineCancelled("Job cancelled")
+
+        async def progress(stage: str, message: str, pct: float, data=None):
+            if progress_callback:
+                await progress_callback(stage, message, pct, data)
+
+        scenes = list(previous_result.get("scenes") or [])
+        by_index = {int(s["index"]): s for s in scenes if s.get("index") is not None}
+
+        entries: List[Dict[str, Any]] = []
+        for entry in timeline or []:
+            index = int(entry.get("scene_index", -1))
+            scene = by_index.get(index)
+            if scene is None:
+                raise SceneRegenerationUnavailable(
+                    f"Scene {index + 1} is not part of this video."
+                )
+            entries.append(
+                {
+                    "scene": scene,
+                    "index": index,
+                    "trim_start": max(0.0, float(entry.get("trim_start", 0.0) or 0.0)),
+                    "trim_end": max(0.0, float(entry.get("trim_end", 0.0) or 0.0)),
+                }
+            )
+        if not entries:
+            raise SceneRegenerationUnavailable(
+                "A cut needs at least one scene — an empty timeline would "
+                "produce an empty video."
+            )
+
+        missing = [
+            e["index"] + 1
+            for e in entries
+            if not (
+                e["scene"].get("clip_url")
+                or (e["scene"].get("clip_path") and os.path.isfile(e["scene"]["clip_path"]))
+            )
+        ]
+        if missing:
+            raise SceneRegenerationUnavailable(
+                "The clips for this video are no longer stored, so it cannot "
+                f"be re-cut (missing: scene {missing[0]}). Please generate it again."
+            )
+
+        _check_cancel()
+        await progress("assembly", "Re-cutting the timeline", 20)
+
+        scene_paths: List[str] = []
+        for position, entry in enumerate(entries):
+            _check_cancel()
+            scene = entry["scene"]
+            local = scene.get("clip_path")
+            if not (local and os.path.isfile(local)):
+                local = os.path.join(working_dir, f"scene_{entry['index']}_restored.mp4")
+                await download_video(scene["clip_url"], local)
+            trimmed = await trim_clip(
+                local,
+                os.path.join(working_dir, f"cut_{position}_scene_{entry['index']}.mp4"),
+                entry["trim_start"],
+                entry["trim_end"],
+            )
+            scene_paths.append(trimmed)
+
+        # Dialogue is keyed by the clip's POSITION in the cut, not by which
+        # scene it came from, so a reorder has to re-key it or every line lands
+        # on the wrong picture.
+        state = (previous_result or {}).get("_render_state") or {}
+        source_tracks = state.get("dialogue_tracks") or []
+        clip_index_by_scene = {
+            int(s["index"]): int(s["clip_index"])
+            for s in scenes
+            if s.get("clip_index") is not None
+        }
+        dialogue_tracks: List[Dict[str, Any]] = []
+        for position, entry in enumerate(entries):
+            origin = clip_index_by_scene.get(entry["index"])
+            if origin is None:
+                continue
+            for track in source_tracks:
+                if int(track.get("scene_index", -1)) == origin:
+                    dialogue_tracks.append({**track, "scene_index": position})
+
+        _check_cancel()
+        final_path = await self._assemble_final_drama(
+            scene_paths,
+            working_dir,
+            progress_callback,
+            state.get("music_url"),
+            previous_result.get("plan", "free"),
+            is_cancelled=is_cancelled,
+            dialogue_tracks=dialogue_tracks,
+            director_style=previous_result.get("director_style", "cinematic_balanced"),
+            transitions=plan_transitions([e["scene"]["script"] for e in entries]),
+            aspect_ratio=previous_result.get("aspect_ratio", "16:9"),
+        )
+
+        # The source scenes are kept intact (with their original clips) so the
+        # cut can be revised again, or reverted, without re-rendering anything.
+        result = {**previous_result}
+        result["timeline"] = [
+            {
+                "scene_index": e["index"],
+                "trim_start": e["trim_start"],
+                "trim_end": e["trim_end"],
+            }
+            for e in entries
+        ]
+        result["scene_count"] = len(entries)
+        version = int(previous_result.get("cut_version", 0)) + 1
+        result["cut_version"] = version
+        await self._publish_master(result, final_path, working_dir, suffix=f"cut{version}")
+        await progress("complete", "New cut ready", 100, {"video_url": result["video_url"]})
         return result
 
     async def _assemble_final_drama(

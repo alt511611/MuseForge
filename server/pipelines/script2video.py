@@ -22,6 +22,7 @@ from tools.character_qa import (
 from tools.muapi_image_generator import MuAPIImageGenerator
 from tools.muapi_video_generator import MuAPIVideoGenerator
 from tools.muapi_client import MuAPICancelled
+from tools.video_model_router import classify_shot
 
 logger = logging.getLogger(__name__)
 
@@ -1163,6 +1164,19 @@ class Script2VideoPipeline:
                     async with progress_lock:
                         await progress("video", f"Animating shot {i + 1}/{len(shots)}", 50 + i * 5)
 
+                    # Which model animates this shot depends on what KIND of
+                    # shot it is, not just on the plan: a talking close-up and
+                    # a chase fail in different ways, and an empty-set plate
+                    # needs neither's strengths. See tools/video_model_router.
+                    shot_profile = classify_shot(
+                        motion_desc=getattr(shot, "motion_desc", "") or "",
+                        visual_desc=getattr(shot, "visual_desc", "") or "",
+                        camera_movement=getattr(shot, "camera_movement", "") or "",
+                        shot_type=getattr(shot, "shot_type", "") or "",
+                        has_dialogue=has_dialogue,
+                        scene_tension=scene_tension,
+                        has_character=matched_char is not None,
+                    )
                     video_url = await self.video_gen.generate_video_from_image(
                         prompt=video_prompt,
                         image_url=frame_url if not one_step_reference_video else reference_url,
@@ -1170,6 +1184,7 @@ class Script2VideoPipeline:
                         aspect_ratio=aspect_ratio,
                         plan=plan,
                         is_cancelled=is_cancelled,
+                        shot_profile=shot_profile,
                     )
                 except MuAPICancelled as exc:
                     # Translate the low-level "stopped polling mid-wait"
@@ -1184,6 +1199,10 @@ class Script2VideoPipeline:
                 # diagnosed from real data (was the wrong character matched,
                 # or did MuAPI itself drift?) instead of guessing blind.
                 meta["reference_character"] = matched_char.name if matched_char else None
+                # Recorded so "why does this shot look wrong?" can be answered
+                # from the job record -- which model profile handled it -- rather
+                # than by re-deriving the classification from the prompt text.
+                meta["shot_profile"] = shot_profile
                 # Which lock actually anchored this shot. Without it, a
                 # "the room keeps changing" report cannot be told apart from
                 # "the wrong character was matched" after the fact.

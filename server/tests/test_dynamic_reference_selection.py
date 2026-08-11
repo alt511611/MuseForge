@@ -66,7 +66,8 @@ async def _run_three_scene_drama(monkeypatch, working_dir):
         return f"https://fake.cdn/frame_{len(reference_calls)}.png"
 
     async def fake_generate_video_from_image(
-        self, prompt, image_url, duration=5, aspect_ratio="16:9", plan="free", is_cancelled=None
+        self, prompt, image_url, duration=5, aspect_ratio="16:9", plan="free",
+        is_cancelled=None, shot_profile=None
     ):
         return "https://fake.cdn/video.mp4"
 
@@ -179,7 +180,7 @@ async def test_single_scene_call_without_shared_dict_still_uses_portrait(monkeyp
     async def fake_img_ref(self, prompt, reference_url, aspect_ratio="16:9", is_cancelled=None):
         return f"https://fake.cdn/frame_from_{reference_url.split('/')[-1]}"
 
-    async def fake_vid(self, prompt, image_url, duration=5, aspect_ratio="16:9", plan="free", is_cancelled=None):
+    async def fake_vid(self, prompt, image_url, duration=5, aspect_ratio="16:9", plan="free", is_cancelled=None, shot_profile=None):
         return "https://fake.cdn/clip.mp4"
 
     async def fake_storyboard(self, script, characters, user_requirement="", director_style="cinematic_balanced", **_kwargs):

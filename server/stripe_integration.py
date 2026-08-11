@@ -37,18 +37,90 @@ CREDIT_PACKAGES = {
     "LARGE":  {"credits": 26, "label": "26 Credits"},
 }
 
-# How long a granted credit stays spendable. Every grant -- pack or renewal --
-# lands immediately and lapses this many days later, whether or not it was
-# used. Must match public.credit_validity_days() in supabase_migration.sql;
-# the database is the enforcer, this constant is what the UI quotes.
+# How long a granted credit stays spendable. Every grant lands immediately and
+# lapses after its own window, whether or not it was used. The DATABASE is the
+# enforcer (public.grant_credits takes p_days); these constants are what the
+# server passes and what the UI quotes.
+#
+# A monthly allowance is rented: it is sized to one month of work and lapses
+# with the month, which is what stops it being hoarded across renewals.
 CREDIT_VALIDITY_DAYS = 30
+#: Must match public.credit_validity_days() in supabase_migration.sql, which is
+#: the fallback used when a caller passes no p_days.
+DEFAULT_CREDIT_VALIDITY_DAYS = CREDIT_VALIDITY_DAYS
+
+# A credit PACK was bought outright, not rented, and it is bought precisely by
+# the people whose work is lumpy -- an agency with one shoot this quarter. A
+# 30-day fuse on money already taken is the kind of term customers discover at
+# renewal and leave over, so packs (and the prepaid annual allowance) live a
+# year.
+PACK_CREDIT_VALIDITY_DAYS = 365
+ANNUAL_CREDIT_VALIDITY_DAYS = 365
+
+#: Billing intervals a subscription can be sold on. Annual is the default
+#: offer: it is cheaper for the customer and prepaid for us.
+BILLING_INTERVALS = ("annual", "monthly")
+DEFAULT_BILLING_INTERVAL = "annual"
+
+#: Discount applied to the annual price, quoted to the customer on the pricing
+#: page. The authoritative number is whatever the Stripe annual Price says --
+#: this constant only has to agree with it.
+ANNUAL_DISCOUNT_PERCENT = 10
+
+#: Months of allowance handed over when an annual subscription starts or
+#: renews. The whole year lands at once (with a year to spend it) because the
+#: customer has already paid for the whole year: metering it out monthly would
+#: need a scheduler we do not run, and would silently expire allowance they
+#: are not getting a refund for.
+ANNUAL_ALLOWANCE_MONTHS = 12
 
 stripe.api_key = STRIPE_SECRET_KEY
 
 
-def get_price_id(plan: str) -> Optional[str]:
-    env_key = f"STRIPE_PRICE_{plan.upper()}"
-    return os.environ.get(env_key)
+def get_price_id(plan: str, interval: str = DEFAULT_BILLING_INTERVAL) -> Optional[str]:
+    """Stripe Price for a plan on a billing interval.
+
+    Annual has its own Price (STRIPE_PRICE_PRO_ANNUAL). It deliberately does
+    NOT fall back to the monthly Price when unset: falling back would charge a
+    customer who chose "billed yearly" a monthly amount and put them on a
+    monthly cycle, which is a billing error, not a degraded experience. An
+    unconfigured annual Price is a 400 the operator can see.
+    """
+    plan = (plan or "").upper()
+    if (interval or DEFAULT_BILLING_INTERVAL).lower() == "annual":
+        return os.environ.get(f"STRIPE_PRICE_{plan}_ANNUAL")
+    return os.environ.get(f"STRIPE_PRICE_{plan}")
+
+
+def plan_for_price_id(price_id: str) -> Optional[str]:
+    """Which plan a Stripe Price belongs to, on either interval.
+
+    The webhook used to compare against STRIPE_PRICE_PRO alone, so an ANNUAL
+    Pro subscriber matched nothing and was silently provisioned as Creator --
+    the more expensive plan granting the smaller allowance.
+    """
+    if not price_id:
+        return None
+    for plan in PLAN_CREDITS:
+        for interval in BILLING_INTERVALS:
+            if get_price_id(plan, interval) == price_id:
+                return plan
+    return None
+
+
+def is_annual_price(price_id: str) -> bool:
+    """True when this Price is one of the configured annual Prices."""
+    if not price_id:
+        return False
+    return any(get_price_id(plan, "annual") == price_id for plan in PLAN_CREDITS)
+
+
+def allowance_for(plan: str, annual: bool) -> tuple:
+    """(credits, validity_days) granted for one billing cycle of this plan."""
+    monthly = PLAN_CREDITS.get(plan, PLAN_CREDITS["creator"])
+    if annual:
+        return monthly * ANNUAL_ALLOWANCE_MONTHS, ANNUAL_CREDIT_VALIDITY_DAYS
+    return monthly, CREDIT_VALIDITY_DAYS
 
 
 def get_credit_price_id(package: str) -> Optional[str]:
@@ -92,11 +164,13 @@ async def _add_credits_to_profile(
     stripe_customer_id: Optional[str] = None,
     stripe_subscription_id: Optional[str] = None,
     reason: str = "subscription_renewal",
+    validity_days: int = CREDIT_VALIDITY_DAYS,
 ):
     """Grant credits as a new lot and update the profile's Stripe fields.
 
     The grant is spendable the moment this returns and lapses
-    CREDIT_VALIDITY_DAYS later. grant_credits() also writes the ledger entry
+    ``validity_days`` later -- 30 for a monthly allowance, a year for a pack or
+    a prepaid annual allowance. grant_credits() also writes the ledger entry
     and refreshes profiles.credits, so this no longer does the read-then-write
     dance that could lose a concurrent grant.
     """
@@ -111,7 +185,7 @@ async def _add_credits_to_profile(
                     "p_user_id": user_id,
                     "p_amount": credits_delta,
                     "p_reason": reason,
-                    "p_days": CREDIT_VALIDITY_DAYS,
+                    "p_days": validity_days,
                 },
                 headers=_sb_headers(),
             )
@@ -227,19 +301,23 @@ async def handle_webhook(payload: bytes, sig_header: str) -> dict:
             pkg = CREDIT_PACKAGES.get(pkg_key.upper(), {})
             credits = pkg.get("credits", 0)
             if user_id and credits:
-                await _add_credits_to_profile(user_id, credits, reason="credit_purchase")
+                await _add_credits_to_profile(
+                    user_id,
+                    credits,
+                    reason="credit_purchase",
+                    validity_days=PACK_CREDIT_VALIDITY_DAYS,
+                )
 
         else:
-            # Subscription: grant initial credits + set plan
+            # Subscription: grant the cycle's credits + set plan
             plan = "creator"
-            credits = PLAN_CREDITS["creator"]
+            annual = False
             if subscription_id:
                 sub = await asyncio.to_thread(stripe.Subscription.retrieve, subscription_id)
                 price_id = sub["items"]["data"][0]["price"]["id"]
-                pro_price = os.environ.get("STRIPE_PRICE_PRO", "")
-                if price_id == pro_price:
-                    plan = "pro"
-                    credits = PLAN_CREDITS["pro"]
+                plan = plan_for_price_id(price_id) or "creator"
+                annual = is_annual_price(price_id)
+            credits, validity_days = allowance_for(plan, annual)
             if user_id:
                 await _add_credits_to_profile(
                     user_id=user_id,
@@ -248,9 +326,10 @@ async def handle_webhook(payload: bytes, sig_header: str) -> dict:
                     stripe_customer_id=customer_id,
                     stripe_subscription_id=subscription_id,
                     reason="subscription_renewal",
+                    validity_days=validity_days,
                 )
 
-    # ── Monthly invoice paid (subscription renewal) ───────────────────────────
+    # ── Invoice paid (subscription renewal, monthly or yearly) ────────────────
     elif event_type == "invoice.paid":
         billing_reason = data.get("billing_reason", "")
         # Only handle renewal invoices (not the first subscription creation, handled above)
@@ -271,16 +350,33 @@ async def handle_webhook(payload: bytes, sig_header: str) -> dict:
                         plan = rows[0].get("plan", "creator")
 
             if user_id:
-                credits = PLAN_CREDITS.get(plan, PLAN_CREDITS["creator"])
-                # Grant the month's allowance as a fresh 30-day lot. This used
-                # to OVERWRITE the balance with the allowance to stop hoarding,
+                # Which interval renewed decides both the size of the grant and
+                # how long it lives. Read it off the invoice line rather than
+                # the profile: the profile records the PLAN, not the cycle, so
+                # an annual renewal would otherwise be paid a single month's
+                # allowance and expire it in 30 days -- eleven twelfths of a
+                # year the customer had already paid for.
+                renewed_price = ""
+                try:
+                    renewed_price = (
+                        ((data.get("lines") or {}).get("data") or [{}])[0]
+                        .get("price", {})
+                        .get("id", "")
+                    ) or ""
+                except (AttributeError, IndexError, TypeError):
+                    renewed_price = ""
+                plan = plan_for_price_id(renewed_price) or plan
+                credits, validity_days = allowance_for(plan, is_annual_price(renewed_price))
+                # Grant the cycle's allowance as a fresh lot. This used to
+                # OVERWRITE the balance with the allowance to stop hoarding,
                 # which also wiped credit packs the user had paid for on top of
-                # the subscription. Expiry handles hoarding now: last month's
-                # unused allowance lapses on its own 30 days after it landed.
+                # the subscription. Expiry handles hoarding now: last cycle's
+                # unused allowance lapses on its own.
                 await _add_credits_to_profile(
                     user_id=user_id,
                     credits_delta=credits,
                     reason="subscription_renewal",
+                    validity_days=validity_days,
                 )
 
     # ── Subscription cancelled ────────────────────────────────────────────────

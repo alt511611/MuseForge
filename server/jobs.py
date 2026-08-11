@@ -938,6 +938,162 @@ async def run_regenerate_scene_job(
         _refund_retake()
 
 
+async def run_global_edit_job(
+    job: Job,
+    api_key: str,
+    instruction: str,
+    target: str,
+    scene_indices: List[int],
+    charged_credits: int = 0,
+):
+    """Apply one continuity change across every scene it affects.
+
+    Same failure contract as a retake: the previous result is held until the
+    new one is complete, so a failed edit leaves the customer with the video
+    they already had, and everything charged for the edit is refunded.
+    """
+    from pipelines.idea2video import Idea2VideoPipeline, SceneRegenerationUnavailable
+    from pipelines.script2video import PipelineCancelled
+
+    previous_result = dict(job.result or {})
+    job.status = JobStatus.RUNNING
+    await job_store.persist(job)
+
+    working_dir = os.path.join(JOBS_DIR, job.id)
+
+    def is_cancelled() -> bool:
+        return job.status == JobStatus.CANCELLED
+
+    async def progress_callback(stage, message, progress, data=None):
+        await job_store.emit(job, stage, message, progress, data)
+
+    def _refund() -> None:
+        if job.user_id and not job.demo and charged_credits:
+            asyncio.create_task(
+                _sb_refund_credits(job.user_id, charged_credits, job.id)
+            )
+
+    def _restore_previous() -> None:
+        job.result = previous_result
+        job.status = JobStatus.COMPLETED
+
+    try:
+        pipeline = Idea2VideoPipeline(api_key=api_key, demo=job.demo)
+        result = await asyncio.wait_for(
+            pipeline.apply_global_edit(
+                previous_result=previous_result,
+                instruction=instruction,
+                target=target,
+                working_dir=working_dir,
+                scene_indices=scene_indices or None,
+                progress_callback=progress_callback,
+                is_cancelled=is_cancelled,
+            ),
+            timeout=PIPELINE_HARD_TIMEOUT_SECONDS,
+        )
+        if is_cancelled():
+            _restore_previous()
+            await job_store.persist(job)
+            await job_store.emit(job, "cancelled", "Edit cancelled", 100)
+            _refund()
+            return
+        job.result = result
+        job.status = JobStatus.COMPLETED
+        await job_store.persist(job)
+        await job_store.emit(job, "complete", "Edit applied", 100, public_result(result))
+    except SceneRegenerationUnavailable as exc:
+        _restore_previous()
+        job.error = str(exc)
+        await job_store.persist(job)
+        await job_store.emit(job, "error", str(exc), 100)
+        _refund()
+    except PipelineCancelled:
+        _restore_previous()
+        await job_store.persist(job)
+        await job_store.emit(job, "cancelled", "Edit cancelled", 100)
+        _refund()
+    except asyncio.TimeoutError:
+        _restore_previous()
+        job.error = "The edit timed out — your video is unchanged."
+        await job_store.persist(job)
+        await job_store.emit(job, "error", job.error, 100)
+        _refund()
+    except Exception as exc:
+        _restore_previous()
+        job.error = f"The edit failed, your video is unchanged: {exc}"
+        await job_store.persist(job)
+        await job_store.emit(job, "error", job.error, 100)
+        _refund()
+
+
+async def run_timeline_edit_job(job: Job, api_key: str, timeline: List[Dict[str, Any]]):
+    """Re-cut a finished job from clips that already exist.
+
+    No credits are involved anywhere in this path: reordering, trimming and
+    dropping scenes calls no generation model, so there is nothing to charge
+    and nothing to refund. A failure simply restores the previous cut.
+    """
+    from pipelines.idea2video import Idea2VideoPipeline, SceneRegenerationUnavailable
+    from pipelines.script2video import PipelineCancelled
+
+    previous_result = dict(job.result or {})
+    job.status = JobStatus.RUNNING
+    await job_store.persist(job)
+
+    working_dir = os.path.join(JOBS_DIR, job.id)
+
+    def is_cancelled() -> bool:
+        return job.status == JobStatus.CANCELLED
+
+    async def progress_callback(stage, message, progress, data=None):
+        await job_store.emit(job, stage, message, progress, data)
+
+    def _restore_previous() -> None:
+        job.result = previous_result
+        job.status = JobStatus.COMPLETED
+
+    try:
+        pipeline = Idea2VideoPipeline(api_key=api_key, demo=job.demo)
+        result = await asyncio.wait_for(
+            pipeline.apply_timeline_edit(
+                previous_result=previous_result,
+                timeline=timeline,
+                working_dir=working_dir,
+                progress_callback=progress_callback,
+                is_cancelled=is_cancelled,
+            ),
+            timeout=PIPELINE_HARD_TIMEOUT_SECONDS,
+        )
+        if is_cancelled():
+            _restore_previous()
+            await job_store.persist(job)
+            await job_store.emit(job, "cancelled", "Re-cut cancelled", 100)
+            return
+        job.result = result
+        job.status = JobStatus.COMPLETED
+        await job_store.persist(job)
+        await job_store.emit(job, "complete", "New cut ready", 100, public_result(result))
+    except SceneRegenerationUnavailable as exc:
+        _restore_previous()
+        job.error = str(exc)
+        await job_store.persist(job)
+        await job_store.emit(job, "error", str(exc), 100)
+    except PipelineCancelled:
+        _restore_previous()
+        await job_store.persist(job)
+        await job_store.emit(job, "cancelled", "Re-cut cancelled", 100)
+    except asyncio.TimeoutError:
+        _restore_previous()
+        job.error = "The re-cut timed out — your video is unchanged."
+        await job_store.persist(job)
+        await job_store.emit(job, "error", job.error, 100)
+    except Exception as exc:
+        _restore_previous()
+        job.error = f"The re-cut failed, your video is unchanged: {exc}"
+        await job_store.persist(job)
+        await job_store.emit(job, "error", job.error, 100)
+
+
 async def run_continue_from_script_job(job: Job, api_key: str, script_data: Dict[str, Any]):
     """Resume after script approval — charges already taken by the API layer."""
     from interfaces.character import DramaScript

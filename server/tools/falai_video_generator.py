@@ -98,7 +98,12 @@ class FalAIVideoGenerator:
         aspect_ratio: str = "16:9",
         plan: str = "free",
         is_cancelled: Optional[Callable[[], bool]] = None,
+        shot_profile: Optional[str] = None,
     ) -> str:
+        # shot_profile is MuAPI-only routing (tools/video_model_router); this
+        # backend exposes a single endpoint, so it is accepted and ignored
+        # rather than left out, which would TypeError the shared call site.
+        _ = shot_profile
         # aspect_ratio/plan kept in the signature for interchangeability
         # with MuAPIVideoGenerator; this model derives aspect ratio from
         # the source image and has no HD/standard mode split (yet).

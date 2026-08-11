@@ -22,6 +22,9 @@ Idea → Screenwriter → Storyboard Artist → Frame Generator → Video Genera
 ## Key Features
 
 - **Character Consistency Lock** — one portrait per character, generated once and reused across every scene.
+- **Continuity Edits** — "put her in a red coat" moves the locked portrait itself, then re-renders only the scenes she appears in.
+- **Timeline Re-cut** — reorder, trim and drop scenes from a finished drama. Uses the clips you already paid for, so it costs nothing.
+- **Per-shot Model Routing** — dialogue, action and establishing shots each get their own MuAPI model, with an automatic fallback chain when an endpoint is unavailable.
 - **Director Style Presets** — Slow Cinematic, Balanced, Dynamic Action, Intimate, Noir Mystery, Anime.
 - **Demo Mode** — no keys? The whole pipeline still runs with placeholder assets so you can explore the product instantly.
 - **Real-time SSE Progress** — live agent log with a heartbeat that survives long generation stages.
@@ -82,6 +85,9 @@ python -m pytest -v          # or: make test
 | GET | `/api/jobs/{id}/stream` | SSE progress stream (with heartbeat) |
 | GET | `/api/jobs/{id}/video` | Stream/download the final video |
 | POST | `/api/jobs/{id}/cancel` | Cancel a running job |
+| POST | `/api/jobs/{id}/scenes/{i}/regenerate` | Re-shoot one scene (1 credit) |
+| POST | `/api/jobs/{id}/global-edit` | Change a costume/set everywhere (1 credit per affected scene) |
+| POST | `/api/jobs/{id}/timeline` | Reorder / trim / drop scenes — no generation, free |
 
 ## Tech Stack
 

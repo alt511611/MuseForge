@@ -55,7 +55,7 @@ def fake_providers(monkeypatch):
         calls["frames"] += 1
         return f"https://fake.cdn/frame_{calls['frames']}.png"
 
-    async def fake_generate_video(self, prompt, image_url, duration=5, aspect_ratio="16:9", plan="free", is_cancelled=None):
+    async def fake_generate_video(self, prompt, image_url, duration=5, aspect_ratio="16:9", plan="free", is_cancelled=None, shot_profile=None):
         calls["videos"] += 1
         return f"https://fake.cdn/clip_{calls['videos']}.mp4"
 

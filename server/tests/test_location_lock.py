@@ -61,7 +61,8 @@ async def _run(monkeypatch, working_dir, shot_descs, location="", location_overr
         return f"https://fake.cdn/frame_{len(reference_calls)}.png"
 
     async def fake_generate_video_from_image(
-        self, prompt, image_url, duration=5, aspect_ratio="16:9", plan="free", is_cancelled=None
+        self, prompt, image_url, duration=5, aspect_ratio="16:9", plan="free",
+        is_cancelled=None, shot_profile=None
     ):
         return "https://fake.cdn/video.mp4"
 

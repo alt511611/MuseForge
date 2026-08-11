@@ -2,11 +2,24 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "./LocaleLink";
-import { Download, Share2, Plus, ExternalLink, Layout, ChevronDown, ChevronUp, Loader2, BookmarkPlus, Check, RefreshCw } from "lucide-react";
+import { Download, Share2, Plus, ExternalLink, Layout, ChevronDown, ChevronUp, Loader2, BookmarkPlus, Check, RefreshCw, Wand2, Scissors, ArrowUp, ArrowDown, Eye, EyeOff } from "lucide-react";
 import Confetti from "./Confetti";
 import { useLanguage } from "../contexts/LanguageContext";
 import { useAuth } from "../contexts/AuthContext";
 import { API_BASE, resolveJobVideoUrl } from "../lib/apiBase";
+
+/** Translate with a real fallback.
+ *
+ * t() returns the KEY itself when a string is missing, so the older
+ * `t(key) || fallback` idiom never reached its fallback: the key is a
+ * non-empty string, so `||` kept it and the user was shown the raw
+ * "result_cut_apply". Comparing against the key is the only way to tell a
+ * missing string from a real one.
+ */
+function tr(t, key, fallback) {
+  const value = t(key);
+  return value === key ? fallback : value;
+}
 
 function SaveCharacterButton({ character }) {
   const { t } = useLanguage();
@@ -21,7 +34,7 @@ function SaveCharacterButton({ character }) {
     setSaving(true);
     try {
       const token = await getAccessToken();
-      if (!token) throw new Error(t("result_save_char_auth") || "Sign in required");
+      if (!token) throw new Error(tr(t, "result_save_char_auth", "Sign in required"));
       const res = await fetch(`${API_BASE}/api/characters`, {
         method: "POST",
         headers: {
@@ -36,11 +49,11 @@ function SaveCharacterButton({ character }) {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(data.detail || t("result_save_char_failed") || "Could not save character");
+        throw new Error(data.detail || tr(t, "result_save_char_failed", "Could not save character"));
       }
       setSaved(true);
     } catch (err) {
-      setError(err.message || t("result_save_char_failed") || "Could not save character");
+      setError(err.message || tr(t, "result_save_char_failed", "Could not save character"));
     } finally {
       setSaving(false);
     }
@@ -67,8 +80,8 @@ function SaveCharacterButton({ character }) {
           <BookmarkPlus size={10} />
         )}
         {saved
-          ? (t("result_char_saved") || "Kaydedildi")
-          : (t("result_save_char") || "Bu karakteri kaydet")}
+          ? (tr(t, "result_char_saved", "Kaydedildi"))
+          : (tr(t, "result_save_char", "Bu karakteri kaydet"))}
       </button>
       {error && <span className="text-[9px] text-center" style={{ color: "var(--mf-err-soft)" }}>{error}</span>}
     </div>
@@ -148,7 +161,7 @@ function RetakeSceneButton({ jobId, sceneIndex, onStarted }) {
         }
       );
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.detail || t("result_retake_failed") || "Retake failed");
+      if (!res.ok) throw new Error(data.detail || tr(t, "result_retake_failed", "Retake failed"));
       setOpen(false);
       setNote("");
       onStarted?.();
@@ -168,7 +181,7 @@ function RetakeSceneButton({ jobId, sceneIndex, onStarted }) {
         style={{ color: "var(--mf-ink-3)", border: "1px solid var(--mf-line-strong)" }}
       >
         <RefreshCw size={12} />
-        {t("result_retake_scene") || "Bu sahneyi yeniden çek"}
+        {tr(t, "result_retake_scene", "Bu sahneyi yeniden çek")}
       </button>
     );
   }
@@ -181,8 +194,7 @@ function RetakeSceneButton({ jobId, sceneIndex, onStarted }) {
         maxLength={500}
         rows={2}
         placeholder={
-          t("result_retake_note_ph") ||
-          "Neyi değiştirmeli? Örn: çok karanlık, ellerini göster"
+          tr(t, "result_retake_note_ph", "Neyi değiştirmeli? Örn: çok karanlık, ellerini göster")
         }
         className="w-full px-3 py-2 rounded-lg text-xs focus:outline-none"
         style={{
@@ -200,7 +212,7 @@ function RetakeSceneButton({ jobId, sceneIndex, onStarted }) {
           style={{ backgroundColor: "var(--mf-violet)", color: "white" }}
         >
           {busy ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
-          {t("result_retake_confirm") || "Yeniden çek (1 kredi)"}
+          {tr(t, "result_retake_confirm", "Yeniden çek (1 kredi)")}
         </button>
         <button
           type="button"
@@ -211,12 +223,262 @@ function RetakeSceneButton({ jobId, sceneIndex, onStarted }) {
           className="text-[11px] px-2 py-1.5 rounded-lg"
           style={{ color: "var(--mf-ink-3)" }}
         >
-          {t("result_retake_cancel") || "Vazgeç"}
+          {tr(t, "result_retake_cancel", "Vazgeç")}
         </button>
       </div>
       {error && (
         <p className="text-[11px]" style={{ color: "var(--mf-err-soft)" }}>{error}</p>
       )}
+    </div>
+  );
+}
+
+/** Change one continuity fact — a costume, a set — everywhere it appears.
+ *
+ * Separate from a retake because the unit of change is different: a retake
+ * re-rolls ONE scene, while this moves the locked portrait or set plate and
+ * then re-renders every scene anchored to it. That is why it is priced per
+ * affected scene, and why the price is only known after the server has worked
+ * out which scenes those are.
+ */
+function ContinuityEditPanel({ jobId, characters, hasLocation, onStarted }) {
+  const { t } = useLanguage();
+  const { getAccessToken } = useAuth();
+  const [target, setTarget] = useState(characters[0] || (hasLocation ? "location" : ""));
+  const [instruction, setInstruction] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  if (!target) return null;
+
+  const submit = async () => {
+    if (busy || instruction.trim().length < 3) return;
+    setError(null);
+    setBusy(true);
+    try {
+      const token = await getAccessToken();
+      const res = await fetch(`${API_BASE}/api/jobs/${jobId}/global-edit`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ instruction: instruction.trim(), target }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || tr(t, "result_edit_failed", "Değişiklik uygulanamadı"));
+      onStarted?.();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="text-[11px]" style={{ color: "var(--mf-ink-4)" }}>
+        {tr(t, "result_edit_hint", "Kilitli portreyi veya mekânı değiştirir; etkilenen her sahne yeniden çekilir (sahne başına 1 kredi).")}
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          value={target}
+          onChange={(e) => setTarget(e.target.value)}
+          className="text-xs px-2 py-2 rounded-lg focus:outline-none"
+          style={{
+            backgroundColor: "var(--mf-stage)",
+            border: "1px solid var(--mf-line-strong)",
+            color: "var(--mf-ink)",
+          }}
+        >
+          {characters.map((name) => (
+            <option key={name} value={name}>{name}</option>
+          ))}
+          {hasLocation && (
+            <option value="location">{tr(t, "result_edit_location", "Mekân")}</option>
+          )}
+        </select>
+        <input
+          value={instruction}
+          onChange={(e) => setInstruction(e.target.value)}
+          maxLength={300}
+          placeholder={tr(t, "result_edit_ph", "Örn: kırmızı palto giydir")}
+          className="flex-1 min-w-[180px] px-3 py-2 rounded-lg text-xs focus:outline-none"
+          style={{
+            backgroundColor: "var(--mf-stage)",
+            border: "1px solid var(--mf-line-strong)",
+            color: "var(--mf-ink)",
+          }}
+        />
+        <button
+          type="button"
+          onClick={submit}
+          disabled={busy || instruction.trim().length < 3}
+          className="inline-flex items-center gap-1.5 text-[11px] px-3 py-2 rounded-lg disabled:opacity-50"
+          style={{ backgroundColor: "var(--mf-violet)", color: "white" }}
+        >
+          {busy ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />}
+          {tr(t, "result_edit_apply", "Her sahnede uygula")}
+        </button>
+      </div>
+      {error && <p className="text-[11px]" style={{ color: "var(--mf-err-soft)" }}>{error}</p>}
+    </div>
+  );
+}
+
+/** Reorder, trim and drop scenes of a finished drama.
+ *
+ * Every clip already exists, so this calls no generation model and costs
+ * nothing — which is the whole reason it exists next to the retake button.
+ * Someone who only wants the last scene two seconds shorter should not have to
+ * pay to re-roll the take.
+ */
+function TimelinePanel({ jobId, scenes, onStarted }) {
+  const { t } = useLanguage();
+  const { getAccessToken } = useAuth();
+  const [entries, setEntries] = useState(() =>
+    scenes.map((scene) => ({
+      scene_index: scene.index,
+      label: scene.script || `Scene ${scene.index + 1}`,
+      included: true,
+      trim_start: 0,
+      trim_end: 0,
+    }))
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const move = (position, delta) => {
+    const target = position + delta;
+    if (target < 0 || target >= entries.length) return;
+    const next = [...entries];
+    [next[position], next[target]] = [next[target], next[position]];
+    setEntries(next);
+  };
+
+  const patch = (position, changes) =>
+    setEntries(entries.map((e, i) => (i === position ? { ...e, ...changes } : e)));
+
+  const kept = entries.filter((e) => e.included);
+  const dirty =
+    kept.length !== scenes.length ||
+    kept.some((e, i) => e.scene_index !== scenes[i]?.index || e.trim_start || e.trim_end);
+
+  const submit = async () => {
+    if (busy || !kept.length) return;
+    setError(null);
+    setBusy(true);
+    try {
+      const token = await getAccessToken();
+      const res = await fetch(`${API_BASE}/api/jobs/${jobId}/timeline`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          timeline: kept.map((e) => ({
+            scene_index: e.scene_index,
+            trim_start: Number(e.trim_start) || 0,
+            trim_end: Number(e.trim_end) || 0,
+          })),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || tr(t, "result_cut_failed", "Kurgu uygulanamadı"));
+      onStarted?.();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="text-[11px]" style={{ color: "var(--mf-ink-4)" }}>
+        {tr(t, "result_cut_hint", "Sahneleri sırala, kırp veya çıkar. Yeniden üretim yok — ücretsiz.")}
+      </p>
+      {entries.map((entry, position) => (
+        <div
+          key={entry.scene_index}
+          className="flex flex-wrap items-center gap-2 px-2 py-1.5 rounded-lg"
+          style={{
+            border: "1px solid var(--mf-line-strong)",
+            opacity: entry.included ? 1 : 0.45,
+          }}
+        >
+          <span className="text-[11px] w-6 text-center" style={{ color: "var(--mf-ink-4)" }}>
+            {position + 1}
+          </span>
+          <span className="text-[11px] flex-1 min-w-[120px] truncate" style={{ color: "var(--mf-ink-2)" }}>
+            {entry.label}
+          </span>
+          <label className="text-[10px] flex items-center gap-1" style={{ color: "var(--mf-ink-4)" }}>
+            {tr(t, "result_cut_trim_start", "baş")}
+            <input
+              type="number" min={0} max={14} step={0.5}
+              value={entry.trim_start}
+              onChange={(e) => patch(position, { trim_start: e.target.value })}
+              className="w-14 px-1.5 py-1 rounded text-[11px] focus:outline-none"
+              style={{
+                backgroundColor: "var(--mf-stage)",
+                border: "1px solid var(--mf-line-strong)",
+                color: "var(--mf-ink)",
+              }}
+            />
+          </label>
+          <label className="text-[10px] flex items-center gap-1" style={{ color: "var(--mf-ink-4)" }}>
+            {tr(t, "result_cut_trim_end", "son")}
+            <input
+              type="number" min={0} max={14} step={0.5}
+              value={entry.trim_end}
+              onChange={(e) => patch(position, { trim_end: e.target.value })}
+              className="w-14 px-1.5 py-1 rounded text-[11px] focus:outline-none"
+              style={{
+                backgroundColor: "var(--mf-stage)",
+                border: "1px solid var(--mf-line-strong)",
+                color: "var(--mf-ink)",
+              }}
+            />
+          </label>
+          <button type="button" onClick={() => move(position, -1)} aria-label={tr(t, "result_cut_up", "Yukarı taşı")}
+            className="p-1 rounded" style={{ color: "var(--mf-ink-3)" }}>
+            <ArrowUp size={12} />
+          </button>
+          <button type="button" onClick={() => move(position, 1)} aria-label={tr(t, "result_cut_down", "Aşağı taşı")}
+            className="p-1 rounded" style={{ color: "var(--mf-ink-3)" }}>
+            <ArrowDown size={12} />
+          </button>
+          <button
+            type="button"
+            onClick={() => patch(position, { included: !entry.included })}
+            aria-label={entry.included ? (tr(t, "result_cut_drop", "Kesimden çıkar")) : (tr(t, "result_cut_keep", "Kesime geri al"))}
+            className="p-1 rounded"
+            style={{ color: "var(--mf-ink-3)" }}
+          >
+            {entry.included ? <Eye size={12} /> : <EyeOff size={12} />}
+          </button>
+        </div>
+      ))}
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={submit}
+          disabled={busy || !kept.length || !dirty}
+          className="inline-flex items-center gap-1.5 text-[11px] px-3 py-2 rounded-lg disabled:opacity-50"
+          style={{ backgroundColor: "var(--mf-violet)", color: "white" }}
+        >
+          {busy ? <Loader2 size={12} className="animate-spin" /> : <Scissors size={12} />}
+          {tr(t, "result_cut_apply", "Yeni kurguyu uygula (ücretsiz)")}
+        </button>
+        {!kept.length && (
+          <span className="text-[11px]" style={{ color: "var(--mf-err-soft)" }}>
+            {tr(t, "result_cut_empty", "En az bir sahne kalmalı.")}
+          </span>
+        )}
+      </div>
+      {error && <p className="text-[11px]" style={{ color: "var(--mf-err-soft)" }}>{error}</p>}
     </div>
   );
 }
@@ -227,6 +489,7 @@ export default function VideoResult({ job, jobId }) {
   const result = job?.result;
   const [confetti, setConfetti] = useState(false);
   const [storyboardOpen, setStoryboardOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
   const [exporting, setExporting] = useState(null); // "9:16" | "1:1" | null
   const [exportError, setExportError] = useState(null);
   const notifiedRef = useRef(false);
@@ -268,6 +531,10 @@ export default function VideoResult({ job, jobId }) {
 
   const scenes = result.scenes || [];
   const portraits = result.portraits || {};
+  // Only scenes whose clip was archived can be re-cut or spliced into.
+  const editableScenes = scenes.filter(
+    (scene) => scene.clip_index !== null && scene.clip_index !== undefined
+  );
   const videoSrc = resolveJobVideoUrl(result.video_url, jobId);
   const originalRatio = result.aspect_ratio || "16:9";
 
@@ -370,6 +637,39 @@ export default function VideoResult({ job, jobId }) {
       <div className="mb-5">
         <NextSteps jobId={jobId} videoUrl={result.video_url} />
       </div>
+
+      {/* Post-production. Only offered when this job archived its scene clips
+          — without them there is nothing to re-cut or splice into, and the
+          server would refuse the request anyway. */}
+      {editableScenes.length > 0 && (
+        <div className="glass rounded-2xl mb-5">
+          <button
+            onClick={() => setEditOpen(!editOpen)}
+            className="w-full flex items-center justify-between px-5 py-4"
+          >
+            <span className="text-sm font-medium flex items-center gap-2" style={{ color: "var(--mf-violet-soft)" }}>
+              <Scissors size={15} />
+              {tr(t, "result_edit_panel", "Kurgu ve düzeltmeler")}
+            </span>
+            {editOpen ? <ChevronUp size={15} style={{ color: "var(--mf-ink-3)" }} /> : <ChevronDown size={15} style={{ color: "var(--mf-ink-3)" }} />}
+          </button>
+          {editOpen && (
+            <div className="px-5 pb-5 flex flex-col gap-5 animate-fade-in">
+              <ContinuityEditPanel
+                jobId={jobId}
+                characters={Object.keys(portraits)}
+                hasLocation={!!result.location_plate}
+                onStarted={() => window.location.reload()}
+              />
+              <TimelinePanel
+                jobId={jobId}
+                scenes={editableScenes}
+                onStarted={() => window.location.reload()}
+              />
+            </div>
+          )}
+        </div>
+      )}
 
       {(scenes.length > 0 || Object.keys(portraits).length > 0) && (
         <div className="glass rounded-2xl">
