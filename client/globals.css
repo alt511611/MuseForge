@@ -148,23 +148,25 @@ body {
   box-shadow: var(--mf-lift);
 }
 
-/* Animated gradient border glow shown on focus-within, used alongside
-   .glass on the main idea form. */
+/* Gradient border glow shown on focus-within, used alongside .glass on the
+   main idea form.
+
+   The glow is a ring, not a fill. It used to be a full-bleed gradient
+   ::before sitting at z-index:-1 — but .glass sets backdrop-filter, which
+   makes the card its own stacking context, so the gradient painted *over*
+   the card's translucent background instead of behind it. The whole panel
+   turned lilac the moment an input took focus and every dim label on it
+   (the scene count, the field descriptions) washed out. A ring cannot cover
+   anything. */
 .border-glow {
   position: relative;
+  transition: border-color 0.3s, box-shadow 0.3s;
 }
-.border-glow::before {
-  content: "";
-  position: absolute;
-  inset: -1px;
-  background: linear-gradient(135deg, var(--mf-violet-deep), var(--mf-violet-soft), var(--mf-violet-deep));
-  border-radius: inherit;
-  z-index: -1;
-  opacity: 0;
-  transition: opacity 0.3s;
-}
-.border-glow:focus-within::before {
-  opacity: 1;
+.border-glow:focus-within {
+  border-color: rgba(139, 92, 246, 0.55);
+  box-shadow:
+    0 0 0 1px rgba(139, 92, 246, 0.55),
+    0 0 34px -10px rgba(139, 92, 246, 0.7);
 }
 
 /* ── Cinematic texture ───────────────────────────────────────────────────── */

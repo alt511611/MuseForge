@@ -101,7 +101,10 @@ def test_both_provider_paths_share_the_token_budget():
     muapi_call = inspect.getsource(ScreenwriterAgent.write_script)
     anthropic_call = inspect.getsource(ScreenwriterAgent._write_with_claude)
     assert "max_tokens=self.MAX_SCRIPT_TOKENS" in muapi_call
-    assert '"max_tokens": self.MAX_SCRIPT_TOKENS' in anthropic_call
+    # Keyword form since the Anthropic path moved from a raw httpx JSON body
+    # to the official SDK; the point of the test is that neither path carries
+    # its own budget.
+    assert "max_tokens=self.MAX_SCRIPT_TOKENS" in anthropic_call
 
 
 def test_storyboard_also_passes_its_budget_to_muapi():
@@ -288,7 +291,7 @@ async def test_direction_reaches_the_storyboard_agent(monkeypatch, tmp_path):
         return "https://fake.cdn/f.png"
 
     async def fake_vid(self, prompt, image_url, duration=5, aspect_ratio="16:9",
-                       plan="free", is_cancelled=None):
+                       plan="free", is_cancelled=None, shot_profile=None):
         return "https://fake.cdn/v.mp4"
 
     async def fake_dl(url, path):

@@ -6,6 +6,8 @@ import tD from "./t-d";
 import tExtra from "./t-extra";
 import tPipeline from "./t-pipeline";
 import tSections from "./t-sections";
+import tShowcase from "./t-showcase";
+import tLocation from "./t-location";
 
 export { LOCALES, LOCALE_CODES, DEFAULT_LOCALE };
 
@@ -19,7 +21,7 @@ function mergeLocales(...parts) {
   return out;
 }
 
-export const translations = mergeLocales(tA, tB, tC, tD, tExtra, tPipeline, tSections);
+export const translations = mergeLocales(tA, tB, tC, tD, tExtra, tPipeline, tSections, tShowcase, tLocation);
 
 /**
  * Lookup a key in the given locale, falling back to English then the key itself.

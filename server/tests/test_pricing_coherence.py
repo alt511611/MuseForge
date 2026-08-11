@@ -134,8 +134,58 @@ def test_pricing_page_shows_the_credits_the_code_grants():
 
 def test_pricing_page_shows_the_expected_prices():
     page = _pricing_page()
-    for price in list(PLAN_PRICES.values()) + list(PACK_PRICES.values()):
+    # Plans carry the undiscounted monthly figure; the card derives both the
+    # annual rate and the yearly total from it.
+    for price in PLAN_PRICES.values():
+        assert re.search(rf"monthly:\s*{price}\b", page), price
+    for price in PACK_PRICES.values():
         assert f'"${price}"' in page, price
+
+
+# --- annual billing -----------------------------------------------------
+
+
+def test_page_and_server_agree_on_the_annual_discount():
+    """The page quotes the discount; Stripe's annual Price is what actually
+    charges. The constant on each side is the only thing keeping the quote
+    and the charge in step."""
+    from stripe_integration import ANNUAL_DISCOUNT_PERCENT
+
+    assert ANNUAL_DISCOUNT_PERCENT == 10
+    assert re.search(
+        rf"ANNUAL_DISCOUNT_PERCENT\s*=\s*{ANNUAL_DISCOUNT_PERCENT}\b", _pricing_page()
+    )
+
+
+def test_annual_is_the_option_on_screen_first():
+    """The cheaper offer should be the one a visitor sees before touching
+    anything -- and the interval sent to checkout must match it."""
+    page = _pricing_page()
+    assert re.search(r'useState\("annual"\)', page)
+    assert "interval={interval}" in page
+
+
+def test_page_states_what_a_credit_buys():
+    """Competitors meter raw model compute, so their credit counts are an
+    order of magnitude larger for the same money. Without the seconds figure
+    on the page, "36 credits" vs "800 credits" is a comparison we lose on a
+    misunderstanding."""
+    page = _pricing_page()
+    assert re.search(rf"SECONDS_PER_CREDIT\s*=\s*{int(SECONDS_PER_CREDIT)}\b", page), (
+        "the pricing page must state the same seconds-per-credit the pipeline uses"
+    )
+
+
+def test_annual_totals_in_env_example_match_the_discount():
+    """Stripe's annual Prices are created by hand from these numbers."""
+    from stripe_integration import ANNUAL_DISCOUNT_PERCENT
+
+    path = os.path.join(os.path.dirname(__file__), "..", "..", ".env.example")
+    with open(path, encoding="utf-8") as f:
+        env = f.read()
+    for plan, monthly in PLAN_PRICES.items():
+        total = round(monthly * 12 * (1 - ANNUAL_DISCOUNT_PERCENT / 100))
+        assert f"${total}/yıl" in env, f"{plan}: expected ${total}/yıl in .env.example"
 
 
 def test_pricing_jsonld_mirrors_the_plan_table():

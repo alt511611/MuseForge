@@ -260,7 +260,7 @@ async def test_emotion_and_identity_reach_the_image_model(monkeypatch, tmp_path)
         return "https://fake.cdn/frame.png"
 
     async def fake_video(self, prompt, image_url, duration=5, aspect_ratio="16:9",
-                         plan="free", is_cancelled=None):
+                         plan="free", is_cancelled=None, shot_profile=None):
         return "https://fake.cdn/clip.mp4"
 
     async def fake_download(url, path):

@@ -1,8 +1,10 @@
 "use client";
 
 import Link from "./LocaleLink";
-import { Check, ArrowRight, Film } from "lucide-react";
+import { Check, ArrowRight } from "lucide-react";
 import { useLanguage } from "../contexts/LanguageContext";
+import Reel from "./Reel";
+import { reelForSegment } from "../lib/showcase";
 
 /**
  * Shared layout for all /solutions/* segment pages.
@@ -14,7 +16,12 @@ import { useLanguage } from "../contexts/LanguageContext";
  *   badge       — small badge text above heading
  *   heading     — main h1 (can be JSX)
  *   subheading  — paragraph under h1
- *   useCases    — [{icon, title, desc}]
+ *   segment     — "creators" | "agencies" | "filmmakers" | "education";
+ *                 picks which of the three site reels this page embeds
+ *   useCases    — [{icon, title, desc, sample}] — `sample` is the one-line
+ *                 brief behind the use case, set as text rather than a video
+ *                 frame: four fake 16:9 boxes per page is four times the
+ *                 footage this site has
  *   differentiators — [{title, desc}]  (3-4 items)
  *   planCard    — { name, price, period, cta, ctaHref, highlight, credits, features }
  *   ctaBanner   — { title, desc, btnText, btnHref }
@@ -26,12 +33,14 @@ export default function SolutionPage({
   badge,
   heading,
   subheading,
+  segment,
   useCases = [],
   differentiators = [],
   planCard,
   ctaBanner,
 }) {
   const { t } = useLanguage();
+  const reel = segment ? reelForSegment(segment) : null;
   return (
     <main className="min-h-screen" style={{ backgroundColor: "var(--mf-stage)" }}>
       {/* Hero */}
@@ -54,6 +63,17 @@ export default function SolutionPage({
         </div>
       </div>
 
+      {/* One real reel per page, sitting where the hero hands off to the
+          content — the same three clips the landing page uses. */}
+      {reel && (
+        <section className="max-w-3xl mx-auto px-6 pb-4">
+          <p className="slate-label text-center mb-4">{t("sol_example_reel")}</p>
+          {/* A vertical clip at full column width would tower over the page,
+              so hold it to a phone-sized column. */}
+          <Reel reel={reel} className={reel.aspect === "9/16" ? "max-w-[280px] mx-auto" : ""} />
+        </section>
+      )}
+
       {/* Use case cards */}
       {useCases.length > 0 && (
         <section className="max-w-5xl mx-auto px-6 py-14">
@@ -68,19 +88,11 @@ export default function SolutionPage({
                 <h3 className="text-base font-bold mb-2" style={{ color: "var(--mf-ink)" }}>{title}</h3>
                 <p className="text-sm leading-relaxed" style={{ color: "var(--mf-ink-3)" }}>{desc}</p>
                 {sample && (
-                  <div className="mt-4 rounded-xl overflow-hidden aspect-video relative"
-                    style={{ backgroundColor: "var(--mf-panel)", border: "1px solid var(--mf-line-strong)" }}>
-                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
-                      <div className="w-12 h-12 rounded-full flex items-center justify-center"
-                        style={{ backgroundColor: `${accentColor}25`, border: `1px solid ${accentColor}40` }}>
-                        <Film size={20} style={{ color: accentColor }} />
-                      </div>
-                      <span className="text-xs px-2.5 py-1 rounded-full font-medium"
-                        style={{ backgroundColor: `${accentColor}20`, color: accentColor }}>
-                        {t("sol_example_output")}
-                      </span>
-                      <p className="text-xs text-center max-w-[180px]" style={{ color: "var(--mf-ink-4)" }}>{sample}</p>
-                    </div>
+                  /* The brief itself, quoted — it says more than an empty
+                     player frame pretending a video lives here. */
+                  <div className="mt-4 pl-3" style={{ borderLeft: `2px solid ${accentColor}55` }}>
+                    <p className="slate-label" style={{ fontSize: "9px" }}>{t("sol_example_output")}</p>
+                    <p className="text-xs leading-relaxed mt-1" style={{ color: "var(--mf-ink-2)" }}>{sample}</p>
                   </div>
                 )}
               </div>

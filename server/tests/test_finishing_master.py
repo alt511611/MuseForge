@@ -85,7 +85,7 @@ async def test_motion_prompt_reaches_the_video_model(monkeypatch, tmp_path):
         return "https://fake.cdn/f.png"
 
     async def fake_vid(self, prompt, image_url, duration=5, aspect_ratio="16:9",
-                       plan="free", is_cancelled=None):
+                       plan="free", is_cancelled=None, shot_profile=None):
         captured["prompt"] = prompt
         return "https://fake.cdn/v.mp4"
 

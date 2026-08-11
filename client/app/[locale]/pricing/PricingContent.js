@@ -88,6 +88,92 @@ function ManagePortalButton({ getAccessToken }) {
   );
 }
 
+// ── Billing interval ──────────────────────────────────────────────────────────
+
+/** Discount on annual. Must match the annual Stripe Prices; the page only
+ *  quotes it. Server side: stripe_integration.ANNUAL_DISCOUNT_PERCENT. */
+const ANNUAL_DISCOUNT_PERCENT = 10;
+
+/** What one credit buys, in seconds of finished film. Mirrors
+ *  server/interfaces/second_budget.SECONDS_PER_CREDIT — the single number that
+ *  makes our credit comparable to a competitor's metered one. */
+const SECONDS_PER_CREDIT = 8;
+
+/** Rate shown on the card. Annual is quoted PER MONTH because that is the
+ *  number buyers compare across products; the yearly total is spelled out
+ *  right underneath so the actual charge is never a surprise. */
+function monthlyRate(monthly, annual) {
+  if (!monthly) return 0;
+  return annual ? Math.round(monthly * (1 - ANNUAL_DISCOUNT_PERCENT / 100)) : monthly;
+}
+
+/** What the card is actually charged on an annual plan. Derived from the
+ *  undiscounted monthly price, NOT from the rounded monthly rate above —
+ *  rounding twice would quote a total that does not match Stripe's Price. */
+function annualTotal(monthly) {
+  return Math.round(monthly * 12 * (1 - ANNUAL_DISCOUNT_PERCENT / 100));
+}
+
+/** t() returns the key itself for a missing string, so `t(key) || fallback`
+ *  never reaches its fallback. Compare against the key instead. */
+function tr(t, key, fallback) {
+  const value = t(key);
+  return value === key ? fallback : value;
+}
+
+function IntervalToggle({ interval, onChange }) {
+  const { t } = useLanguage();
+  const options = [
+    {
+      id: "annual",
+      label: tr(t, "pricing_annual", "Yıllık"),
+      badge: `%${ANNUAL_DISCOUNT_PERCENT} ${tr(t, "pricing_off", "indirim")}`,
+    },
+    { id: "monthly", label: tr(t, "pricing_monthly", "Aylık"), badge: null },
+  ];
+
+  return (
+    <div
+      className="inline-flex items-center p-1 rounded-full mb-8"
+      style={{ backgroundColor: "var(--mf-panel)", border: "1px solid var(--mf-line-strong)" }}
+      role="group"
+      aria-label={tr(t, "pricing_interval", "Faturalama dönemi")}
+    >
+      {options.map((option) => {
+        const active = interval === option.id;
+        return (
+          <button
+            key={option.id}
+            type="button"
+            onClick={() => onChange(option.id)}
+            aria-pressed={active}
+            className="inline-flex items-center gap-2 px-5 py-2 rounded-full text-sm font-medium transition-all"
+            style={{
+              background: active
+                ? "linear-gradient(135deg,var(--mf-violet),var(--mf-violet-deep))"
+                : "transparent",
+              color: active ? "#fff" : "var(--mf-ink-3)",
+            }}
+          >
+            {option.label}
+            {option.badge && (
+              <span
+                className="text-[10px] px-1.5 py-0.5 rounded-full font-semibold"
+                style={{
+                  backgroundColor: active ? "rgba(255,255,255,0.18)" : "rgba(52,211,153,0.15)",
+                  color: active ? "#fff" : "var(--mf-ok)",
+                }}
+              >
+                {option.badge}
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 // ── Main content ──────────────────────────────────────────────────────────────
 function PricingContent() {
   const { user, getAccessToken } = useAuth();
@@ -97,6 +183,9 @@ function PricingContent() {
   const creditsBought = searchParams.get("credits");
   const successPlan = searchParams.get("plan");
   const [confetti, setConfetti] = useState(false);
+  // Annual first: it is the cheaper offer, so it is the one that should be on
+  // screen before anyone touches anything.
+  const [interval, setInterval] = useState("annual");
 
   useEffect(() => {
     if (success) { setConfetti(true); setTimeout(() => setConfetti(false), 5000); }
@@ -109,12 +198,14 @@ function PricingContent() {
     { icon: BookOpen,  label: t("sol_education"),  href: "/solutions/education" },
   ];
 
+  const annual = interval === "annual";
+
   const PLANS = [
     {
       id: "free",
       name: t("plan_free_name"),
       icon: Film,
-      price: "$0",
+      monthly: 0,
       description: t("plan_free_desc"),
       forWho: t("plan_free_forwho"),
       segHref: "/",
@@ -129,7 +220,7 @@ function PricingContent() {
       id: "creator",
       name: t("plan_creator_name"),
       icon: Zap,
-      price: "$59",
+      monthly: 59,
       description: t("plan_creator_desc"),
       forWho: "Content creators, small businesses & educators",
       segHref: "/solutions/creators",
@@ -144,7 +235,7 @@ function PricingContent() {
       id: "pro",
       name: t("plan_pro_name"),
       icon: Crown,
-      price: "$129",
+      monthly: 129,
       description: t("plan_pro_desc"),
       forWho: "Agencies & corporate communications teams",
       segHref: "/solutions/agencies",
@@ -221,7 +312,11 @@ function PricingContent() {
             {t("pricing_header")}
           </h1>
           <p className="text-base md:text-lg max-w-xl mx-auto mb-3" style={{ color: "var(--mf-ink-2)" }}>{t("pricing_sub")}</p>
-          <p className="slate-label mb-8" style={{ color: "var(--mf-gold)" }}>{t("pricing_cancel_anytime")}</p>
+          <p className="slate-label mb-6" style={{ color: "var(--mf-gold)" }}>{t("pricing_cancel_anytime")}</p>
+
+          <div>
+            <IntervalToggle interval={interval} onChange={setInterval} />
+          </div>
 
           {/* Segment links */}
           <div className="flex flex-wrap justify-center gap-2">
@@ -276,12 +371,33 @@ function PricingContent() {
                 </Link>
 
                 <div className="mb-6">
-                  <span className="display text-4xl" style={{ color: "var(--mf-ink)" }}>{plan.price}</span>
+                  <span className="display text-4xl" style={{ color: "var(--mf-ink)" }}>
+                    {plan.isEnterprise ? t("pricing_enterprise_price") : `$${monthlyRate(plan.monthly, annual)}`}
+                  </span>
                   {!plan.isEnterprise && <span className="text-sm ml-1.5" style={{ color: "var(--mf-ink-3)" }}>{t("plan_period")}</span>}
+                  {/* Annual is quoted as a monthly rate with the real charge
+                      spelled out underneath: the number people compare is the
+                      monthly one, and the number their card is charged must
+                      not be a surprise. */}
+                  {!plan.isEnterprise && plan.monthly > 0 && (
+                    <p className="text-xs mt-1.5" style={{ color: annual ? "var(--mf-gold)" : "var(--mf-ink-4)" }}>
+                      {annual
+                        ? tr(t, "pricing_billed_yearly", "yılda ${total} olarak faturalanır")
+                            .replace("{total}", annualTotal(plan.monthly))
+                        : tr(t, "pricing_billed_monthly", "aylık faturalanır · yıllıkta %{off} indirim")
+                            .replace("{off}", String(ANNUAL_DISCOUNT_PERCENT))}
+                    </p>
+                  )}
                   {plan.credits && (
                     <p className="slate-label mt-2 flex items-center gap-1.5" style={{ color: "var(--mf-violet-soft)" }}>
                       <Sparkles size={10} />
                       {plan.credits} credits / mo
+                    </p>
+                  )}
+                  {plan.credits && (
+                    <p className="text-xs mt-1" style={{ color: "var(--mf-ink-4)" }}>
+                      {tr(t, "pricing_credits_as_seconds", "≈ {seconds} sn bitmiş film / ay")
+                        .replace("{seconds}", String(plan.credits * SECONDS_PER_CREDIT))}
                     </p>
                   )}
                 </div>
@@ -314,6 +430,7 @@ function PricingContent() {
                 ) : (
                   <CheckoutButton
                     plan={plan.id}
+                    interval={interval}
                     className={`w-full py-3 rounded-xl text-sm font-semibold ${plan.highlight ? "mf-btn-primary" : "mf-btn-ghost"}`}
                   >
                     {plan.cta}
@@ -322,6 +439,54 @@ function PricingContent() {
               </div>
             );
           })}
+        </div>
+
+        {/* What a credit actually buys.
+            Competitors meter raw model compute, so their credit counts are an
+            order of magnitude larger for the same money. Without this block a
+            visitor compares "36 credits" against "800 credits" and draws the
+            obvious, wrong conclusion. */}
+        <div className="mf-card p-8 mb-16" style={{ borderColor: "rgba(139,92,246,0.2)" }}>
+          <h2 className="text-xl font-bold flex items-center gap-2 mb-2" style={{ color: "var(--mf-ink)" }}>
+            <Sparkles size={18} style={{ color: "var(--mf-violet)" }} />
+            {tr(t, "pricing_credit_meaning_title", "1 kredi ne satın alır?")}
+          </h2>
+          <p className="text-sm mb-6" style={{ color: "var(--mf-ink-3)" }}>
+            {tr(
+              t,
+              "pricing_credit_meaning_sub",
+              "Bizim kredimiz ham model hesabı değil, bitmiş bir sahne. Senaryo, storyboard, karakter kilidi, kare üretimi, video, kurgu ve mastering dahil."
+            )}
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            {[
+              {
+                head: `${SECONDS_PER_CREDIT} ${tr(t, "pricing_credit_seconds", "saniye")}`,
+                body: tr(t, "pricing_credit_seconds_desc", "kredi başına bitmiş, izlenebilir film"),
+              },
+              {
+                head: tr(t, "pricing_credit_included_head", "Her şey dahil"),
+                body: tr(
+                  t,
+                  "pricing_credit_included_desc",
+                  "Senaryo, storyboard, karakter tutarlılığı, renk, müzik ve mastering ayrı ücretlendirilmez"
+                ),
+              },
+              {
+                head: tr(t, "pricing_credit_free_head", "Kurgu ücretsiz"),
+                body: tr(
+                  t,
+                  "pricing_credit_free_desc",
+                  "Sahne sıralama, kırpma ve çıkarma kredi harcamaz — klipler zaten sizin"
+                ),
+              },
+            ].map((item) => (
+              <div key={item.head} className="p-4 rounded-xl" style={{ backgroundColor: "var(--mf-bg)", border: "1px solid var(--mf-line)" }}>
+                <p className="display text-2xl" style={{ color: "var(--mf-violet-soft)" }}>{item.head}</p>
+                <p className="text-xs mt-1.5 leading-relaxed" style={{ color: "var(--mf-ink-3)" }}>{item.body}</p>
+              </div>
+            ))}
+          </div>
         </div>
 
         {/* Credit Packages strip */}
@@ -351,6 +516,12 @@ function PricingContent() {
                   <p className="slate-label" style={{ fontSize: "10px" }}>{pkg.label}</p>
                   <p className="display text-2xl mt-1.5" style={{ color: pkg.highlight ? "var(--mf-violet-soft)" : "var(--mf-ink)" }}>{pkg.price}</p>
                   <p className="text-xs mt-1" style={{ color: "var(--mf-ink-4)" }}>${(parseFloat(pkg.price.replace("$","")) / pkg.credits).toFixed(2)}/credit</p>
+                  {/* Packs were bought outright, so they get a year — unlike
+                      the monthly allowance, which is rented and lapses with
+                      the month. Server side: PACK_CREDIT_VALIDITY_DAYS. */}
+                  <p className="text-[11px] mt-1" style={{ color: "var(--mf-ok)" }}>
+                    {tr(t, "pricing_pack_validity", "12 ay geçerli")}
+                  </p>
                 </div>
                 <BuyCreditsButton
                   pkg={pkg.key}

@@ -37,6 +37,7 @@ export default function FilmmakersPage({ params: { locale } }) {
       badge="Independent Filmmakers"
       heading={<><span className="gradient-text">Previsualize Any Scene</span><br /><span style={{ color: "var(--mf-ink)" }}>Before You Shoot It</span></>}
       subheading="Use MuseForge as your pre-production previsualization engine — generate shot-accurate storyboards and animatic-quality frame sequences without hiring a storyboard artist."
+      segment="filmmakers"
       useCases={[
         {
           icon: <Eye size={20} style={{ color: "#4f46e5" }} />,

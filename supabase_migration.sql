@@ -307,8 +307,14 @@ create policy "users_read_own_lots"
 grant select on public.credit_lots to authenticated;
 grant all on public.credit_lots to service_role;
 
--- Default validity for a grant. Changing this affects only NEW grants -- lots
--- already issued keep the expiry they were sold with.
+-- Default validity for a grant, used only when the caller passes no p_days.
+-- It is the MONTHLY ALLOWANCE window: an allowance is rented for the month and
+-- lapses with it, which is what stops it being hoarded across renewals.
+-- Purchased packs and prepaid annual allowances are granted with an explicit
+-- p_days of 365 (see server/stripe_integration.py) -- money already taken does
+-- not get a 30-day fuse.
+-- Changing this affects only NEW grants; lots already issued keep the expiry
+-- they were sold with.
 create or replace function public.credit_validity_days()
 returns int language sql immutable as $$ select 30 $$;
 

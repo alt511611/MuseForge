@@ -19,7 +19,7 @@ def _wire_common_mocks(monkeypatch, generate_image_with_reference):
             StoryboardShot(idx=0, visual_desc="Maria stands by the window", motion_desc="Maria turns")
         ]
 
-    async def fake_generate_video(self, prompt, image_url, duration, aspect_ratio="16:9", plan="free", is_cancelled=None):
+    async def fake_generate_video(self, prompt, image_url, duration, aspect_ratio="16:9", plan="free", is_cancelled=None, shot_profile=None):
         return "https://fake.cdn/clip.mp4"
 
     async def fake_download(url, path):

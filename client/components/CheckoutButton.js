@@ -8,7 +8,7 @@ import { API_BASE } from "../lib/apiBase";
 import { useLanguage } from "../contexts/LanguageContext";
 import { friendlyError } from "../utils/errorMessages";
 
-export default function CheckoutButton({ plan, children, className = "", style = {} }) {
+export default function CheckoutButton({ plan, interval = "annual", children, className = "", style = {} }) {
   const { user, getAccessToken } = useAuth();
   const { t, localeHref } = useLanguage();
   const router = useRouter();
@@ -36,6 +36,10 @@ export default function CheckoutButton({ plan, children, className = "", style =
         },
         body: JSON.stringify({
           plan,
+          // Sent explicitly rather than left to the server default, so the
+          // cycle the customer is charged on is always the one the toggle was
+          // showing when they clicked.
+          interval,
           success_url: `${origin}/pricing?success=1&plan=${plan}`,
           cancel_url: `${origin}/pricing?cancelled=1`,
         }),

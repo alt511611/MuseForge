@@ -90,9 +90,12 @@ class FalAIReferenceVideoGenerator:
         aspect_ratio: str = "16:9",
         plan: str = "free",
         is_cancelled: Optional[Callable[[], bool]] = None,
+        shot_profile: Optional[str] = None,
     ) -> str:
         # plan kept for signature parity; this endpoint has no HD/standard mode.
+        # shot_profile likewise: MuAPI-only routing (tools/video_model_router).
         _ = plan
+        _ = shot_profile
         if self.demo:
             return DEMO_VIDEO_URL
 

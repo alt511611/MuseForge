@@ -71,6 +71,15 @@ def test_validity_is_thirty_days():
     assert si.CREDIT_VALIDITY_DAYS == 30
 
 
+def test_bought_credits_outlive_rented_ones():
+    """A pack is money already taken, not an allowance. Giving it the same
+    30-day fuse as the monthly allowance is the term customers discover at
+    renewal and leave over."""
+    assert si.PACK_CREDIT_VALIDITY_DAYS == 365
+    assert si.PACK_CREDIT_VALIDITY_DAYS > si.CREDIT_VALIDITY_DAYS
+    assert si.ANNUAL_CREDIT_VALIDITY_DAYS == 365
+
+
 # ── grants land immediately, with an expiry attached ────────────────────────
 
 
@@ -119,18 +128,21 @@ def _install_fake_client(monkeypatch):
 @pytest.mark.asyncio
 async def test_a_purchase_is_granted_as_an_expiring_lot(monkeypatch):
     """'Hemen tanımlansın': the pack is spendable as soon as the webhook
-    returns, and it carries the 30-day expiry with it."""
+    returns, and it carries an expiry with it."""
     client = _install_fake_client(monkeypatch)
 
     await si._add_credits_to_profile(
-        user_id="user-1", credits_delta=12, reason="credit_purchase"
+        user_id="user-1",
+        credits_delta=12,
+        reason="credit_purchase",
+        validity_days=si.PACK_CREDIT_VALIDITY_DAYS,
     )
 
     grants = [body for url, body in client.posts if url.endswith("/rpc/grant_credits")]
     assert len(grants) == 1, client.posts
     assert grants[0]["p_amount"] == 12
     assert grants[0]["p_reason"] == "credit_purchase"
-    assert grants[0]["p_days"] == si.CREDIT_VALIDITY_DAYS
+    assert grants[0]["p_days"] == si.PACK_CREDIT_VALIDITY_DAYS
 
 
 @pytest.mark.asyncio

@@ -38,7 +38,9 @@ from jobs import (
     job_store,
     run_continue_from_script_job,
     run_generation_job,
+    run_global_edit_job,
     run_regenerate_scene_job,
+    run_timeline_edit_job,
 )
 
 load_dotenv()
@@ -327,6 +329,30 @@ class RegenerateSceneRequest(BaseModel):
     # Why the take was rejected ("too dark", "show his hands"). Optional, but
     # it is what turns a retake into a direction rather than a re-roll.
     director_note: str = Field(default="", max_length=500)
+
+
+class GlobalEditRequest(BaseModel):
+    # What to change, in the user's own words ("put her in a red coat").
+    instruction: str = Field(..., min_length=3, max_length=300)
+    # Which continuity lock it applies to: a character's name, or "location".
+    target: str = Field(..., min_length=1, max_length=100)
+    # Optional narrowing. Left empty, the server works out every scene the
+    # target actually appears in — which is the point of a *global* edit.
+    scene_indices: List[int] = Field(default_factory=list, max_length=24)
+
+
+class TimelineEntry(BaseModel):
+    scene_index: int = Field(..., ge=0, le=23)
+    # Seconds to shave off the head/tail of this clip. Capped well below any
+    # clip's runtime; the pipeline additionally refuses to trim a shot to
+    # nothing (see MIN_TRIMMED_SECONDS).
+    trim_start: float = Field(default=0.0, ge=0, le=14)
+    trim_end: float = Field(default=0.0, ge=0, le=14)
+
+
+class TimelineEditRequest(BaseModel):
+    # The new cut, in order. Scenes left out are dropped from it.
+    timeline: List[TimelineEntry] = Field(..., min_length=1, max_length=24)
 
 
 class EstimateRequest(BaseModel):
@@ -1131,6 +1157,148 @@ async def regenerate_scene(
     return {"job_id": job.id, "scene_index": scene_index, "status": JobStatus.RUNNING.value}
 
 
+@app.post("/api/jobs/{job_id}/global-edit")
+async def global_edit(
+    job_id: str,
+    req: GlobalEditRequest,
+    background_tasks: BackgroundTasks,
+    current_user: Optional[AuthUser] = Depends(get_optional_user),
+):
+    """Change one continuity fact — a costume, a set — everywhere it appears.
+
+    Costs one scene credit per scene actually re-rendered, which is why the
+    affected scenes are worked out HERE rather than inside the background
+    task: the customer is told the price, and charged it, before any
+    generation starts.
+    """
+    from pipelines.idea2video import Idea2VideoPipeline
+
+    job = job_store.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.user_id and (not current_user or job.user_id != current_user.user_id):
+        if not (current_user and current_user.is_admin):
+            raise HTTPException(status_code=403, detail="Access denied")
+
+    if job.status != JobStatus.COMPLETED or not job.result:
+        raise HTTPException(status_code=400, detail="Job is not completed")
+
+    result = job.result or {}
+    is_location = req.target.strip().lower() in ("location", "set", "setting")
+    if is_location:
+        if not result.get("location_plate"):
+            raise HTTPException(
+                status_code=400,
+                detail="This video has no locked set to edit.",
+            )
+        default_scenes = [int(s["index"]) for s in (result.get("scenes") or [])]
+    else:
+        portraits = result.get("portraits") or {}
+        if not any(n.strip().lower() == req.target.strip().lower() for n in portraits):
+            raise HTTPException(
+                status_code=404,
+                detail=f"There is no character called {req.target!r} in this video.",
+            )
+        default_scenes = Idea2VideoPipeline(api_key="", demo=True).scenes_featuring(
+            result, req.target
+        )
+
+    known = {int(s["index"]) for s in (result.get("scenes") or [])}
+    affected = sorted(set(req.scene_indices) & known) if req.scene_indices else default_scenes
+    if not affected:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{req.target} does not appear in any scene of this video.",
+        )
+
+    demo = job.demo or _is_demo()
+    credit_cost = len(affected) * SCENE_RETAKE_CREDIT_COST
+    charged = 0
+    if current_user and not demo and job.user_id:
+        ok = await _deduct_credits(
+            current_user.user_id, credit_cost, "global_edit", job_id=job.id
+        )
+        if not ok:
+            raise HTTPException(
+                status_code=402,
+                detail=(
+                    f"Insufficient credits. This edit touches {len(affected)} "
+                    f"scene(s) and costs {credit_cost} credits."
+                ),
+            )
+        charged = credit_cost
+
+    api_key = os.environ.get("MUAPI_KEY", "")
+    background_tasks.add_task(
+        run_global_edit_job,
+        job,
+        api_key,
+        req.instruction,
+        req.target,
+        affected,
+        charged,
+    )
+    return {
+        "job_id": job.id,
+        "scene_indices": affected,
+        "credits_charged": charged,
+        "status": JobStatus.RUNNING.value,
+    }
+
+
+@app.post("/api/jobs/{job_id}/timeline")
+async def timeline_edit(
+    job_id: str,
+    req: TimelineEditRequest,
+    background_tasks: BackgroundTasks,
+    current_user: Optional[AuthUser] = Depends(get_optional_user),
+):
+    """Re-cut a finished video: reorder, trim, drop scenes. Free.
+
+    Nothing here calls a generation model — every clip already exists and was
+    already paid for — so this deliberately takes no credits at all.
+    """
+    job = job_store.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.user_id and (not current_user or job.user_id != current_user.user_id):
+        if not (current_user and current_user.is_admin):
+            raise HTTPException(status_code=403, detail="Access denied")
+
+    if job.status != JobStatus.COMPLETED or not job.result:
+        raise HTTPException(status_code=400, detail="Job is not completed")
+
+    known = {int(s["index"]) for s in ((job.result or {}).get("scenes") or [])}
+    requested = [entry.scene_index for entry in req.timeline]
+    unknown = [i + 1 for i in requested if i not in known]
+    if unknown:
+        raise HTTPException(
+            status_code=404, detail=f"Scene {unknown[0]} is not part of this video."
+        )
+    # A scene used twice would need its clip in two places at once with two
+    # different trims, and its dialogue would play twice over one voice track.
+    if len(set(requested)) != len(requested):
+        raise HTTPException(
+            status_code=400, detail="Each scene can appear only once in a cut."
+        )
+
+    api_key = os.environ.get("MUAPI_KEY", "")
+    background_tasks.add_task(
+        run_timeline_edit_job,
+        job,
+        api_key,
+        [entry.model_dump() for entry in req.timeline],
+    )
+    return {
+        "job_id": job.id,
+        "scene_count": len(req.timeline),
+        "credits_charged": 0,
+        "status": JobStatus.RUNNING.value,
+    }
+
+
 @app.get("/api/jobs/{job_id}/stream")
 async def stream_job(job_id: str):
     job = job_store.get(job_id)
@@ -1429,7 +1597,7 @@ async def get_credits(current_user: AuthUser = Depends(get_current_user)):
     """
     from datetime import datetime, timezone
 
-    from stripe_integration import CREDIT_VALIDITY_DAYS
+    from stripe_integration import CREDIT_VALIDITY_DAYS, PACK_CREDIT_VALIDITY_DAYS
 
     credits = await _get_user_credits(current_user.user_id)
     ledger: list = []
@@ -1473,7 +1641,12 @@ async def get_credits(current_user: AuthUser = Depends(get_current_user)):
         "credits": credits,
         "ledger": ledger,
         "expiring": expiring,
+        # Two windows now, because a rented monthly allowance and a pack the
+        # customer bought outright are not the same promise. Each lot carries
+        # its own expires_at, so the UI should prefer `expiring` over either
+        # number; these are for copy like "packs last a year".
         "validity_days": CREDIT_VALIDITY_DAYS,
+        "pack_validity_days": PACK_CREDIT_VALIDITY_DAYS,
     }
 
 
@@ -1483,6 +1656,10 @@ class CheckoutRequest(BaseModel):
     plan: str
     success_url: str
     cancel_url: str
+    # Annual by default: it is the offer the pricing page leads with, so a
+    # client that predates the toggle (or forgets the field) sends the customer
+    # to the cheaper of the two rather than quietly upselling them to monthly.
+    interval: str = Field(default="annual", pattern=r"^(annual|monthly)$")
 
 
 class PortalRequest(BaseModel):
@@ -1496,11 +1673,14 @@ async def create_checkout_session(
 ):
     from stripe_integration import create_checkout_session as _create, get_price_id
 
-    price_id = get_price_id(req.plan)
+    price_id = get_price_id(req.plan, req.interval)
     if not price_id:
         raise HTTPException(
             status_code=400,
-            detail=f"No Stripe price configured for plan '{req.plan}'.",
+            detail=(
+                f"No Stripe price configured for plan '{req.plan}' "
+                f"({req.interval} billing)."
+            ),
         )
     try:
         url = await _create(

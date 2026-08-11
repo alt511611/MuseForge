@@ -37,6 +37,7 @@ export default function AgenciesPage({ params: { locale } }) {
       badge="Ad Agencies & Corporate Comms"
       heading={<><span className="gradient-text">Pitch-Ready Video,</span><br /><span style={{ color: "var(--mf-ink)" }}>Generated in Minutes</span></>}
       subheading="From brand brief to cinematic storyboard — MuseForge's multi-agent pipeline handles scripting, visual design, and production so your team can focus on strategy."
+      segment="agencies"
       useCases={[
         {
           icon: <Megaphone size={20} style={{ color: "var(--mf-violet)" }} />,

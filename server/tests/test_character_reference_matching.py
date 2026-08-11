@@ -36,7 +36,7 @@ async def test_reference_uses_named_character_not_always_first(monkeypatch, tmp_
         captured_refs.append(None)
         return "https://fake.cdn/frame.png"
 
-    async def fake_generate_video(self, prompt, image_url, duration, aspect_ratio="16:9", plan="free", is_cancelled=None):
+    async def fake_generate_video(self, prompt, image_url, duration, aspect_ratio="16:9", plan="free", is_cancelled=None, shot_profile=None):
         return "https://fake.cdn/clip.mp4"
 
     async def fake_download(url, path):
@@ -97,7 +97,7 @@ async def test_reference_falls_back_to_first_character_when_no_name_matches(monk
         captured_refs.append(reference_url)
         return "https://fake.cdn/frame.png"
 
-    async def fake_generate_video(self, prompt, image_url, duration, aspect_ratio="16:9", plan="free", is_cancelled=None):
+    async def fake_generate_video(self, prompt, image_url, duration, aspect_ratio="16:9", plan="free", is_cancelled=None, shot_profile=None):
         return "https://fake.cdn/clip.mp4"
 
     async def fake_download(url, path):
