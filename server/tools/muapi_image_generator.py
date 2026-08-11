@@ -62,6 +62,42 @@ def resolve_dimensions(aspect_ratio: str) -> dict:
     return {"width": width, "height": height}
 
 
+#: MuAPI's documented bound on `positivePrompt`: a non-empty, non-whitespace
+#: string of 2..3000 characters. Violating it is a 400 raised at GENERATION
+#: time rather than on submit, so the job pays for the round trip and then
+#: dies with a provider error the user cannot act on.
+MAX_PROMPT_CHARS = 3000
+MIN_PROMPT_CHARS = 2
+
+
+def clamp_prompt(prompt: str) -> str:
+    """Enforce the provider's prompt contract at the last possible moment.
+
+    Callers are expected to build prompts that already fit (see
+    pipelines/script2video.fit_image_prompt, which drops whole clauses by
+    priority instead of cutting mid-sentence). This is the backstop for every
+    OTHER caller -- character portraits, retakes, repair passes -- so that no
+    code path can put a job in front of a 400 it could have prevented.
+    """
+    text = (prompt or "").strip()
+    if len(text) < MIN_PROMPT_CHARS:
+        # An empty prompt is a bug upstream, but failing the render on it
+        # helps nobody: name the problem and render something.
+        logger.error(
+            "Image prompt was empty or too short (%d chars) — substituting a "
+            "neutral prompt. Check the caller.", len(text),
+        )
+        return "a cinematic film still"
+    if len(text) > MAX_PROMPT_CHARS:
+        logger.warning(
+            "Image prompt is %d chars, over MuAPI's %d limit — truncating. "
+            "The caller should be trimming by priority instead.",
+            len(text), MAX_PROMPT_CHARS,
+        )
+        text = text[:MAX_PROMPT_CHARS].rsplit(" ", 1)[0]
+    return text
+
+
 def _demo_image_url(prompt: str, aspect_ratio: str) -> str:
     """Deterministic placeholder image so the pipeline works with no API key."""
     dims = ASPECT_RATIO_MAP.get(aspect_ratio, ASPECT_RATIO_MAP["16:9"])
@@ -97,7 +133,7 @@ class MuAPIImageGenerator:
         """flux-2-pro / flux-dev-image style payload (combined size string)."""
         dims = resolve_dimensions(aspect_ratio)
         payload = {
-            "prompt": prompt,
+            "prompt": clamp_prompt(prompt),
             "size": f"{dims['width']}*{dims['height']}",
             "num_inference_steps": 28,
             "seed": -1,
@@ -170,6 +206,10 @@ class MuAPIImageGenerator:
             return _demo_image_url(prompt + "|ref", aspect_ratio)
 
         endpoint = self.KONTEXT_ENDPOINT
+        # Reference-model payloads are built here rather than in
+        # _size_payload, so they need the same clamp -- this is the path a
+        # character-locked frame actually takes.
+        prompt = clamp_prompt(prompt)
         if "pulid" in endpoint.lower():
             # PuLID is identity-focused and uses a singular reference URL.
             payload = {
