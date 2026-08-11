@@ -120,7 +120,15 @@ Respond ONLY with valid JSON matching this schema:
     #: Anthropic fallback (as an earlier change did) leaves the primary path
     #: truncating its JSON mid-object -- which parses as failure and drops
     #: the whole script to the generic template, silently.
-    MAX_SCRIPT_TOKENS = 8192
+    #:
+    #: 8192 still truncated in production: a five-scene script carries
+    #: per-scene turn/subtext/staging plus per-character want/need/arc and
+    #: verbatim dialogue, and a response cut off mid-object is unparseable
+    #: JSON -- which surfaced to the user as "the script model is
+    #: unavailable" even though the model had answered fine. The Anthropic
+    #: path streams, so a larger budget costs nothing in wall-clock risk;
+    #: unused tokens are not billed.
+    MAX_SCRIPT_TOKENS = 16000
 
     def __init__(self, api_key: Optional[str] = None, demo: bool = False):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
@@ -219,74 +227,145 @@ Respond ONLY with valid JSON matching this schema:
         user_requirement: str,
         preset_characters: Optional[List[dict]] = None,
     ) -> DramaScript:
-        try:
-            import httpx
+        import anthropic
 
-            preset_block = ""
-            if preset_characters:
-                lines = [
-                    f"- {c.get('name')}: {c.get('static_features')}"
-                    for c in preset_characters
-                    if c.get("name") and c.get("static_features")
-                ]
-                if lines:
-                    preset_block = (
-                        "PRESET CHARACTERS (already exist — use directly, do not redefine):\n"
-                        + "\n".join(lines)
-                        + "\n"
-                    )
-            prompt = (
-                f"{preset_block}"
-                f"Idea: {idea}\nStyle: {style}\nScenes: {num_scenes}\n"
-                f"Additional requirements: {user_requirement or 'none'}"
-            )
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key": self.api_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
-                    },
-                    json={
-                        "model": "claude-sonnet-5",
-                        # A director-level script carries per-scene turn,
-                        # subtext, staging and per-character want/need/arc, so
-                        # 5 scenes no longer fit the old 2048 budget -- a
-                        # truncated response is unparseable JSON and silently
-                        # drops the whole script to the template fallback.
-                        "max_tokens": self.MAX_SCRIPT_TOKENS,
-                        "system": self.SYSTEM_PROMPT,
-                        "messages": [{"role": "user", "content": prompt}],
-                    },
+        preset_block = ""
+        if preset_characters:
+            lines = [
+                f"- {c.get('name')}: {c.get('static_features')}"
+                for c in preset_characters
+                if c.get("name") and c.get("static_features")
+            ]
+            if lines:
+                preset_block = (
+                    "PRESET CHARACTERS (already exist — use directly, do not redefine):\n"
+                    + "\n".join(lines)
+                    + "\n"
                 )
-                resp.raise_for_status()
-                content = resp.json()["content"][0]["text"]
-                data = self._parse_json(content)
-                return self._with_brief(DramaScript(**data), idea)
+        prompt = (
+            f"{preset_block}"
+            f"Idea: {idea}\nStyle: {style}\nScenes: {num_scenes}\n"
+            f"Additional requirements: {user_requirement or 'none'}"
+        )
+
+        # The official SDK, and streaming, both for the same reason: this used
+        # to be a raw httpx POST with a flat 60s timeout and no retries. A
+        # script this size takes most of a minute to generate, so a slow run
+        # hit the deadline and a busy upstream (429/529) failed on the first
+        # try -- and both surfaced to the user as "the script model is
+        # unavailable". Streaming has no such deadline, and the SDK retries
+        # 429/5xx with backoff on its own.
+        #
+        # Sonnet 5 runs adaptive thinking by default (Sonnet 4.6 did not when
+        # `thinking` was omitted), so `content[0]` is a thinking block and the
+        # script text is further down the list. The old code read
+        # `content[0]["text"]` and died with `KeyError: 'text'` on every
+        # single job -- see the type filter below, and never index the block
+        # list by position again. Thinking stays on: it measurably improves
+        # story structure, and `max_tokens` covers thinking plus text
+        # together, which the raised budget above accounts for.
+        client = anthropic.AsyncAnthropic(api_key=self.api_key, max_retries=2)
+        try:
+            async with client.messages.stream(
+                model="claude-sonnet-5",
+                max_tokens=self.MAX_SCRIPT_TOKENS,
+                system=self.SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+            ) as stream:
+                message = await stream.get_final_message()
+        except anthropic.APIStatusError as exc:
+            # The response body is where the API states the actual cause --
+            # an expired key, an exhausted quota, a model the key can't reach.
+            body = ""
+            try:
+                body = f" body={exc.response.text[:500]}"
+            except Exception:
+                pass
+            logger.error(
+                f"Anthropic screenwriter call failed: {type(exc).__name__}: "
+                f"{exc} | status={exc.status_code} type={exc.type}{body}"
+            )
+            raise ScriptGenerationFailed(self._failure_message(exc)) from exc
         except Exception as exc:
-            # This used to swallow the exception entirely, so a failing
-            # Anthropic key/model/quota looked identical to "no key
-            # configured" in the logs -- both just produced a generic
-            # template with no explanation. Surface the response body when
-            # there is one; that is where the API states the actual cause.
-            detail = ""
-            resp = getattr(exc, "response", None)
-            if resp is not None:
-                try:
-                    detail = f" | status={resp.status_code} body={resp.text[:500]}"
-                except Exception:
-                    pass
             logger.error(
                 f"Anthropic screenwriter call failed: "
-                f"{type(exc).__name__}: {exc}{detail}"
+                f"{type(exc).__name__}: {exc}"
             )
             # Deliberately NOT the template -- see write_script step 3.
             raise ScriptGenerationFailed(
-                "The script model is unavailable, so your idea could not be "
-                "turned into a script. No credits were spent — please try "
-                "again shortly."
+                "The script model could not be reached, so your idea could "
+                "not be turned into a script. No credits were spent — please "
+                "try again shortly."
             ) from exc
+
+        # A truncated response is not an outage: the model answered, the
+        # budget ran out mid-JSON. Saying "unavailable" here sent operators
+        # hunting for a dead API while the real fix was MAX_SCRIPT_TOKENS.
+        if message.stop_reason == "max_tokens":
+            logger.error(
+                "Anthropic screenwriter response hit max_tokens "
+                f"({self.MAX_SCRIPT_TOKENS}) and is truncated mid-JSON. "
+                f"Raise MAX_SCRIPT_TOKENS or lower the scene count "
+                f"(usage: {message.usage.output_tokens} output tokens)."
+            )
+            raise ScriptGenerationFailed(
+                "The script came back longer than the limit and was cut off. "
+                "No credits were spent — try again with fewer scenes."
+            )
+        if message.stop_reason == "refusal":
+            logger.error(
+                "Anthropic screenwriter declined the request: "
+                f"{getattr(message.stop_details, 'category', None)}"
+            )
+            raise ScriptGenerationFailed(
+                "This idea could not be turned into a script. No credits were "
+                "spent — please try rephrasing it."
+            )
+
+        text = next((b.text for b in message.content if b.type == "text"), "")
+        try:
+            data = self._parse_json(text)
+            return self._with_brief(DramaScript(**data), idea)
+        except Exception as exc:
+            # Include what came back: "No JSON found in response" on its own
+            # gives an operator nothing to act on.
+            logger.error(
+                f"Anthropic screenwriter response could not be parsed: "
+                f"{type(exc).__name__}: {exc} | stop_reason="
+                f"{message.stop_reason} | first 500 chars: {text[:500]!r}"
+            )
+            raise ScriptGenerationFailed(
+                "The script came back in a form we could not read. No credits "
+                "were spent — please try again shortly."
+            ) from exc
+
+    @staticmethod
+    def _failure_message(exc) -> str:
+        """Turn an API status error into something the user can act on.
+
+        Every one of these used to read "the script model is unavailable",
+        which is true of an outage and misleading of everything else: a
+        rate limit clears in a minute, and a bad key never clears at all
+        but tells the user to "try again shortly" forever.
+        """
+        status = getattr(exc, "status_code", None)
+        if status in (401, 403):
+            # An operator problem. Say so plainly rather than implying the
+            # user should retry into a wall.
+            return (
+                "The script service is not configured correctly, so nothing "
+                "was generated. No credits were spent — please contact support."
+            )
+        if status == 429:
+            return (
+                "The script service is rate limited right now. No credits "
+                "were spent — please wait a minute and try again."
+            )
+        return (
+            "The script model is unavailable, so your idea could not be "
+            "turned into a script. No credits were spent — please try "
+            "again shortly."
+        )
 
     def _parse_json(self, text: str) -> dict:
         match = re.search(r"\{[\s\S]*\}", text)

@@ -37,6 +37,7 @@ export default function CreatorsPage({ params: { locale } }) {
       badge="Content Creators & Solo Filmmakers"
       heading={<><span className="gradient-text">Your Entire Studio,</span><br /><span style={{ color: "var(--mf-ink)" }}>In One Prompt</span></>}
       subheading="Write an idea. MuseForge builds the script, designs the storyboard, generates every frame, and stitches a cinematic video — all in a few minutes."
+      segment="creators"
       useCases={[
         {
           icon: <Film size={20} style={{ color: "var(--mf-violet-deep)" }} />,

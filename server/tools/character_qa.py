@@ -77,50 +77,47 @@ async def verify_frame(
     )
 
     try:
-        import httpx
+        import anthropic
 
-        async with httpx.AsyncClient(timeout=45.0) as client:
-            resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": anthropic_api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": "claude-sonnet-5",
-                    "max_tokens": 256,
-                    "messages": [
+        client = anthropic.AsyncAnthropic(api_key=anthropic_api_key, max_retries=2)
+        message = await client.messages.create(
+            model="claude-sonnet-5",
+            # Thinking off, deliberately. This is a two-boolean visual check
+            # that runs once per generated frame, so latency and cost per
+            # call matter more than deliberation. It also has to be explicit:
+            # Sonnet 5 thinks by default, and since `max_tokens` covers
+            # thinking plus text, the old 256 left nothing for the answer.
+            thinking={"type": "disabled"},
+            max_tokens=512,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
                         {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "image",
-                                    "source": {
-                                        "type": "url",
-                                        "url": frame_url,
-                                    },
-                                },
-                                {"type": "text", "text": user_text},
-                            ],
-                        }
+                            "type": "image",
+                            "source": {"type": "url", "url": frame_url},
+                        },
+                        {"type": "text", "text": user_text},
                     ],
-                },
-            )
-            resp.raise_for_status()
-            text = resp.json()["content"][0]["text"]
-            match = re.search(r"\{[\s\S]*\}", text)
-            if not match:
-                return {"character_ok": True, "setting_ok": True, "issue": ""}
-            data = json.loads(match.group())
-            character_ok = bool(data.get("character_ok", True))
-            setting_ok = bool(data.get("setting_ok", True))
-            issue = _truncate_issue(data.get("issue", "")) if not (character_ok and setting_ok) else ""
-            return {
-                "character_ok": character_ok,
-                "setting_ok": setting_ok,
-                "issue": issue,
-            }
+                }
+            ],
+        )
+        # Select the text block by type. Reading content[0] blindly is what
+        # made this check die with `KeyError: 'text'` -- and because the QA
+        # fails open, it died silently and every frame passed unchecked.
+        text = next((b.text for b in message.content if b.type == "text"), "")
+        match = re.search(r"\{[\s\S]*\}", text)
+        if not match:
+            return {"character_ok": True, "setting_ok": True, "issue": ""}
+        data = json.loads(match.group())
+        character_ok = bool(data.get("character_ok", True))
+        setting_ok = bool(data.get("setting_ok", True))
+        issue = _truncate_issue(data.get("issue", "")) if not (character_ok and setting_ok) else ""
+        return {
+            "character_ok": character_ok,
+            "setting_ok": setting_ok,
+            "issue": issue,
+        }
     except Exception as exc:
         logger.warning("character/setting QA failed (fail-open): %s", exc)
         return {"character_ok": True, "setting_ok": True, "issue": ""}

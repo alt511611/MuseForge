@@ -10,6 +10,38 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
+def _qa_message(text):
+    """One text block, as `thinking: {"type": "disabled"}` returns.
+
+    These fixtures used to be raw `{"content": [{"type": "text", ...}]}`
+    dicts fed through a mocked httpx client — which is why they kept passing
+    while production died on `content[0]["text"]`: the mock never produced
+    the leading thinking block a real Sonnet 5 response carries. They now go
+    through the SDK client the code actually calls.
+    """
+    return SimpleNamespace(
+        content=[SimpleNamespace(type="text", text=text)],
+        stop_reason="end_turn",
+    )
+
+
+def _patch_qa_client(result):
+    """Patch anthropic.AsyncAnthropic; `result` is a message or an exception."""
+    import anthropic
+
+    async def fake_create(*args, **kwargs):
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            self.messages = SimpleNamespace(create=fake_create)
+
+    return patch.object(anthropic, "AsyncAnthropic", _FakeClient)
+
+
+
 def test_drama_script_setting_defaults_empty():
     from interfaces.character import DramaScript
 
@@ -91,12 +123,7 @@ async def test_verify_frame_fail_open_without_key():
 async def test_verify_frame_fail_open_on_http_error():
     from tools import character_qa as qa_mod
 
-    mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-    mock_client.post = AsyncMock(side_effect=RuntimeError("network down"))
-
-    with patch("httpx.AsyncClient", return_value=mock_client):
+    with _patch_qa_client(RuntimeError("network down")):
         result = await qa_mod.verify_frame(
             frame_url="https://example.com/f.jpg",
             expected_character_desc="woman",
@@ -110,26 +137,10 @@ async def test_verify_frame_fail_open_on_http_error():
 async def test_verify_frame_parses_both_flags():
     from tools import character_qa as qa_mod
 
-    resp = AsyncMock()
-    resp.raise_for_status = lambda: None
-    resp.json = lambda: {
-        "content": [
-            {
-                "type": "text",
-                "text": (
-                    '{"character_ok": false, "setting_ok": true, '
-                    '"issue": "the coat color doesn\'t match the reference"}'
-                ),
-            }
-        ]
-    }
-
-    mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-    mock_client.post = AsyncMock(return_value=resp)
-
-    with patch("httpx.AsyncClient", return_value=mock_client):
+    with _patch_qa_client(_qa_message(
+        '{"character_ok": false, "setting_ok": true, '
+        '"issue": "the coat color doesn\'t match the reference"}'
+    )):
         result = await qa_mod.verify_frame(
             frame_url="https://example.com/f.jpg",
             expected_character_desc="woman",
@@ -149,23 +160,9 @@ async def test_verify_frame_omits_issue_when_both_ok():
     model includes stray text in that field."""
     from tools import character_qa as qa_mod
 
-    resp = AsyncMock()
-    resp.raise_for_status = lambda: None
-    resp.json = lambda: {
-        "content": [
-            {
-                "type": "text",
-                "text": '{"character_ok": true, "setting_ok": true, "issue": "looks fine"}',
-            }
-        ]
-    }
-
-    mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-    mock_client.post = AsyncMock(return_value=resp)
-
-    with patch("httpx.AsyncClient", return_value=mock_client):
+    with _patch_qa_client(_qa_message(
+        '{"character_ok": true, "setting_ok": true, "issue": "looks fine"}'
+    )):
         result = await qa_mod.verify_frame(
             frame_url="https://example.com/f.jpg",
             expected_character_desc="woman",
@@ -182,25 +179,9 @@ async def test_verify_frame_truncates_overlong_issue():
     from tools import character_qa as qa_mod
 
     long_issue = " ".join(f"word{i}" for i in range(40))
-    resp = AsyncMock()
-    resp.raise_for_status = lambda: None
-    resp.json = lambda: {
-        "content": [
-            {
-                "type": "text",
-                "text": json.dumps(
-                    {"character_ok": False, "setting_ok": True, "issue": long_issue}
-                ),
-            }
-        ]
-    }
-
-    mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-    mock_client.post = AsyncMock(return_value=resp)
-
-    with patch("httpx.AsyncClient", return_value=mock_client):
+    with _patch_qa_client(_qa_message(
+        json.dumps({"character_ok": False, "setting_ok": True, "issue": long_issue})
+    )):
         result = await qa_mod.verify_frame(
             frame_url="https://example.com/f.jpg",
             expected_character_desc="woman",

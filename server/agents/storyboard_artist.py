@@ -79,7 +79,11 @@ Respond ONLY with valid JSON array containing a single shot object:
     #: One shot's JSON is small, but the director's notes make the RESPONSE
     #: longer than the old default allowed. Same lesson as the screenwriter:
     #: both provider paths must share the budget.
-    MAX_SHOT_TOKENS = 2048
+    #:
+    #: Raised for adaptive thinking: on Sonnet 5 it is on by default and
+    #: `max_tokens` caps thinking plus text together, so 2048 left the shot
+    #: list itself with whatever thinking did not use.
+    MAX_SHOT_TOKENS = 6000
 
     def __init__(self, api_key: Optional[str] = None, demo: bool = False):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
@@ -425,7 +429,7 @@ Respond ONLY with valid JSON array containing a single shot object:
         user_brief: str = "",
     ) -> List[StoryboardShot]:
         try:
-            import httpx
+            import anthropic
 
             char_desc = ", ".join(f"{c.name}: {c.static_features}" for c in characters if c.is_visible)
             setting_line = self._format_setting_line(
@@ -444,25 +448,46 @@ Respond ONLY with valid JSON array containing a single shot object:
                 f"Director guidance: {guidance}\nDefault lens: {default_lens}\n"
                 f"User requirements: {user_requirement or 'none'}"
             )
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key": self.api_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
-                    },
-                    json={
-                        "model": "claude-sonnet-5",
-                        "max_tokens": 2048,
-                        "system": self.SYSTEM_PROMPT,
-                        "messages": [{"role": "user", "content": prompt}],
-                    },
+            # Same migration as agents/screenwriter.py, for the same two
+            # reasons. (1) Sonnet 5 runs adaptive thinking by default, so
+            # `content[0]` is a thinking block -- the old
+            # `content[0]["text"]` raised `KeyError: 'text'` on every call
+            # and silently dropped every scene to the template shot list.
+            # Filter blocks by type; never index by position. (2) The old
+            # flat 60s httpx deadline with no retries turned a slow or busy
+            # upstream into the same silent template fallback.
+            client = anthropic.AsyncAnthropic(api_key=self.api_key, max_retries=2)
+            async with client.messages.stream(
+                model="claude-sonnet-5",
+                # Thinking and text share this budget, so the pre-thinking
+                # 2048 now leaves very little for the shot list itself.
+                max_tokens=self.MAX_SHOT_TOKENS,
+                system=self.SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+            ) as stream:
+                message = await stream.get_final_message()
+
+            if message.stop_reason == "max_tokens":
+                logger.error(
+                    "Anthropic storyboard response hit max_tokens "
+                    f"({self.MAX_SHOT_TOKENS}) and is truncated mid-JSON; "
+                    "falling back to the template shot list."
                 )
-                resp.raise_for_status()
-                content = resp.json()["content"][0]["text"]
-                data = json.loads(re.search(r"\[[\s\S]*\]", content).group())
-                return [StoryboardShot(**s) for s in data]
+                return []
+
+            content = next(
+                (b.text for b in message.content if b.type == "text"), ""
+            )
+            match = re.search(r"\[[\s\S]*\]", content)
+            if not match:
+                logger.error(
+                    "Anthropic storyboard response contained no shot list, "
+                    f"falling back to template | stop_reason="
+                    f"{message.stop_reason} | first 500 chars: {content[:500]!r}"
+                )
+                return []
+            data = json.loads(match.group())
+            return [StoryboardShot(**s) for s in data]
         except Exception as exc:
             detail = ""
             resp = getattr(exc, "response", None)

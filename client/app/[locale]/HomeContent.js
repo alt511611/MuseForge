@@ -6,6 +6,8 @@ import Link from "../../components/LocaleLink";
 import IdeaForm from "../../components/IdeaForm";
 import { API_BASE } from "../../lib/apiBase";
 import MiniDemo from "../../components/MiniDemo";
+import Reel from "../../components/Reel";
+import { HERO_REEL, SHOWCASE_REELS } from "../../lib/showcase";
 import ExitIntent from "../../components/ExitIntent";
 import StickyCtaButton from "../../components/StickyCtaButton";
 import {
@@ -15,31 +17,6 @@ import {
 import { useAuth } from "../../contexts/AuthContext";
 import { useLanguage } from "../../contexts/LanguageContext";
 import { friendlyError } from "../../utils/errorMessages";
-
-/* Example videos shown under the hero. Drop your own files in
-   `client/public/examples/` and set `src` (plus an optional `poster` image);
-   a slot with no `src` stays an empty graded frame rather than showing a
-   stand-in that pretends to be real output. */
-const SHOWCASE = [
-  {
-    label: "",
-    src: null,   // e.g. "/examples/example-1.mp4"
-    poster: null, // e.g. "/examples/example-1.jpg"
-    tone: "linear-gradient(160deg,#2a2140 0%,#6d28d9 60%,#07070b 100%)",
-  },
-  {
-    label: "",
-    src: null,
-    poster: null,
-    tone: "linear-gradient(160deg,#1e3a8a 0%,#8b5cf6 60%,#07070b 100%)",
-  },
-  {
-    label: "",
-    src: null,
-    poster: null,
-    tone: "linear-gradient(160deg,#7c2d12 0%,#e8b64c 60%,#07070b 100%)",
-  },
-];
 
 /* A section eyebrow styled like a film slate: "02 / GENRES". Numbering the
    sections gives the long page a sense of running order. */
@@ -281,45 +258,13 @@ export default function HomeContent() {
             </div>
           </div>
 
-          {/* ── Showcase: three slots for real example videos. ─────────────
-                 Fill in `src` (and optionally `poster`) in SHOWCASE above to
-                 turn a slot into a playing video; until then the slot renders
-                 as an empty graded frame — no claims, no placeholder assets. */}
-          <div className="mt-14 grid grid-cols-1 sm:grid-cols-3 gap-3 md:gap-4">
-            {SHOWCASE.map((f, i) => (
-              <div
-                key={i}
-                className="relative overflow-hidden rounded-xl vignette film-grain animate-rise"
-                style={{
-                  aspectRatio: "16/9",
-                  background: f.tone,
-                  border: "1px solid var(--mf-line)",
-                  animationDelay: `${0.12 * (i + 1)}s`,
-                }}
-              >
-                {f.src ? (
-                  <video
-                    className="absolute inset-0 w-full h-full object-cover"
-                    src={f.src}
-                    poster={f.poster || undefined}
-                    muted
-                    loop
-                    playsInline
-                    autoPlay
-                    preload="metadata"
-                    aria-label={f.label}
-                  />
-                ) : null}
-                {f.label ? (
-                  <div
-                    className="absolute inset-x-0 bottom-0 z-[3] flex items-center px-3 pb-3 pt-8"
-                    style={{ background: "linear-gradient(to top, rgba(7,7,11,0.85), transparent)" }}
-                  >
-                    <span className="text-[11px] font-semibold" style={{ color: "var(--mf-ink)" }}>{f.label}</span>
-                  </div>
-                ) : null}
-              </div>
-            ))}
+          {/* ── Hero reel ──────────────────────────────────────────────────
+                 One frame, held large, instead of a row of small slots: the
+                 page needs a single piece of real footage to open on, not
+                 three. Edit `client/lib/showcase.js` to publish it. */}
+          <div className="mt-14 max-w-4xl mx-auto animate-rise" style={{ animationDelay: "0.16s" }}>
+            <p className="slate-label text-center mb-4">{t("hero_reel_caption")}</p>
+            <Reel reel={HERO_REEL} priority showMeta />
           </div>
 
           {/* ── Pipeline rail ──────────────────────────────────────────────── */}
@@ -375,9 +320,23 @@ export default function HomeContent() {
         <MiniDemo onTryReal={(idea) => scrollToForm({ idea })} />
       </section>
 
+      {/* ── Example reels ────────────────────────────────────────────────
+             Two finished shorts — one landscape, one vertical — so the page
+             proves both output formats with the footage it already has. Any
+             more slots than this and the site starts begging for content it
+             does not have. */}
+      <section className="max-w-5xl mx-auto px-6 pb-20">
+        <SectionHead n={2} eyebrow={t("sec_showcase")} title={t("showcase_title")} sub={t("showcase_sub")} />
+        <div className="grid grid-cols-1 md:grid-cols-[1.55fr_1fr] gap-6 md:gap-8 items-start">
+          {SHOWCASE_REELS.map((reel) => (
+            <Reel key={reel.id} reel={reel} />
+          ))}
+        </div>
+      </section>
+
       {/* ── Genre templates ─────────────────────────────────────────────── */}
       <section className="max-w-6xl mx-auto px-6 pb-20">
-        <SectionHead n={2} eyebrow={t("sec_genres")} title={t("genres_title")} sub={t("genres_desc")} />
+        <SectionHead n={3} eyebrow={t("sec_genres")} title={t("genres_title")} sub={t("genres_desc")} />
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {GENRE_TEMPLATES.map((g) => (
             <button
@@ -428,7 +387,7 @@ export default function HomeContent() {
 
       {/* ── How it works ────────────────────────────────────────────────── */}
       <section className="max-w-5xl mx-auto px-6 pb-20">
-        <SectionHead n={3} eyebrow={t("sec_flow")} title={t("how_title")} />
+        <SectionHead n={4} eyebrow={t("sec_flow")} title={t("how_title")} />
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {HOW_IT_WORKS.map((step, i) => (
             <div key={step.title} className="mf-card mf-card-hover p-6">
@@ -452,7 +411,7 @@ export default function HomeContent() {
 
       {/* ── Feature showcase ────────────────────────────────────────────── */}
       <section className="max-w-5xl mx-auto px-6 pb-20">
-        <SectionHead n={4} eyebrow={t("sec_different")} title={t("feat_title")} />
+        <SectionHead n={5} eyebrow={t("sec_different")} title={t("feat_title")} />
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {FEATURES.map((f) => (
             <div key={f.title} className="mf-card mf-card-hover p-7 flex gap-5">
@@ -473,43 +432,33 @@ export default function HomeContent() {
 
       {/* ── Director Style Gallery ──────────────────────────────────────── */}
       <section className="max-w-5xl mx-auto px-6 pb-20">
-        <SectionHead n={5} eyebrow={t("sec_presets")} title={t("gallery_title")} sub={t("gallery_sub")} />
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+        <SectionHead n={6} eyebrow={t("sec_presets")} title={t("gallery_title")} sub={t("gallery_sub")} />
+        {/* Presets read as colour-grade swatches, not as five 9:16 frames.
+            A tall empty frame looks like a video that failed to load; a
+            swatch strip says "this is a look" and needs no footage. */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {DIRECTOR_STYLES.map(({ style, mood, color }) => (
             <button
               key={style}
               type="button"
-              className="group relative rounded-2xl overflow-hidden text-left vignette film-grain transition-transform duration-300 hover:scale-[1.03]"
-              style={{ border: "1px solid var(--mf-line)", backgroundColor: "var(--mf-bg)", aspectRatio: "9/16" }}
+              className="group mf-card mf-card-hover p-4 text-left flex items-center gap-4"
               onClick={() => scrollToForm({ director_style: style.toLowerCase().replace(/\s+/g, "_") })}
             >
-              {/* Two lights: a strong key from above and a rim from the lower
-                  edge, so each preset reads as a distinctly graded frame
-                  rather than five near-identical dark rectangles. */}
-              <div
-                className="absolute inset-0"
-                style={{ background: `radial-gradient(ellipse at 50% 22%, ${color}80 0%, ${color}1a 48%, #07070b 78%)` }}
+              <span
+                className="w-1.5 self-stretch rounded-full flex-shrink-0"
+                style={{ background: `linear-gradient(180deg, ${color}, ${color}22)` }}
+                aria-hidden="true"
               />
-              <div
-                className="absolute inset-0"
-                style={{ background: `radial-gradient(ellipse at 50% 100%, ${color}33 0%, transparent 55%)` }}
-              />
-              <div className="absolute inset-0 flex flex-col justify-end p-3 z-[3]">
-                <span
-                  className="slate-label mb-2 self-start px-2 py-0.5 rounded-full"
-                  style={{ fontSize: "9px", backgroundColor: `${color}1f`, color, border: `1px solid ${color}3d` }}
-                >
-                  {t("gallery_demo_label")}
-                </span>
-                <p className="text-xs font-bold leading-tight" style={{ color: "var(--mf-ink)" }}>{style}</p>
-                <p className="text-[10px] mt-0.5 leading-snug" style={{ color: "var(--mf-ink-3)" }}>{mood}</p>
-              </div>
-              <div className="absolute inset-0 z-[4] flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-300"
-                style={{ backgroundColor: "rgba(7,7,11,0.45)" }}>
-                <span className="mf-btn-primary px-3 py-1.5 rounded-full text-[11px] font-semibold">
-                  {t("sec_try_style")} →
-                </span>
-              </div>
+              <span className="flex-1 min-w-0">
+                <span className="block text-sm font-semibold" style={{ color: "var(--mf-ink)" }}>{style}</span>
+                <span className="block text-xs mt-0.5" style={{ color: "var(--mf-ink-3)" }}>{mood}</span>
+              </span>
+              <span
+                className="slate-label flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity duration-300"
+                style={{ fontSize: "9px", color }}
+              >
+                {t("sec_try_style")} →
+              </span>
             </button>
           ))}
         </div>
@@ -517,7 +466,7 @@ export default function HomeContent() {
 
       {/* ── Comparison Table ────────────────────────────────────────────── */}
       <section className="max-w-4xl mx-auto px-6 pb-20">
-        <SectionHead n={6} eyebrow={t("sec_compare")} title={t("compare_title")} sub={t("compare_sub")} />
+        <SectionHead n={7} eyebrow={t("sec_compare")} title={t("compare_title")} sub={t("compare_sub")} />
         <div className="mf-card overflow-hidden">
           <div
             className="grid grid-cols-3 px-6 py-4 border-b"
@@ -561,7 +510,7 @@ export default function HomeContent() {
 
       {/* ── Generation form ─────────────────────────────────────────────── */}
       <section ref={formRef} className="relative max-w-3xl mx-auto px-6 pb-20 scroll-mt-24">
-        <SectionHead n={7} eyebrow={t("sec_action")} title={t("form_title")} sub={t("form_sub")} />
+        <SectionHead n={8} eyebrow={t("sec_action")} title={t("form_title")} sub={t("form_sub")} />
 
         {creditsExhausted && (
           <div
@@ -593,7 +542,7 @@ export default function HomeContent() {
 
       {/* ── FAQ ──────────────────────────────────────────────────────────── */}
       <section className="max-w-2xl mx-auto px-6 pb-20">
-        <SectionHead n={8} eyebrow={t("sec_questions")} title={t("faq_title")} />
+        <SectionHead n={9} eyebrow={t("sec_questions")} title={t("faq_title")} />
         <div className="mf-card overflow-hidden">
           {FAQ.map(({ q, a }, i, arr) => (
             <details
