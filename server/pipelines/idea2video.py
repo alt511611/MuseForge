@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional
 from agents.screenwriter import ScreenwriterAgent, ScriptGenerationFailed
 from interfaces.character import CharacterInScene, DramaScript
 from interfaces.film_look import build_film_look_filters
+from interfaces.language import DEFAULT_LANGUAGE
 from interfaces.second_budget import billable_seconds, distribute_budget
 from interfaces.transitions import plan_transitions
 from pipelines.script2video import (
@@ -986,6 +987,8 @@ class Idea2VideoPipeline:
         across every scene.
         """
         portraits: Dict[str, str] = dict(character_portraits_override or {})
+
+        pending = []
         for char in characters:
             if not char.is_visible:
                 continue
@@ -993,6 +996,20 @@ class Idea2VideoPipeline:
                 # Already supplied by the user — skip AI generation for this one.
                 char.portrait_url = portraits[char.name]
                 continue
+            pending.append(char)
+        if not pending:
+            return portraits
+
+        # Portraits are independent of one another, and NOTHING starts until
+        # the last one lands: this runs before the location plate, which runs
+        # before the first scene. Generated serially, a four-hander spent four
+        # full image round trips of dead time before any scene work began.
+        # Bounded so a large cast does not arrive at the provider as one burst.
+        semaphore = asyncio.Semaphore(
+            max(1, int(os.environ.get("MUSEFORGE_PORTRAIT_CONCURRENCY", "3")))
+        )
+
+        async def _portrait(char) -> tuple:
             wardrobe = (getattr(char, "wardrobe", "") or "").strip()
             prompt = (
                 f"Character portrait, {style} style. "
@@ -1002,7 +1019,12 @@ class Idea2VideoPipeline:
                 f"{('Wearing ' + wardrobe + '. ') if wardrobe else ''}"
                 f"Front-facing, neutral expression, studio lighting, high detail."
             )
-            url = await self.image_gen.generate_image(prompt, aspect_ratio="1:1")
+            async with semaphore:
+                return char, await self.image_gen.generate_image(
+                    prompt, aspect_ratio="1:1"
+                )
+
+        for char, url in await asyncio.gather(*[_portrait(c) for c in pending]):
             portraits[char.name] = url
             char.portrait_url = url
         return portraits
@@ -1979,6 +2001,7 @@ class Idea2VideoPipeline:
         progress_callback: Optional[Callable] = None,
         is_cancelled: Optional[Callable[[], bool]] = None,
         preset_characters: Optional[List[Dict[str, Any]]] = None,
+        language: str = DEFAULT_LANGUAGE,
     ) -> DramaScript:
         """Phase A: screenwriting only — no portraits / frames / video."""
 
@@ -1998,6 +2021,7 @@ class Idea2VideoPipeline:
             num_scenes,
             user_requirement,
             preset_characters=preset_characters,
+            language=language,
         )
 
     async def continue_from_script(
@@ -2018,6 +2042,7 @@ class Idea2VideoPipeline:
         plan: str = "free",
         library_characters: Optional[List[Dict[str, Any]]] = None,
         location_image_override: Optional[str] = None,
+        language: str = DEFAULT_LANGUAGE,
     ) -> dict:
         """Phase B: everything after screenwriting (portraits → scenes → assemble)."""
         os.makedirs(working_dir, exist_ok=True)
@@ -2108,23 +2133,27 @@ class Idea2VideoPipeline:
                         )
                     )
 
+        # The cast lock and the SET lock are independent -- the plate is shot
+        # deliberately empty, so it needs no portrait -- but they used to be
+        # awaited one after the other, and no scene starts until both land.
+        # Run them together: on a job with a set and any cast at all this is
+        # a whole image round trip of dead time removed from every render.
+        #
+        # The plate is generated at the drama's own aspect ratio (unlike
+        # portraits, which are square) because it is a background reference,
+        # so its framing has to match the frames it will condition.
         _check_cancel()
-        await progress("portraits", "Locking character portraits for consistency", 10)
-        portraits = await self._lock_character_portraits(
-            characters, style, character_portraits_override=character_portraits_override
-        )
-
-        # Lock the SET the same way the cast is locked. Generated at the
-        # drama's own aspect ratio (unlike portraits, which are square) --
-        # this plate is a background reference, so its framing has to match
-        # the frames it will condition.
-        _check_cancel()
-        await progress("portraits", "Locking the set for consistency", 12)
-        location_plate = await self._lock_location_plate(
-            script,
-            style,
-            aspect_ratio=aspect_ratio,
-            location_image_override=location_image_override,
+        await progress("portraits", "Locking cast and set for consistency", 10)
+        portraits, location_plate = await asyncio.gather(
+            self._lock_character_portraits(
+                characters, style, character_portraits_override=character_portraits_override
+            ),
+            self._lock_location_plate(
+                script,
+                style,
+                aspect_ratio=aspect_ratio,
+                location_image_override=location_image_override,
+            ),
         )
 
         # Dynamic reference selection (adapted from ViMax's "previous
@@ -2313,7 +2342,9 @@ class Idea2VideoPipeline:
                 if voice_gen is not None and scene_dialogue_lines and assembled_scene_index is not None:
                     task = asyncio.create_task(
                         voice_gen.generate_scene_dialogue(
-                            scene_dialogue_lines, is_cancelled=is_cancelled
+                            scene_dialogue_lines,
+                            is_cancelled=is_cancelled,
+                            language=language,
                         )
                     )
                     dialogue_tasks.append((assembled_scene_index, idx, task))
@@ -2479,6 +2510,11 @@ class Idea2VideoPipeline:
             "director_style": director_style,
             "style": style,
             "aspect_ratio": aspect_ratio,
+            # Recorded rather than persisted on the job row: the drama's
+            # language is a property of what was MADE, and the result already
+            # survives the Supabase round-trip that a new jobs column would
+            # have needed a migration for.
+            "language": language,
             "demo": self.demo,
             "music_enabled": bool(music_url) if not self.demo else False,
             "dialogue_enabled": bool(dialogue_tracks) if not self.demo else False,
@@ -2510,6 +2546,7 @@ class Idea2VideoPipeline:
         plan: str = "free",
         preset_characters: Optional[List[Dict[str, Any]]] = None,
         location_image_override: Optional[str] = None,
+        language: str = DEFAULT_LANGUAGE,
     ) -> dict:
         """Full end-to-end run (script + production). Default path unchanged."""
         script = await self.write_script_only(
@@ -2520,6 +2557,7 @@ class Idea2VideoPipeline:
             progress_callback=progress_callback,
             is_cancelled=is_cancelled,
             preset_characters=preset_characters,
+            language=language,
         )
         return await self.continue_from_script(
             script=script,
@@ -2538,4 +2576,5 @@ class Idea2VideoPipeline:
             plan=plan,
             library_characters=preset_characters,
             location_image_override=location_image_override,
+            language=language,
         )

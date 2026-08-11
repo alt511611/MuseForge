@@ -81,7 +81,7 @@ async def test_pipeline_invariants(monkeypatch):
         storyboard_calls.append(director_style)
         return [FakeShot(0)]
 
-    async def fake_write_script(self, idea, style="Cinematic", num_scenes=3, user_requirement="", preset_characters=None):
+    async def fake_write_script(self, idea, style="Cinematic", num_scenes=3, user_requirement="", preset_characters=None, language="en"):
         return DramaScript(
             title="Maya",
             logline=idea,

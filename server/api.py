@@ -28,6 +28,7 @@ from auth import (
     get_optional_user,
 )
 from interfaces.camera import DIRECTOR_STYLES
+from interfaces.language import normalize as normalize_language
 from interfaces.second_budget import SECONDS_PER_CREDIT, total_budget_seconds
 from tools.muapi_lipsync import is_lipsync_enabled
 from tools.muapi_voice_generator import is_dialogue_enabled
@@ -275,6 +276,12 @@ class GenerateRequest(BaseModel):
     aspect_ratio: str = Field(default="16:9", pattern=r"^(16:9|9:16|1:1)$")
     # Absolute ceiling = Pro plan max; per-plan caps enforced in generate().
     num_scenes: int = Field(default=3, ge=2, le=24)
+    # The drama's SPOKEN language, as an ISO-639-1 code. The site is served in
+    # twenty locales and none of them reached the backend, so a Turkish user on
+    # a Turkish page got whatever language the screenwriter happened to infer
+    # from the wording of their idea. Unrecognised values normalise to English
+    # rather than erroring -- see interfaces/language.
+    language: str = "en"
     user_requirement: str = ""
     character_image: Optional[str] = None
     character_name: str = ""
@@ -818,6 +825,7 @@ async def generate(
         aspect_ratio=req.aspect_ratio,
         num_scenes=req.num_scenes,
         user_requirement=req.user_requirement,
+        language=normalize_language(req.language),
         demo=demo,
         user_id=current_user.user_id if current_user else None,
         user_email=current_user.email if current_user else None,

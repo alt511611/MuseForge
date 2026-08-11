@@ -49,7 +49,7 @@ function SectionHead({ n, eyebrow, title, sub }) {
 export default function HomeContent() {
   const router = useRouter();
   const { getAccessToken } = useAuth();
-  const { t, localeHref } = useLanguage();
+  const { t, locale, localeHref } = useLanguage();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState(null);
   const [creditsExhausted, setCreditsExhausted] = useState(false);
@@ -75,7 +75,12 @@ export default function HomeContent() {
           "Content-Type": "application/json",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify(formData),
+        // The drama is spoken in the language the site is being read in.
+        // Without this the screenwriter inferred it from the wording of the
+        // idea, so a Turkish reader who wrote an English brief got an English
+        // drama with no way to say otherwise. formData wins if a form field
+        // ever offers an explicit choice.
+        body: JSON.stringify({ language: locale, ...formData }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));

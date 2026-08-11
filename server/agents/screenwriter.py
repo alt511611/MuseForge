@@ -7,6 +7,7 @@ import re
 from typing import List, Optional
 
 from interfaces.character import CharacterProfile, DramaScript, ScriptScene
+from interfaces.language import DEFAULT_LANGUAGE, is_default, name_of
 from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
 
 logger = logging.getLogger(__name__)
@@ -115,6 +116,25 @@ Respond ONLY with valid JSON matching this schema:
   ]
 }"""
 
+    #: Appended to the system prompt when the drama is not in English.
+    #:
+    #: Placed in the SYSTEM prompt, not the user turn, because it has to
+    #: outrank the brief: a Turkish user often writes the idea in English
+    #: ("two brothers fight over an inheritance") and still wants a Turkish
+    #: drama. It also has to outrank this prompt's own English example values
+    #: (`"line": "The exact words Kemal says."`), which were quietly biasing
+    #: short briefs back to English.
+    #:
+    #: Field NAMES stay English or the JSON stops parsing.
+    LANGUAGE_CLAUSE = """
+
+LANGUAGE. Write the drama in {language}. Every piece of text a viewer will
+read or hear — "title", "logline", and every "line" of dialogue — must be in
+{language}, natural and idiomatic, never a translation of an English sentence.
+This holds even when the user's brief itself is written in another language.
+The JSON field NAMES and the enum values ("protagonist", "climax", ...) stay
+in English exactly as specified; only the prose changes."""
+
     #: Token budget for a director-level script. Shared by BOTH provider
     #: paths: the MuAPI route is tried FIRST, so raising it only on the
     #: Anthropic fallback (as an earlier change did) leaves the primary path
@@ -135,6 +155,18 @@ Respond ONLY with valid JSON matching this schema:
         self.muapi_key = os.environ.get("MUAPI_KEY", "")
         self.demo = demo
 
+    def _system_prompt(self, language: str = DEFAULT_LANGUAGE) -> str:
+        """The system prompt for this drama's language.
+
+        English adds nothing — the prompt is already written in it, and a
+        redundant "write in English" clause only spends tokens.
+        """
+        if is_default(language):
+            return self.SYSTEM_PROMPT
+        return self.SYSTEM_PROMPT + self.LANGUAGE_CLAUSE.format(
+            language=name_of(language)
+        )
+
     async def write_script(
         self,
         idea: str,
@@ -142,6 +174,7 @@ Respond ONLY with valid JSON matching this schema:
         num_scenes: int = 3,
         user_requirement: str = "",
         preset_characters: Optional[List[dict]] = None,
+        language: str = DEFAULT_LANGUAGE,
     ) -> DramaScript:
         # Demo mode must stay fast and free of real network calls --
         # matches MuAPIImageGenerator/MuAPIVideoGenerator's demo behavior.
@@ -176,7 +209,9 @@ Respond ONLY with valid JSON matching this schema:
         if self.muapi_key and is_muapi_llm_enabled():
             try:
                 content = await complete_via_muapi(
-                    self.SYSTEM_PROMPT, prompt, max_tokens=self.MAX_SCRIPT_TOKENS
+                    self._system_prompt(language),
+                    prompt,
+                    max_tokens=self.MAX_SCRIPT_TOKENS,
                 )
                 return self._with_brief(
                     DramaScript(**self._parse_json(content)), idea
@@ -198,7 +233,7 @@ Respond ONLY with valid JSON matching this schema:
         # 2) Fall back to a direct Anthropic call if a key is configured.
         if self.api_key:
             return await self._write_with_claude(
-                idea, style, num_scenes, user_requirement, preset_characters
+                idea, style, num_scenes, user_requirement, preset_characters, language
             )
 
         # 3) No provider answered. The deterministic template is NOT an
@@ -226,6 +261,7 @@ Respond ONLY with valid JSON matching this schema:
         num_scenes: int,
         user_requirement: str,
         preset_characters: Optional[List[dict]] = None,
+        language: str = DEFAULT_LANGUAGE,
     ) -> DramaScript:
         import anthropic
 
@@ -269,7 +305,7 @@ Respond ONLY with valid JSON matching this schema:
             async with client.messages.stream(
                 model="claude-sonnet-5",
                 max_tokens=self.MAX_SCRIPT_TOKENS,
-                system=self.SYSTEM_PROMPT,
+                system=self._system_prompt(language),
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:
                 message = await stream.get_final_message()

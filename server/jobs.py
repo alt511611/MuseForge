@@ -303,6 +303,13 @@ class Job:
     aspect_ratio: str = "16:9"
     num_scenes: int = 3
     user_requirement: str = ""
+    # ISO-639-1 code for the drama's SPOKEN language (see interfaces/language).
+    # Deliberately absent from _sb_row, like lipsync_enabled and
+    # library_characters: it is only needed while the run is in flight, and
+    # adding a column to the jobs table would break every deployment that has
+    # not replayed the migration yet. It is recorded on the result instead,
+    # which already survives the Supabase round-trip.
+    language: str = "en"
     demo: bool = False
     user_id: Optional[str] = None
     user_email: Optional[str] = None
@@ -322,6 +329,14 @@ class Job:
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     _seq: int = 0
     _subscribers: List[asyncio.Queue] = field(default_factory=list, repr=False)
+    #: Wall-clock profile of the run, filled in by JobStore.emit as stages
+    #: change. A render is a chain of multi-minute provider calls, and until
+    #: this existed "it took 24 minutes" could not be attributed to a stage
+    #: without hand-subtracting timestamps out of the event log -- which does
+    #: not work at all for the stages that run concurrently.
+    _stage: Optional[str] = field(default=None, repr=False)
+    _stage_started: float = field(default=0.0, repr=False)
+    _stage_seconds: Dict[str, float] = field(default_factory=dict, repr=False)
 
     def to_dict(self, include_events: bool = True) -> dict:
         return {
@@ -332,6 +347,7 @@ class Job:
             "director_style": self.director_style,
             "aspect_ratio": self.aspect_ratio,
             "num_scenes": self.num_scenes,
+            "language": self.language,
             "demo": self.demo,
             "user_id": self.user_id,
             "user_email": self.user_email,
@@ -415,11 +431,51 @@ class JobStore:
         asyncio.create_task(_sb_delete(job_id))
 
     async def emit(self, job: Job, stage: str, message: str, progress: float, data=None):
+        self._record_stage_timing(job, stage)
         job._seq += 1
         event = JobEvent(stage=stage, message=message, progress=progress, data=data, seq=job._seq)
         job.events.append(event)
         for queue in list(job._subscribers):
             await queue.put(event)
+
+    @staticmethod
+    def _record_stage_timing(job: Job, stage: str) -> None:
+        """Close out the previous stage and log how long it ran.
+
+        Stages repeat (`storyboard` is emitted once per scene) so the times
+        accumulate per stage name rather than being overwritten. `heartbeat`
+        is skipped: it fires on a timer, not on progress, and would otherwise
+        chop every real stage into fragments.
+        """
+        if stage == "heartbeat":
+            return
+        now = time.monotonic()
+        if job._stage is not None and stage != job._stage:
+            elapsed = now - job._stage_started
+            job._stage_seconds[job._stage] = (
+                job._stage_seconds.get(job._stage, 0.0) + elapsed
+            )
+            logger.info(
+                "[%s] stage %r took %.1fs (running total %.1fs)",
+                job.id, job._stage, elapsed, sum(job._stage_seconds.values()),
+            )
+        if stage != job._stage:
+            job._stage = stage
+            job._stage_started = now
+
+    @staticmethod
+    def log_stage_profile(job: Job) -> None:
+        """One line naming where a finished run actually spent its time."""
+        if not job._stage_seconds:
+            return
+        total = sum(job._stage_seconds.values())
+        breakdown = ", ".join(
+            f"{name} {secs:.0f}s ({secs / total * 100:.0f}%)"
+            for name, secs in sorted(
+                job._stage_seconds.items(), key=lambda kv: kv[1], reverse=True
+            )
+        )
+        logger.info("[%s] render profile — total %.0fs: %s", job.id, total, breakdown)
 
     async def subscribe(self, job_id: str) -> AsyncGenerator[JobEvent, None]:
         job = self.get(job_id)
@@ -729,6 +785,7 @@ async def run_generation_job(job: Job, api_key: str):
                         progress_callback=progress_callback,
                         is_cancelled=is_cancelled,
                         preset_characters=library_characters or None,
+                        language=job.language,
                     ),
                     timeout=PIPELINE_HARD_TIMEOUT_SECONDS,
                 )
@@ -761,6 +818,7 @@ async def run_generation_job(job: Job, api_key: str):
                     user_requirement=job.user_requirement,
                     num_scenes=job.num_scenes,
                     aspect_ratio=job.aspect_ratio,
+                    language=job.language,
                     working_dir=working_dir,
                     progress_callback=progress_callback,
                     is_cancelled=is_cancelled,
@@ -783,6 +841,7 @@ async def run_generation_job(job: Job, api_key: str):
             job.status = JobStatus.COMPLETED
             # Persist COMPLETED + result (includes signed Storage URL when uploaded)
             await job_store.persist(job)
+            job_store.log_stage_profile(job)
             await job_store.emit(
                 job, "complete", "Generation finished", 100, public_result(result)
             )
@@ -1132,6 +1191,7 @@ async def run_continue_from_script_job(job: Job, api_key: str, script_data: Dict
                 director_style=job.director_style,
                 user_requirement=job.user_requirement,
                 aspect_ratio=job.aspect_ratio,
+                language=job.language,
                 working_dir=working_dir,
                 progress_callback=progress_callback,
                 is_cancelled=is_cancelled,
