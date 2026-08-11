@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("MUAPI_KEY", "test-key-not-real")
 
 import pipelines.idea2video as idea2video_mod  # noqa: E402
-import tools.falai_lipsync as lipsync_mod  # noqa: E402
+import tools.muapi_lipsync as lipsync_mod  # noqa: E402
 
 
 def _tracks():
@@ -33,7 +33,9 @@ def _tracks():
 async def _run(monkeypatch, tmp_path, sync_results, enabled=True, demo=False):
     """sync_results: {scene_index: synced_url or None}."""
     monkeypatch.setenv("MUSEFORGE_LIPSYNC_ENABLED", "1" if enabled else "0")
-    monkeypatch.setenv("FAL_KEY", "fake-fal-key")
+    # MuAPI is the default backend; fal.ai stays selectable (tested below).
+    monkeypatch.delenv("MUSEFORGE_LIPSYNC_PROVIDER", raising=False)
+    monkeypatch.setenv("MUAPI_KEY", "fake-muapi-key")
 
     sync_calls = []
 
@@ -50,7 +52,7 @@ async def _run(monkeypatch, tmp_path, sync_results, enabled=True, demo=False):
             f.write(b"synced bytes")
         return path
 
-    monkeypatch.setattr(lipsync_mod.FalAILipsync, "sync", fake_sync)
+    monkeypatch.setattr(lipsync_mod.MuAPILipsync, "sync", fake_sync)
     monkeypatch.setattr(idea2video_mod, "download_video", fake_download_video)
 
     scene_paths = [str(tmp_path / f"scene_{i}.mp4") for i in range(3)]
@@ -127,15 +129,55 @@ async def test_disabled_and_demo_do_nothing(monkeypatch, tmp_path):
     assert synced == [] and sync_calls == [], "Demo mode never makes a paid call"
 
 
-def test_sync_mode_preserves_clip_length_not_the_providers_default(monkeypatch):
-    """cut_off (fal's default) trims the VIDEO to the audio, which would let a
-    short line shorten a scene the customer already paid seconds for."""
-    assert lipsync_mod.SYNC_MODE == "silence"
+def test_muapi_is_the_default_backend_and_fal_stays_selectable(monkeypatch):
+    """Lip sync was the last reason a deployment needed a second vendor: video,
+    images, voice and music all run on MuAPI, and this one call forced a fal.ai
+    key on top."""
+    from tools.falai_lipsync import FalAILipsync
+
+    monkeypatch.setenv("MUAPI_KEY", "k")
+    monkeypatch.delenv("MUSEFORGE_LIPSYNC_PROVIDER", raising=False)
+    assert isinstance(lipsync_mod.make_lipsync(), lipsync_mod.MuAPILipsync)
+
+    monkeypatch.setenv("MUSEFORGE_LIPSYNC_PROVIDER", "falai")
+    assert isinstance(lipsync_mod.make_lipsync(), FalAILipsync)
+
+
+def test_a_shortened_clip_is_rejected(tmp_path):
+    """Sync Labs' own default trims the VIDEO down to the audio, which would
+    let a short line shorten a scene the customer already paid seconds for.
+    The fal backend pins sync_mode to stop that; MuAPI's endpoint exposes no
+    such knob, so the length is verified after the fact instead."""
+    from unittest.mock import patch
+
+    original, candidate = str(tmp_path / "a.mp4"), str(tmp_path / "b.mp4")
+
+    def _durations(path):
+        return {original: 8.0, candidate: 3.0}.get(path)
+
+    with patch.object(idea2video_mod, "_clip_duration", _durations):
+        assert not idea2video_mod._keeps_its_length(original, candidate)
+
+    # A re-encode moves the last frame by a hair; that is not a trim.
+    with patch.object(idea2video_mod, "_clip_duration", lambda p: 8.0 if p == original else 7.9):
+        assert idea2video_mod._keeps_its_length(original, candidate)
+
+
+def test_the_length_check_fails_open_when_it_cannot_measure(tmp_path):
+    """Refusing every sync on a probe failure would quietly disable a feature
+    the customer paid for. The check exists to catch a provider that trims to
+    the audio -- unmistakable -- not to police rounding."""
+    from unittest.mock import patch
+
+    with patch.object(idea2video_mod, "_clip_duration", lambda p: None):
+        assert idea2video_mod._keeps_its_length("a.mp4", "b.mp4")
 
 
 @pytest.mark.asyncio
-async def test_missing_fal_key_skips_quietly(monkeypatch, tmp_path):
+async def test_missing_provider_key_skips_quietly(monkeypatch, tmp_path):
     monkeypatch.setenv("MUSEFORGE_LIPSYNC_ENABLED", "1")
+    monkeypatch.delenv("MUSEFORGE_LIPSYNC_PROVIDER", raising=False)
+    monkeypatch.setenv("MUAPI_KEY", "")
     monkeypatch.delenv("FAL_KEY", raising=False)
 
     async def progress(*a, **kw):
@@ -170,7 +212,7 @@ async def test_deployment_flag_alone_does_not_sync_an_unpaid_job(monkeypatch, tm
         sync_calls.append(video_path_or_url)
         return "https://cdn/synced.mp4"
 
-    monkeypatch.setattr(lipsync_mod.FalAILipsync, "sync", fake_sync)
+    monkeypatch.setattr(lipsync_mod.MuAPILipsync, "sync", fake_sync)
 
     async def progress(*a, **kw):
         return None

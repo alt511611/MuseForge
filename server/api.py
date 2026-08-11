@@ -29,7 +29,7 @@ from auth import (
 )
 from interfaces.camera import DIRECTOR_STYLES
 from interfaces.second_budget import SECONDS_PER_CREDIT, total_budget_seconds
-from tools.falai_lipsync import is_lipsync_enabled
+from tools.muapi_lipsync import is_lipsync_enabled
 from tools.muapi_voice_generator import is_dialogue_enabled
 from jobs import (
     JOBS_DIR,

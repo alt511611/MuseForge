@@ -99,18 +99,34 @@ class MuAPIVideoGenerator:
         duration: int,
         generate_audio: bool = True,
         last_image: Optional[str] = None,
+        endpoint: Optional[str] = None,
+        aspect_ratio: Optional[str] = None,
     ) -> Dict[str, Any]:
-        # Schema confirmed against MuAPI playground for kling-v3.0-*-image-to-video:
-        # prompt, image_url, duration (int 3-15), generate_audio; optional last_image.
-        # No `mode` field — Pro/Standard is selected via endpoint_for_plan().
-        payload: Dict[str, Any] = {
-            "prompt": prompt,
-            "image_url": image_url,
-            "duration": clamp_duration(duration),
-            "generate_audio": generate_audio,
-        }
-        if last_image:
+        """Build the payload for ONE endpoint, carrying only fields it accepts.
+
+        Every model used to get the kling-v3.0 payload verbatim. MuAPI
+        validates, so `generate_audio` — which only the Kling v3.0 family
+        declares — comes back from a Seedance or Veo endpoint as a 422, which
+        the fallback chain reads as "this endpoint does not exist" and demotes
+        to Standard. A routed model would have been configured, charged for in
+        expectation, and never once actually run.
+        """
+        from tools.video_model_router import optional_fields
+
+        allowed = optional_fields(endpoint or endpoint_for_plan("free"))
+
+        payload: Dict[str, Any] = {"prompt": prompt, "image_url": image_url}
+        if "duration" in allowed:
+            payload["duration"] = clamp_duration(duration)
+        if "generate_audio" in allowed:
+            payload["generate_audio"] = generate_audio
+        if "last_image" in allowed and last_image:
             payload["last_image"] = last_image
+        # Kling i2v derives aspect from the source image and has no such field;
+        # Seedance and Veo do take one, and left unset they can letterbox a
+        # vertical frame back to 16:9.
+        if "aspect_ratio" in allowed and aspect_ratio:
+            payload["aspect_ratio"] = aspect_ratio
         return payload
 
     async def generate_video_from_image(
@@ -123,9 +139,6 @@ class MuAPIVideoGenerator:
         is_cancelled=None,
         shot_profile: Optional[str] = None,
     ) -> str:
-        # aspect_ratio kept in the signature for callers; not sent in payload
-        # (Kling i2v derives aspect from the source image).
-        _ = aspect_ratio
         if self.demo:
             return DEMO_VIDEO_URL
 
@@ -133,9 +146,6 @@ class MuAPIVideoGenerator:
         from tools.video_model_router import model_chain
 
         chain = model_chain(shot_profile or STANDARD_PROFILE, plan)
-        payload = self._payload(
-            prompt, image_url, duration, generate_audio=is_native_audio_enabled()
-        )
 
         # Walk the chain: a routed specialist first, the plan's endpoint next,
         # Standard last. Only endpoint-level rejections (404/422 -- "this model
@@ -145,6 +155,17 @@ class MuAPIVideoGenerator:
         # just spend the customer's time and credits three times over.
         last_exc: Optional[MuAPIError] = None
         for position, endpoint in enumerate(chain):
+            # Built per endpoint, not once for the chain: the links do not share
+            # a schema, which is the whole reason a demotion has to change the
+            # payload as well as the URL.
+            payload = self._payload(
+                prompt,
+                image_url,
+                duration,
+                generate_audio=is_native_audio_enabled(),
+                endpoint=endpoint,
+                aspect_ratio=aspect_ratio,
+            )
             try:
                 return await self.client.generate(
                     endpoint,

@@ -24,7 +24,7 @@ from pipelines.script2video import (
     moviepy_encode_kwargs,
     video_encode_args,
 )
-from tools.falai_lipsync import FalAILipsync, is_lipsync_enabled
+from tools.muapi_lipsync import is_lipsync_enabled, make_lipsync
 from tools.muapi_voice_generator import MuAPIVoiceGenerator, is_dialogue_enabled
 
 logger = logging.getLogger(__name__)
@@ -874,6 +874,40 @@ async def export_alternate_format(
 #: against a UI that lets someone drag both handles past each other.
 MIN_TRIMMED_SECONDS = 0.5
 
+#: How much shorter a lip-synced clip may be than the take it replaces before
+#: it is rejected. Re-encoding moves the last frame around by a hair; a real
+#: trim-to-audio removes seconds.
+LIPSYNC_LENGTH_TOLERANCE_SECONDS = 0.35
+
+
+def _clip_duration(path: str) -> Optional[float]:
+    """Seconds of video at ``path``, or None if it cannot be measured."""
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        from moviepy import VideoFileClip
+
+        with VideoFileClip(path) as clip:
+            return float(clip.duration)
+    except Exception as exc:
+        logger.warning("Could not measure %s: %s", path, exc)
+        return None
+
+
+def _keeps_its_length(original_path: str, candidate_path: str) -> bool:
+    """Whether ``candidate_path`` is (near enough) as long as the original.
+
+    Fails OPEN: when either clip cannot be measured the candidate is accepted,
+    because refusing every sync on a probe failure would quietly disable a
+    feature the customer paid for. The check exists to catch a provider that
+    trims to the audio, which is unmistakable, not to police rounding.
+    """
+    original = _clip_duration(original_path)
+    candidate = _clip_duration(candidate_path)
+    if original is None or candidate is None:
+        return True
+    return candidate >= original - LIPSYNC_LENGTH_TOLERANCE_SECONDS
+
 
 async def trim_clip(
     source_path: str,
@@ -1052,9 +1086,12 @@ class Idea2VideoPipeline:
         if self.demo or not requested or not is_lipsync_enabled() or not dialogue_tracks:
             return []
 
-        lipsync = FalAILipsync(os.environ.get("FAL_KEY", ""), demo=self.demo)
+        lipsync = make_lipsync(demo=self.demo)
         if not lipsync.available():
-            logger.info("Lip sync enabled but FAL_KEY is not set — skipping.")
+            logger.info(
+                "Lip sync enabled but %s has no API key — skipping.",
+                type(lipsync).__name__,
+            )
             return []
 
         # One request per SCENE, keyed off the track that actually carries the
@@ -1097,6 +1134,21 @@ class Idea2VideoPipeline:
                     "keeping the original: %s",
                     scene_index,
                     exc,
+                )
+                continue
+            if not _keeps_its_length(scene_paths[scene_index], local_path):
+                # Sync Labs' own default trims the video down to the length of
+                # the audio, which would let a short line silently shorten a
+                # scene and break the fixed per-credit second budget the whole
+                # costing model rests on. The fal backend pins sync_mode to
+                # stop that; MuAPI's endpoint exposes no such knob, so the
+                # guarantee is enforced here instead -- a clip that came back
+                # short is discarded and the unsynced take kept.
+                logger.warning(
+                    "Lip-synced clip for scene %s came back shorter than the "
+                    "take it replaces — keeping the original so the runtime "
+                    "the customer paid for is preserved.",
+                    scene_index,
                 )
                 continue
             scene_paths[scene_index] = local_path
