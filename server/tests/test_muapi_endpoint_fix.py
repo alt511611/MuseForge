@@ -100,11 +100,20 @@ def test_video_payload_matches_kling_v3_schema():
     assert payload["generate_audio"] is True
     assert payload["prompt"] == "pan left"
     assert payload["image_url"] == "https://cdn.example/f.jpg"
-    import inspect
     import tools.muapi_video_generator as vid_mod
 
-    source = inspect.getsource(vid_mod)
-    assert '"aspect_ratio"' not in source
+    # Kling must not be sent an aspect_ratio even when the caller supplies one:
+    # it derives aspect from the source image and has no such field. This used
+    # to be pinned by scanning the module source for the string, which stopped
+    # being possible once OTHER endpoints in the chain (Seedance, Veo) started
+    # taking one -- the field map is what enforces it now.
+    assert "aspect_ratio" not in gen._payload(
+        "pan left",
+        "https://cdn.example/f.jpg",
+        5,
+        endpoint=vid_mod.STANDARD_ENDPOINT,
+        aspect_ratio="9:16",
+    )
 
     assert vid_mod.endpoint_for_plan("free") == vid_mod.STANDARD_ENDPOINT
     assert vid_mod.endpoint_for_plan("creator") == vid_mod.STANDARD_ENDPOINT

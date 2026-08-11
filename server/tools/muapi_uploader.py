@@ -26,6 +26,34 @@ class InvalidCharacterPhoto(ValueError):
     """Raised when the uploaded character photo isn't a valid image data URI."""
 
 
+async def upload_local_file(path: str, api_key: str) -> Optional[str]:
+    """Upload a file already on disk to MuAPI storage; None if it cannot be.
+
+    Lip sync needs this: the endpoint fetches the clip by URL, and the clip it
+    has to sync is the scene we just rendered, sitting in the working
+    directory. Returns None rather than raising because lip sync is polish
+    running after the expensive generation is already paid for — losing it
+    must cost mouth accuracy, never the job.
+    """
+    if not api_key or not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "rb") as f:
+            file_bytes = f.read()
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                f"{MUAPI_BASE}/upload_file",
+                headers={"x-api-key": api_key},
+                files={"file": (Path(path).name, file_bytes)},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        url = data.get("url") or data.get("file_url")
+        return url if url and str(url).startswith("http") else None
+    except (httpx.HTTPError, OSError, ValueError):
+        return None
+
+
 async def upload_base64_image(data_uri: str, api_key: str, demo: bool = False) -> str:
     """Decode a base64 data URI and upload it to MuAPI's file storage,
     returning a real hosted URL. In demo mode (or if MUAPI_KEY is missing),

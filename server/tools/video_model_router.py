@@ -133,6 +133,75 @@ def model_chain(profile: str, plan: str = "free") -> List[str]:
     return chain
 
 
+#: Fields every image-to-video endpoint in the MuAPI catalogue takes.
+UNIVERSAL_FIELDS = frozenset({"prompt", "image_url"})
+
+#: What to send to an endpoint we have no schema for. MuAPI validates the
+#: payload, so an unknown field is not ignored -- it comes back as a 422, which
+#: this module's fallback chain then reads as "this endpoint does not exist"
+#: and quietly demotes the shot to Standard. The routed model would never
+#: actually run, and nothing in the logs would say why. `duration` is in the
+#: default because nearly every i2v model in the catalogue takes it; the
+#: handful that do not are listed in _NO_DURATION below.
+DEFAULT_OPTIONAL_FIELDS = frozenset({"duration"})
+
+#: Optional fields each endpoint is KNOWN to accept, read off the model's
+#: schema in the MuAPI playground. Only fields this client actually sends are
+#: listed -- an endpoint may well take `seed` or `resolution` too, but we have
+#: nothing to put in them.
+#:
+#: Keep this in step with the playground when adding a model: getting it wrong
+#: in the permissive direction (listing a field the model rejects) costs a
+#: silent demotion to Standard, which is exactly what this map exists to stop.
+_ENDPOINT_FIELDS = {
+    # Kling v3.0 is the one family that takes an audio flag and an end frame.
+    "kling-v3.0-pro-image-to-video": frozenset(
+        {"duration", "generate_audio", "last_image"}
+    ),
+    "kling-v3.0-standard-image-to-video": frozenset(
+        {"duration", "generate_audio", "last_image"}
+    ),
+    "kling-v3.0-4k-image-to-video": frozenset(
+        {"duration", "generate_audio", "last_image"}
+    ),
+    # Turbo drops both: prompt, image_url and duration only.
+    "kling-v3-turbo-pro-image-to-video": frozenset({"duration"}),
+    "kling-v3-turbo-standard-image-to-video": frozenset({"duration"}),
+    # Veo takes an end frame and an aspect ratio, but no audio flag (its audio
+    # is always on). Its `duration` is a single-value enum -- see _FIXED_DURATION.
+    "veo3.1-image-to-video": frozenset({"duration", "last_image", "aspect_ratio"}),
+    "veo3.1-fast-image-to-video": frozenset({"duration", "last_image", "aspect_ratio"}),
+    "veo3.1-lite-image-to-video": frozenset({"duration", "last_image", "aspect_ratio"}),
+    # Seedance takes an aspect ratio and a seed; no audio flag, no end frame.
+    "seedance-2.5-image-to-video": frozenset({"duration", "aspect_ratio"}),
+    "seedance-2.5-image-to-video-480p": frozenset({"duration", "aspect_ratio"}),
+    "seedance-2-image-to-video": frozenset({"duration", "aspect_ratio"}),
+}
+
+#: Endpoints with NO duration field at all -- their clip length is fixed by the
+#: model. Sending `duration` to one is a 422; not sending it means the shot
+#: comes back at whatever length the model produces, which the second budget
+#: (interfaces/second_budget) cannot then honour. Route to these only if you
+#: are prepared for that.
+_NO_DURATION = frozenset(
+    {
+        "minimax-hailuo-2.3-pro-i2v",
+        "minimax-hailuo-2.3-standard-i2v",
+        "minimax-hailuo-2.3-fast",
+    }
+)
+
+
+def optional_fields(endpoint: str) -> frozenset:
+    """Which optional fields this endpoint accepts, beyond prompt + image_url."""
+    endpoint = (endpoint or "").strip()
+    if endpoint in _ENDPOINT_FIELDS:
+        return _ENDPOINT_FIELDS[endpoint]
+    if endpoint in _NO_DURATION:
+        return frozenset()
+    return DEFAULT_OPTIONAL_FIELDS
+
+
 def is_routing_active() -> bool:
     """True when at least one profile is pinned to a non-default model.
 

@@ -83,8 +83,98 @@ IMAGE_QUALITY_SUFFIX = (
     "No text, captions, subtitles, watermarks or logos anywhere in the frame."
 )
 
+#: MuAPI rejects a `positivePrompt` outside 2..3000 characters with a 400 --
+#: and it does so at GENERATION time, not on submit, so the job burns the
+#: submit round trip and dies mid-render with an opaque provider error.
+#:
+#: This bites precisely when the product is working properly: a real script
+#: names several characters with described faces AND wardrobe, and every one
+#: of them is restated in the identity clause of every frame. Three or four
+#: richly described characters clear 3000 characters on their own. It went
+#: unnoticed while the screenwriter was failing to the deterministic template,
+#: whose one undescribed "Alex" produced a short prompt every time.
+MAX_IMAGE_PROMPT_CHARS = 3000
 
-def build_character_identity_clause(characters, matched_char=None) -> str:
+
+def fit_image_prompt(segments: list, limit: int = MAX_IMAGE_PROMPT_CHARS) -> str:
+    """Assemble a prompt that respects the provider's character budget.
+
+    `segments` is a list of `(priority, text)` in the order they should READ.
+    Priority 0 is required; higher numbers are dropped first. Order and
+    priority are deliberately separate: an image model weights the opening of
+    the prompt, so "Cinematic style. Maya walks the pier." has to stay at the
+    front even though the quality suffix that trails it is the first thing
+    worth losing.
+
+    Dropping whole clauses by priority beats a blind truncation, which would
+    cut mid-word and could sever the character lock -- the frame would still
+    render, just of somebody else.
+    """
+    kept = [(prio, text) for prio, text in segments if text]
+    while sum(len(t) for _, t in kept) > limit:
+        droppable = [p for p, _ in kept if p > 0]
+        if not droppable:
+            break
+        worst = max(droppable)
+        idx = next(i for i, (p, _) in enumerate(kept) if p == worst)
+        _, dropped = kept.pop(idx)
+        logger.warning(
+            "Frame prompt over %d chars — dropping %d chars of lower-priority "
+            "direction (%.60s...)", limit, len(dropped), dropped,
+        )
+    prompt = "".join(t for _, t in kept)
+    if len(prompt) > limit:
+        # Even the required segments are too long: a single enormous
+        # visual_desc. Cut on a word boundary so it doesn't end mid-token.
+        logger.warning(
+            "Frame prompt still over %d chars after dropping every optional "
+            "clause (%d) — truncating.", limit, len(prompt),
+        )
+        prompt = prompt[:limit].rsplit(" ", 1)[0]
+    return prompt
+
+
+def _describe_characters(visible, limit=None) -> list:
+    """One "Name (looks)" entry per visible character, compacted to fit.
+
+    Three levels, applied only as far as needed: full detail; drop wardrobe
+    (the global "clothing is FIXED" sentence still covers costume drift);
+    then trim each description to its opening clauses, which is where a face
+    is actually described.
+    """
+
+    def render(with_wardrobe=True, feature_chars=None):
+        out = []
+        for c in visible:
+            features = (getattr(c, "static_features", "") or "").strip()
+            if not features:
+                continue
+            if feature_chars and len(features) > feature_chars:
+                features = features[:feature_chars].rsplit(",", 1)[0].rstrip(" ,")
+            # Wardrobe is stated alongside the face: the reference image
+            # fixes identity but not costume, so an unstated outfit drifts
+            # scene to scene.
+            wardrobe = (getattr(c, "wardrobe", "") or "").strip() if with_wardrobe else ""
+            detail = f"{features}, wearing {wardrobe}" if wardrobe else features
+            out.append(f"{c.name} ({detail})")
+        return out
+
+    described = render()
+    if limit is None:
+        return described
+
+    for attempt in (
+        lambda: render(with_wardrobe=False),
+        lambda: render(with_wardrobe=False, feature_chars=90),
+        lambda: render(with_wardrobe=False, feature_chars=45),
+    ):
+        if sum(len(d) + 2 for d in described) <= limit:
+            break
+        described = attempt()
+    return described
+
+
+def build_character_identity_clause(characters, matched_char=None, limit=None) -> str:
     """Restate every on-screen character's fixed appearance in the prompt text.
 
     The reference image only ever binds ONE character's identity (both MuAPI
@@ -94,18 +184,15 @@ def build_character_identity_clause(characters, matched_char=None) -> str:
     like different people in different scenes". Naming each character with
     their locked description gives the non-referenced ones a stable textual
     anchor across the whole drama.
+
+    `limit` caps the per-character detail so a crowded scene cannot push the
+    whole prompt past the provider's character budget. It compacts rather
+    than drops: a shorter anchor for everyone beats a full description for
+    the first few and nothing for the rest, because an un-anchored character
+    is exactly the one the image model re-invents.
     """
     visible = [c for c in (characters or []) if getattr(c, "is_visible", True)]
-    described = []
-    for c in visible:
-        features = (getattr(c, "static_features", "") or "").strip()
-        if not features:
-            continue
-        # Wardrobe is stated alongside the face: the reference image fixes
-        # identity but not costume, so an unstated outfit drifts scene to scene.
-        wardrobe = (getattr(c, "wardrobe", "") or "").strip()
-        detail = f"{features}, wearing {wardrobe}" if wardrobe else features
-        described.append(f"{c.name} ({detail})")
+    described = _describe_characters(visible, limit)
     if not described:
         return ""
     clause = (
@@ -241,19 +328,37 @@ def build_frame_prompt(
         "The character's face is clearly visible and softly lit — not a "
         "silhouette, not backlit into shadow, not turned away from camera. "
     )
-    identity_clause = build_character_identity_clause(characters, matched_char)
-    direction_clause = build_screen_direction_clause(characters)
-    # lighting_clause sits next to the setting clause because it makes the
-    # same promise: the room does not change between shots, and neither does
-    # the light in it.
-    return (
-        f"{style} style. {setting_clause}{lighting_clause}"
-        f"{identity_clause}{direction_clause}"
-        f"{shot.visual_desc}. "
-        f"{expression_clause}{face_clause}"
-        f"{dialogue_clause}Shot type: {shot.shot_type}. Lens: {shot.lens}. "
-        f"{IMAGE_QUALITY_SUFFIX}"
+    # Budget for the identity clause: whatever is left after the shot itself
+    # and its framing, minus room for the setting clause. Everything else is
+    # optional and trimmed by fit_image_prompt below.
+    identity_budget = MAX_IMAGE_PROMPT_CHARS - len(shot.visual_desc) - len(setting_clause) - 400
+    identity_clause = build_character_identity_clause(
+        characters, matched_char, limit=max(identity_budget, 200)
     )
+    direction_clause = build_screen_direction_clause(characters)
+    # (priority, text) in READING order. Priority 0 is required: the style,
+    # the shot itself, its framing, and the character lock -- without the
+    # first there is no frame, without the last the frame renders a stranger,
+    # which is the failure this whole product exists to prevent.
+    #
+    # Everything else is dropped worst-priority-first when a crowded scene
+    # pushes the prompt past the provider's budget. The quality suffix goes
+    # first because it is pure polish; the setting and its lighting go last
+    # because they make the continuity promise that the room (and the light
+    # in it) does not change between shots.
+    return fit_image_prompt([
+        (0, f"{style} style. "),
+        (1, setting_clause),
+        (1, lighting_clause),
+        (0, identity_clause),
+        (3, direction_clause),
+        (0, f"{shot.visual_desc}. "),
+        (2, expression_clause),
+        (2, face_clause),
+        (3, dialogue_clause),
+        (0, f"Shot type: {shot.shot_type}. Lens: {shot.lens}. "),
+        (4, IMAGE_QUALITY_SUFFIX),
+    ])
 
 
 def build_motion_prompt(shot, matched_char=None) -> str:

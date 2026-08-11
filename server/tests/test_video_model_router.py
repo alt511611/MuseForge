@@ -98,6 +98,90 @@ async def test_rejected_endpoint_falls_through_to_the_next_link(monkeypatch):
     assert tried[-1] == STANDARD_ENDPOINT
 
 
+# ── each endpoint only gets the fields it declares ──────────────────────────
+
+
+def test_kling_keeps_its_audio_flag_and_end_frame():
+    from tools.muapi_video_generator import MuAPIVideoGenerator, STANDARD_ENDPOINT
+
+    payload = MuAPIVideoGenerator("k")._payload(
+        "p", "https://cdn/f.png", 5,
+        generate_audio=True, last_image="https://cdn/l.png",
+        endpoint=STANDARD_ENDPOINT, aspect_ratio="9:16",
+    )
+    assert payload["generate_audio"] is True
+    assert payload["last_image"] == "https://cdn/l.png"
+    assert payload["duration"] == 5
+    # Kling i2v derives aspect from the source image; it has no such field.
+    assert "aspect_ratio" not in payload
+
+
+def test_seedance_is_not_sent_klings_audio_flag():
+    """The bug this map exists for: MuAPI validates, so an undeclared field
+    is a 422 -- which the fallback chain reads as "endpoint does not exist"
+    and demotes to Standard. The routed model would never once run, and
+    nothing in the logs would say why."""
+    from tools.muapi_video_generator import MuAPIVideoGenerator
+
+    payload = MuAPIVideoGenerator("k")._payload(
+        "p", "https://cdn/f.png", 5,
+        generate_audio=True, last_image="https://cdn/l.png",
+        endpoint="seedance-2.5-image-to-video", aspect_ratio="9:16",
+    )
+    assert "generate_audio" not in payload
+    assert "last_image" not in payload
+    assert payload["aspect_ratio"] == "9:16"
+    assert payload["duration"] == 5
+
+
+def test_a_fixed_length_model_is_not_sent_a_duration():
+    from tools.muapi_video_generator import MuAPIVideoGenerator
+
+    payload = MuAPIVideoGenerator("k")._payload(
+        "p", "https://cdn/f.png", 5, endpoint="minimax-hailuo-2.3-pro-i2v"
+    )
+    assert payload == {"prompt": "p", "image_url": "https://cdn/f.png"}
+
+
+def test_an_unknown_model_gets_the_conservative_payload():
+    """Operators will point a profile at slugs this map has never seen. The
+    safe default is the intersection every i2v model in the catalogue
+    supports, not the richest payload we happen to know."""
+    from tools.muapi_video_generator import MuAPIVideoGenerator
+
+    payload = MuAPIVideoGenerator("k")._payload(
+        "p", "https://cdn/f.png", 7,
+        generate_audio=True, last_image="https://cdn/l.png",
+        endpoint="some-model-shipped-next-week", aspect_ratio="16:9",
+    )
+    assert payload == {"prompt": "p", "image_url": "https://cdn/f.png", "duration": 7}
+
+
+@pytest.mark.asyncio
+async def test_each_link_in_the_chain_gets_its_own_payload(monkeypatch):
+    """A demotion changes the schema, not just the URL, so the payload has to
+    be rebuilt per endpoint rather than once for the chain."""
+    monkeypatch.setenv("MUAPI_VIDEO_MODEL_ACTION", "seedance-2.5-image-to-video")
+    from tools.muapi_video_generator import MuAPIVideoGenerator, STANDARD_ENDPOINT
+
+    seen = []
+
+    async def fake_generate(self, endpoint, payload, **kwargs):
+        seen.append((endpoint, dict(payload)))
+        if endpoint != STANDARD_ENDPOINT:
+            raise MuAPIError("status_code=422 unprocessable")
+        return "https://fake.cdn/clip.mp4"
+
+    monkeypatch.setattr("tools.muapi_client.MuAPIClient.generate", fake_generate)
+
+    await MuAPIVideoGenerator("k").generate_video_from_image(
+        prompt="p", image_url="https://cdn/f.png", aspect_ratio="9:16",
+        plan="pro", shot_profile=ACTION,
+    )
+    assert "generate_audio" not in seen[0][1], "Seedance does not declare it"
+    assert "generate_audio" in seen[-1][1], "Kling does"
+
+
 @pytest.mark.asyncio
 async def test_a_real_generation_failure_is_not_retried_on_every_model(monkeypatch):
     """A prompt MuAPI refuses fails identically everywhere.

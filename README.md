@@ -24,7 +24,8 @@ Idea → Screenwriter → Storyboard Artist → Frame Generator → Video Genera
 - **Character Consistency Lock** — one portrait per character, generated once and reused across every scene.
 - **Continuity Edits** — "put her in a red coat" moves the locked portrait itself, then re-renders only the scenes she appears in.
 - **Timeline Re-cut** — reorder, trim and drop scenes from a finished drama. Uses the clips you already paid for, so it costs nothing.
-- **Per-shot Model Routing** — dialogue, action and establishing shots each get their own MuAPI model, with an automatic fallback chain when an endpoint is unavailable.
+- **Per-shot Model Routing** — dialogue, action and establishing shots each get their own MuAPI model, with an automatic fallback chain when an endpoint is unavailable. Each endpoint is sent only the fields its schema declares.
+- **Single Provider** — video, images, voice, music and lip sync all run on MuAPI; no second vendor key is required.
 - **Director Style Presets** — Slow Cinematic, Balanced, Dynamic Action, Intimate, Noir Mystery, Anime.
 - **Demo Mode** — no keys? The whole pipeline still runs with placeholder assets so you can explore the product instantly.
 - **Real-time SSE Progress** — live agent log with a heartbeat that survives long generation stages.

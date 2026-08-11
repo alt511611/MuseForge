@@ -40,9 +40,10 @@ DEFAULT_POLL_INTERVAL = 3.0
 DEFAULT_MAX_POLLS = 120
 
 
-def is_lipsync_enabled() -> bool:
-    """Opt-in: every synced scene is a paid API call on top of generation."""
-    return os.environ.get("MUSEFORGE_LIPSYNC_ENABLED", "").strip().lower() in TRUTHY
+# Re-exported, not redefined: the flag is provider-neutral and now lives with
+# the default (MuAPI) backend. Two copies of it would eventually disagree about
+# which spellings count as true.
+from tools.muapi_lipsync import is_lipsync_enabled  # noqa: E402,F401
 
 
 class FalAILipsync:
