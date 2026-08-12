@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import re
 import shutil
 import tempfile
 from typing import Any, Callable, Dict, List, Optional
@@ -228,6 +229,12 @@ def _format_story_state(scenes: List[Any], index: int) -> tuple:
 #: not to paste a stack of JSON into the results page.
 MAX_REASON_CHARS = 240
 
+#: httpx appends this to every HTTPStatusError. Same words every time, and
+#: longer than the budget it was eating.
+_MDN_BOILERPLATE = re.compile(
+    r"For more information check:\s*https?://\S*", re.IGNORECASE
+)
+
 
 def _provider_reason(exc: Exception) -> str:
     """A one-line, user-readable version of a provider failure.
@@ -237,6 +244,11 @@ def _provider_reason(exc: Exception) -> str:
     JSON in a results-page warning is not a message, it is wallpaper.
     """
     text = " ".join(str(exc or "").split())
+    # httpx spends most of its message on a link to MDN's page about status
+    # codes. It is the same sentence for every failure, it is longer than the
+    # cap below, and it pushed the one specific part -- the provider's own
+    # explanation -- off the end of the warning the user actually reads.
+    text = _MDN_BOILERPLATE.sub("", text).strip()
     if not text:
         return ""
     if len(text) > MAX_REASON_CHARS:
