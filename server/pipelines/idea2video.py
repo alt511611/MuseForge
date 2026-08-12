@@ -13,6 +13,7 @@ from interfaces.film_look import build_film_look_filters
 from interfaces.language import DEFAULT_LANGUAGE
 from interfaces.second_budget import billable_seconds, distribute_budget
 from interfaces.transitions import plan_transitions
+from interfaces.visual_style import resolve as resolve_visual_style
 from pipelines.script2video import (
     PipelineCancelled,
     Script2VideoPipeline,
@@ -1095,6 +1096,8 @@ class Idea2VideoPipeline:
             max(1, int(os.environ.get("MUSEFORGE_PORTRAIT_CONCURRENCY", "3")))
         )
 
+        look = resolve_visual_style(style)
+
         async def _portrait(char) -> tuple:
             wardrobe = (getattr(char, "wardrobe", "") or "").strip()
             prompt = (
@@ -1104,6 +1107,13 @@ class Idea2VideoPipeline:
                 # it without wardrobe leaves every scene to invent an outfit.
                 f"{('Wearing ' + wardrobe + '. ') if wardrobe else ''}"
                 f"Front-facing, neutral expression, studio lighting, high detail."
+                # The portrait is the identity anchor every frame is matched
+                # against, so it has to be made the same way the frames are.
+                # A photographic face bound into cel-shaded scenes fights the
+                # style in every shot of the drama. Added only for stylised
+                # looks: a photoreal style already renders this correctly and
+                # a redundant note could only move a picture that was right.
+                f"{'' if look.is_photoreal else ' ' + look.render_note}"
             )
             async with semaphore:
                 return char, await self.image_gen.generate_image(
@@ -1149,6 +1159,7 @@ class Idea2VideoPipeline:
 
         time_of_day = (getattr(script, "setting_time_of_day", "") or "").strip()
         era = (getattr(script, "setting_era", "") or "").strip()
+        look = resolve_visual_style(style)
         prompt = (
             f"Empty location plate, {style} style. {location}. "
             f"{('Time of day: ' + time_of_day + '. ') if time_of_day else ''}"
@@ -1156,6 +1167,10 @@ class Idea2VideoPipeline:
             "Wide establishing view of the space itself, no people, no figures, "
             "no characters. Consistent architecture, materials, furniture and "
             "lighting. High detail."
+            # Same reason as the character portrait: the plate is the set
+            # reference every establishing shot is drawn from, so it has to
+            # be built in the drama's own look.
+            f"{'' if look.is_photoreal else ' ' + look.render_note}"
         )
         try:
             return await self.image_gen.generate_image(prompt, aspect_ratio=aspect_ratio)

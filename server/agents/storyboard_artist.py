@@ -9,6 +9,7 @@ from typing import List, Optional
 from interfaces.camera import get_director_style
 from interfaces.character import CharacterInScene
 from interfaces.shot import StoryboardShot
+from interfaces.visual_style import resolve as resolve_visual_style
 from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
 
 logger = logging.getLogger(__name__)
@@ -149,6 +150,12 @@ Respond ONLY with valid JSON array containing a single shot object:
         characters: List[CharacterInScene],
         user_requirement: str = "",
         director_style: str = "cinematic_balanced",
+        # The drama's visual style (Noir, Anime, Documentary...). It reached
+        # the image model as a two-word prefix and stopped there, so shot
+        # DESIGN was identical for every style the product sells: a noir and
+        # a romance were the same frames with a different word in front of
+        # them. Defaulted so every existing caller keeps working unchanged.
+        style: str = "Cinematic",
         setting_location: str = "",
         setting_time_of_day: str = "",
         setting_era: str = "",
@@ -183,6 +190,7 @@ Respond ONLY with valid JSON array containing a single shot object:
             user_requirement=user_requirement,
             guidance=preset.storyboard_guidance,
             default_lens=preset.default_lens,
+            style=style,
             setting_location=setting_location,
             setting_time_of_day=setting_time_of_day,
             setting_era=setting_era,
@@ -230,6 +238,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                 user_requirement,
                 preset.storyboard_guidance,
                 preset.default_lens,
+                style=style,
                 setting_location=setting_location,
                 setting_time_of_day=setting_time_of_day,
                 setting_era=setting_era,
@@ -335,6 +344,7 @@ Respond ONLY with valid JSON array containing a single shot object:
         user_requirement: str,
         guidance: str,
         default_lens: str,
+        style: str = "Cinematic",
         setting_location: str = "",
         setting_time_of_day: str = "",
         setting_era: str = "",
@@ -371,6 +381,7 @@ Respond ONLY with valid JSON array containing a single shot object:
             f"{self._format_character_direction_block(character_direction)}"
             f"{self._format_setting_line(setting_location, setting_time_of_day, setting_era)}"
             f"{self._format_through_line(theme, visual_motif)}"
+            f"{self._format_visual_style(style)}"
             f"Director guidance: {guidance}\nDefault lens: {default_lens}\n"
             f"User requirements: {user_requirement or 'none'}"
         )
@@ -489,6 +500,27 @@ Respond ONLY with valid JSON array containing a single shot object:
         )
 
     @staticmethod
+    def _format_visual_style(style: str = "") -> str:
+        """The drama's look, as a composition instruction.
+
+        The style used to stop at the image model, which meant it could
+        change how a frame was PAINTED but never how it was FRAMED — a noir
+        and a romance were designed as the same shot with a different word
+        in front of it. Cinematic emits nothing: it is the neutral house
+        style this prompt already describes, and a note there would only
+        restate the default at the cost of tokens.
+        """
+        look = resolve_visual_style(style)
+        if not look.shot_note:
+            return ""
+        return (
+            f"Visual style — compose the shot for it, not just its subject: "
+            f"{look.label}. Favour {look.shot_note}. Keep this within the "
+            f"director guidance and the locked setting below; it decides "
+            f"framing and light, never the place or who is in it.\n"
+        )
+
+    @staticmethod
     def _format_setting_line(
         setting_location: str = "",
         setting_time_of_day: str = "",
@@ -514,6 +546,7 @@ Respond ONLY with valid JSON array containing a single shot object:
         user_requirement: str,
         guidance: str,
         default_lens: str,
+        style: str = "Cinematic",
         setting_location: str = "",
         setting_time_of_day: str = "",
         setting_era: str = "",
@@ -536,6 +569,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                 user_requirement=user_requirement,
                 guidance=guidance,
                 default_lens=default_lens,
+                style=style,
                 setting_location=setting_location,
                 setting_time_of_day=setting_time_of_day,
                 setting_era=setting_era,
