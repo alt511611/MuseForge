@@ -7,10 +7,11 @@ import { Film, Plus, ExternalLink, AlertCircle, Clock, CheckCircle2, XCircle, Lo
 import { useAuth } from "../../../contexts/AuthContext";
 import { useLanguage } from "../../../contexts/LanguageContext";
 import { createClient } from "../../../lib/supabase";
-import { isLowCredits } from "../../../lib/credits";
+import { isLowCredits, isOutOfCredits } from "../../../lib/credits";
 import { API_BASE, resolveJobVideoUrl } from "../../../lib/apiBase";
 import VideoPlayerModal from "../../../components/VideoPlayerModal";
 import { friendlyError } from "../../../utils/errorMessages";
+import { tr } from "../../../lib/tr";
 
 const PAGE_SIZE = 12;
 
@@ -113,7 +114,7 @@ function SkeletonCard() {
   );
 }
 
-function BuyCreditsModal({ onClose, getAccessToken }) {
+function BuyCreditsModal({ onClose, getAccessToken, validityDays }) {
   const { t } = useLanguage();
   const [loading, setLoading] = useState(null);
   const [err, setErr] = useState(null);
@@ -155,7 +156,19 @@ function BuyCreditsModal({ onClose, getAccessToken }) {
           </h3>
           <button onClick={onClose} style={{ color: "var(--mf-ink-3)" }}><X size={18} /></button>
         </div>
-        <p className="text-xs mb-5" style={{ color: "var(--mf-ink-3)" }}>No subscription required. Credits are added instantly and are valid for 30 days.</p>
+        {/* The 30 days here was stale copy: a PURCHASED pack has run on
+              PACK_CREDIT_VALIDITY_DAYS (a year) since packs stopped sharing the
+              monthly allowance's fuse. /api/credits reports the real number as
+              pack_validity_days -- read it rather than restating it, so the two
+              cannot drift apart again. */}
+          <p className="text-xs mb-5" style={{ color: "var(--mf-ink-3)" }}>
+            {tr(
+              t,
+              "dash_buy_credits_note",
+              `No subscription required. Credits are added instantly and are valid for ${validityDays} days.`,
+              { days: validityDays }
+            )}
+          </p>
         <div className="space-y-3">
           {PACKAGES.map((pkg) => (
             <div key={pkg.key}
@@ -230,6 +243,8 @@ export default function DashboardPage() {
   const [hasMore, setHasMore] = useState(false);
   const [showBuyModal, setShowBuyModal] = useState(false);
   const [ledger, setLedger] = useState([]);
+  // Authoritative pack lifetime, straight from the server's own constant.
+  const [packValidityDays, setPackValidityDays] = useState(365);
   const [playingVideo, setPlayingVideo] = useState(null);
 
   useEffect(() => {
@@ -276,6 +291,9 @@ export default function DashboardPage() {
       if (res.ok) {
         const data = await res.json();
         setLedger(data.ledger || []);
+        if (typeof data.pack_validity_days === "number") {
+          setPackValidityDays(data.pack_validity_days);
+        }
         if (data.credits !== undefined && profile) {
           setProfile((p) => p ? { ...p, credits: data.credits } : p);
         }
@@ -317,12 +335,15 @@ export default function DashboardPage() {
   };
 
   const lowCredits = profile && isLowCredits(profile.credits, profile.plan);
+  // isLowCredits() is false at zero (it requires credits > 0), so the banner
+  // disappeared exactly when the account could no longer generate anything.
+  const outOfCredits = profile && isOutOfCredits(profile.credits);
 
   const PLAN_LABEL_KEYS = { free: "dash_plan_free", creator: "dash_plan_creator", pro: "dash_plan_pro" };
 
   return (
     <main className="min-h-screen" style={{ backgroundColor: "var(--mf-stage)" }}>
-      {showBuyModal && <BuyCreditsModal onClose={() => setShowBuyModal(false)} getAccessToken={getAccessToken} />}
+      {showBuyModal && <BuyCreditsModal onClose={() => setShowBuyModal(false)} getAccessToken={getAccessToken} validityDays={packValidityDays} />}
       <div className="max-w-5xl mx-auto px-6 py-12">
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-10">
@@ -340,13 +361,15 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {lowCredits && (
+        {(lowCredits || outOfCredits) && (
           <div
             className="mb-6 px-5 py-4 rounded-xl flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
             style={{ backgroundColor: "rgba(232,182,76,0.08)", border: "1px solid rgba(232,182,76,0.35)" }}
           >
             <p className="text-sm font-medium" style={{ color: "var(--mf-gold)" }}>
-              {t("credits_low_banner", { n: profile.credits })}
+              {outOfCredits
+                ? t("credits_out_banner")
+                : t("credits_low_banner", { n: profile.credits })}
             </p>
             <button
               type="button"

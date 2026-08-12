@@ -139,22 +139,10 @@ def _sb_headers() -> dict:
     }
 
 
-async def _add_ledger_entry(user_id: str, amount: int, reason: str, job_id: Optional[str] = None):
-    """Insert a row into credit_ledger. Fire-and-forget safe."""
-    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-        return
-    try:
-        payload = {"user_id": user_id, "amount": amount, "reason": reason}
-        if job_id:
-            payload["job_id"] = job_id
-        async with httpx.AsyncClient(timeout=6.0) as client:
-            await client.post(
-                f"{SUPABASE_URL}/rest/v1/credit_ledger",
-                json=payload,
-                headers=_sb_headers(),
-            )
-    except Exception:
-        pass
+# NOTE: there is deliberately no _add_ledger_entry helper here. Every credit
+# movement in this file goes through the grant_credits/deduct_credits RPCs,
+# which write their own credit_ledger row -- a second writer would double-count
+# every purchase in the user's history.
 
 
 async def _add_credits_to_profile(

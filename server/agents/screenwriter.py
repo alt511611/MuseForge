@@ -7,6 +7,7 @@ import re
 from typing import List, Optional
 
 from interfaces.character import CharacterProfile, DramaScript, ScriptScene
+from interfaces.language import DEFAULT_LANGUAGE, is_default, name_of
 from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,19 @@ brief already reads as a shot list, keep its scenes, their order and their spoke
 lines; your job is then to fill in the fields it does not mention, not to rewrite it.
 If the brief supplies the spoken lines, put them in "dialogue" word for word — never
 replace them with lines of your own and never return an empty dialogue list.
+
+THE BRIEF'S EVENT IS THE CLIMAX. When the brief states something that HAPPENS — "the
+city's power dies the moment she opens it", "the letter burns", "he misses the train" —
+that event is not background colour, it is the film. Make it the "turn" of the climax
+scene and write it into that scene's "action" as something a camera can watch happen.
+A drama whose stated event never visibly occurs has failed the brief, however good the
+scenes around it are.
+
+DO NOT PRE-EMPT THE EVENT. No scene before the climax may show the event or its
+aftermath: if the power dies at the climax, every earlier scene is still lit; if the
+container is opened at the climax, every earlier scene has it shut. Order the scenes so
+that each one's "action" is only possible given what the earlier scenes have already
+done, and so the world visibly CHANGES at the climax.
 
 STRUCTURE. Build 3-5 scenes into ONE dramatic shape, not a list of events. Assign each
 scene a "dramatic_function" from: setup, inciting_incident, rising_action, turning_point,
@@ -79,6 +93,14 @@ SETTING. Define ONE locked setting for the ENTIRE drama (not per scene): locatio
 of day, era. Every scene takes place there — do not invent a different place or time per
 scene.
 
+CLOSED CAST, FIXED COSTUME. Every character a viewer will see must be listed in
+"characters" — the render only holds onto faces it was told about, so anyone who appears
+in an "action" line without a "characters" entry comes back as a different stranger in
+every scene. Keep the cast as small as the story allows, introduce no new featured
+character after the first scene, and give each one a SPECIFIC "wardrobe" (garment, cut,
+colour) that they wear for the whole drama. Never write a costume change unless the brief
+asks for one, and never describe the same person's clothing differently in two scenes.
+
 PRESET CHARACTERS in the user message already exist: do NOT redefine or rename them.
 Use their exact names and visual descriptions, and weave them into the story. You may
 add extra supporting characters only if needed.
@@ -115,6 +137,42 @@ Respond ONLY with valid JSON matching this schema:
   ]
 }"""
 
+    #: Appended to the system prompt when the drama is not in English.
+    #:
+    #: Placed in the SYSTEM prompt, not the user turn, because it has to
+    #: outrank the brief: a Turkish user often writes the idea in English
+    #: ("two brothers fight over an inheritance") and still wants a Turkish
+    #: drama. It also has to outrank this prompt's own English example values
+    #: (`"line": "The exact words Kemal says."`), which were quietly biasing
+    #: short briefs back to English.
+    #:
+    #: Field NAMES stay English or the JSON stops parsing.
+    LANGUAGE_CLAUSE = """
+
+LANGUAGE. Write the drama in {language}. Every piece of text a viewer will
+read or hear — "title", "logline", and every "line" of dialogue — must be in
+{language}, natural and idiomatic, never a translation of an English sentence.
+This holds even when the user's brief itself is written in another language.
+The JSON field NAMES and the enum values ("protagonist", "climax", ...) stay
+in English exactly as specified; only the prose changes."""
+
+    #: Appended to the system prompt when the job will actually VOICE the
+    #: script (dialogue is enabled and paid for on this run).
+    #:
+    #: The base prompt tells the model that "silence is a legitimate choice",
+    #: which is true of a silent film and wrong of a job the user switched
+    #: dialogue on for: an all-silent script produces no voice tracks, no
+    #: captions and — with music off — a master with no audio stream at all,
+    #: which reads as the feature being broken rather than as a choice.
+    DIALOGUE_CLAUSE = """
+
+SPOKEN DRAMA. This script WILL be voiced by actors, so it cannot be a silent film:
+EVERY scene needs at least one line in its "dialogue" list, and an empty dialogue
+list is not acceptable in any scene. Keep lines short, speakable and few (one to
+three per scene) — this is film dialogue over a picture, not a radio play. The
+climax's stated event still has to be SEEN, not merely narrated: never replace the
+event with a character describing it."""
+
     #: Token budget for a director-level script. Shared by BOTH provider
     #: paths: the MuAPI route is tried FIRST, so raising it only on the
     #: Anthropic fallback (as an earlier change did) leaves the primary path
@@ -135,6 +193,22 @@ Respond ONLY with valid JSON matching this schema:
         self.muapi_key = os.environ.get("MUAPI_KEY", "")
         self.demo = demo
 
+    def _system_prompt(
+        self, language: str = DEFAULT_LANGUAGE, require_dialogue: bool = False
+    ) -> str:
+        """The system prompt for this drama's language and audio mode.
+
+        English adds nothing to the language clause — the prompt is already
+        written in it, and a redundant "write in English" clause only spends
+        tokens.
+        """
+        prompt = self.SYSTEM_PROMPT
+        if not is_default(language):
+            prompt += self.LANGUAGE_CLAUSE.format(language=name_of(language))
+        if require_dialogue:
+            prompt += self.DIALOGUE_CLAUSE
+        return prompt
+
     async def write_script(
         self,
         idea: str,
@@ -142,6 +216,8 @@ Respond ONLY with valid JSON matching this schema:
         num_scenes: int = 3,
         user_requirement: str = "",
         preset_characters: Optional[List[dict]] = None,
+        language: str = DEFAULT_LANGUAGE,
+        require_dialogue: bool = False,
     ) -> DramaScript:
         # Demo mode must stay fast and free of real network calls --
         # matches MuAPIImageGenerator/MuAPIVideoGenerator's demo behavior.
@@ -176,7 +252,9 @@ Respond ONLY with valid JSON matching this schema:
         if self.muapi_key and is_muapi_llm_enabled():
             try:
                 content = await complete_via_muapi(
-                    self.SYSTEM_PROMPT, prompt, max_tokens=self.MAX_SCRIPT_TOKENS
+                    self._system_prompt(language, require_dialogue),
+                    prompt,
+                    max_tokens=self.MAX_SCRIPT_TOKENS,
                 )
                 return self._with_brief(
                     DramaScript(**self._parse_json(content)), idea
@@ -198,7 +276,13 @@ Respond ONLY with valid JSON matching this schema:
         # 2) Fall back to a direct Anthropic call if a key is configured.
         if self.api_key:
             return await self._write_with_claude(
-                idea, style, num_scenes, user_requirement, preset_characters
+                idea,
+                style,
+                num_scenes,
+                user_requirement,
+                preset_characters,
+                language,
+                require_dialogue,
             )
 
         # 3) No provider answered. The deterministic template is NOT an
@@ -226,6 +310,8 @@ Respond ONLY with valid JSON matching this schema:
         num_scenes: int,
         user_requirement: str,
         preset_characters: Optional[List[dict]] = None,
+        language: str = DEFAULT_LANGUAGE,
+        require_dialogue: bool = False,
     ) -> DramaScript:
         import anthropic
 
@@ -269,7 +355,7 @@ Respond ONLY with valid JSON matching this schema:
             async with client.messages.stream(
                 model="claude-sonnet-5",
                 max_tokens=self.MAX_SCRIPT_TOKENS,
-                system=self.SYSTEM_PROMPT,
+                system=self._system_prompt(language, require_dialogue),
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:
                 message = await stream.get_final_message()

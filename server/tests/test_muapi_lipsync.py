@@ -6,7 +6,6 @@ everything else already ran on MuAPI.
 
 import os
 import sys
-from unittest.mock import patch
 
 import pytest
 

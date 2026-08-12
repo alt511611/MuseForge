@@ -9,6 +9,7 @@ import logging
 import os
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from interfaces.language import DEFAULT_LANGUAGE, is_default, normalize
 from tools.muapi_client import MuAPIClient
 
 logger = logging.getLogger(__name__)
@@ -186,6 +187,7 @@ class MuAPIVoiceGenerator:
         self,
         dialogue: Iterable[Any],
         is_cancelled: Optional[Callable[[], bool]] = None,
+        language: str = DEFAULT_LANGUAGE,
     ) -> List[Dict[str, Any]]:
         """Generate all non-empty scene lines in ONE ElevenLabs dialogue request.
 
@@ -202,8 +204,22 @@ class MuAPIVoiceGenerator:
                 {"text": row["line"], "voice_id": row["voice_id"]} for row in lines
             ],
             "stability": 0.5,
-            "language": None,
         }
+        # The field is `language_code`, not `language` -- the old key was not a
+        # field this endpoint declares, so it carried no hint at all and every
+        # drama fell through to auto-detection. Auto-detect is fine on a
+        # paragraph and unreliable on the two-word lines a micro-drama is made
+        # of ("Söz."), where it can switch language mid-scene.
+        #
+        # Sent only for non-English: omitted means auto-detect, which is the
+        # right behaviour for English and keeps the payload identical to what
+        # the endpoint saw before for every existing job.
+        #
+        # No per-language voice table is needed to go with it: ElevenLabs v3
+        # voices are multilingual, so the same cast speaks any supported
+        # language once the code is passed.
+        if not is_default(language):
+            payload["language_code"] = normalize(language)
         try:
             audio_url = await self.client.generate(
                 self.VOICE_ENDPOINT,

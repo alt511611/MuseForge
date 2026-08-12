@@ -28,6 +28,8 @@ from auth import (
     get_optional_user,
 )
 from interfaces.camera import DIRECTOR_STYLES
+from interfaces.language import normalize as normalize_language
+from interfaces.render_eta import RenderPlan, prior_seconds
 from interfaces.second_budget import SECONDS_PER_CREDIT, total_budget_seconds
 from tools.muapi_lipsync import is_lipsync_enabled
 from tools.muapi_voice_generator import is_dialogue_enabled
@@ -68,23 +70,12 @@ ALLOWED_ORIGIN_REGEX = os.environ.get(
 )
 
 DEMO_FLAG = os.environ.get("MUSEFORGE_DEMO", "").lower() in ("1", "true", "yes")
-# Wall-clock generation time per sequential scene (frame + Kling video).
-# Music/dialogue overlap the scene loop, so they are modelled as smaller add-ons
-# below rather than another full scene multiplier. Override via env.
-SECONDS_PER_SCENE = float(os.environ.get("MUSEFORGE_SECONDS_PER_SCENE", "100"))
-# Screenplay + portraits + final assembly overhead (mostly fixed).
-ESTIMATE_BASE_SECONDS = float(os.environ.get("MUSEFORGE_ESTIMATE_BASE_SECONDS", "90"))
-# Residual music cost after overlap (mix + any leftover generation wait).
-ESTIMATE_MUSIC_SECONDS = float(os.environ.get("MUSEFORGE_ESTIMATE_MUSIC_SECONDS", "45"))
-# Per-scene residual for dialogue TTS that may not fully overlap video gen.
-ESTIMATE_DIALOGUE_PER_SCENE = float(
-    os.environ.get("MUSEFORGE_ESTIMATE_DIALOGUE_PER_SCENE", "20")
-)
-# Per speaking scene. Unlike dialogue TTS this cannot overlap generation: it
-# needs the finished clip AND the finished voice before it can start.
-ESTIMATE_LIPSYNC_PER_SCENE = float(
-    os.environ.get("MUSEFORGE_ESTIMATE_LIPSYNC_PER_SCENE", "40")
-)
+# The phase budgets that used to live here as loose constants now sit in
+# interfaces/render_eta, because the LIVE countdown needs the same model: it
+# reports remaining time by measuring this deployment's real scene rate and
+# rescaling the very same phases. Keeping two copies is how the quote and the
+# countdown drift apart, which is what made the old ETA hit zero mid-render.
+# The env var names and their defaults are unchanged.
 # Surface a wait warning once estimated wall-clock exceeds this many minutes.
 WAIT_WARNING_MINUTES = int(os.environ.get("MUSEFORGE_WAIT_WARNING_MINUTES", "15"))
 
@@ -109,6 +100,40 @@ def _demo_reason() -> Optional[str]:
     return None
 
 
+def render_plan_for(
+    num_scenes: int,
+    *,
+    music_enabled: bool = False,
+    dialogue_enabled: bool = False,
+    lipsync_enabled: bool = False,
+    plan: str = "free",
+    demo: Optional[bool] = None,
+) -> RenderPlan:
+    """The shape of the run these options describe.
+
+    Applies the same plan gating as /api/generate, so a stage the caller asks
+    for but will not actually get (music on a Free plan, lip sync on a
+    deployment without a provider key) is not in the estimate either.
+    """
+    if demo is None:
+        demo = _is_demo()
+    plan = (plan or "free").lower()
+    dialogue_on = bool(dialogue_enabled) and plan == "pro" and is_dialogue_enabled()
+    # Scenes render in parallel batches (see idea2video._scene_concurrency),
+    # so wall-clock scales with the number of BATCHES, not raw scene count --
+    # a 5-scene job at concurrency 3 takes ~2 scene-slots, not 5.
+    from pipelines.idea2video import _scene_concurrency
+
+    return RenderPlan(
+        num_scenes=max(1, int(num_scenes or 1)),
+        concurrency=_scene_concurrency(num_scenes),
+        music=bool(music_enabled) and plan in ("creator", "pro"),
+        dialogue=dialogue_on,
+        lipsync=dialogue_on and bool(lipsync_enabled) and _lipsync_configured(),
+        demo=bool(demo),
+    )
+
+
 def estimate_generation_seconds(
     num_scenes: int,
     *,
@@ -118,35 +143,22 @@ def estimate_generation_seconds(
     plan: str = "free",
     demo: Optional[bool] = None,
 ) -> int:
-    """Wall-clock generation estimate (not output video length)."""
-    if demo is None:
-        demo = _is_demo()
-    if demo:
-        # Demo pipeline is near-instant regardless of scene count.
-        return 5
+    """Wall-clock generation estimate (not output video length).
 
-    plan = (plan or "free").lower()
-    music_on = bool(music_enabled) and plan in ("creator", "pro")
-    dialogue_on = (
-        bool(dialogue_enabled) and plan == "pro" and is_dialogue_enabled()
+    This is the PRIOR — what to quote before anything has run. Once a job is in
+    flight the live figure comes from jobs.Job.eta_seconds instead, which
+    measures the real rate rather than assuming this one.
+    """
+    return prior_seconds(
+        render_plan_for(
+            num_scenes,
+            music_enabled=music_enabled,
+            dialogue_enabled=dialogue_enabled,
+            lipsync_enabled=lipsync_enabled,
+            plan=plan,
+            demo=demo,
+        )
     )
-    # Scenes render in parallel batches (see idea2video._scene_concurrency),
-    # so wall-clock scales with the number of BATCHES, not raw scene count --
-    # a 5-scene job at concurrency 3 takes ~2 scene-slots, not 5.
-    from pipelines.idea2video import _scene_concurrency
-
-    concurrency = _scene_concurrency(num_scenes)
-    batches = -(-max(1, num_scenes) // concurrency)  # ceil division
-    seconds = ESTIMATE_BASE_SECONDS + batches * SECONDS_PER_SCENE
-    if music_on:
-        seconds += ESTIMATE_MUSIC_SECONDS
-    if dialogue_on:
-        seconds += num_scenes * ESTIMATE_DIALOGUE_PER_SCENE
-    # Lip sync runs one request per speaking scene, strictly after that
-    # scene's clip and voice both exist, so it is added time, not overlapped.
-    if dialogue_on and bool(lipsync_enabled) and _lipsync_configured():
-        seconds += num_scenes * ESTIMATE_LIPSYNC_PER_SCENE
-    return max(1, int(round(seconds)))
 
 
 # ── Rate limiter (sliding-window, no external dependencies) ───────────────────
@@ -275,6 +287,12 @@ class GenerateRequest(BaseModel):
     aspect_ratio: str = Field(default="16:9", pattern=r"^(16:9|9:16|1:1)$")
     # Absolute ceiling = Pro plan max; per-plan caps enforced in generate().
     num_scenes: int = Field(default=3, ge=2, le=24)
+    # The drama's SPOKEN language, as an ISO-639-1 code. The site is served in
+    # twenty locales and none of them reached the backend, so a Turkish user on
+    # a Turkish page got whatever language the screenwriter happened to infer
+    # from the wording of their idea. Unrecognised values normalise to English
+    # rather than erroring -- see interfaces/language.
+    language: str = "en"
     user_requirement: str = ""
     character_image: Optional[str] = None
     character_name: str = ""
@@ -386,12 +404,24 @@ LIPSYNC_EXTRA_CREDIT_COST = 1
 
 
 def _lipsync_configured() -> bool:
-    """Deployment-level readiness: the feature flag AND a usable fal.ai key.
+    """Deployment-level readiness: the feature flag AND the key its provider needs.
 
     Kept separate from the per-request opt-in so an unconfigured deployment
     never quotes (or charges) for a stage it cannot run.
+
+    WHICH key depends on MUSEFORGE_LIPSYNC_PROVIDER. This used to demand
+    FAL_KEY unconditionally, which was correct only while fal.ai was the sole
+    backend. Since MuAPI became the DEFAULT provider (tools/muapi_lipsync), a
+    deployment running that default reported lipsync_available=False forever:
+    the toggle never appeared in the UI, and a request that asked for it anyway
+    was silently dropped in generate(). The feature was unreachable in its own
+    default configuration -- ask the provider what it needs instead.
     """
-    return is_lipsync_enabled() and bool((os.environ.get("FAL_KEY") or "").strip())
+    if not is_lipsync_enabled():
+        return False
+    provider = (os.environ.get("MUSEFORGE_LIPSYNC_PROVIDER", "muapi") or "").strip().lower()
+    key = "FAL_KEY" if provider == "falai" else "MUAPI_KEY"
+    return bool((os.environ.get(key) or "").strip())
 
 
 def _enforce_plan_scene_limit(plan: str, num_scenes: int) -> None:
@@ -510,7 +540,6 @@ async def public_stats():
     if SUPABASE_URL and SUPABASE_SERVICE_KEY:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                now = time.time()
                 import datetime
                 first_of_month = datetime.datetime.utcnow().replace(
                     day=1, hour=0, minute=0, second=0, microsecond=0
@@ -818,6 +847,7 @@ async def generate(
         aspect_ratio=req.aspect_ratio,
         num_scenes=req.num_scenes,
         user_requirement=req.user_requirement,
+        language=normalize_language(req.language),
         demo=demo,
         user_id=current_user.user_id if current_user else None,
         user_email=current_user.email if current_user else None,
@@ -973,7 +1003,11 @@ async def export_job_format(
     from pipelines.idea2video import export_alternate_format
     from tools.supabase_storage import upload_video
 
-    job = job_store.get(job_id)
+    # Restored from storage on a memory miss: these controls stay on screen
+    # for any finished job the browser can load, so looking in memory alone
+    # made every one of them answer "Job not found" after a restart or an
+    # eviction, while the page around them rendered fine.
+    job = await job_store.get_or_restore(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -1038,7 +1072,11 @@ async def approve_script(
     """Charge credits (if needed) and continue production from an edited script."""
     from interfaces.character import DramaScript
 
-    job = job_store.get(job_id)
+    # Restored from storage on a memory miss: these controls stay on screen
+    # for any finished job the browser can load, so looking in memory alone
+    # made every one of them answer "Job not found" after a restart or an
+    # eviction, while the page around them rendered fine.
+    job = await job_store.get_or_restore(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -1120,7 +1158,11 @@ async def regenerate_scene(
     Costs a single scene credit. Re-running the whole job would also re-roll
     the scenes the user was happy with and charge for all of them.
     """
-    job = job_store.get(job_id)
+    # Restored from storage on a memory miss: these controls stay on screen
+    # for any finished job the browser can load, so looking in memory alone
+    # made every one of them answer "Job not found" after a restart or an
+    # eviction, while the page around them rendered fine.
+    job = await job_store.get_or_restore(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -1173,7 +1215,11 @@ async def global_edit(
     """
     from pipelines.idea2video import Idea2VideoPipeline
 
-    job = job_store.get(job_id)
+    # Restored from storage on a memory miss: these controls stay on screen
+    # for any finished job the browser can load, so looking in memory alone
+    # made every one of them answer "Job not found" after a restart or an
+    # eviction, while the page around them rendered fine.
+    job = await job_store.get_or_restore(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -1259,7 +1305,11 @@ async def timeline_edit(
     Nothing here calls a generation model — every clip already exists and was
     already paid for — so this deliberately takes no credits at all.
     """
-    job = job_store.get(job_id)
+    # Restored from storage on a memory miss: these controls stay on screen
+    # for any finished job the browser can load, so looking in memory alone
+    # made every one of them answer "Job not found" after a restart or an
+    # eviction, while the page around them rendered fine.
+    job = await job_store.get_or_restore(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -1553,6 +1603,12 @@ async def admin_retry_job(
     if old.status == JobStatus.RUNNING:
         raise HTTPException(status_code=400, detail="Job is still running")
 
+    # Every field the original job carried, not just the ones that happened to
+    # exist when this endpoint was written. A retry that silently drops
+    # `language` re-renders a Turkish drama in English, and one that drops
+    # `lipsync_enabled` / `library_characters` / the uploaded reference photos
+    # produces a different video than the one being retried -- while the admin
+    # is told it is the same job again.
     new_job = await job_store.create(
         idea=old.idea,
         style=old.style,
@@ -1560,12 +1616,19 @@ async def admin_retry_job(
         aspect_ratio=old.aspect_ratio,
         num_scenes=old.num_scenes,
         user_requirement=old.user_requirement,
+        language=old.language,
         demo=old.demo,
         user_id=old.user_id,
         user_email=old.user_email,
+        character_image=old.character_image,
+        character_name=old.character_name,
+        location_image=old.location_image,
         music_enabled=old.music_enabled,
         dialogue_enabled=old.dialogue_enabled,
+        lipsync_enabled=old.lipsync_enabled,
         plan=old.plan,
+        require_script_approval=old.require_script_approval,
+        library_characters=list(old.library_characters or []),
     )
     api_key = os.environ.get("MUAPI_KEY", "")
     logger.info("About to schedule background job %s", new_job.id)

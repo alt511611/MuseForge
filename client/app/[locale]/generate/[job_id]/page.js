@@ -6,7 +6,7 @@ import Link from "../../../../components/LocaleLink";
 import {
   Film, Pen, Layout, Image as ImageIcon, Video, Music,
   CheckCircle2, XCircle, Loader2, ArrowLeft, Sparkles,
-  Ban, FlaskConical, RefreshCw,
+  Ban, FlaskConical, RefreshCw, AudioLines, Palette, Subtitles,
 } from "lucide-react";
 import LoadingAnimation from "../../../../components/LoadingAnimation";
 import VideoResult from "../../../../components/VideoResult";
@@ -15,6 +15,7 @@ import { friendlyError } from "../../../../utils/errorMessages";
 import { useAuth } from "../../../../contexts/AuthContext";
 import { API_BASE } from "../../../../lib/apiBase";
 import { useLanguage } from "../../../../contexts/LanguageContext";
+import { tr } from "../../../../lib/tr";
 
 const STAGE_CONFIG = {
   screenwriting: { icon: Pen, labelKey: "stage_screenwriting", color: "var(--mf-violet-soft)" },
@@ -24,6 +25,14 @@ const STAGE_CONFIG = {
   video: { icon: Video, labelKey: "stage_video", color: "#34d399" },
   assembly: { icon: Film, labelKey: "stage_assembly", color: "var(--mf-gold)" },
   music: { icon: Music, labelKey: "stage_music", color: "#f472b6" },
+  // Stages the pipeline really emits (see idea2video._assemble_final_drama and
+  // _lipsync_scenes) that had no entry here at all, so the live log printed
+  // their raw slugs and coloured them like plain text.
+  lipsync: { icon: AudioLines, labelKey: "stage_lipsync", color: "#f472b6" },
+  grade: { icon: Palette, labelKey: "stage_grade", color: "var(--mf-gold)" },
+  subtitles: { icon: Subtitles, labelKey: "stage_subtitles", color: "#60a5fa" },
+  finishing: { icon: Sparkles, labelKey: "stage_finishing", color: "var(--mf-gold)" },
+  script_ready: { icon: Pen, labelKey: "stage_script_ready", color: "var(--mf-violet-soft)" },
   scene_complete: { icon: CheckCircle2, labelKey: "stage_scene_complete", color: "var(--mf-ok)" },
   complete: { icon: CheckCircle2, labelKey: "stage_complete", color: "var(--mf-ok)" },
   cancelled: { icon: Ban, labelKey: "stage_cancelled", color: "var(--mf-gold)" },
@@ -67,14 +76,20 @@ export default function GeneratePage() {
   const { getAccessToken } = useAuth();
   const { t } = useLanguage();
   const [job, setJob] = useState(null);
-  const [estimatedTotalSeconds, setEstimatedTotalSeconds] = useState(null);
-  // fetchJob's closure captures estimatedTotalSeconds, and the state is
-  // deliberately not in its dependency list (adding it would tear down and
-  // re-open the EventSource). That made the `=== null` check below always
-  // true, so every re-run of fetchJob -- stream close, stream error, the
-  // cancel-race re-sync -- fired another /api/estimate for a value that
-  // never changes. A ref reads current without re-creating the callback.
+  // fetchJob's closure captures this state, and it is deliberately not in the
+  // dependency list (adding it would tear down and re-open the EventSource).
+  // A ref reads current without re-creating the callback.
   const estimateRequestedRef = useRef(false);
+  // The last remaining-seconds figure the SERVER reported, and the client
+  // clock reading at which it arrived. Everything shown is derived from this
+  // pair: the countdown ticks down locally between updates and re-anchors
+  // whenever a fresh figure lands (every event, and every 15s heartbeat).
+  //
+  // Replaces an extrapolation from the progress percentage, which was the
+  // wrong instrument for the job — progress% advances in steps while
+  // wall-clock advances continuously, so it read as "4 minutes left" through
+  // a stalled stage and then hit zero with a third of the render still to go.
+  const etaRef = useRef({ seconds: null, at: 0 });
   const [events, setEvents] = useState([]);
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState("running");
@@ -85,6 +100,12 @@ export default function GeneratePage() {
   const [nowTick, setNowTick] = useState(0);
   const [editScript, setEditScript] = useState(null);
   const [approving, setApproving] = useState(false);
+  // Bumped to force a NEW EventSource. The server's SSE generator only streams
+  // while the job is queued/running (jobs.JobStore.subscribe), so it closes the
+  // moment the job parks in awaiting_script_approval — and nothing reopened it
+  // once production actually started. The whole script-approval flow therefore
+  // ended in a frozen 10% progress bar until the user reloaded by hand.
+  const [streamEpoch, setStreamEpoch] = useState(0);
   const logRef = useRef(null);
   const seenSeq = useRef(new Set());
   const startTimeRef = useRef(Date.now());
@@ -95,7 +116,18 @@ export default function GeneratePage() {
     return token ? { Authorization: `Bearer ${token}` } : {};
   }, [getAccessToken]);
 
+  // Anchor a server-reported ETA to the local clock. `nowTick` (below) drives
+  // the once-a-second re-render that makes it visibly count down.
+  const syncEta = useCallback((seconds) => {
+    if (typeof seconds !== "number" || seconds < 0) return;
+    etaRef.current = { seconds, at: Date.now() };
+  }, []);
+
   const addEvent = useCallback((evt) => {
+    // A heartbeat carries no progress of its own, but it DOES carry a freshly
+    // measured ETA — it is the only thing that arrives during the long silence
+    // of a multi-minute provider call, so it is taken before the early return.
+    if (typeof evt.eta_seconds === "number") syncEta(evt.eta_seconds);
     if (evt.stage === "heartbeat") return;
     if (typeof evt.seq === "number" && evt.seq >= 0) {
       if (seenSeq.current.has(evt.seq)) return;
@@ -111,7 +143,7 @@ export default function GeneratePage() {
       setStatus("awaiting_script_approval");
       if (evt.data?.script) setEditScript(evt.data.script);
     }
-  }, []);
+  }, [syncEta]);
 
   const fetchJob = useCallback(async () => {
     try {
@@ -128,21 +160,36 @@ export default function GeneratePage() {
           setEditScript(data.result.script);
         }
 
-        // Fetch a stable, stage-aware total-duration estimate once we know
-        // num_scenes, instead of relying purely on the volatile
-        // elapsed/progress extrapolation below (which can spike upward
-        // whenever progress% stalls relative to wall-clock time -- e.g.
-        // during a slow video-generation stage).
+        // Once the job is running the server reports a MEASURED figure (see
+        // interfaces/render_eta), so this call only has to cover the gap
+        // before the first scene lands.
+        if (typeof data.eta_seconds === "number") syncEta(data.eta_seconds);
+
+        // The opening estimate. It has to describe THIS job: the request used
+        // to send num_scenes alone, so a Pro job with dialogue and lip sync --
+        // the slowest configuration the product sells, and the one where the
+        // wait most needs explaining — was quoted the time of the cheapest one
+        // and blew through its own countdown within minutes.
         if (!estimateRequestedRef.current && typeof data.num_scenes === "number") {
           estimateRequestedRef.current = true;
           fetch(`${API_BASE}/api/estimate`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ num_scenes: data.num_scenes }),
+            body: JSON.stringify({
+              num_scenes: data.num_scenes,
+              music_enabled: !!data.music_enabled,
+              dialogue_enabled: !!data.dialogue_enabled,
+              lipsync_enabled: !!data.lipsync_enabled,
+              plan: data.plan || "free",
+            }),
           })
             .then((r) => (r.ok ? r.json() : null))
             .then((est) => {
-              if (est?.estimated_seconds) setEstimatedTotalSeconds(est.estimated_seconds);
+              // Never let the prior overwrite a measurement that has already
+              // arrived — this response can land after the first SSE event.
+              if (est?.estimated_seconds && etaRef.current.seconds === null) {
+                syncEta(est.estimated_seconds);
+              }
             })
             .catch(() => {});
         }
@@ -170,7 +217,7 @@ export default function GeneratePage() {
     };
     source.onerror = () => { source.close(); fetchJob(); };
     return () => source.close();
-  }, [job_id, fetchJob, addEvent]);
+  }, [job_id, fetchJob, addEvent, streamEpoch]);
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
@@ -224,6 +271,16 @@ export default function GeneratePage() {
         );
       }
       setStatus("running");
+      // Production has restarted server-side; re-subscribe so its progress is
+      // actually streamed. The ETA clock restarts here too — it was measuring
+      // from page load, which on this path includes however long the user spent
+      // reading and editing the script.
+      startTimeRef.current = Date.now();
+      // Drop the pre-approval figure rather than letting it tick down against
+      // the run that is only now starting; the server re-arms its own clock at
+      // the same moment and the first event brings a fresh one.
+      etaRef.current = { seconds: null, at: 0 };
+      setStreamEpoch((n) => n + 1);
     } catch (err) {
       setError(err.message || t("gen_approve_failed"));
     } finally {
@@ -257,33 +314,46 @@ export default function GeneratePage() {
     return () => clearInterval(id);
   }, [isRunning]);
 
-  // ETA calculation
+  // ETA. The figure itself comes from the server, which measures this
+  // deployment's real scene rate rather than assuming one (interfaces/
+  // render_eta); all this does is tick the last reported value down between
+  // updates so the number visibly moves. Updates land on every progress event
+  // and on the 15s heartbeat, at which point it re-anchors — so a batch that
+  // runs long corrects the estimate instead of silently exhausting it.
   void nowTick; // re-render tick
   const elapsed = Math.round((Date.now() - startTimeRef.current) / 1000);
-  // Prefer the stable, stage-aware estimate (total expected duration minus
-  // elapsed) over the volatile elapsed/progress extrapolation, which can
-  // spike upward whenever the progress percentage stalls relative to real
-  // time -- e.g. during a slow video-generation stage that stays at ~50%
-  // for several minutes. Fall back to the old formula only until the
-  // estimate has loaded.
-  const remainingSeconds =
-    estimatedTotalSeconds !== null
-      ? Math.round(estimatedTotalSeconds - elapsed)
-      : null;
   const OVERTIME_KEYS = ["gen_overtime_1", "gen_overtime_2", "gen_overtime_3", "gen_overtime_4"];
+  // Every other string on this page is translated; the countdown was written
+  // in Turkish inline, so a reader on any of the other nineteen locales got
+  // "~4dk kaldı" in the middle of their own language.
+  const remainingLabel = (seconds) =>
+    seconds < 60
+      ? tr(t, "gen_eta_seconds", `~${seconds}s kaldı`, { n: seconds })
+      : tr(t, "gen_eta_minutes", `~${Math.round(seconds / 60)}dk kaldı`, {
+          n: Math.round(seconds / 60),
+        });
+
+  let remainingSeconds = null;
+  if (etaRef.current.seconds !== null) {
+    const sinceSync = Math.round((Date.now() - etaRef.current.at) / 1000);
+    remainingSeconds = Math.max(0, etaRef.current.seconds - sinceSync);
+  }
+
   let etaLabel = null;
-  if (remainingSeconds !== null && remainingSeconds <= 0 && isRunning) {
-    // Estimate exhausted — don't freeze on "~0s". Rotate honest status lines.
+  if (!isRunning || remainingSeconds === null) {
+    // Nothing measurable (a re-cut, a retake on an older job, a job parked on
+    // script approval). Showing no countdown is the honest answer; the stage
+    // messages still say what is happening.
+    etaLabel = null;
+  } else if (remainingSeconds > 0) {
+    etaLabel = remainingLabel(remainingSeconds);
+  } else {
+    // The server floors its own estimate just above zero while work is still
+    // open, so reaching zero here means the last update is stale — a provider
+    // call has outrun even the corrected figure. Say that, rather than
+    // freezing on "~0s".
     const idx = Math.floor(elapsed / 9) % OVERTIME_KEYS.length;
     etaLabel = t(OVERTIME_KEYS[idx]);
-  } else if (remainingSeconds !== null && remainingSeconds > 0) {
-    etaLabel =
-      remainingSeconds < 60
-        ? `~${remainingSeconds}s kaldı`
-        : `~${Math.round(remainingSeconds / 60)}dk kaldı`;
-  } else if (estimatedTotalSeconds === null && progress > 5) {
-    const eta = Math.round((elapsed / progress) * (100 - progress));
-    etaLabel = eta < 60 ? `~${eta}s kaldı` : `~${Math.round(eta / 60)}dk kaldı`;
   }
 
   // Stage-specific inspiration message (i18n via t())
@@ -530,7 +600,12 @@ export default function GeneratePage() {
                 return (
                   <div key={evt.seq ?? i} className="flex gap-2 py-0.5">
                     <span style={{ color: "var(--mf-ink-4)" }}>{evt.timestamp?.slice(11, 19) || ""}</span>
-                    <span style={{ color: config.color || "var(--mf-ink-2)" }}>[{config.label || evt.stage}]</span>
+                    {/* `config.label` never existed — the entries carry
+                        `labelKey` — so this always fell through to the raw
+                        slug and the log stayed untranslated in all 20 locales. */}
+                    <span style={{ color: config.color || "var(--mf-ink-2)" }}>
+                      [{config.labelKey ? t(config.labelKey) : evt.stage}]
+                    </span>
                     <span style={{ color: "var(--mf-ink-2)" }}>{evt.message}</span>
                   </div>
                 );

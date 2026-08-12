@@ -57,11 +57,6 @@ export function splitLocale(pathname) {
   return { locale: DEFAULT_LOCALE, path: pathname };
 }
 
-/** BCP-47 tag for <html lang> and og:locale. Same as the code for our set. */
-export function htmlLang(locale) {
-  return isLocale(locale) ? locale : DEFAULT_LOCALE;
-}
-
 export function textDirection(locale) {
   return LOCALES[locale]?.dir ?? "ltr";
 }

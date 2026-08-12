@@ -1,7 +1,5 @@
-import { createServerClient } from "@supabase/ssr";
-import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { SUPABASE_URL, SUPABASE_ANON_KEY } from "../../../lib/supabaseEnv";
+import { createServerSupabaseClient } from "../../../lib/supabase-server";
 
 export async function GET(request) {
   const { searchParams, origin } = new URL(request.url);
@@ -9,27 +7,18 @@ export async function GET(request) {
   const next = searchParams.get("next") ?? "/";
 
   if (code) {
-    const cookieStore = cookies();
-    const supabase = createServerClient(
-      SUPABASE_URL,
-      SUPABASE_ANON_KEY,
-      {
-        cookies: {
-          getAll() { return cookieStore.getAll(); },
-          setAll(cookiesToSet) {
-            try {
-              cookiesToSet.forEach(({ name, value, options }) =>
-                cookieStore.set(name, value, options)
-              );
-            } catch { /* ignore in server component */ }
-          },
-        },
+    // The shared helper rather than a second inline createServerClient: this
+    // route had its own copy of the cookie plumbing and, unlike the helper, no
+    // hasSupabaseConfig() guard — so on a deployment without Supabase env vars
+    // it constructed a client against an empty URL and threw inside the OAuth
+    // callback, which the user sees as a blank crash mid-sign-in rather than a
+    // redirect back to the login page.
+    const supabase = createServerSupabaseClient();
+    if (supabase) {
+      const { error } = await supabase.auth.exchangeCodeForSession(code);
+      if (!error) {
+        return NextResponse.redirect(`${origin}${next}`);
       }
-    );
-
-    const { error } = await supabase.auth.exchangeCodeForSession(code);
-    if (!error) {
-      return NextResponse.redirect(`${origin}${next}`);
     }
   }
 

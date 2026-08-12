@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "../../components/LocaleLink";
 import IdeaForm from "../../components/IdeaForm";
@@ -49,7 +49,7 @@ function SectionHead({ n, eyebrow, title, sub }) {
 export default function HomeContent() {
   const router = useRouter();
   const { getAccessToken } = useAuth();
-  const { t, localeHref } = useLanguage();
+  const { t, locale, localeHref } = useLanguage();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState(null);
   const [creditsExhausted, setCreditsExhausted] = useState(false);
@@ -60,6 +60,21 @@ export default function HomeContent() {
     setPrefill({ ...data, _ts: Date.now() });
     setTimeout(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
   };
+
+  // The dashboard's "try again" button on a failed job links here as
+  // /?idea=<the original idea>, but nothing ever read that parameter: the user
+  // landed on an empty form and had to retype the brief the button existed to
+  // carry over. Read straight off location rather than useSearchParams(), which
+  // would force a Suspense boundary and opt the landing page out of static
+  // rendering (the same reasoning as LanguageContext.setLocale).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const idea = new URLSearchParams(window.location.search).get("idea");
+    if (idea && idea.trim()) scrollToForm({ idea: idea.trim() });
+    // Mount only: a later push to the same route should not re-prefill over
+    // whatever the user has since typed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const jumpToForm = () => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
 
@@ -75,7 +90,12 @@ export default function HomeContent() {
           "Content-Type": "application/json",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify(formData),
+        // The drama is spoken in the language the site is being read in.
+        // Without this the screenwriter inferred it from the wording of the
+        // idea, so a Turkish reader who wrote an English brief got an English
+        // drama with no way to say otherwise. formData wins if a form field
+        // ever offers an explicit choice.
+        body: JSON.stringify({ language: locale, ...formData }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));

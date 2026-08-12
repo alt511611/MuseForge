@@ -23,6 +23,9 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import httpx
 
+from interfaces.language import DEFAULT_LANGUAGE
+from interfaces.render_eta import RenderEta, RenderPlan
+
 logger = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL = 15.0
@@ -124,8 +127,24 @@ def public_result(result: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 
 def _sb_row_to_dict(row: dict) -> dict:
-    """Normalise a Supabase jobs row to the same shape as Job.to_dict()."""
+    """Normalise a Supabase jobs row to the same shape as Job.to_dict().
+
+    "Same shape" is load-bearing, not decorative: this is what the client
+    receives for any job the in-memory store has already evicted (a reload
+    after the tab was closed, a second server instance, anything older than
+    the last restart). A key that Job.to_dict() has and this does not is a
+    field that silently becomes ``undefined`` on exactly those requests.
+
+    Three of them are not columns on the jobs table at all -- language,
+    lipsync_enabled and require_script_approval were deliberately kept off
+    the row so no deployment needs a migration to replay. They are recovered
+    from the stored RESULT, which does survive the round trip: without that,
+    the generate page's cost/ETA estimate re-fetched for a resumed job quoted
+    a run with no dialogue and no lip sync, i.e. the cheapest configuration,
+    for what may be the most expensive one.
+    """
     status = row.get("status", "unknown")
+    result = row.get("result") if isinstance(row.get("result"), dict) else {}
     return {
         "id": row.get("id"),
         "status": status,
@@ -134,17 +153,30 @@ def _sb_row_to_dict(row: dict) -> dict:
         "director_style": row.get("director_style", "cinematic_balanced"),
         "aspect_ratio": row.get("aspect_ratio", "16:9"),
         "num_scenes": row.get("num_scenes", 3),
+        "user_requirement": row.get("user_requirement", ""),
+        "language": result.get("language") or DEFAULT_LANGUAGE,
         "demo": row.get("demo", False),
         "music_enabled": row.get("music_enabled", False),
         "dialogue_enabled": row.get("dialogue_enabled", False),
+        # A scene only appears here when its mouth was actually driven by the
+        # voice track, so a non-empty list is proof the run had lip sync on.
+        "lipsync_enabled": bool(result.get("lipsynced_scenes")),
         "plan": row.get("plan", "free"),
         "user_id": row.get("user_id"),
         "user_email": row.get("user_email"),
+        # The flag itself is not persisted; the status is what the client acts
+        # on, and a job parked awaiting approval was necessarily started with
+        # it on.
+        "require_script_approval": status == JobStatus.AWAITING_SCRIPT_APPROVAL.value,
         "events": [],  # events are not persisted to DB
         "result": public_result(row.get("result")),
         "error": row.get("error"),
         "created_at": row.get("created_at"),
         "progress": 100 if status in ("completed", "failed", "cancelled") else 0,
+        # Nothing measured survives a restart, and Job.eta_seconds() returns
+        # None for a finished job anyway. Stated explicitly so the key exists
+        # in both shapes rather than being absent from one of them.
+        "eta_seconds": None,
     }
 
 
@@ -202,39 +234,86 @@ async def _sb_get(job_id: str) -> Optional[dict]:
         return None
 
 
+#: How long a refunded credit stays spendable. Matches the monthly allowance
+#: window in stripe_integration.CREDIT_VALIDITY_DAYS -- a refund gives back what
+#: was spent, on the same terms it was sold under.
+REFUND_VALIDITY_DAYS = 30
+
+
 async def _sb_refund_credits(user_id: str, amount: int, job_id: str) -> None:
-    """Refund credits to user after a failed/cancelled job. Fire-and-forget safe."""
-    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+    """Refund credits to user after a failed/cancelled job. Fire-and-forget safe.
+
+    Goes through grant_credits(), which issues a real credit LOT. The previous
+    implementation added the amount straight onto profiles.credits -- but that
+    column is only a read cache of the lot table (public.sync_credit_cache
+    rewrites it from credit_lots on every grant or deduction), and
+    api._get_user_credits reads the credit_balance() RPC, which sums lots and
+    ignores the cache entirely. So every refund was invisible the moment it was
+    written, and permanently erased by the next credit movement: a failed paid
+    job cost the customer their credits twice over, which is exactly the
+    outcome the loud logging below was added to catch.
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY or amount <= 0:
         return
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
-            # Read current balance
+            headers = {
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Content-Type": "application/json",
+            }
+            # grant_credits writes the ledger row and refreshes the cache too,
+            # so a successful call needs nothing else.
+            resp = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/grant_credits",
+                json={
+                    "p_user_id": user_id,
+                    "p_amount": amount,
+                    "p_reason": "refund",
+                    "p_days": REFUND_VALIDITY_DAYS,
+                },
+                headers=headers,
+            )
+            if resp.status_code < 400:
+                # grant_credits' ledger row carries no job_id (the RPC has no
+                # such parameter), so attach one for support/audit purposes.
+                await client.patch(
+                    f"{SUPABASE_URL}/rest/v1/credit_ledger",
+                    params={
+                        "user_id": f"eq.{user_id}",
+                        "reason": "eq.refund",
+                        "job_id": "is.null",
+                    },
+                    json={"job_id": job_id},
+                    headers={**headers, "Prefer": "return=minimal"},
+                )
+                return
+
+            # An install that has not replayed the credit_lots migration has no
+            # grant_credits(). Fall back to the old cache write so those
+            # deployments keep refunding rather than silently stopping.
+            logger.warning(
+                "grant_credits unavailable for refund (status=%s), falling back "
+                "to the profiles.credits cache: %s",
+                resp.status_code,
+                resp.text[:300],
+            )
             resp = await client.get(
                 f"{SUPABASE_URL}/rest/v1/profiles",
                 params={"id": f"eq.{user_id}", "select": "credits", "limit": "1"},
-                headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+                headers=headers,
             )
             data = resp.json()
             current = data[0].get("credits", 0) if isinstance(data, list) and data else 0
             await client.patch(
                 f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{user_id}",
                 json={"credits": current + amount},
-                headers={
-                    "apikey": SUPABASE_SERVICE_KEY,
-                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                    "Content-Type": "application/json",
-                    "Prefer": "return=minimal",
-                },
+                headers={**headers, "Prefer": "return=minimal"},
             )
             await client.post(
                 f"{SUPABASE_URL}/rest/v1/credit_ledger",
                 json={"user_id": user_id, "amount": amount, "reason": "refund", "job_id": job_id},
-                headers={
-                    "apikey": SUPABASE_SERVICE_KEY,
-                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                    "Content-Type": "application/json",
-                    "Prefer": "return=minimal",
-                },
+                headers={**headers, "Prefer": "return=minimal"},
             )
     except Exception as exc:
         # logger.error (not .debug): a silently failed refund means the
@@ -280,6 +359,10 @@ class JobEvent:
     progress: float
     data: Optional[Dict[str, Any]] = None
     seq: int = 0
+    #: Remaining seconds as measured when this event was emitted, or None when
+    #: the run reports nothing to measure. Rides on the event so the live
+    #: countdown updates from the stream rather than from a re-poll.
+    eta_seconds: Optional[int] = None
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> dict:
@@ -289,6 +372,7 @@ class JobEvent:
             "progress": self.progress,
             "data": self.data,
             "seq": self.seq,
+            "eta_seconds": self.eta_seconds,
             "timestamp": self.timestamp,
         }
 
@@ -303,6 +387,13 @@ class Job:
     aspect_ratio: str = "16:9"
     num_scenes: int = 3
     user_requirement: str = ""
+    # ISO-639-1 code for the drama's SPOKEN language (see interfaces/language).
+    # Deliberately absent from _sb_row, like lipsync_enabled and
+    # library_characters: it is only needed while the run is in flight, and
+    # adding a column to the jobs table would break every deployment that has
+    # not replayed the migration yet. It is recorded on the result instead,
+    # which already survives the Supabase round-trip.
+    language: str = "en"
     demo: bool = False
     user_id: Optional[str] = None
     user_email: Optional[str] = None
@@ -322,6 +413,36 @@ class Job:
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     _seq: int = 0
     _subscribers: List[asyncio.Queue] = field(default_factory=list, repr=False)
+    #: Wall-clock profile of the run, filled in by JobStore.emit as stages
+    #: change. A render is a chain of multi-minute provider calls, and until
+    #: this existed "it took 24 minutes" could not be attributed to a stage
+    #: without hand-subtracting timestamps out of the event log -- which does
+    #: not work at all for the stages that run concurrently.
+    _stage: Optional[str] = field(default=None, repr=False)
+    _stage_started: float = field(default=0.0, repr=False)
+    _stage_seconds: Dict[str, float] = field(default_factory=dict, repr=False)
+    #: Live remaining-time tracker. Fed from every emit(), it measures this
+    #: run's real scene rate instead of trusting the prior -- see
+    #: interfaces/render_eta for why the constant alone was not good enough.
+    _eta: RenderEta = field(default_factory=RenderEta, repr=False)
+
+    def eta_seconds(self) -> Optional[int]:
+        """Seconds until this job finishes, or None when unknowable.
+
+        None is a real answer: a retake or a re-cut reports no scene counters,
+        and showing no countdown is better than showing a made-up one.
+        """
+        if self.status in (
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        ):
+            return 0
+        if self.status == JobStatus.AWAITING_SCRIPT_APPROVAL:
+            # Parked on the user, not on us. Any number here would be counting
+            # down how long they take to read their own script.
+            return None
+        return self._eta.remaining(time.monotonic())
 
     def to_dict(self, include_events: bool = True) -> dict:
         return {
@@ -332,6 +453,12 @@ class Job:
             "director_style": self.director_style,
             "aspect_ratio": self.aspect_ratio,
             "num_scenes": self.num_scenes,
+            # Persisted on the row and served for historical jobs, so a live
+            # job has to carry it too: without this the same job answers with
+            # a different set of keys depending on whether this process
+            # happens to still remember it.
+            "user_requirement": self.user_requirement,
+            "language": self.language,
             "demo": self.demo,
             "user_id": self.user_id,
             "user_email": self.user_email,
@@ -345,6 +472,10 @@ class Job:
             "error": self.error,
             "created_at": self.created_at,
             "progress": self.events[-1].progress if self.events else 0,
+            # Measured, not assumed. The client shows this instead of running
+            # its own extrapolation off the progress percentage, which spiked
+            # every time progress stalled against wall-clock.
+            "eta_seconds": self.eta_seconds(),
         }
 
 
@@ -363,26 +494,31 @@ class JobStore:
         JobStatus.CANCELLED,
     )
 
+    def _evict_if_full(self) -> None:
+        """Make room for one more job. Caller must hold the lock."""
+        if len(self._jobs) < self._max_jobs:
+            return
+        # Evict a FINISHED job first. Evicting purely by age drops
+        # whichever job is oldest even while it is still running --
+        # its SSE stream and cancel endpoint then 404 while the work
+        # (and the spend) carries on invisibly.
+        finished = [
+            j for j in self._jobs.values()
+            if j.status in self._TERMINAL_STATUSES
+        ]
+        pool = finished or list(self._jobs.values())
+        if not finished:
+            logger.warning(
+                "Job store full (%s) with no finished jobs; evicting a "
+                "live job — raise max_jobs if this recurs.",
+                self._max_jobs,
+            )
+        oldest = min(pool, key=lambda j: j.created_at)
+        del self._jobs[oldest.id]
+
     async def create(self, **kwargs) -> Job:
         async with self._lock:
-            if len(self._jobs) >= self._max_jobs:
-                # Evict a FINISHED job first. Evicting purely by age drops
-                # whichever job is oldest even while it is still running --
-                # its SSE stream and cancel endpoint then 404 while the work
-                # (and the spend) carries on invisibly.
-                finished = [
-                    j for j in self._jobs.values()
-                    if j.status in self._TERMINAL_STATUSES
-                ]
-                pool = finished or list(self._jobs.values())
-                if not finished:
-                    logger.warning(
-                        "Job store full (%s) with no finished jobs; evicting a "
-                        "live job — raise max_jobs if this recurs.",
-                        self._max_jobs,
-                    )
-                oldest = min(pool, key=lambda j: j.created_at)
-                del self._jobs[oldest.id]
+            self._evict_if_full()
 
             job_id = str(uuid.uuid4())[:12]
             job = Job(id=job_id, **kwargs)
@@ -394,6 +530,76 @@ class JobStore:
 
     def get(self, job_id: str) -> Optional[Job]:
         return self._jobs.get(job_id)
+
+    async def get_or_restore(self, job_id: str) -> Optional[Job]:
+        """The Job itself, rebuilt from Supabase when memory has lost it.
+
+        Everything a finished drama can still be asked to do -- re-export it
+        at another ratio, retake a scene, re-cut the timeline, apply a global
+        edit -- ran off ``get()`` alone, which only ever sees jobs this process
+        has handled since it last started. The store also evicts finished jobs
+        once it is full. So the post-production controls kept rendering (the
+        job dict they need is served from the database quite happily) while
+        every button on them answered "Job not found": a restart, a second
+        instance, or a hundred jobs later was enough.
+
+        The row carries the full result, INCLUDING the underscore-prefixed
+        ``_render_state`` that a retake needs -- ``public_result`` strips that
+        on the way to the browser, not on the way into storage. Restored jobs
+        are put back in memory so the work that follows behaves exactly like a
+        job that never left.
+        """
+        job = self._jobs.get(job_id)
+        if job:
+            return job
+        row = await _sb_get(job_id)
+        if not row:
+            return None
+        result = row.get("result") if isinstance(row.get("result"), dict) else None
+        try:
+            status = JobStatus(row.get("status", "completed"))
+        except ValueError:
+            logger.warning(
+                "Job %s has unrecognised status %r in storage; not restoring.",
+                job_id,
+                row.get("status"),
+            )
+            return None
+        restored = Job(
+            id=row.get("id") or job_id,
+            status=status,
+            idea=row.get("idea", ""),
+            style=row.get("style", "Cinematic"),
+            director_style=row.get("director_style", "cinematic_balanced"),
+            aspect_ratio=row.get("aspect_ratio", "16:9"),
+            num_scenes=row.get("num_scenes", 3),
+            user_requirement=row.get("user_requirement", ""),
+            # Not columns on the jobs table -- recovered from the result for
+            # the same reason _sb_row_to_dict recovers them.
+            language=(result or {}).get("language") or DEFAULT_LANGUAGE,
+            lipsync_enabled=bool((result or {}).get("lipsynced_scenes")),
+            demo=bool(row.get("demo", False)),
+            user_id=row.get("user_id"),
+            user_email=row.get("user_email"),
+            music_enabled=bool(row.get("music_enabled", False)),
+            dialogue_enabled=bool(row.get("dialogue_enabled", False)),
+            plan=row.get("plan", "free"),
+            result=result,
+            error=row.get("error"),
+            created_at=row.get("created_at") or datetime.now(timezone.utc).isoformat(),
+        )
+        async with self._lock:
+            # Another request may have restored (or the pipeline re-created)
+            # the same job while this one was waiting on the network.
+            existing = self._jobs.get(job_id)
+            if existing:
+                return existing
+            # A restore is a job entering memory like any other, so it obeys
+            # the same ceiling -- otherwise browsing old jobs would grow the
+            # store without bound.
+            self._evict_if_full()
+            self._jobs[restored.id] = restored
+        return restored
 
     async def persist(self, job: Job) -> None:
         """Fire-and-forget upsert of the current job state to Supabase.
@@ -415,11 +621,61 @@ class JobStore:
         asyncio.create_task(_sb_delete(job_id))
 
     async def emit(self, job: Job, stage: str, message: str, progress: float, data=None):
+        self._record_stage_timing(job, stage)
+        job._eta.observe(stage, data, time.monotonic())
         job._seq += 1
-        event = JobEvent(stage=stage, message=message, progress=progress, data=data, seq=job._seq)
+        event = JobEvent(
+            stage=stage,
+            message=message,
+            progress=progress,
+            data=data,
+            seq=job._seq,
+            # Carried on the event itself so a browser watching the SSE stream
+            # gets a fresh figure without polling /api/jobs for it.
+            eta_seconds=job.eta_seconds(),
+        )
         job.events.append(event)
         for queue in list(job._subscribers):
             await queue.put(event)
+
+    @staticmethod
+    def _record_stage_timing(job: Job, stage: str) -> None:
+        """Close out the previous stage and log how long it ran.
+
+        Stages repeat (`storyboard` is emitted once per scene) so the times
+        accumulate per stage name rather than being overwritten. `heartbeat`
+        is skipped: it fires on a timer, not on progress, and would otherwise
+        chop every real stage into fragments.
+        """
+        if stage == "heartbeat":
+            return
+        now = time.monotonic()
+        if job._stage is not None and stage != job._stage:
+            elapsed = now - job._stage_started
+            job._stage_seconds[job._stage] = (
+                job._stage_seconds.get(job._stage, 0.0) + elapsed
+            )
+            logger.info(
+                "[%s] stage %r took %.1fs (running total %.1fs)",
+                job.id, job._stage, elapsed, sum(job._stage_seconds.values()),
+            )
+        if stage != job._stage:
+            job._stage = stage
+            job._stage_started = now
+
+    @staticmethod
+    def log_stage_profile(job: Job) -> None:
+        """One line naming where a finished run actually spent its time."""
+        if not job._stage_seconds:
+            return
+        total = sum(job._stage_seconds.values())
+        breakdown = ", ".join(
+            f"{name} {secs:.0f}s ({secs / total * 100:.0f}%)"
+            for name, secs in sorted(
+                job._stage_seconds.items(), key=lambda kv: kv[1], reverse=True
+            )
+        )
+        logger.info("[%s] render profile — total %.0fs: %s", job.id, total, breakdown)
 
     async def subscribe(self, job_id: str) -> AsyncGenerator[JobEvent, None]:
         job = self.get(job_id)
@@ -439,7 +695,18 @@ class JobStore:
                     yield event
                 except asyncio.TimeoutError:
                     last = job.events[-1].progress if job.events else 0
-                    yield JobEvent(stage="heartbeat", message="", progress=last, seq=-1)
+                    # The heartbeat is the only thing that fires during the
+                    # long silences — a single Kling call can run for minutes
+                    # without a progress event — so it is exactly where a
+                    # re-measured ETA needs to ride. Without it the countdown
+                    # would only correct itself once a scene landed.
+                    yield JobEvent(
+                        stage="heartbeat",
+                        message="",
+                        progress=last,
+                        seq=-1,
+                        eta_seconds=job.eta_seconds(),
+                    )
         finally:
             if queue in job._subscribers:
                 job._subscribers.remove(queue)
@@ -609,6 +876,31 @@ async def stale_job_reaper_loop() -> None:
 
 # ── Generation runner ──────────────────────────────────────────────────────────
 
+def arm_job_eta(job: Job, *, scenes: Optional[int] = None, prologue: bool = True) -> None:
+    """Start the job's remaining-time clock with the shape of the work ahead.
+
+    ``scenes`` overrides the job's own count for post-production runs, which
+    re-render only the scenes they were asked to and skip the prologue
+    entirely -- quoting those a fresh screenplay and a fresh cast lock would
+    overstate a one-scene retake by about a minute.
+    """
+    from pipelines.idea2video import _scene_concurrency
+
+    num_scenes = max(1, int(scenes if scenes is not None else job.num_scenes or 1))
+    job._eta.arm(
+        RenderPlan(
+            num_scenes=num_scenes,
+            concurrency=_scene_concurrency(num_scenes),
+            music=bool(job.music_enabled),
+            dialogue=bool(job.dialogue_enabled),
+            lipsync=bool(job.lipsync_enabled),
+            demo=bool(job.demo),
+            include_prologue=prologue,
+        ),
+        time.monotonic(),
+    )
+
+
 def _job_refund_amount(job: Job) -> int:
     return (
         job.num_scenes
@@ -629,6 +921,12 @@ def _job_refund_amount(job: Job) -> int:
 async def run_generation_job(job: Job, api_key: str):
     """Start a job. If require_script_approval, stop after screenwriting."""
     logger.info("run_generation_job ENTERED for job %s", job.id)
+    # Bound BEFORE the try block. The outer handler below calls
+    # cleanup_working_dir(working_dir); if anything above the assignment threw
+    # (an import error, a Supabase hiccup in persist()), that handler raised
+    # NameError while handling the original exception -- turning a legible
+    # failure into a traceback that named the wrong line.
+    working_dir = os.path.join(JOBS_DIR, job.id)
     try:
         from agents.screenwriter import ScriptGenerationFailed
         from pipelines.idea2video import Idea2VideoPipeline
@@ -636,9 +934,8 @@ async def run_generation_job(job: Job, api_key: str):
         from tools.muapi_uploader import InvalidCharacterPhoto, upload_base64_image
 
         job.status = JobStatus.RUNNING
+        arm_job_eta(job)
         await job_store.persist(job)  # persist RUNNING state
-
-        working_dir = os.path.join(JOBS_DIR, job.id)
 
         def is_cancelled() -> bool:
             return job.status == JobStatus.CANCELLED
@@ -729,6 +1026,13 @@ async def run_generation_job(job: Job, api_key: str):
                         progress_callback=progress_callback,
                         is_cancelled=is_cancelled,
                         preset_characters=library_characters or None,
+                        language=job.language,
+                        # Approve-script runs write the script that will later
+                        # be voiced, so the screenwriter has to know now — by
+                        # the time continue_from_script sees dialogue_enabled,
+                        # the (possibly silent) script is already written and
+                        # approved.
+                        dialogue_enabled=job.dialogue_enabled,
                     ),
                     timeout=PIPELINE_HARD_TIMEOUT_SECONDS,
                 )
@@ -761,6 +1065,7 @@ async def run_generation_job(job: Job, api_key: str):
                     user_requirement=job.user_requirement,
                     num_scenes=job.num_scenes,
                     aspect_ratio=job.aspect_ratio,
+                    language=job.language,
                     working_dir=working_dir,
                     progress_callback=progress_callback,
                     is_cancelled=is_cancelled,
@@ -783,6 +1088,7 @@ async def run_generation_job(job: Job, api_key: str):
             job.status = JobStatus.COMPLETED
             # Persist COMPLETED + result (includes signed Storage URL when uploaded)
             await job_store.persist(job)
+            job_store.log_stage_profile(job)
             await job_store.emit(
                 job, "complete", "Generation finished", 100, public_result(result)
             )
@@ -866,6 +1172,7 @@ async def run_regenerate_scene_job(
 
     previous_result = dict(job.result or {})
     job.status = JobStatus.RUNNING
+    arm_job_eta(job, scenes=1, prologue=False)
     await job_store.persist(job)
 
     working_dir = os.path.join(JOBS_DIR, job.id)
@@ -1101,6 +1408,8 @@ async def run_continue_from_script_job(job: Job, api_key: str, script_data: Dict
     from pipelines.script2video import PipelineCancelled
 
     job.status = JobStatus.RUNNING
+    # The screenplay is already written and approved; production starts here.
+    arm_job_eta(job)
     await job_store.persist(job)
 
     working_dir = os.path.join(JOBS_DIR, job.id)
@@ -1132,6 +1441,7 @@ async def run_continue_from_script_job(job: Job, api_key: str, script_data: Dict
                 director_style=job.director_style,
                 user_requirement=job.user_requirement,
                 aspect_ratio=job.aspect_ratio,
+                language=job.language,
                 working_dir=working_dir,
                 progress_callback=progress_callback,
                 is_cancelled=is_cancelled,
