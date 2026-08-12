@@ -72,8 +72,17 @@ shapes, faces turned away from camera, or faces hidden by shadow; those destroy 
 emotional read. Prefer medium or close-up framing for emotional beats so the face fills
 enough of the frame to be legible.
 
+NEVER PLAY TO THE LENS. Readable is not the same as facing the viewer. No character
+looks into the camera, acknowledges it, or poses for it — write every eyeline as aimed
+at something inside the story (the other character, the object in their hands, the
+thing they have just noticed off-screen). A row of characters staring down the lens is
+a poster, not a scene, and it is the single fastest way to make a drama look generated.
+
 If a locked Setting is provided, EVERY shot MUST stay in that place and time of day —
-do not invent a different location or lighting for this scene.
+do not invent a different location or lighting for this scene. The ONE exception is a
+scene whose director's notes name what changes about the place: then that change is
+mandatory and must be visible in the shot, and everything else about the location still
+holds.
 For duration_seconds do NOT blindly assign 5 to every shot — pick between 3 and 15
 based on the scene's importance: 4-6 for short transition/action shots, 8-12 for
 emotional/establishing moments, 13-15 for very important finales.

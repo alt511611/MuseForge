@@ -80,13 +80,15 @@ async def test_character_voice_ids_are_locked_and_reused():
     call = generator.client.generate.await_args
     assert call.args[0] == "elevenlabs-text-to-dialogue-v3"
     payload = call.args[1]
-    assert "inputs" in payload
-    assert len(payload["inputs"]) == 3
+    # The field MuAPI's schema declares is `dialogue`; `inputs` is rejected
+    # with a 422 and silences the whole drama.
+    assert "inputs" not in payload
+    assert len(payload["dialogue"]) == 3
     assert payload["stability"] == 0.5
 
-    kemal_voice = payload["inputs"][0]["voice_id"]
-    leyla_voice = payload["inputs"][1]["voice_id"]
-    assert payload["inputs"][2]["voice_id"] == kemal_voice
+    kemal_voice = payload["dialogue"][0]["voice_id"]
+    leyla_voice = payload["dialogue"][1]["voice_id"]
+    assert payload["dialogue"][2]["voice_id"] == kemal_voice
     assert leyla_voice != kemal_voice
     assert kemal_voice in MuAPIVoiceGenerator.SYSTEM_VOICE_IDS
 
@@ -96,6 +98,38 @@ async def test_character_voice_ids_are_locked_and_reused():
     # Combined audio only on the first track; later rows are caption-only.
     assert "audio_url" not in tracks[1]
     assert tracks[2]["voice_id"] == kemal_voice
+
+
+def test_voice_ids_are_elevenlabs_ids_not_display_labels():
+    """Every drama came back silent because the cast was sent as playground
+    labels ("George - Warm") where the endpoint wants ElevenLabs voice IDs."""
+    from tools.muapi_voice_generator import MuAPIVoiceGenerator
+
+    ids = set(MuAPIVoiceGenerator.SYSTEM_VOICE_IDS)
+    ids |= set(MuAPIVoiceGenerator.FEMALE_VOICE_IDS)
+    ids |= set(MuAPIVoiceGenerator.MALE_VOICE_IDS)
+    for voice_id in ids:
+        assert " " not in voice_id and "-" not in voice_id, voice_id
+        assert len(voice_id) == 20, voice_id
+    # Female and male pools must stay disjoint, or casting is meaningless.
+    assert not set(MuAPIVoiceGenerator.FEMALE_VOICE_IDS) & set(
+        MuAPIVoiceGenerator.MALE_VOICE_IDS
+    )
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_reaches_the_caller():
+    """Swallowing the provider error made a broken payload look exactly like
+    a scene with no lines, so nothing in the logs named the real cause."""
+    from tools.muapi_voice_generator import MuAPIVoiceGenerator
+
+    generator = MuAPIVoiceGenerator("test-key")
+    generator.client.generate = AsyncMock(side_effect=RuntimeError("422 unprocessable"))
+
+    with pytest.raises(RuntimeError):
+        await generator.generate_scene_dialogue(
+            [{"character": "Kemal", "line": "First line."}]
+        )
 
 
 @pytest.mark.asyncio
@@ -118,7 +152,7 @@ async def test_pipeline_routes_structured_dialogue_to_voice_layer(tmp_path, monk
                 {
                     "character": dialogue[0].character,
                     "line": dialogue[0].line,
-                    "voice_id": "George - Warm",
+                    "voice_id": "JBFqnCBsd6RMkjVDRZzb",
                     "audio_url": "https://audio/line.mp3",
                 }
             ]
@@ -155,7 +189,7 @@ async def test_pipeline_routes_structured_dialogue_to_voice_layer(tmp_path, monk
     assert scene_call["has_dialogue"] is True
     assert captured["character"] == "Kemal"
     assert assembly_call["dialogue_tracks"][0]["scene_index"] == 0
-    assert assembly_call["dialogue_tracks"][0]["voice_id"] == "George - Warm"
+    assert assembly_call["dialogue_tracks"][0]["voice_id"] == "JBFqnCBsd6RMkjVDRZzb"
 
 
 # --- the UI gate --------------------------------------------------------

@@ -169,6 +169,11 @@ def _format_scene_direction(scene: Any) -> str:
     for label, field in (
         ("Dramatic function", "dramatic_function"),
         ("THE TURN — film this moment", "turn"),
+        (
+            "WHAT CHANGES ABOUT THE PLACE — this is the drama's event and it "
+            "must be VISIBLE in this scene's shots, not implied",
+            "world_change",
+        ),
         ("Subtext (what they really mean)", "subtext"),
         ("Staging", "staging"),
     ):
@@ -215,6 +220,23 @@ def _format_story_state(scenes: List[Any], index: int) -> tuple:
         if (line := _scene_beat_line(scene, i + 1))
     ]
     return "\n".join(before), "\n".join(after)
+
+
+def _world_state(scenes: List[Any], index: int) -> tuple:
+    """(this scene's world change, changes already in force) at ``index``.
+
+    A world change is not a one-shot event: once the city's power dies, it
+    stays dead for the rest of the drama. The scene that CAUSES the change
+    has to break the locked lighting; every scene after it has to inherit the
+    broken state, or the film cuts from a blackout back to a lit harbour.
+    """
+    current = _scene_field(scenes[index], "world_change").strip() if index < len(scenes) else ""
+    earlier = [
+        change
+        for scene in scenes[:index]
+        if (change := _scene_field(scene, "world_change").strip())
+    ]
+    return current, "; ".join(earlier)
 
 
 def _format_character_direction(script: DramaScript) -> str:
@@ -2334,6 +2356,7 @@ class Idea2VideoPipeline:
                 _check_cancel()
                 scene_dialogue_lines = _scene_dialogue(scene)
                 story_so_far, not_yet = _format_story_state(script.scenes, idx)
+                world_change, world_state = _world_state(script.scenes, idx)
 
                 async def scene_progress(stage, message, pct, data=None, _idx=idx):
                     # Scenes may finish out of order, so progress tracks how
@@ -2380,6 +2403,12 @@ class Idea2VideoPipeline:
                     # them — including scene 1, which spoils the payoff.
                     story_so_far=story_so_far,
                     not_yet=not_yet,
+                    # The drama's event, and whether this scene causes it or
+                    # inherits it. The locked-setting clause in the frame
+                    # prompt otherwise renders the climax under the opening
+                    # scene's lamps — see build_frame_prompt.
+                    world_change=world_change,
+                    world_state=world_state,
                     scene_tension=_scene_tension(scene),
                     scene_duration=scene_durations[idx] if idx < len(scene_durations) else 0.0,
                     character_direction=character_direction,
