@@ -9,6 +9,26 @@ import { useAuth } from "../contexts/AuthContext";
 import { API_BASE, resolveJobVideoUrl } from "../lib/apiBase";
 import { tr } from "../lib/tr";
 
+/**
+ * The one line of a scene a human should read.
+ *
+ * A scene's `script` is NOT a string. It was one, back when a script was a
+ * list of sentences, and this component still rendered it as one — so the
+ * moment scenes became structured objects, printing `{scene.script}` handed
+ * React an object and took the whole results page down with "Minified React
+ * error #31". Every field the screenwriter grows (turn, staging,
+ * world_change…) rode along in that object, which is why the crash arrived
+ * looking like a new feature's fault rather than a four-year-old assumption.
+ *
+ * Reads the action line, tolerates the legacy string, and never returns
+ * anything React cannot print.
+ */
+function sceneLine(script) {
+  if (typeof script === "string") return script;
+  if (script && typeof script === "object") return script.action || "";
+  return "";
+}
+
 function SaveCharacterButton({ character }) {
   const { t } = useLanguage();
   const { getAccessToken } = useAuth();
@@ -327,7 +347,7 @@ function TimelinePanel({ jobId, scenes, onStarted }) {
   const [entries, setEntries] = useState(() =>
     scenes.map((scene) => ({
       scene_index: scene.index,
-      label: scene.script || `Scene ${scene.index + 1}`,
+      label: sceneLine(scene.script) || `Scene ${scene.index + 1}`,
       included: true,
       trim_start: 0,
       trim_end: 0,
@@ -749,7 +769,7 @@ export default function VideoResult({ job, jobId }) {
                 <div key={scene.index} className="mb-4">
                   <div className="flex items-start justify-between gap-3 mb-2">
                     <p className="text-xs" style={{ color: "var(--mf-ink-3)" }}>
-                      Scene {scene.index + 1}: {scene.script}
+                      Scene {scene.index + 1}: {sceneLine(scene.script)}
                       {scene.take > 1 && (
                         <span className="ml-2" style={{ color: "var(--mf-ink-4)" }}>
                           · {tr(t, "result_take_n", `çekim ${scene.take}`, { n: scene.take })}
