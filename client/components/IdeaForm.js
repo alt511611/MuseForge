@@ -21,6 +21,7 @@ import {
 import { useLanguage } from "../contexts/LanguageContext";
 import { useAuth } from "../contexts/AuthContext";
 import { API_BASE } from "../lib/apiBase";
+import { tr } from "../lib/tr";
 
 // Plans allowed to attach optional background music. Kept in sync with the
 // server-side gate in server/api.py (music_enabled is silently ignored for
@@ -244,12 +245,12 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
     setUploadError(null);
     if (!file) return;
     if (file.size > MAX_UPLOAD_BYTES) {
-      setUploadError(t("form_photo_size_error") || "Photo must be smaller than 5MB.");
+      setUploadError(tr(t, "form_photo_size_error", "Photo must be smaller than 5MB."));
       e.target.value = "";
       return;
     }
     if (!file.type.startsWith("image/")) {
-      setUploadError(t("form_photo_type_error") || "Please select an image file.");
+      setUploadError(tr(t, "form_photo_type_error", "Please select an image file."));
       e.target.value = "";
       return;
     }
@@ -269,12 +270,12 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
     setLocationError(null);
     if (!file) return;
     if (file.size > MAX_UPLOAD_BYTES) {
-      setLocationError(t("form_photo_size_error") || "Photo must be smaller than 5MB.");
+      setLocationError(tr(t, "form_photo_size_error", "Photo must be smaller than 5MB."));
       e.target.value = "";
       return;
     }
     if (!file.type.startsWith("image/")) {
-      setLocationError(t("form_photo_type_error") || "Please select an image file.");
+      setLocationError(tr(t, "form_photo_type_error", "Please select an image file."));
       e.target.value = "";
       return;
     }
@@ -481,19 +482,18 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
         )}
         {characterImage && !characterName.trim() && (
           <p className="text-xs mt-2" style={{ color: "var(--mf-gold)" }}>
-            {t("form_char_name_warning") || "Enter the character name so the script can match this photo to the right character."}
+            {tr(t, "form_char_name_warning", "Enter the character name so the script can match this photo to the right character.")}
           </p>
         )}
       </div>
 
       <div className="mb-6">
         <label className="text-sm font-medium mb-2 block" style={{ color: "var(--mf-ink-2)" }}>
-          {t("form_location_label") || "Mekân fotoğrafı"}{" "}
+          {tr(t, "form_location_label", "Mekân fotoğrafı")}{" "}
           <span style={{ color: "var(--mf-ink-4)", fontWeight: 400 }}>{t("form_char_optional")}</span>
         </label>
         <p className="text-xs mb-3" style={{ color: "var(--mf-ink-3)" }}>
-          {t("form_location_desc") ||
-            "Yüklerseniz her sahne bu mekânda geçer. Yüklemezseniz senaryonun mekânı bir kez üretilip tüm sahnelerde aynı kalır."}
+          {tr(t, "form_location_desc", "Yüklerseniz her sahne bu mekânda geçer. Yüklemezseniz senaryonun mekânı bir kez üretilip tüm sahnelerde aynı kalır.")}
         </p>
         {!locationImage ? (
           <>
@@ -511,19 +511,19 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
               style={{ backgroundColor: "var(--mf-stage)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink-2)" }}
             >
               <MapPin size={15} />
-              {t("form_location_upload_btn") || "Mekân fotoğrafı yükle"}
+              {tr(t, "form_location_upload_btn", "Mekân fotoğrafı yükle")}
             </label>
           </>
         ) : (
           <div className="flex items-center gap-3">
             <img
               src={locationImage}
-              alt={t("form_location_preview_alt") || "Mekân önizleme"}
+              alt={tr(t, "form_location_preview_alt", "Mekân önizleme")}
               className="w-16 h-10 rounded-lg object-cover"
               style={{ border: "2px solid var(--mf-violet)" }}
             />
             <span className="flex-1 text-xs" style={{ color: "var(--mf-ink-3)" }}>
-              {t("form_location_locked") || "Bu mekân tüm sahnelerde kilitlenecek."}
+              {tr(t, "form_location_locked", "Bu mekân tüm sahnelerde kilitlenecek.")}
             </span>
             <button
               type="button"
@@ -534,7 +534,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
               className="p-2 rounded-lg transition-colors"
               style={{ color: "var(--mf-ink-3)" }}
               disabled={isSubmitting}
-              aria-label={t("form_location_remove") || "Mekân fotoğrafını kaldır"}
+              aria-label={tr(t, "form_location_remove", "Mekân fotoğrafını kaldır")}
             >
               <X size={16} />
             </button>
@@ -548,10 +548,10 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
       {libraryEligible && libraryCharacters.length > 0 && (
         <div className="mb-6">
           <label className="text-sm font-medium mb-2 block" style={{ color: "var(--mf-ink-2)" }}>
-            {t("form_library_chars") || "Kayıtlı karakterlerimden seç"}
+            {tr(t, "form_library_chars", "Kayıtlı karakterlerimden seç")}
           </label>
           <p className="text-xs mb-3" style={{ color: "var(--mf-ink-3)" }}>
-            {t("form_library_chars_hint") || "Seçilen karakterler senaryoya doğrudan dahil edilir."}
+            {tr(t, "form_library_chars_hint", "Seçilen karakterler senaryoya doğrudan dahil edilir.")}
           </p>
           <div className="flex flex-wrap gap-3">
             {libraryCharacters.map((c) => {
@@ -725,17 +725,16 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
           <label className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: "var(--mf-ink-2)" }}>
             <AudioLines size={16} style={{ color: "var(--mf-violet-soft)" }} />
             <span>
-              {t("form_lipsync_toggle") || "Dudak senkronu"}
+              {tr(t, "form_lipsync_toggle", "Dudak senkronu")}
               <span className="block text-[11px] mt-0.5" style={{ color: "var(--mf-ink-4)" }}>
-                {t("form_lipsync_hint") ||
-                  "Karakterlerin ağzı, üretilen sesle konuşur. Kapalıyken ses görüntünün üstüne bindirilir."}
+                {tr(t, "form_lipsync_hint", "Karakterlerin ağzı, üretilen sesle konuşur. Kapalıyken ses görüntünün üstüne bindirilir.")}
               </span>
             </span>
           </label>
           <div className="flex items-center gap-3">
             {lipsyncEnabled && !demoMode && (
               <span className="text-xs" style={{ color: "var(--mf-gold)" }}>
-                {t("form_lipsync_credit_note", { n: numScenes }) || `+${numScenes} kredi`}
+                {tr(t, "form_lipsync_credit_note", `+${numScenes} kredi`, { n: numScenes })}
               </span>
             )}
             <button

@@ -163,7 +163,6 @@ async def test_regrade_keeps_more_detail_than_default_crf(tmp_path):
     picture far better than ffmpeg's default would."""
     import shutil
 
-    from moviepy import ColorClip
 
     from pipelines.script2video import apply_color_grade
 

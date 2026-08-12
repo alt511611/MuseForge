@@ -181,6 +181,42 @@ def _format_scene_direction(scene: Any) -> str:
     return "\n".join(parts)
 
 
+def _scene_beat_line(scene: Any, number: int) -> str:
+    """One line describing what a scene does, for the story-state blocks.
+
+    The turn is what actually changed in that scene, so it is what a later
+    scene must keep true and an earlier scene must not have shown yet. Scenes
+    with no turn fall back to their action line rather than dropping out —
+    a missing beat would silently re-open the door this exists to close.
+    """
+    beat = _scene_field(scene, "turn").strip() or _scene_action(scene).strip()
+    return f"Scene {number}: {beat}" if beat else ""
+
+
+def _format_story_state(scenes: List[Any], index: int) -> tuple:
+    """(already happened, not yet happened) around the scene at ``index``.
+
+    Every scene is storyboarded on its own, with no idea of where it sits in
+    the story, so the shot designer used to be free to stage the drama's
+    payoff in scene 1 — and did: a story whose stated event was the moment a
+    container is opened opened ON the container, already open and glowing,
+    with four scenes of build-up behind it. Handing each scene the turns
+    behind it and the turns still ahead of it is what makes the order of the
+    cut visible to the step that draws it.
+    """
+    before = [
+        line
+        for i, scene in enumerate(scenes[:index])
+        if (line := _scene_beat_line(scene, i + 1))
+    ]
+    after = [
+        line
+        for i, scene in enumerate(scenes[index + 1 :], start=index + 1)
+        if (line := _scene_beat_line(scene, i + 1))
+    ]
+    return "\n".join(before), "\n".join(after)
+
+
 def _format_character_direction(script: DramaScript) -> str:
     """Render per-character performance direction (want / need / arc)."""
     lines = []
@@ -1371,6 +1407,7 @@ class Idea2VideoPipeline:
             take = int(target.get("take", 1)) + 1
             takes[index] = take
             scene_dir = os.path.join(working_dir, f"scene_{index}_take{take}")
+            story_so_far, not_yet = _format_story_state(script.scenes, index)
             async with semaphore:
                 _check_cancel()
                 scene_result = await self.script2video.run(
@@ -1396,6 +1433,12 @@ class Idea2VideoPipeline:
                     scene_emotion=_scene_emotion(scene_script),
                     scene_dialogue=_format_scene_dialogue(_scene_dialogue(scene_script)),
                     scene_direction=_format_scene_direction(scene_script),
+                    # A retake replaces one scene inside a cut that already
+                    # exists, so it needs the same story-state fence the first
+                    # pass had — otherwise the new take comes back showing a
+                    # later scene's payoff.
+                    story_so_far=story_so_far,
+                    not_yet=not_yet,
                     scene_tension=_scene_tension(scene_script),
                     # Same slice of the second budget as the take it replaces,
                     # so a retake can never quietly lengthen (or shorten) the
@@ -1453,6 +1496,16 @@ class Idea2VideoPipeline:
             for track in dialogue_tracks:
                 if int(track.get("scene_index", -1)) in resync:
                     track.pop("lipsynced", None)
+                    # Put the voice back where the MIXER looks for it, not
+                    # just where the sync step does. The first pass moved it
+                    # to synced_audio_url because the speech was baked into
+                    # the picture -- but the picture it was baked into has
+                    # just been thrown away. If the re-sync then fails (it is
+                    # fail-open, one clip at a time), the track carries no
+                    # audio_url, the mixer lays down nothing, and the retaken
+                    # scene plays silent in a video whose other scenes speak.
+                    if not track.get("audio_url") and track.get("synced_audio_url"):
+                        track["audio_url"] = track["synced_audio_url"]
             await self._lipsync_scenes(
                 scene_paths=scene_paths,
                 dialogue_tracks=dialogue_tracks,
@@ -2002,6 +2055,7 @@ class Idea2VideoPipeline:
         is_cancelled: Optional[Callable[[], bool]] = None,
         preset_characters: Optional[List[Dict[str, Any]]] = None,
         language: str = DEFAULT_LANGUAGE,
+        dialogue_enabled: bool = False,
     ) -> DramaScript:
         """Phase A: screenwriting only — no portraits / frames / video."""
 
@@ -2022,6 +2076,12 @@ class Idea2VideoPipeline:
             user_requirement,
             preset_characters=preset_characters,
             language=language,
+            # The screenwriter is otherwise free to write a silent film --
+            # the base prompt explicitly allows empty dialogue lists -- and a
+            # silent script on a run the user enabled (and paid for) dialogue
+            # on produces no voices, no captions and, with music off, a master
+            # with no audio stream at all.
+            require_dialogue=dialogue_enabled,
         )
 
     async def continue_from_script(
@@ -2175,6 +2235,19 @@ class Idea2VideoPipeline:
         dialogue_requested = (
             dialogue_enabled and is_dialogue_enabled() and not self.demo
         )
+        # Every audio stage below is deliberately fail-open: a dead voice
+        # provider must not throw away a finished picture. The cost of that is
+        # a master with NO audio stream at all (music off + no voice = a silent
+        # mp4), delivered without a word of explanation — the user switched
+        # dialogue on, paid the dialogue surcharge, and got silence that looks
+        # exactly like a broken feature. Collect the reasons instead and hand
+        # them back on the result.
+        warnings: List[str] = []
+        if dialogue_enabled and not dialogue_requested and not self.demo:
+            warnings.append(
+                "Spoken dialogue is switched off on this server, so the video "
+                "was rendered without voices."
+            )
         voice_gen = MuAPIVoiceGenerator(self.api_key, demo=self.demo) if dialogue_requested else None
         if voice_gen is not None:
             # Cast the whole ensemble up front, gender-matched to each
@@ -2236,6 +2309,20 @@ class Idea2VideoPipeline:
         # chaining on, scene N's reference is scene N-1's finished frame, so
         # that mode stays strictly sequential and simply renders as before.
         scene_concurrency = _scene_concurrency(total_scenes)
+
+        def _scene_progress_data(done: int) -> Dict[str, Any]:
+            """Counters the live ETA measures this deployment's rate from.
+
+            The estimate shown to the user is only a prior until a scene
+            actually lands; these three numbers are what turn it into a
+            measurement (see interfaces/render_eta.RenderEta.observe).
+            """
+            return {
+                "scenes_completed": done,
+                "scenes_total": total_scenes,
+                "scene_concurrency": scene_concurrency,
+            }
+
         scene_slots: List[Optional[Dict[str, Any]]] = [None] * len(script.scenes)
         scene_semaphore = asyncio.Semaphore(scene_concurrency)
         progress_lock = asyncio.Lock()
@@ -2246,6 +2333,7 @@ class Idea2VideoPipeline:
             async with scene_semaphore:
                 _check_cancel()
                 scene_dialogue_lines = _scene_dialogue(scene)
+                story_so_far, not_yet = _format_story_state(script.scenes, idx)
 
                 async def scene_progress(stage, message, pct, data=None, _idx=idx):
                     # Scenes may finish out of order, so progress tracks how
@@ -2286,6 +2374,12 @@ class Idea2VideoPipeline:
                     # dialogue is what tells the artist which moment matters.
                     scene_dialogue=_format_scene_dialogue(scene_dialogue_lines),
                     scene_direction=_format_scene_direction(scene),
+                    # Where this scene sits in the story. Without it every
+                    # scene is designed as if it were the only one, and the
+                    # most striking beat in the brief gets staged in all of
+                    # them — including scene 1, which spoils the payoff.
+                    story_so_far=story_so_far,
+                    not_yet=not_yet,
                     scene_tension=_scene_tension(scene),
                     scene_duration=scene_durations[idx] if idx < len(scene_durations) else 0.0,
                     character_direction=character_direction,
@@ -2302,9 +2396,21 @@ class Idea2VideoPipeline:
                         "video",
                         f"Scene {completed_scenes}/{total_scenes} complete",
                         15 + (completed_scenes / total_scenes) * 65,
+                        _scene_progress_data(completed_scenes),
                     )
 
         try:
+            # Opens the scene phase, and starts the clock the live ETA measures
+            # its rate against (jobs.Job._eta). It has to be emitted BEFORE the
+            # first scene rather than only on completion: with no start marker
+            # the tracker would see its first scene land in zero elapsed time
+            # and could not derive a rate at all.
+            await progress(
+                "video",
+                f"Rendering {total_scenes} scene(s)",
+                15,
+                _scene_progress_data(0),
+            )
             if scene_concurrency <= 1:
                 # Strictly sequential: preserves the exact previous ordering,
                 # which the reference-chaining mode depends on.
@@ -2363,6 +2469,7 @@ class Idea2VideoPipeline:
                 )
 
             _check_cancel()
+            failed_dialogue_scenes: List[int] = []
             for assembled_scene_index, scene_number, task in dialogue_tasks:
                 try:
                     generated_tracks = await task
@@ -2376,6 +2483,32 @@ class Idea2VideoPipeline:
                         scene_number + 1,
                         exc,
                     )
+                    failed_dialogue_scenes.append(scene_number + 1)
+            if dialogue_requested:
+                if not dialogue_tasks:
+                    # The script came back with no spoken lines at all, so
+                    # there was never anything to voice. The screenwriter is
+                    # now told when a run is going to be voiced (see
+                    # ScreenwriterAgent.DIALOGUE_CLAUSE), which makes this
+                    # rare -- but an approved/edited script can still arrive
+                    # silent, and silently shipping it is what made this look
+                    # like the dialogue feature failing.
+                    warnings.append(
+                        "The script has no spoken lines, so there was nothing "
+                        "to voice — the video has no dialogue."
+                    )
+                elif not dialogue_tracks:
+                    warnings.append(
+                        "Voice generation failed for every scene, so the video "
+                        "was rendered without dialogue."
+                    )
+                elif failed_dialogue_scenes:
+                    scenes_label = ", ".join(str(n) for n in failed_dialogue_scenes)
+                    warnings.append(
+                        f"Voice generation failed for scene(s) {scenes_label}, "
+                        f"which play without dialogue."
+                    )
+
             # Drive the mouths from the voice track that is about to be
             # played. Deliberately placed AFTER dialogue is collected and
             # BEFORE assembly: the provider works on one clip at a time, and
@@ -2412,6 +2545,11 @@ class Idea2VideoPipeline:
 
         if music_task is not None:
             music_url = await music_task
+            if not music_url:
+                warnings.append(
+                    "Background music could not be generated, so the video "
+                    "was rendered without a score."
+                )
 
         actual_duration_seconds: Optional[float] = None
         if self.demo or not scene_paths:
@@ -2525,6 +2663,11 @@ class Idea2VideoPipeline:
             # Lets the UI explain a generic result instead of leaving the
             # user to guess why their prompt was ignored.
             "script_degraded": getattr(script, "generated_by", "llm") == "template",
+            # Anything that was ASKED for and quietly did not happen. Every
+            # audio stage fails open (a dead voice provider must not bin a
+            # finished picture), so without this the user's only evidence is a
+            # video that is silent for no stated reason.
+            "warnings": warnings,
         }
 
     async def run(
@@ -2558,6 +2701,7 @@ class Idea2VideoPipeline:
             is_cancelled=is_cancelled,
             preset_characters=preset_characters,
             language=language,
+            dialogue_enabled=dialogue_enabled,
         )
         return await self.continue_from_script(
             script=script,

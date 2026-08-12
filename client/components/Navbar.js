@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { Film, LogOut, Shield, ChevronDown, User, LayoutDashboard, Globe, Building2, Users, Clapperboard, BookOpen, AlertTriangle, Menu, X } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { useLanguage } from "../contexts/LanguageContext";
-import { isLowCredits } from "../lib/credits";
+import { isLowCredits, isOutOfCredits } from "../lib/credits";
 
 function LanguageSelector() {
   const { locale, setLocale, LOCALES, LOCALE_CODES, t } = useLanguage();
@@ -117,6 +117,11 @@ export default function Navbar() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
   const [lowCredits, setLowCredits] = useState(false);
+  // Zero is not "low": isLowCredits() requires credits > 0, so an account that
+  // has run out lost the warning entirely — the badge vanished at exactly the
+  // moment the user could no longer generate anything, and the next click just
+  // failed. Tracked separately so it can say something different.
+  const [outOfCredits, setOutOfCredits] = useState(false);
   const [creditCount, setCreditCount] = useState(null);
   const ref = useRef(null);
 
@@ -137,11 +142,13 @@ export default function Navbar() {
   useEffect(() => {
     if (!user || !profile) {
       setLowCredits(false);
+      setOutOfCredits(false);
       setCreditCount(null);
       return;
     }
     setCreditCount(profile.credits);
     setLowCredits(isLowCredits(profile.credits, profile.plan));
+    setOutOfCredits(isOutOfCredits(profile.credits));
   }, [user, profile]);
 
   const handleSignOut = async () => {
@@ -176,12 +183,12 @@ export default function Navbar() {
           {t("nav_pricing")}
         </Link>
 
-        {user && lowCredits && (
+        {user && (lowCredits || outOfCredits) && (
           <Link
             href="/dashboard"
             className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium"
             style={{ backgroundColor: "rgba(232,182,76,0.12)", border: "1px solid rgba(232,182,76,0.35)", color: "var(--mf-gold)" }}
-            title={t("credits_low_banner", { n: creditCount ?? 0 })}
+            title={outOfCredits ? t("credits_out_banner") : t("credits_low_banner", { n: creditCount ?? 0 })}
           >
             <AlertTriangle size={11} />
             {creditCount ?? "—"}
@@ -209,7 +216,7 @@ export default function Navbar() {
                   className="flex items-center gap-2 px-3 py-1.5 rounded-xl text-sm transition-all relative"
                   style={{ backgroundColor: "var(--mf-panel)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink-2)" }}
                 >
-                  {lowCredits && (
+                  {(lowCredits || outOfCredits) && (
                     <span
                       className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full"
                       style={{ backgroundColor: "var(--mf-gold)", boxShadow: "0 0 0 2px var(--mf-stage)" }}

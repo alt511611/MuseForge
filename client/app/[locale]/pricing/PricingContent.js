@@ -10,6 +10,7 @@ import { useLanguage } from "../../../contexts/LanguageContext";
 import Confetti from "../../../components/Confetti";
 import { API_BASE } from "../../../lib/apiBase";
 import { friendlyError } from "../../../utils/errorMessages";
+import { tr } from "../../../lib/tr";
 
 // ── Credit package buy button ─────────────────────────────────────────────────
 function BuyCreditsButton({ pkg, label, price, credits, highlight }) {
@@ -112,13 +113,6 @@ function monthlyRate(monthly, annual) {
  *  rounding twice would quote a total that does not match Stripe's Price. */
 function annualTotal(monthly) {
   return Math.round(monthly * 12 * (1 - ANNUAL_DISCOUNT_PERCENT / 100));
-}
-
-/** t() returns the key itself for a missing string, so `t(key) || fallback`
- *  never reaches its fallback. Compare against the key instead. */
-function tr(t, key, fallback) {
-  const value = t(key);
-  return value === key ? fallback : value;
 }
 
 function IntervalToggle({ interval, onChange }) {

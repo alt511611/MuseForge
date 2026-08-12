@@ -52,6 +52,14 @@ services:
         value: "150"
       - key: MUSEFORGE_SECONDS_PER_SCENE
         value: "100"
+      # Spoken character dialogue (ElevenLabs text-to-dialogue via MuAPI).
+      # Off by default — every line is a paid call — but it must be declared
+      # here: /api/health reports `dialogue_available` from this flag, and the
+      # client only offers the Pro dialogue toggle when that is true. Left out
+      # of the blueprint entirely, a deployment ships with the feature sold on
+      # the pricing page and unreachable in the product. Set to "1" to enable.
+      - key: MUSEFORGE_DIALOGUE_ENABLED
+        value: ""
       # Lip sync (fal.ai Sync Lipsync). Requires FAL_KEY and dialogue to be on
       # — with no generated voice there is nothing to sync a mouth to. Off by
       # default: every synced scene is a paid call on top of generation.

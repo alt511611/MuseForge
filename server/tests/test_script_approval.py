@@ -70,7 +70,6 @@ async def test_require_script_approval_stops_before_video(monkeypatch, tmp_path)
 async def test_approve_script_continues_with_edited_scene(monkeypatch, tmp_path):
     """continue_from_script receives the user-edited scene text."""
     import jobs as jobs_mod
-    from interfaces.character import DramaScript
 
     monkeypatch.setattr(jobs_mod, "JOBS_DIR", str(tmp_path))
     monkeypatch.setattr(jobs_mod, "cleanup_working_dir", lambda *_a, **_k: None)

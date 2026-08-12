@@ -117,16 +117,23 @@ async def test_pro_plan_allows_twenty_four_scenes():
 
 @pytest.mark.asyncio
 async def test_estimate_warns_for_long_jobs():
+    # The phase budgets live in interfaces/render_eta now, because the LIVE
+    # countdown shown during a render is built from the same model -- see that
+    # module for why one shared model is the point. api.py holds only the
+    # warning threshold. Totals below are unchanged: prologue 55 + epilogue 35
+    # is the old flat base of 90.
     import api as _api
+    import interfaces.render_eta as _eta
     from fastapi.testclient import TestClient
 
     with patch.object(_api, "DEMO_FLAG", False), \
          patch.dict(os.environ, {"MUAPI_KEY": "real_key",
                                  "MUSEFORGE_SCENE_CONCURRENCY": "1"}):
-        with patch.object(_api, "SECONDS_PER_SCENE", 100.0), \
-             patch.object(_api, "ESTIMATE_BASE_SECONDS", 90.0), \
-             patch.object(_api, "ESTIMATE_MUSIC_SECONDS", 45.0), \
-             patch.object(_api, "ESTIMATE_DIALOGUE_PER_SCENE", 20.0), \
+        with patch.object(_eta, "SECONDS_PER_SCENE", 100.0), \
+             patch.object(_eta, "PROLOGUE_SECONDS", 55.0), \
+             patch.object(_eta, "EPILOGUE_SECONDS", 35.0), \
+             patch.object(_eta, "MUSIC_SECONDS", 45.0), \
+             patch.object(_eta, "DIALOGUE_PER_SCENE", 20.0), \
              patch.object(_api, "WAIT_WARNING_MINUTES", 15):
             tc = TestClient(_api.app, raise_server_exceptions=False)
             # Concurrency pinned to 1: 16 scenes → 90 + 16*100 = 1690s ≈ 28 min → warning
@@ -152,8 +159,9 @@ async def test_estimate_warns_for_long_jobs():
     with patch.object(_api, "DEMO_FLAG", False), \
          patch.dict(os.environ, {"MUAPI_KEY": "real_key"}, clear=False):
         os.environ.pop("MUSEFORGE_SCENE_CONCURRENCY", None)
-        with patch.object(_api, "SECONDS_PER_SCENE", 100.0), \
-             patch.object(_api, "ESTIMATE_BASE_SECONDS", 90.0):
+        with patch.object(_eta, "SECONDS_PER_SCENE", 100.0), \
+             patch.object(_eta, "PROLOGUE_SECONDS", 55.0), \
+             patch.object(_eta, "EPILOGUE_SECONDS", 35.0):
             tc = TestClient(_api.app, raise_server_exceptions=False)
             parallel = tc.post(
                 "/api/estimate", json={"num_scenes": 16, "plan": "creator"}

@@ -26,7 +26,6 @@ and continue without music.
 from __future__ import annotations
 
 import os
-from typing import Optional
 
 from tools.falai_common import fal_generate, make_fal_client
 

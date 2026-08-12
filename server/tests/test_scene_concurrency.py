@@ -93,7 +93,8 @@ async def test_scenes_render_in_parallel_with_locked_portraits(monkeypatch, tmp_
         return {"path": path, "url": None, "shots": [{"idx": 0, "scene": idx}]}
 
     async def fake_write_script(self, idea, style="Cinematic", num_scenes=3,
-                                user_requirement="", preset_characters=None, language="en"):
+                                user_requirement="", preset_characters=None, language="en",
+                                require_dialogue=False):
         return DramaScript(
             title="t", logline=idea,
             characters=[CharacterProfile(name="Maya", description="30s")],
@@ -215,7 +216,8 @@ async def test_one_failing_scene_cancels_its_siblings(monkeypatch, tmp_path):
         return {"path": None, "url": None, "shots": []}
 
     async def fake_write_script(self, idea, style="Cinematic", num_scenes=3,
-                                user_requirement="", preset_characters=None, language="en"):
+                                user_requirement="", preset_characters=None, language="en",
+                                require_dialogue=False):
         return DramaScript(
             title="t", logline=idea,
             characters=[CharacterProfile(name="Maya", description="30s")],

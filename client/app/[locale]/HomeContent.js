@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "../../components/LocaleLink";
 import IdeaForm from "../../components/IdeaForm";
@@ -60,6 +60,21 @@ export default function HomeContent() {
     setPrefill({ ...data, _ts: Date.now() });
     setTimeout(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
   };
+
+  // The dashboard's "try again" button on a failed job links here as
+  // /?idea=<the original idea>, but nothing ever read that parameter: the user
+  // landed on an empty form and had to retype the brief the button existed to
+  // carry over. Read straight off location rather than useSearchParams(), which
+  // would force a Suspense boundary and opt the landing page out of static
+  // rendering (the same reasoning as LanguageContext.setLocale).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const idea = new URLSearchParams(window.location.search).get("idea");
+    if (idea && idea.trim()) scrollToForm({ idea: idea.trim() });
+    // Mount only: a later push to the same route should not re-prefill over
+    // whatever the user has since typed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const jumpToForm = () => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
 

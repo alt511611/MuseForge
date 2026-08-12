@@ -143,9 +143,20 @@ class MuAPIVideoGenerator:
             return DEMO_VIDEO_URL
 
         from tools.video_model_router import STANDARD as STANDARD_PROFILE
-        from tools.video_model_router import model_chain
+        from tools.video_model_router import is_routing_active, model_chain
 
-        chain = model_chain(shot_profile or STANDARD_PROFILE, plan)
+        profile = shot_profile or STANDARD_PROFILE
+        chain = model_chain(profile, plan)
+        # Without this, a chain of [plan endpoint, standard] is indistinguishable
+        # in the logs from "an operator pinned a specialist and it resolved to
+        # the same place" -- which is the first question asked when a routed
+        # model appears not to be running.
+        logger.info(
+            "Shot profile=%r routed to %s (routing %s)",
+            profile,
+            chain,
+            "configured" if is_routing_active() else "not configured",
+        )
 
         # Walk the chain: a routed specialist first, the plan's endpoint next,
         # Standard last. Only endpoint-level rejections (404/422 -- "this model
@@ -182,7 +193,7 @@ class MuAPIVideoGenerator:
                 logger.warning(
                     "MuAPI rejected endpoint=%r for profile=%r (%s); falling back to %r",
                     endpoint,
-                    shot_profile or STANDARD_PROFILE,
+                    profile,
                     exc,
                     chain[position + 1],
                 )

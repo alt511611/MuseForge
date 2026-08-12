@@ -36,6 +36,13 @@ When the director's notes name THE TURN, that is the moment — film it, not the
 business around it. Honour the given staging (positions, hands, the object the scene
 turns on) instead of inventing different blocking.
 
+DO NOT FILM THE FUTURE. The notes tell you what has ALREADY happened in earlier scenes
+and what has NOT happened yet. Your shot shows the world exactly as it stands at THIS
+point in the story: never show a later scene's event, its aftermath or its changed state
+(a container already open, the lights already out, a wound not yet taken, a character not
+yet arrived), and never undo something an earlier scene established. When the scene IS
+the event, show the event itself happening on camera — that is the shot.
+
 MATCH SHOT SCALE TO THE BEAT. Let the scene's dramatic function and tension pick the
 framing: setup and resolution can breathe in wide or medium; rising_action and
 turning_point tighten to medium; climax and any tension of 8+ belong in a close-up
@@ -146,6 +153,8 @@ Respond ONLY with valid JSON array containing a single shot object:
         theme: str = "",
         visual_motif: str = "",
         user_brief: str = "",
+        story_so_far: str = "",
+        not_yet: str = "",
     ) -> List[StoryboardShot]:
         preset = get_director_style(director_style)
 
@@ -159,22 +168,24 @@ Respond ONLY with valid JSON array containing a single shot object:
                 scene_duration,
             )
 
-        char_desc = ", ".join(f"{c.name}: {c.static_features}" for c in characters if c.is_visible)
-        setting_line = self._format_setting_line(
-            setting_location, setting_time_of_day, setting_era
-        )
-        prompt = (
-            f"{self._format_user_brief_block(user_brief)}"
-            f"Scene script: {script}\n"
-            f"{self._format_emotion_line(scene_emotion)}"
-            f"{self._format_direction_block(scene_direction)}"
-            f"{self._format_dialogue_line(scene_dialogue)}"
-            f"Characters: {char_desc}\n"
-            f"{self._format_character_direction_block(character_direction)}"
-            f"{setting_line}"
-            f"{self._format_through_line(theme, visual_motif)}"
-            f"Director guidance: {preset.storyboard_guidance}\nDefault lens: {preset.default_lens}\n"
-            f"User requirements: {user_requirement or 'none'}"
+        prompt = self._build_prompt(
+            script=script,
+            characters=characters,
+            user_requirement=user_requirement,
+            guidance=preset.storyboard_guidance,
+            default_lens=preset.default_lens,
+            setting_location=setting_location,
+            setting_time_of_day=setting_time_of_day,
+            setting_era=setting_era,
+            scene_emotion=scene_emotion,
+            scene_dialogue=scene_dialogue,
+            scene_direction=scene_direction,
+            character_direction=character_direction,
+            theme=theme,
+            visual_motif=visual_motif,
+            user_brief=user_brief,
+            story_so_far=story_so_far,
+            not_yet=not_yet,
         )
 
         # 1) MuAPI first, but opt-in only -- its LLM slug is a guess, so it
@@ -220,6 +231,8 @@ Respond ONLY with valid JSON array containing a single shot object:
                 theme=theme,
                 visual_motif=visual_motif,
                 user_brief=user_brief,
+                story_so_far=story_so_far,
+                not_yet=not_yet,
             )
             self._ensure_expression(shots, scene_emotion)
             if shots:
@@ -305,6 +318,54 @@ Respond ONLY with valid JSON array containing a single shot object:
                     pass
         return shots
 
+    def _build_prompt(
+        self,
+        *,
+        script: str,
+        characters: List[CharacterInScene],
+        user_requirement: str,
+        guidance: str,
+        default_lens: str,
+        setting_location: str = "",
+        setting_time_of_day: str = "",
+        setting_era: str = "",
+        scene_emotion: str = "",
+        scene_dialogue: str = "",
+        scene_direction: str = "",
+        character_direction: str = "",
+        theme: str = "",
+        visual_motif: str = "",
+        user_brief: str = "",
+        story_so_far: str = "",
+        not_yet: str = "",
+    ) -> str:
+        """The user turn for a shot-design call, for EITHER provider path.
+
+        Written once because it was written twice: the two paths carried
+        byte-identical prompt assembly, and a clause added to one of them
+        silently did nothing on the other. That is not hypothetical -- the
+        story-state block (which stops scene 1 being staged as the story's
+        payoff) was added to the MuAPI path alone and was therefore dead on
+        the DEFAULT path, since MuAPI's LLM route is opt-in.
+        """
+        char_desc = ", ".join(
+            f"{c.name}: {c.static_features}" for c in characters if c.is_visible
+        )
+        return (
+            f"{self._format_user_brief_block(user_brief)}"
+            f"Scene script: {script}\n"
+            f"{self._format_emotion_line(scene_emotion)}"
+            f"{self._format_direction_block(scene_direction)}"
+            f"{self._format_story_state(story_so_far, not_yet)}"
+            f"{self._format_dialogue_line(scene_dialogue)}"
+            f"Characters: {char_desc}\n"
+            f"{self._format_character_direction_block(character_direction)}"
+            f"{self._format_setting_line(setting_location, setting_time_of_day, setting_era)}"
+            f"{self._format_through_line(theme, visual_motif)}"
+            f"Director guidance: {guidance}\nDefault lens: {default_lens}\n"
+            f"User requirements: {user_requirement or 'none'}"
+        )
+
     #: How much of the user's prompt is carried into the shot-design call.
     #: The API caps an idea at 2000 characters, so this passes it whole; the
     #: bound exists only so a future cap increase cannot blow the token budget.
@@ -353,6 +414,33 @@ Respond ONLY with valid JSON array containing a single shot object:
         if not direction:
             return ""
         return f"DIRECTOR'S NOTES FOR THIS SCENE:\n{direction}\n"
+
+    @staticmethod
+    def _format_story_state(story_so_far: str = "", not_yet: str = "") -> str:
+        """Where this scene sits in the story: what is done, what is not.
+
+        Scenes are storyboarded independently (and, by default, in parallel),
+        so nothing else tells this call that it is designing scene 1 of 4. Left
+        blind, the model reaches for the most striking image in the brief and
+        stages the story's payoff in the opening shot — observed in the wild as
+        a drama that opens on the container already hanging open and glowing,
+        then spends four scenes building up to it. The turns of the LATER
+        scenes are what must not appear yet; the turns of the earlier ones are
+        what must still be true.
+        """
+        blocks = []
+        if (story_so_far or "").strip():
+            blocks.append(
+                "ALREADY HAPPENED in earlier scenes — still true in this shot:\n"
+                f"{story_so_far.strip()}"
+            )
+        if (not_yet or "").strip():
+            blocks.append(
+                "HAS NOT HAPPENED YET — must NOT appear in this shot, in any "
+                "form, including its aftermath or changed state:\n"
+                f"{not_yet.strip()}"
+            )
+        return "\n".join(blocks) + "\n" if blocks else ""
 
     @staticmethod
     def _format_character_direction_block(character_direction: str = "") -> str:
@@ -427,26 +515,30 @@ Respond ONLY with valid JSON array containing a single shot object:
         theme: str = "",
         visual_motif: str = "",
         user_brief: str = "",
+        story_so_far: str = "",
+        not_yet: str = "",
     ) -> List[StoryboardShot]:
         try:
             import anthropic
 
-            char_desc = ", ".join(f"{c.name}: {c.static_features}" for c in characters if c.is_visible)
-            setting_line = self._format_setting_line(
-                setting_location, setting_time_of_day, setting_era
-            )
-            prompt = (
-                f"{self._format_user_brief_block(user_brief)}"
-                f"Scene script: {script}\n"
-                f"{self._format_emotion_line(scene_emotion)}"
-                f"{self._format_direction_block(scene_direction)}"
-                f"{self._format_dialogue_line(scene_dialogue)}"
-                f"Characters: {char_desc}\n"
-                f"{self._format_character_direction_block(character_direction)}"
-                f"{setting_line}"
-                f"{self._format_through_line(theme, visual_motif)}"
-                f"Director guidance: {guidance}\nDefault lens: {default_lens}\n"
-                f"User requirements: {user_requirement or 'none'}"
+            prompt = self._build_prompt(
+                script=script,
+                characters=characters,
+                user_requirement=user_requirement,
+                guidance=guidance,
+                default_lens=default_lens,
+                setting_location=setting_location,
+                setting_time_of_day=setting_time_of_day,
+                setting_era=setting_era,
+                scene_emotion=scene_emotion,
+                scene_dialogue=scene_dialogue,
+                scene_direction=scene_direction,
+                character_direction=character_direction,
+                theme=theme,
+                visual_motif=visual_motif,
+                user_brief=user_brief,
+                story_so_far=story_so_far,
+                not_yet=not_yet,
             )
             # Same migration as agents/screenwriter.py, for the same two
             # reasons. (1) Sonnet 5 runs adaptive thinking by default, so

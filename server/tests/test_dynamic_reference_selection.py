@@ -74,7 +74,8 @@ async def _run_three_scene_drama(monkeypatch, working_dir):
     async def fake_design_storyboard(self, script, characters, user_requirement="", director_style="cinematic_balanced", **_kwargs):
         return [FakeShot(0)]
 
-    async def fake_write_script(self, idea, style="Cinematic", num_scenes=3, user_requirement="", preset_characters=None, language="en"):
+    async def fake_write_script(self, idea, style="Cinematic", num_scenes=3, user_requirement="", preset_characters=None, language="en",
+                                require_dialogue=False):
         return DramaScript(
             title="Maya",
             logline=idea,

@@ -2,24 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "./LocaleLink";
-import { Download, Share2, Plus, ExternalLink, Layout, ChevronDown, ChevronUp, Loader2, BookmarkPlus, Check, RefreshCw, Wand2, Scissors, ArrowUp, ArrowDown, Eye, EyeOff } from "lucide-react";
+import { Download, Share2, Plus, ExternalLink, Layout, ChevronDown, ChevronUp, Loader2, BookmarkPlus, Check, RefreshCw, Wand2, Scissors, ArrowUp, ArrowDown, Eye, EyeOff, AlertTriangle } from "lucide-react";
 import Confetti from "./Confetti";
 import { useLanguage } from "../contexts/LanguageContext";
 import { useAuth } from "../contexts/AuthContext";
 import { API_BASE, resolveJobVideoUrl } from "../lib/apiBase";
-
-/** Translate with a real fallback.
- *
- * t() returns the KEY itself when a string is missing, so the older
- * `t(key) || fallback` idiom never reached its fallback: the key is a
- * non-empty string, so `||` kept it and the user was shown the raw
- * "result_cut_apply". Comparing against the key is the only way to tell a
- * missing string from a real one.
- */
-function tr(t, key, fallback) {
-  const value = t(key);
-  return value === key ? fallback : value;
-}
+import { tr } from "../lib/tr";
 
 function SaveCharacterButton({ character }) {
   const { t } = useLanguage();
@@ -501,14 +489,25 @@ export default function VideoResult({ job, jobId }) {
     setConfetti(true);
     setTimeout(() => setConfetti(false), 5000);
 
-    // Browser notification
+    // Browser notification. The `"Notification" in window` guard only covered
+    // the FIRST branch, so on a browser without the API (iOS Safari, and any
+    // page served over plain http) the `else if` dereferenced an undefined
+    // global and threw a ReferenceError — inside an effect, with no catch, so
+    // the finished video the user had just paid for never rendered at all.
     const notifyTitle = t("result_ready");
-    if ("Notification" in window && Notification.permission === "default") {
-      Notification.requestPermission().then((perm) => {
-        if (perm === "granted") new Notification(notifyTitle, { body: result.title || t("result_notify_body"), icon: "/favicon.ico" });
-      });
-    } else if (Notification.permission === "granted") {
-      new Notification(notifyTitle, { body: result.title || t("result_notify_body"), icon: "/favicon.ico" });
+    const notifyBody = { body: result.title || t("result_notify_body"), icon: "/favicon.ico" };
+    if (typeof Notification !== "undefined") {
+      try {
+        if (Notification.permission === "default") {
+          Notification.requestPermission().then((perm) => {
+            if (perm === "granted") new Notification(notifyTitle, notifyBody);
+          });
+        } else if (Notification.permission === "granted") {
+          new Notification(notifyTitle, notifyBody);
+        }
+      } catch {
+        /* notifications blocked by policy — the page still works */
+      }
     }
 
     // Completion chime
@@ -530,6 +529,7 @@ export default function VideoResult({ job, jobId }) {
   if (!result) return null;
 
   const scenes = result.scenes || [];
+  const warnings = Array.isArray(result.warnings) ? result.warnings : [];
   const portraits = result.portraits || {};
   // Only scenes whose clip was archived can be re-cut or spliced into.
   const editableScenes = scenes.filter(
@@ -634,6 +634,29 @@ export default function VideoResult({ job, jobId }) {
         )}
       </div>
 
+      {/* Anything the job was asked for and could not deliver. Every audio
+          stage fails open server-side, so without this a video that is silent
+          (or unscored) looks like a broken feature rather than a stated
+          outcome. */}
+      {warnings.length > 0 && (
+        <div
+          className="rounded-2xl px-4 py-3 mb-5 flex gap-3"
+          style={{ backgroundColor: "var(--mf-panel)", border: "1px solid var(--mf-line-strong)" }}
+        >
+          <AlertTriangle size={16} className="flex-shrink-0 mt-0.5" style={{ color: "var(--mf-warn, #d9a441)" }} />
+          <div>
+            <p className="text-xs font-medium" style={{ color: "var(--mf-ink-2)" }}>
+              {t("result_warnings_title")}
+            </p>
+            <ul className="text-xs mt-1 space-y-0.5 list-disc pl-4" style={{ color: "var(--mf-ink-3)" }}>
+              {warnings.map((warning, i) => (
+                <li key={i}>{warning}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
+
       <div className="mb-5">
         <NextSteps jobId={jobId} videoUrl={result.video_url} />
       </div>
@@ -729,7 +752,7 @@ export default function VideoResult({ job, jobId }) {
                       Scene {scene.index + 1}: {scene.script}
                       {scene.take > 1 && (
                         <span className="ml-2" style={{ color: "var(--mf-ink-4)" }}>
-                          · {t("result_take_n", { n: scene.take }) || `çekim ${scene.take}`}
+                          · {tr(t, "result_take_n", `çekim ${scene.take}`, { n: scene.take })}
                         </span>
                       )}
                     </p>

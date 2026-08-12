@@ -200,12 +200,24 @@ def build_character_identity_clause(characters, matched_char=None, limit=None) -
         "IDENTICAL to previous scenes — same face, same age, same hair length, "
         "colour and style, same build: " + "; ".join(described) + ". "
     )
-    # A character with no stated wardrobe is the outfit-drift case: the
-    # reference image binds a face, not a costume, so with nothing said about
-    # clothing the image model dresses them afresh every scene (observed in
-    # the wild as one character appearing in three different outfits across a
-    # three-scene drama). Pin the costume to the reference instead.
-    if any(not (getattr(c, "wardrobe", "") or "").strip() for c in visible):
+    # Costume drift is its own failure, separate from face drift: the
+    # reference image binds a face, not an outfit, so the image model dresses
+    # everyone afresh each scene unless told not to (observed in the wild as
+    # one character appearing in three different outfits across a three-scene
+    # drama, and as a protagonist whose yellow overalls became a yellow slicker
+    # and then a yellow hooded jacket). The lock is therefore ALWAYS stated;
+    # only what it pins to changes — the named garments when they survived into
+    # the clause above, the reference image when they did not.
+    wardrobe_named = any(", wearing " in d for d in described) and all(
+        (getattr(c, "wardrobe", "") or "").strip() for c in visible
+    )
+    if wardrobe_named:
+        clause += (
+            "Costume is LOCKED for the whole story: each character wears only "
+            "the outfit named above, in every scene — same garment, same cut, "
+            "same colour, never restyled, swapped or changed. "
+        )
+    else:
         clause += (
             "Clothing is also FIXED: every character wears the EXACT SAME "
             "outfit as in the reference image and in every other scene — same "
@@ -218,6 +230,39 @@ def build_character_identity_clause(characters, matched_char=None, limit=None) -
             f"face exactly. "
         )
     return clause
+
+
+def build_cast_closure_clause(characters) -> str:
+    """Name the whole cast and forbid anyone else appearing in the frame.
+
+    Nothing else in a frame prompt says how MANY people are in this story, so
+    a populated location (a harbour, a station, a market) invites the image
+    model to invent featured strangers, and a scene whose description mentions
+    a second person invites it to duplicate the protagonist rather than draw
+    someone new. Both were visible in the same delivered drama: a lone dock
+    worker who arrived at the container beside a near-copy of herself.
+
+    Emitted separately from the identity clause because it ranks BELOW the
+    locked setting: a stray extra is a blemish, a room that changes between
+    scenes breaks the film.
+    """
+    named = [
+        (getattr(c, "name", "") or "").strip()
+        for c in (characters or [])
+        if getattr(c, "is_visible", True)
+        and (getattr(c, "name", "") or "").strip()
+        and (getattr(c, "static_features", "") or "").strip()
+    ]
+    if not named:
+        return ""
+    return (
+        f"The cast is closed: {'only ' if len(named) == 1 else ''}"
+        + ", ".join(named)
+        + f" appear{'s' if len(named) == 1 else ''} in this story. Add no other "
+        "featured or recognisable person, and never show the same character "
+        "twice in one frame. Background figures only if the shot description "
+        "asks for them, and then distant and unfocused. "
+    )
 
 
 def build_screen_direction_clause(characters) -> str:
@@ -331,10 +376,24 @@ def build_frame_prompt(
     # Budget for the identity clause: whatever is left after the shot itself
     # and its framing, minus room for the setting clause. Everything else is
     # optional and trimmed by fit_image_prompt below.
-    identity_budget = MAX_IMAGE_PROMPT_CHARS - len(shot.visual_desc) - len(setting_clause) - 400
+    # Everything that must survive alongside it is subtracted by its real
+    # length; the flat remainder covers what build_character_identity_clause
+    # wraps around the per-character descriptions themselves (the
+    # fixed-appearance sentence and the costume lock), the style prefix and the
+    # framing line. Guessing at the lighting clause instead of measuring it is
+    # what let a crowded scene push the SETTING out of the prompt — the one
+    # clause that promises the room does not change between scenes.
+    identity_budget = (
+        MAX_IMAGE_PROMPT_CHARS
+        - len(shot.visual_desc)
+        - len(setting_clause)
+        - len(lighting_clause)
+        - 600
+    )
     identity_clause = build_character_identity_clause(
         characters, matched_char, limit=max(identity_budget, 200)
     )
+    cast_clause = build_cast_closure_clause(characters)
     direction_clause = build_screen_direction_clause(characters)
     # (priority, text) in READING order. Priority 0 is required: the style,
     # the shot itself, its framing, and the character lock -- without the
@@ -355,6 +414,7 @@ def build_frame_prompt(
         (0, f"{shot.visual_desc}. "),
         (2, expression_clause),
         (2, face_clause),
+        (2, cast_clause),
         (3, dialogue_clause),
         (0, f"Shot type: {shot.shot_type}. Lens: {shot.lens}. "),
         (4, IMAGE_QUALITY_SUFFIX),
@@ -766,7 +826,7 @@ async def concatenate_videos_with_transitions(
     faded_clips = []
     final = None
     try:
-        from moviepy import VideoFileClip, concatenate_videoclips
+        from moviepy import VideoFileClip
         from moviepy.video.fx import CrossFadeIn, CrossFadeOut
 
         from moviepy import CompositeVideoClip
@@ -1004,6 +1064,8 @@ class Script2VideoPipeline:
         theme: str = "",
         visual_motif: str = "",
         user_brief: str = "",
+        story_so_far: str = "",
+        not_yet: str = "",
     ) -> Dict[str, Any]:
         os.makedirs(working_dir, exist_ok=True)
         portraits = character_portraits or {}
@@ -1051,6 +1113,8 @@ class Script2VideoPipeline:
             theme=theme,
             visual_motif=visual_motif,
             user_brief=user_brief,
+            story_so_far=story_so_far,
+            not_yet=not_yet,
         )
 
         shot_videos: List[Optional[str]] = [None] * len(shots)
