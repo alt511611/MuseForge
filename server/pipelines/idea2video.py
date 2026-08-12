@@ -222,6 +222,34 @@ def _format_story_state(scenes: List[Any], index: int) -> tuple:
     return "\n".join(before), "\n".join(after)
 
 
+#: How much of a provider error is worth putting in front of a user. Long
+#: enough to carry a validation message and the field it names, short enough
+#: not to paste a stack of JSON into the results page.
+MAX_REASON_CHARS = 240
+
+
+def _provider_reason(exc: Exception) -> str:
+    """A one-line, user-readable version of a provider failure.
+
+    Collapsed to a single line because these messages arrive with the raw
+    response body appended (see MuAPIClient._response_detail), and a wall of
+    JSON in a results-page warning is not a message, it is wallpaper.
+    """
+    text = " ".join(str(exc or "").split())
+    if not text:
+        return ""
+    if len(text) > MAX_REASON_CHARS:
+        text = text[:MAX_REASON_CHARS].rstrip() + "…"
+    return text
+
+
+def _reason_suffix(reasons: List[str]) -> str:
+    """Attach the provider's own words to a warning, when it gave any."""
+    if not reasons:
+        return ""
+    return " The voice provider reported: " + " | ".join(reasons)
+
+
 def _world_state(scenes: List[Any], index: int) -> tuple:
     """(this scene's world change, changes already in force) at ``index``.
 
@@ -2499,6 +2527,7 @@ class Idea2VideoPipeline:
 
             _check_cancel()
             failed_dialogue_scenes: List[int] = []
+            dialogue_failure_reasons: List[str] = []
             for assembled_scene_index, scene_number, task in dialogue_tasks:
                 try:
                     generated_tracks = await task
@@ -2513,6 +2542,12 @@ class Idea2VideoPipeline:
                         exc,
                     )
                     failed_dialogue_scenes.append(scene_number + 1)
+                    # Deduped: every scene fails the same way when the cause
+                    # is the request itself, and "the provider said X" five
+                    # times over is noise, not information.
+                    reason = _provider_reason(exc)
+                    if reason and reason not in dialogue_failure_reasons:
+                        dialogue_failure_reasons.append(reason)
             if dialogue_requested:
                 if not dialogue_tasks:
                     # The script came back with no spoken lines at all, so
@@ -2527,15 +2562,25 @@ class Idea2VideoPipeline:
                         "to voice — the video has no dialogue."
                     )
                 elif not dialogue_tracks:
+                    # The reason is attached because without it this sentence
+                    # is unactionable for everyone who reads it: the user
+                    # cannot tell a provider outage from a broken request,
+                    # and whoever fixes it has to go digging in server logs
+                    # for a message the job already had in its hands. A
+                    # request that is malformed fails every scene identically,
+                    # so this is exactly the case where the reason matters
+                    # most and costs one line.
                     warnings.append(
                         "Voice generation failed for every scene, so the video "
                         "was rendered without dialogue."
+                        + _reason_suffix(dialogue_failure_reasons)
                     )
                 elif failed_dialogue_scenes:
                     scenes_label = ", ".join(str(n) for n in failed_dialogue_scenes)
                     warnings.append(
                         f"Voice generation failed for scene(s) {scenes_label}, "
                         f"which play without dialogue."
+                        + _reason_suffix(dialogue_failure_reasons)
                     )
 
             # Drive the mouths from the voice track that is about to be

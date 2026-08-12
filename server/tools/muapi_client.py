@@ -34,6 +34,47 @@ class MuAPICancelled(MuAPIError):
     """
 
 
+#: Keys a completed prediction may carry its file under. ``outputs`` is what
+#: the image and video endpoints return and stays first, so their behaviour is
+#: byte-identical; the rest exist because reading ONE key turns any other
+#: shape into "Completed but no outputs", i.e. a finished, paid-for
+#: generation thrown away over its envelope. The result is fed to an HTTP
+#: download either way, so a wrong guess cannot do worse than the failure it
+#: replaces.
+_OUTPUT_KEYS = ("outputs", "output", "results", "result", "urls", "url")
+
+#: Where a URL hides inside a per-output object.
+_URL_KEYS = (
+    "url", "audio_url", "video_url", "image_url",
+    "output_url", "file_url", "signed_url", "download_url",
+)
+
+
+def _as_url(entry: Any) -> str:
+    """A URL string from an output entry, whether it is one or wraps one."""
+    if isinstance(entry, str):
+        return entry.strip()
+    if isinstance(entry, dict):
+        for key in _URL_KEYS:
+            value = entry.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def extract_output_urls(data: Dict[str, Any]) -> List[str]:
+    """Every file URL in a completed prediction, in the order returned."""
+    for key in _OUTPUT_KEYS:
+        value = data.get(key)
+        if value is None:
+            continue
+        entries = value if isinstance(value, list) else [value]
+        urls = [url for url in (_as_url(entry) for entry in entries) if url]
+        if urls:
+            return urls
+    return []
+
+
 class MuAPIClient:
     def __init__(self, api_key: str, timeout: float = 120.0, max_retries: int = DEFAULT_MAX_RETRIES):
         self.api_key = api_key or os.environ.get("MUAPI_KEY", "")
@@ -125,7 +166,7 @@ class MuAPIClient:
                 status = data.get("status", "")
 
                 if status == "completed":
-                    outputs = data.get("outputs") or []
+                    outputs = extract_output_urls(data)
                     if outputs:
                         return outputs
                     raise MuAPIError(f"Completed but no outputs: {data}")
