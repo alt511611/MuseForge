@@ -1,7 +1,20 @@
 """Optional, fail-open character dialogue generation via MuAPI.
 
 Uses ElevenLabs text-to-dialogue v3: one request per scene with all lines
-in a single ``inputs`` list (confirmed MuAPI playground schema).
+in a single ``dialogue`` list.
+
+Schema CONFIRMED against MuAPI's own OpenAPI spec
+(https://api.muapi.ai/openapi.json -> ElevenlabsTextToDialogueV3Request):
+
+    {"dialogue": [{"text": str, "voice_id": str}, ...],
+     "stability": float, "language_code": str}
+
+Two details that are easy to get wrong and fail EVERY request when wrong:
+  * the list field is ``dialogue`` -- ``inputs`` is not a declared field, so
+    the endpoint rejected the whole body with a 422 before generating a note;
+  * ``voice_id`` is a real ElevenLabs voice ID hash (the sibling
+    ``elevenlabs-tts-turbo-2-5`` schema defaults it to ``21m00Tcm4TlvDq8ikWAM``),
+    NOT a playground display label like "George - Warm".
 """
 
 import hashlib
@@ -9,6 +22,7 @@ import logging
 import os
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from interfaces import gender as gender_of
 from interfaces.language import DEFAULT_LANGUAGE, is_default, normalize
 from tools.muapi_client import MuAPIClient
 
@@ -31,50 +45,45 @@ def _estimate_line_duration_seconds(line: str) -> float:
 class MuAPIVoiceGenerator:
     """Lock each character to one ElevenLabs dialogue voice for the whole drama.
 
-    Voice IDs must match MuAPI's ``elevenlabs-text-to-dialogue-v3`` enum exactly
-    (playground labels like ``George - Warm``).
+    Voice IDs are ElevenLabs library voice IDs. The display names are kept in
+    ``VOICE_NAMES`` for logs and debugging only -- sending a name where an ID
+    belongs is what silenced every drama.
     """
 
     VOICE_ENDPOINT = os.environ.get(
         "MUAPI_VOICE_MODEL", "elevenlabs-text-to-dialogue-v3"
     )
-    # Stable subset from MuAPI's confirmed voice_id enum — gender/tone variety.
-    SYSTEM_VOICE_IDS = (
-        "George - Warm",
-        "Sarah - Soft",
-        "Brian - Deep, Resonant and Comforting",
-        "Charlotte - Clear",
-        "Callum - Husky Trickster",
-        "Laura - Enthusiast, Quirky Attitude",
-    )
-    # Gender pools over the same enum, for description-aware casting: a
-    # character described as a woman must not be voiced by "George - Warm".
-    FEMALE_VOICE_IDS = (
-        "Sarah - Soft",
-        "Charlotte - Clear",
-        "Laura - Enthusiast, Quirky Attitude",
-    )
-    MALE_VOICE_IDS = (
-        "George - Warm",
-        "Brian - Deep, Resonant and Comforting",
-        "Callum - Husky Trickster",
-    )
 
-    # Case-insensitive WHOLE-WORD description keywords -> pool (substring
-    # matching is a trap: "the" contains "he", "woman" contains "man").
-    # Turkish terms included because scripts are frequently written in Turkish.
-    _FEMALE_MARKERS = (
-        "woman", "female", "girl", "mother", "mom", "mum", "daughter",
-        "sister", "aunt", "grandmother", "wife", "lady", "she", "her",
-        "kadın", "kadin", "anne", "kız", "kiz", "abla", "teyze", "hala",
-        "babaanne", "anneanne", "gelin",
-    )
-    _MALE_MARKERS = (
-        "man", "male", "boy", "father", "dad", "son", "brother", "uncle",
-        "grandfather", "husband", "gentleman", "he", "his",
-        "adam", "erkek", "baba", "oğul", "ogul", "oğlan", "oglan",
-        "abi", "ağabey", "agabey", "amca", "dayı", "dayi", "dede", "damat",
-    )
+    # ElevenLabs library voices, multilingual v2 -- gender/tone variety.
+    _GEORGE = "JBFqnCBsd6RMkjVDRZzb"   # warm, male
+    _BRIAN = "nPczCjzI2devNBz1zQrb"    # deep, resonant, male
+    _CALLUM = "N2lVS1w4EtoT3dr4eOWO"   # husky, male
+    _SARAH = "EXAVITQu4vr4xnSDxMaL"    # soft, female
+    _CHARLOTTE = "XB0fDUnXU5powFXDhCwa"  # clear, female
+    _LAURA = "FGY2WhTYpPnrIDTdsKH5"    # bright, female
+
+    #: ID -> display name. Diagnostics only; never sent to the API.
+    VOICE_NAMES = {
+        _GEORGE: "George",
+        _BRIAN: "Brian",
+        _CALLUM: "Callum",
+        _SARAH: "Sarah",
+        _CHARLOTTE: "Charlotte",
+        _LAURA: "Laura",
+    }
+
+    SYSTEM_VOICE_IDS = (_GEORGE, _SARAH, _BRIAN, _CHARLOTTE, _CALLUM, _LAURA)
+    # Gender pools over the same voices, for description-aware casting: a
+    # character described as a woman must not be voiced by George.
+    FEMALE_VOICE_IDS = (_SARAH, _CHARLOTTE, _LAURA)
+    MALE_VOICE_IDS = (_GEORGE, _BRIAN, _CALLUM)
+
+    # The marker table lives in interfaces/gender.py: the screenwriter writes
+    # the gender INTO the description, and this step reads it back out. Two
+    # copies of the word list would let a character be written as a woman and
+    # cast as a man.
+    _FEMALE_MARKERS = gender_of.FEMALE_MARKERS
+    _MALE_MARKERS = gender_of.MALE_MARKERS
 
     def __init__(self, api_key: str, demo: bool = False):
         self.demo = demo
@@ -83,22 +92,8 @@ class MuAPIVoiceGenerator:
 
     @classmethod
     def _infer_gender(cls, description: str) -> str:
-        """"female" / "male" / "" from a visual description.
-
-        Whole words only, earliest match wins (a description usually leads
-        with the defining noun: "52-year-old woman, ...").
-        """
-        import re
-
-        words = re.findall(r"[^\W\d_]+", (description or "").casefold(), re.UNICODE)
-        female = set(cls._FEMALE_MARKERS)
-        male = set(cls._MALE_MARKERS)
-        for word in words:
-            if word in female:
-                return "female"
-            if word in male:
-                return "male"
-        return ""
+        """"female" / "male" / "" from a visual description."""
+        return gender_of.infer(description)
 
     def cast_characters(self, characters: Iterable[Any]) -> Dict[str, str]:
         """Assign every named character a voice UP FRONT, matched to the
@@ -200,7 +195,7 @@ class MuAPIVoiceGenerator:
             return []
 
         payload = {
-            "inputs": [
+            "dialogue": [
                 {"text": row["line"], "voice_id": row["voice_id"]} for row in lines
             ],
             "stability": 0.5,
@@ -229,11 +224,18 @@ class MuAPIVoiceGenerator:
                 is_cancelled=is_cancelled,
             )
         except Exception as exc:
-            logger.warning(
-                "Scene dialogue generation failed; continuing silently: %s",
+            # Deliberately NOT swallowed here. Returning [] made a broken
+            # request schema indistinguishable from a scene with no lines:
+            # every drama shipped silent while the only trace was a warning
+            # with no scene number. The caller (idea2video) still fails open
+            # per scene -- it just gets to say WHICH scene and WHY.
+            logger.error(
+                "Scene dialogue generation failed (%s voice(s), %s line(s)): %s",
+                len({row["voice_id"] for row in lines}),
+                len(lines),
                 exc,
             )
-            return []
+            raise
 
         if not audio_url:
             return []

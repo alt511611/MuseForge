@@ -174,6 +174,60 @@ def _describe_characters(visible, limit=None) -> list:
     return described
 
 
+#: The fixed sentences build_character_identity_clause wraps around the
+#: per-character descriptions. Named separately because their combined length
+#: is the reserve build_frame_prompt has to hold back for them: while it was a
+#: hand-tuned constant, every sentence added here silently ate into the
+#: SETTING's share of the budget, and one addition finally pushed the setting
+#: clause out of a crowded prompt altogether — the one clause that promises
+#: the room does not change between scenes.
+_APPEARANCE_LOCK = (
+    "Character appearance is FIXED for the entire story and must be "
+    "IDENTICAL to previous scenes — same face, same age, same hair length, "
+    "colour and style, same build: "
+)
+_COSTUME_LOCK_NAMED = (
+    "Costume is LOCKED for the whole story: each character wears only "
+    "the outfit named above, in every scene — same garment, same cut, "
+    "same colour, never restyled, swapped or changed. "
+)
+_COSTUME_LOCK_REFERENCED = (
+    "Clothing is also FIXED: every character wears the EXACT SAME "
+    "outfit as in the reference image and in every other scene — same "
+    "garment, same cut, same colour. Never change or restyle the "
+    "costume between scenes. "
+)
+# The costume lock above only forbids CHANGING what was named. Adding
+# something that was never named slips straight past it -- and an
+# occupational setting invites exactly that: a harbour drama came back with
+# the same worker in a beanie, then an orange hard hat, then a black one,
+# because "docks" reads to an image model as "put a helmet on him" and no
+# sentence in the prompt said otherwise. Headwear is called out by name
+# because it sits on the face, so a hat that appears and disappears reads as
+# a different person even when the face is held.
+_NO_UNNAMED_ITEMS = (
+    "Wear NOTHING that is not named above: no hat, cap, beanie, helmet, "
+    "hard hat, hood, mask, goggles, glasses, headset, scarf or badge "
+    "unless the character's own outfit names one — and if it does, it is "
+    "worn in every scene, never taken off or replaced. "
+)
+_REFERENCE_NOTE = (
+    "The attached reference image is {name}; match that face exactly. Take "
+    "ONLY the identity from it — the face, hair and build. Its pose, its "
+    "framing and its gaze into the lens belong to a portrait, not to this "
+    "shot: stage this shot from its own description instead. "
+)
+
+#: What the identity clause costs before a single character is described.
+#: Measured, not guessed, so the reserve tracks the sentences automatically.
+IDENTITY_CLAUSE_OVERHEAD = (
+    len(_APPEARANCE_LOCK)
+    + max(len(_COSTUME_LOCK_NAMED), len(_COSTUME_LOCK_REFERENCED))
+    + len(_NO_UNNAMED_ITEMS)
+    + len(_REFERENCE_NOTE.format(name="X" * 40))
+)
+
+
 def build_character_identity_clause(characters, matched_char=None, limit=None) -> str:
     """Restate every on-screen character's fixed appearance in the prompt text.
 
@@ -195,11 +249,7 @@ def build_character_identity_clause(characters, matched_char=None, limit=None) -
     described = _describe_characters(visible, limit)
     if not described:
         return ""
-    clause = (
-        "Character appearance is FIXED for the entire story and must be "
-        "IDENTICAL to previous scenes — same face, same age, same hair length, "
-        "colour and style, same build: " + "; ".join(described) + ". "
-    )
+    clause = _APPEARANCE_LOCK + "; ".join(described) + ". "
     # Costume drift is its own failure, separate from face drift: the
     # reference image binds a face, not an outfit, so the image model dresses
     # everyone afresh each scene unless told not to (observed in the wild as
@@ -211,24 +261,10 @@ def build_character_identity_clause(characters, matched_char=None, limit=None) -
     wardrobe_named = any(", wearing " in d for d in described) and all(
         (getattr(c, "wardrobe", "") or "").strip() for c in visible
     )
-    if wardrobe_named:
-        clause += (
-            "Costume is LOCKED for the whole story: each character wears only "
-            "the outfit named above, in every scene — same garment, same cut, "
-            "same colour, never restyled, swapped or changed. "
-        )
-    else:
-        clause += (
-            "Clothing is also FIXED: every character wears the EXACT SAME "
-            "outfit as in the reference image and in every other scene — same "
-            "garment, same cut, same colour. Never change or restyle the "
-            "costume between scenes. "
-        )
+    clause += _COSTUME_LOCK_NAMED if wardrobe_named else _COSTUME_LOCK_REFERENCED
+    clause += _NO_UNNAMED_ITEMS
     if matched_char is not None and getattr(matched_char, "name", ""):
-        clause += (
-            f"The attached reference image is {matched_char.name}; match that "
-            f"face exactly. "
-        )
+        clause += _REFERENCE_NOTE.format(name=matched_char.name)
     return clause
 
 
@@ -304,6 +340,8 @@ def build_frame_prompt(
     lipsync_enabled: bool = False,
     characters=None,
     matched_char=None,
+    world_change: str = "",
+    world_state: str = "",
 ) -> str:
     """Build the image prompt for a shot, injecting locked setting when present.
 
@@ -320,23 +358,54 @@ def build_frame_prompt(
         for p in (setting_location, setting_time_of_day, setting_era)
         if (p or "").strip()
     ]
+    # The drama's ONE sanctioned break in the continuity lock (see
+    # ScriptScene.world_change): the scene where the brief's event happens,
+    # and every scene after it, which inherits the changed world.
+    change_now = (world_change or "").strip()
+    change_before = (world_state or "").strip()
     if parts:
         # Prefer "location, time_of_day" when both exist (user-requested shape).
         setting_clause = (
             f"Setting: {', '.join(parts)}. This scene takes place in the "
             f"EXACT SAME physical location established in the story's opening "
             f"shot -- identical architecture, furniture, wall decor, and "
-            f"lighting fixtures. Only the time-of-day lighting may shift "
-            f"subtly per the story's setting_time_of_day; the room itself "
-            f"must not change. "
+            f"lighting fixtures. "
         )
+        if change_now or change_before:
+            # WITHOUT this the next sentence ("only the time-of-day lighting
+            # may shift subtly") vetoes the event: a story whose climax IS a
+            # blackout was rendered under the opening scene's streetlamps,
+            # because the continuity clause is specific, imperative and comes
+            # after the shot description. The set must still not change --
+            # the same architecture, now in a different state.
+            setting_clause += (
+                f"The FIXTURES and architecture are unchanged, but their "
+                f"STATE is not: {change_now or change_before}. Render the "
+                f"location in that state -- this is the story's event and it "
+                f"must be plainly visible in the frame, not implied. "
+            )
+        else:
+            setting_clause += (
+                f"Only the time-of-day lighting may shift subtly per the "
+                f"story's setting_time_of_day; the room itself must not "
+                f"change. "
+            )
     else:
         setting_clause = ""
     # Only lit when the script actually establishes a setting. A legacy/demo
     # script that declares no location, hour or era at all keeps the exact
     # prompt shape it had before -- there is no continuity to protect across
     # scenes that were never placed anywhere.
-    lighting_clause = resolve_lighting(setting_time_of_day).as_clause() if parts else ""
+    #
+    # Suppressed once the world has changed: the plan is derived from the
+    # story's time of day ("night harbour -> sodium streetlamps"), which is
+    # exactly the thing a blackout removes. Keeping it would put the lamps
+    # back on in the same prompt that asks for them to be out.
+    lighting_clause = (
+        resolve_lighting(setting_time_of_day).as_clause()
+        if parts and not (change_now or change_before)
+        else ""
+    )
     # These two instructions are opposites, and which one is right depends
     # entirely on whether the mouth is about to be driven by a lip-sync pass.
     # Hiding the mouth was the correct dodge while dialogue was only ever
@@ -372,23 +441,35 @@ def build_frame_prompt(
     face_clause = (
         "The character's face is clearly visible and softly lit — not a "
         "silhouette, not backlit into shadow, not turned away from camera. "
+        # ...but "visible to camera" is not "staring down the lens", and
+        # without this second sentence the model reads them as the same
+        # thing. Every reference portrait is a frontal headshot with the eyes
+        # on the lens, so the identity anchor pulls the same way: a delivered
+        # drama had both workers stopping mid-scene to look dead at the
+        # viewer, which reads as a poster, not a film. The eyeline has to be
+        # aimed at something INSIDE the story for a shot to be a shot.
+        "The character does NOT look into the lens: no eye contact with the "
+        "camera, no posing for it, no addressing the viewer. Their gaze stays "
+        "inside the scene — on the other character, or on the object they are "
+        "handling — as if the camera were not there. "
     )
     # Budget for the identity clause: whatever is left after the shot itself
     # and its framing, minus room for the setting clause. Everything else is
     # optional and trimmed by fit_image_prompt below.
     # Everything that must survive alongside it is subtracted by its real
-    # length; the flat remainder covers what build_character_identity_clause
-    # wraps around the per-character descriptions themselves (the
-    # fixed-appearance sentence and the costume lock), the style prefix and the
-    # framing line. Guessing at the lighting clause instead of measuring it is
-    # what let a crowded scene push the SETTING out of the prompt — the one
-    # clause that promises the room does not change between scenes.
+    # length: the identity clause's own fixed sentences (measured, see
+    # IDENTITY_CLAUSE_OVERHEAD — a hand-tuned constant here silently shrank
+    # every time one of those sentences grew) plus the style prefix and the
+    # framing line. Guessing at any of it instead of measuring is what let a
+    # crowded scene push the SETTING out of the prompt — the one clause that
+    # promises the room does not change between scenes.
     identity_budget = (
         MAX_IMAGE_PROMPT_CHARS
         - len(shot.visual_desc)
         - len(setting_clause)
         - len(lighting_clause)
-        - 600
+        - IDENTITY_CLAUSE_OVERHEAD
+        - 200  # style prefix, shot type and lens line
     )
     identity_clause = build_character_identity_clause(
         characters, matched_char, limit=max(identity_budget, 200)
@@ -408,7 +489,11 @@ def build_frame_prompt(
     return fit_image_prompt([
         (0, f"{style} style. "),
         (1, setting_clause),
-        (1, lighting_clause),
+        # One rank BELOW the setting, though the two are a pair: within a
+        # priority the drop falls on whichever clause reads first, which
+        # meant a crowded prompt lost the place itself and kept its lamp
+        # plan. Which room the scene is in outranks how it is lit.
+        (2, lighting_clause),
         (0, identity_clause),
         (3, direction_clause),
         (0, f"{shot.visual_desc}. "),
@@ -451,6 +536,11 @@ def build_motion_prompt(shot, matched_char=None) -> str:
         f"throughout the shot — no morphing, no face changes. "
         f"Preserve the source image's screen direction: characters keep "
         f"facing the same way, never mirror the composition. "
+        # The frame can be staged correctly and the video model still turn a
+        # head to the lens mid-shot -- it is animating a still, and "look at
+        # the viewer" is the strongest attractor a portrait-trained model has.
+        f"Nobody turns to look at the camera or acknowledges it; eyelines "
+        f"stay inside the scene. "
         f"Natural, subtle human motion; no warping or distortion."
     )
     return " ".join(parts)
@@ -1066,6 +1156,8 @@ class Script2VideoPipeline:
         user_brief: str = "",
         story_so_far: str = "",
         not_yet: str = "",
+        world_change: str = "",
+        world_state: str = "",
     ) -> Dict[str, Any]:
         os.makedirs(working_dir, exist_ok=True)
         portraits = character_portraits or {}
@@ -1220,6 +1312,8 @@ class Script2VideoPipeline:
                         lipsync_enabled=lipsync_enabled,
                         characters=characters,
                         matched_char=matched_char,
+                        world_change=world_change,
+                        world_state=world_state,
                     )
 
                     # fal.ai reference-to-video binds character identity in a

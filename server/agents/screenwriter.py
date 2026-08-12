@@ -6,6 +6,7 @@ import os
 import re
 from typing import List, Optional
 
+from interfaces import gender as gender_of
 from interfaces.character import CharacterProfile, DramaScript, ScriptScene
 from interfaces.language import DEFAULT_LANGUAGE, is_default, name_of
 from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
@@ -52,6 +53,16 @@ container is opened at the climax, every earlier scene has it shut. Order the sc
 that each one's "action" is only possible given what the earlier scenes have already
 done, and so the world visibly CHANGES at the climax.
 
+NAME THE CHANGE. On the ONE scene where the brief's event happens, set "world_change" to
+what a camera sees become different about the PLACE itself, in a single concrete clause —
+"every light in the city and on the docks goes out, leaving only the container's glow",
+"the water floods over the pier edge". Leave "world_change" empty ("") on every other
+scene. This field is what tells the image step to break the drama's locked lighting for
+that one scene; without it the shot is rendered under the same lamps as scene 1 and the
+event the whole film is built on is literally invisible. Write the change as a STATE the
+picture ends in, not as a process ("the harbour is now black except for one glow", not
+"the lights begin to flicker").
+
 STRUCTURE. Build 3-5 scenes into ONE dramatic shape, not a list of events. Assign each
 scene a "dramatic_function" from: setup, inciting_incident, rising_action, turning_point,
 climax, resolution. A drama needs a climax; do not write five scenes of rising_action.
@@ -75,6 +86,15 @@ DIRECT THE PERFORMANCE. For each character give "want" (the external goal they p
 screen), "need" (the internal truth they avoid), and "arc" (how they change from first
 scene to last). Keep "description" to face, build and age ONLY, and put clothing in
 "wardrobe" — these are used separately downstream.
+
+WHO THE BRIEF SAYS IT IS. "description" must OPEN with the character's gender and age
+("woman in her thirties, weathered face, close-cropped hair"), because it is the only
+text the image model is given about who this person is — a description that omits it is
+drawn as the model's default, not as your character. When the brief genders anyone, by
+pronoun or by noun ("she", "her sister", "a dock worker ... she opens it"), that
+character IS that gender and stays it in every scene. The brief's protagonist is the
+protagonist: do not demote them to a supporting role, do not split their action between
+two new characters, and do not add a second lead the brief never asked for.
 
 FIND THE THROUGH-LINE. Give the drama a "theme" (its controlling idea in one sentence)
 and a "visual_motif": one recurring visual element — an object, a gesture, a quality of
@@ -100,6 +120,10 @@ every scene. Keep the cast as small as the story allows, introduce no new featur
 character after the first scene, and give each one a SPECIFIC "wardrobe" (garment, cut,
 colour) that they wear for the whole drama. Never write a costume change unless the brief
 asks for one, and never describe the same person's clothing differently in two scenes.
+Dress them from the HEAD DOWN: "wardrobe" must settle what is on their head — name the
+hat, helmet or hood if they wear one, and write "bare-headed" if they do not. Leaving it
+unsaid is how the same worker ends up in a beanie, then a hard hat, then neither: the
+render only holds what the wardrobe named, and invents the rest afresh every scene.
 
 PRESET CHARACTERS in the user message already exist: do NOT redefine or rename them.
 Use their exact names and visual descriptions, and weave them into the story. You may
@@ -118,7 +142,7 @@ Respond ONLY with valid JSON matching this schema:
   "setting_era": "e.g. present day, 1950s",
   "characters": [{
     "name": "string",
-    "description": "face, build and age ONLY - no clothing",
+    "description": "gender and age FIRST, then face and build - no clothing",
     "wardrobe": "what they wear",
     "role": "protagonist|antagonist|supporting",
     "want": "external goal", "need": "internal truth", "arc": "how they change"
@@ -130,6 +154,7 @@ Respond ONLY with valid JSON matching this schema:
       "emotion": "e.g. tearful reconciliation",
       "dramatic_function": "setup|inciting_incident|rising_action|turning_point|climax|resolution",
       "turn": "the concrete thing that changes in this scene",
+      "world_change": "climax scene ONLY: what visibly changes about the place itself - otherwise \"\"",
       "subtext": "what they really mean underneath the lines",
       "staging": "blocking: who is where, hands, the object the scene turns on",
       "tension": 4
@@ -297,11 +322,53 @@ event with a character describing it."""
             "into a script. No credits were spent — please try again shortly."
         )
 
-    @staticmethod
-    def _with_brief(script: DramaScript, idea: str) -> DramaScript:
-        """Attach the user's verbatim prompt to the script (see user_brief)."""
+    @classmethod
+    def _with_brief(cls, script: DramaScript, idea: str) -> DramaScript:
+        """Attach the user's verbatim prompt, then hold the script to it.
+
+        Both provider paths come through here, so the guarantees below apply
+        to a script however it was written.
+        """
         script.user_brief = (idea or "").strip()
+        cls._apply_brief_gender(script)
         return script
+
+    @staticmethod
+    def _apply_brief_gender(script: DramaScript) -> None:
+        """Write the brief's stated gender into a description that dropped it.
+
+        A prompt instruction is not a guarantee. The brief said "she opens
+        it" and the script came back describing a protagonist with no gender
+        at all -- from there nothing downstream could recover it, and the
+        render cast two men in a woman's story.
+
+        Deliberately conservative, because guessing wrong is worse than not
+        guessing: it only fills a description that states NO gender, only for
+        the protagonist, and only when the brief itself is unambiguous. A
+        character the model already gendered is left exactly as written, even
+        if it disagrees with this reading of the brief -- the model saw the
+        whole brief; this sees a word list.
+        """
+        wanted = gender_of.infer(script.user_brief)
+        if not wanted:
+            return
+        noun = gender_of.noun(wanted)
+        if not noun:
+            return
+        for char in script.characters or []:
+            if (char.role or "").strip().lower() != "protagonist":
+                continue
+            if gender_of.infer(char.description):
+                return  # already gendered by the writer — leave it alone
+            described = (char.description or "").strip()
+            char.description = f"{noun}, {described}" if described else noun
+            logger.info(
+                "Protagonist %r had no gender in its description; applied %r "
+                "from the brief.",
+                char.name,
+                noun,
+            )
+            return
 
     async def _write_with_claude(
         self,

@@ -66,6 +66,16 @@ class ScriptScene(BaseModel):
     # this scene. A scene without a turn is a scene with nothing to film. The
     # storyboard artist draws this moment rather than the surrounding business.
     turn: str = ""
+    # What a camera sees become different about the PLACE in this scene, set
+    # on the climax scene alone ("every light in the city goes out"). The
+    # drama locks one setting and one lighting plan for continuity, which is
+    # right for four scenes out of five and fatal for the fifth: a brief whose
+    # whole point is "the city's power dies the moment she opens it" rendered
+    # under the same streetlights as the opening shot, so the event the film
+    # exists for was never on screen. This field is the one sanctioned break
+    # in that lock -- and, once it has happened, the state every later scene
+    # inherits.
+    world_change: str = ""
     # What the characters mean underneath what they say. Drives the played
     # expression when it contradicts the spoken line -- the difference between
     # a face that illustrates dialogue and one that acts against it.

@@ -110,6 +110,39 @@ def test_polish_is_dropped_before_continuity():
     assert "Shot on 35mm film" not in crowded, "quality suffix should go first"
 
 
+def test_the_place_outlives_its_lighting_plan():
+    """Both are continuity, but they are not worth the same: a scene lit a
+    little differently is a blemish, a scene in a different room is a
+    different film. They shared a priority once, and the drop fell on
+    whichever read first — which was the place."""
+    long_shot = _shot("She cuts the seal " + "under the sodium lamp " * 60)
+    crowded = _frame_prompt([_character(i) for i in range(4)], long_shot)
+
+    assert "Setting:" in crowded
+    assert "Lighting continuity" not in crowded
+
+
+def test_identity_clause_reserve_tracks_its_own_sentences():
+    """The reserve build_frame_prompt holds back for the identity clause was
+    a hand-tuned number, so every sentence added to that clause quietly ate
+    the setting's share of the budget — until one addition pushed the setting
+    out of a crowded prompt entirely. Measured, it cannot drift again."""
+    from pipelines.script2video import (
+        IDENTITY_CLAUSE_OVERHEAD,
+        build_character_identity_clause,
+    )
+
+    one = CharacterInScene(
+        idx=0, name="Mara", static_features="thirties", wardrobe="navy parka"
+    )
+    clause = build_character_identity_clause([one], matched_char=one)
+    described = f"{one.name} ({one.static_features}, wearing {one.wardrobe})"
+
+    # Everything the clause costs BEYOND the character it describes has to be
+    # covered by the reserve.
+    assert IDENTITY_CLAUSE_OVERHEAD >= len(clause) - len(described)
+
+
 # --- fit_image_prompt itself -------------------------------------------
 
 
