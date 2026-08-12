@@ -1,11 +1,14 @@
 """Shared MuAPI submit-and-poll client with retry/backoff resilience."""
 
 import asyncio
+import logging
 import os
 import random
 from typing import Any, Callable, Dict, List, Optional
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 MUAPI_BASE = os.environ.get("MUAPI_BASE", "https://api.muapi.ai/api/v1")
 DEFAULT_POLL_INTERVAL = 2.0
@@ -72,7 +75,11 @@ def extract_output_urls(data: Dict[str, Any]) -> List[str]:
         urls = [url for url in (_as_url(entry) for entry in entries) if url]
         if urls:
             return urls
-    return []
+    # Last: the file hanging directly off the response with no wrapper at all
+    # (`{"id": ..., "audio_url": ...}`). Checked after every wrapper so a
+    # response carrying both keeps returning the wrapped outputs it always did.
+    direct = _as_url(data)
+    return [direct] if direct else []
 
 
 class MuAPIClient:
@@ -115,8 +122,26 @@ class MuAPIClient:
                 await asyncio.sleep(backoff)
         raise MuAPIError(
             f"MuAPI request failed after {attempts} attempt(s): "
-            f"{last_exc}{self._response_detail(last_exc)}"
+            f"{self._describe(last_exc)}"
         )
+
+    @classmethod
+    def _describe(cls, exc: Exception) -> str:
+        """The failure in as few characters as carry meaning.
+
+        httpx's own message spends most of its length on a link to MDN's
+        page about HTTP status codes, which nobody reading a job's warning
+        needs and which crowded out the one part that is specific to this
+        failure: the body. Seen in production as a 400 that reached the user
+        as "…For more information check: https://developer.mozilla.org/…"
+        with the provider's actual explanation truncated off the end.
+        """
+        response = getattr(exc, "response", None)
+        if response is None:
+            return f"{exc}{cls._response_detail(exc)}"
+        request = getattr(response, "request", None)
+        where = getattr(getattr(request, "url", None), "path", "") or ""
+        return f"HTTP {response.status_code} on {where}{cls._response_detail(exc)}"
 
     @staticmethod
     def _response_detail(exc: Exception) -> str:
@@ -133,6 +158,23 @@ class MuAPIClient:
             return f" | Response body: {response.text[:1000]}"
         except Exception:
             return ""
+
+    async def _submit_raw(self, endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """POST the job and return the provider's whole answer.
+
+        Kept separate from submit() because the answer is not always just a
+        ticket: an endpoint fast enough to finish inline can hand back the
+        finished file, and reading only the ticket out of it sends the caller
+        off to poll for a prediction that was never queued.
+        """
+        if not self.api_key:
+            raise MuAPIError("MUAPI_KEY is not configured")
+
+        url = f"{MUAPI_BASE}/{endpoint.lstrip('/')}"
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            resp = await self._request_with_retry(client, "POST", url, json=payload)
+            data = resp.json()
+        return data if isinstance(data, dict) else {}
 
     async def submit(self, endpoint: str, payload: Dict[str, Any]) -> str:
         if not self.api_key:
@@ -188,6 +230,37 @@ class MuAPIClient:
         max_polls: int = DEFAULT_MAX_POLLS,
         is_cancelled: Optional[Callable[[], bool]] = None,
     ) -> str:
-        request_id = await self.submit(endpoint, payload)
+        data = await self._submit_raw(endpoint, payload)
+
+        # A job that finished inline hands the file back on the spot. Reading
+        # only the ticket out of that answer and then polling
+        # /predictions/{id}/result is how a SUCCESSFUL generation became a
+        # 400 Bad Request: the id belongs to a record that was never queued
+        # as a prediction. Checked before the ticket, and only when the
+        # response actually carries a file, so every asynchronous endpoint
+        # (images, video) takes the identical path it always has.
+        immediate = extract_output_urls(data)
+        if immediate:
+            logger.info(
+                "%s answered inline with %d file(s); no polling needed.",
+                endpoint,
+                len(immediate),
+            )
+            return immediate[0]
+
+        request_id = data.get("request_id") or data.get("id")
+        if not request_id:
+            raise MuAPIError(f"No request_id in MuAPI response: {data}")
+        if not data.get("request_id"):
+            # Worth knowing which key the ticket came from: `id` is a guess
+            # that has already cost one silent feature, and a poll that 400s
+            # right after a successful submit is what it looks like.
+            logger.warning(
+                "%s returned no request_id; polling on `id` %r instead. "
+                "Response keys: %s",
+                endpoint,
+                request_id,
+                sorted(data),
+            )
         outputs = await self.poll_result(request_id, poll_interval, max_polls, is_cancelled=is_cancelled)
         return outputs[0]
