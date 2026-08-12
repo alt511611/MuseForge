@@ -14,6 +14,8 @@ from interfaces.camera import get_director_style
 from interfaces.character import CharacterInScene
 from interfaces.color_grade import get_color_grade
 from interfaces.lighting import resolve_lighting
+from interfaces.visual_style import PHOTOREAL_RENDER
+from interfaces.visual_style import resolve as resolve_visual_style
 from tools.character_qa import (
     format_expected_setting,
     is_character_qa_enabled,
@@ -76,12 +78,14 @@ def _make_image_generator(api_key: str, demo: bool):
 #: than listing artifacts to avoid. Anatomy is called out because hands and
 #: eyes are where generated people break most visibly, and text because
 #: spurious captions/watermarks are a common FLUX failure on cinematic prompts.
-IMAGE_QUALITY_SUFFIX = (
-    "Shot on 35mm film, natural filmic grain, realistic skin texture with "
-    "visible pores, catchlights in the eyes, anatomically correct hands, "
-    "sharp focus on the face with natural depth of field. "
-    "No text, captions, subtitles, watermarks or logos anywhere in the frame."
-)
+#:
+#: It is also per-STYLE, because one shared suffix cannot serve eight looks:
+#: asking for "Anime style" and then for "realistic skin texture with visible
+#: pores" in the same prompt is an instruction to undo the style in the same
+#: breath as requesting it. Every photoreal style still gets this exact text
+#: (see interfaces/visual_style.PHOTOREAL_RENDER) — the name is kept as an
+#: alias so nothing that already imports it moves.
+IMAGE_QUALITY_SUFFIX = PHOTOREAL_RENDER
 
 #: MuAPI rejects a `positivePrompt` outside 2..3000 characters with a 400 --
 #: and it does so at GENERATION time, not on submit, so the job burns the
@@ -502,7 +506,7 @@ def build_frame_prompt(
         (2, cast_clause),
         (3, dialogue_clause),
         (0, f"Shot type: {shot.shot_type}. Lens: {shot.lens}. "),
-        (4, IMAGE_QUALITY_SUFFIX),
+        (4, resolve_visual_style(style).render_note),
     ])
 
 
@@ -1192,6 +1196,9 @@ class Script2VideoPipeline:
             characters,
             user_requirement,
             director_style,
+            # Same style string the frame prompt gets, so the shot is
+            # DESIGNED for the look it will be rendered in.
+            style=style,
             setting_location=setting_location,
             setting_time_of_day=setting_time_of_day,
             setting_era=setting_era,
