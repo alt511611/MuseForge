@@ -6,7 +6,7 @@ import os
 import re
 import shutil
 import tempfile
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agents.screenwriter import ScreenwriterAgent, ScriptGenerationFailed
 from interfaces.character import CharacterInScene, DramaScript
@@ -878,6 +878,135 @@ def build_srt_from_dialogue_tracks(
     return "\n".join(blocks)
 
 
+#: libass renders an ASS script at its declared PlayRes and scales the result
+#: to the frame, so a FontSize is not a pixel count -- it is multiplied by
+#: ``frame_height / PlayResY``. ffmpeg's built-in SRT-to-ASS conversion
+#: declares the classic 384x288, which is where this number comes from. It is
+#: the whole reason a fixed FontSize cannot work across delivery formats.
+_ASS_PLAY_RES_Y = 288
+
+#: Caption line height as a fraction of the frame's SHORTER side.
+#:
+#: The shorter side is what actually constrains a caption, whichever way the
+#: frame is turned: it caps how long a line can run before wrapping, and on a
+#: phone held upright it is the dimension the reader's eye spans. Sizing from
+#: HEIGHT alone -- one fixed FontSize for every format -- meant a 9:16 master
+#: (1920 tall, 1080 wide) got a font scaled as though its lines had 1920px to
+#: run along. One 69-character sentence came out as SIX lines covering 44.5%
+#: of the entire frame; the same sentence at 16:9 was two lines and 14.1%.
+#: Measured, both, in tests/test_caption_legibility.py.
+#:
+#: 4.5% lands within a hair of 4.5-4.9% of the short side in BOTH formats,
+#: at one to two lines, which is the broadcast subtitle convention and close
+#: to what social platforms burn in.
+CAPTION_HEIGHT_FRACTION = 0.045
+
+#: Side margins, as a fraction of width, so libass wraps before the frame
+#: edge instead of at it. Nothing set these before, so a long line ran the
+#: full width of the picture.
+CAPTION_SIDE_MARGIN_FRACTION = 0.06
+
+#: Distance from the bottom of the frame, as a fraction of HEIGHT (this one
+#: really is vertical). Kept clear of the ~10% a video player's control bar
+#: covers, which is what greyed out the second line of every caption in the
+#: results page preview.
+CAPTION_BOTTOM_MARGIN_FRACTION = 0.11
+
+
+def _probe_video_size(video_path: str) -> Tuple[int, int]:
+    """(width, height) of a video, or (0, 0) when it cannot be read."""
+    try:
+        from moviepy import VideoFileClip
+
+        with VideoFileClip(video_path) as clip:
+            width, height = clip.size or (0, 0)
+            return int(width), int(height)
+    except Exception as exc:
+        logger.warning("Could not probe %s for caption sizing: %s", video_path, exc)
+        return 0, 0
+
+
+def build_caption_style(width: int, height: int) -> str:
+    """The ASS ``force_style`` string for a frame of this size.
+
+    Every length is derived from the frame rather than fixed, because the
+    numbers libass wants are in PlayRes units, not pixels: the same literal
+    FontSize is a different physical size in every delivery format. Falls back
+    to the previous constants when the frame could not be measured, so a probe
+    failure cannot leave a video with no captions at all.
+    """
+    if width <= 0 or height <= 0:
+        font_size, margin_v, margin_side = 22, 36, 20
+    else:
+        scale = _ASS_PLAY_RES_Y / height  # pixels -> ASS units
+        # One ASS unit is height/288 pixels, so on a 1920-tall frame the font
+        # can only be chosen in ~6.7px steps. The floor is what keeps a
+        # vertical master's caption from rounding down into unreadability.
+        font_size = max(8, round(min(width, height) * CAPTION_HEIGHT_FRACTION * scale))
+        margin_v = max(8, round(height * CAPTION_BOTTOM_MARGIN_FRACTION * scale))
+        margin_side = max(4, round(width * CAPTION_SIDE_MARGIN_FRACTION * scale))
+    return (
+        f"FontSize={font_size},PrimaryColour=&H00FFFFFF,"
+        f"OutlineColour=&H00000000,BorderStyle=3,Outline=1,Shadow=0,"
+        f"Alignment=2,MarginV={margin_v},"
+        f"MarginL={margin_side},MarginR={margin_side}"
+    )
+
+
+#: How far the finished master's duration may stray from the scenes it was
+#: built out of before something is badly wrong. Generous: fades, transitions
+#: and re-encodes all move the total by a frame or two, and a false alarm in
+#: a log nobody trusts is worse than no alarm.
+MASTER_DURATION_TOLERANCE = 0.25
+
+
+def check_master_duration(final_path: str, scene_paths: Optional[List[str]]) -> bool:
+    """Log loudly when the finished master is not the length of its scenes.
+
+    Nothing in the assembly chain ever asked how long the result was, and a
+    stage that got it wrong therefore had no way of saying so. One did: a
+    silent audio track written by moviepy produced a 30-second drama whose
+    container claimed 13 hours 22 minutes. It reached the user's browser as a
+    player that could not seek, could not scrub and stopped after three
+    seconds -- and the only reason anyone found it was a screen recording.
+
+    Every stage here fails open by design, which is right for a picture that
+    is merely imperfect and wrong for a file that is structurally broken. This
+    cannot repair anything; it makes the breakage searchable, in the same logs
+    the failure already scrolls past. Returns True when the master looks sane.
+    """
+    expected = 0.0
+    for path in scene_paths or []:
+        expected += _probe_video_duration(path)
+    actual = _probe_video_duration(final_path)
+    if expected <= 0 or actual <= 0:
+        return True  # nothing to compare against; not evidence of a problem
+    drift = abs(actual - expected) / expected
+    if drift > MASTER_DURATION_TOLERANCE:
+        logger.error(
+            "Master duration is wrong: %s is %.1fs but its %d scene(s) total "
+            "%.1fs (%.0f%% off). The file will not seek or scrub correctly.",
+            os.path.basename(final_path),
+            actual,
+            len(scene_paths or []),
+            expected,
+            drift * 100,
+        )
+        return False
+    return True
+
+
+def _probe_video_duration(video_path: str) -> float:
+    """Duration in seconds, or 0.0 when it cannot be read."""
+    try:
+        from moviepy import VideoFileClip
+
+        with VideoFileClip(video_path) as clip:
+            return float(clip.duration or 0.0)
+    except Exception:
+        return 0.0
+
+
 def _escape_subtitles_filter_path(path: str) -> str:
     """Escape a filesystem path for ffmpeg's subtitles= filter."""
     # Prefer forward slashes; escape characters that break the filter grammar.
@@ -930,21 +1059,12 @@ async def burn_subtitles(
             srt_path = srt_file.name
             srt_file.write(srt_body)
 
-        ffmpeg_binary = os.environ.get("MUSEFORGE_FFMPEG_BINARY") or shutil.which("ffmpeg")
-        if not ffmpeg_binary:
-            try:
-                import imageio_ffmpeg
-
-                ffmpeg_binary = imageio_ffmpeg.get_ffmpeg_exe()
-            except Exception:
-                ffmpeg_binary = "ffmpeg"
+        ffmpeg_binary = resolve_ffmpeg_binary()
 
         # White primary text, black outline, BorderStyle=3 = opaque box behind
-        # text for readability on busy backgrounds.
-        force_style = (
-            "FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-            "BorderStyle=3,Outline=1,Shadow=0,Alignment=2,MarginV=36"
-        )
+        # text for readability on busy backgrounds. Every size is measured off
+        # this video's own frame -- see build_caption_style.
+        force_style = build_caption_style(*_probe_video_size(video_path))
         vf = (
             f"subtitles={_escape_subtitles_filter_path(srt_path)}"
             f":force_style='{force_style}'"
@@ -2268,6 +2388,7 @@ class Idea2VideoPipeline:
             await add_watermark(video_for_final, final_path)
         else:
             final_path = video_for_final
+        check_master_duration(final_path, scene_paths)
         return final_path
 
     async def write_script_only(

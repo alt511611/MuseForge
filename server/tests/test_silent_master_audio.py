@@ -199,3 +199,48 @@ async def test_real_audio_is_mixed_as_it_always_was(tmp_path):
     assert "audio" in kinds
     # Clipped to the picture, not stretched to the music.
     assert abs(duration - 3.0) < 0.5
+
+
+# --- the guard that would have caught it ---------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_master_the_length_of_its_scenes_passes_quietly(tmp_path):
+    from pipelines.idea2video import check_master_duration
+
+    scenes = [
+        _make_clip(tmp_path, duration=2.0, name="s1.mp4"),
+        _make_clip(tmp_path, duration=3.0, name="s2.mp4"),
+    ]
+    master = _make_clip(tmp_path, duration=5.0, name="master.mp4")
+
+    assert check_master_duration(master, scenes) is True
+
+
+@pytest.mark.asyncio
+async def test_a_thirteen_hour_master_is_reported(tmp_path, caplog):
+    """The shape of the delivered failure: scenes totalling seconds, a
+    container claiming hours, and not one line in the log about it."""
+    import logging
+
+    from pipelines.idea2video import check_master_duration
+
+    scenes = [_make_clip(tmp_path, duration=2.0, name="s1.mp4")]
+    master = _make_clip(tmp_path, duration=30.0, name="master.mp4")
+
+    with caplog.at_level(logging.ERROR):
+        assert check_master_duration(master, scenes) is False
+
+    assert "Master duration is wrong" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_file_is_not_treated_as_broken(tmp_path):
+    """A probe that fails says nothing either way, and a warning nobody can
+    act on is how logs stop being read."""
+    from pipelines.idea2video import check_master_duration
+
+    master = _make_clip(tmp_path, duration=2.0, name="master.mp4")
+
+    assert check_master_duration(master, []) is True
+    assert check_master_duration(str(tmp_path / "missing.mp4"), [master]) is True
