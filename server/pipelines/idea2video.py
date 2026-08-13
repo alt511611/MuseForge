@@ -95,6 +95,50 @@ def _scene_dialogue(scene: Any) -> List[Any]:
     return list(getattr(scene, "dialogue", None) or [])
 
 
+def caption_only_tracks(dialogue: List[Any], scene_index: int) -> List[Dict[str, Any]]:
+    """Subtitle rows for a scene whose voice generation failed.
+
+    The lines are in the script either way -- losing them costs nothing but a
+    dead TTS provider. Silence plus no captions turns a written drama into a
+    mime show, and the viewer cannot even tell there WAS dialogue; silence
+    plus captions is a subtitled film, which is a thing people watch on
+    purpose. Deliberately carries no ``audio_url``: the mixer already skips
+    rows without one (that is how a scene's second and later lines have always
+    reached the SRT), so these can never make it into the audio, and the SRT
+    builder already estimates a duration from the words when there is no
+    recording to measure.
+    """
+    tracks: List[Dict[str, Any]] = []
+    for item in dialogue or []:
+        if isinstance(item, dict):
+            character = str(item.get("character", "") or "")
+            line = str(item.get("line", "") or "")
+        else:
+            character = str(getattr(item, "character", "") or "")
+            line = str(getattr(item, "line", "") or "")
+        if not line.strip():
+            continue
+        tracks.append(
+            {
+                "character": character,
+                "line": line.strip(),
+                "scene_index": scene_index,
+                "caption_only": True,
+            }
+        )
+    return tracks
+
+
+def has_voiced_track(dialogue_tracks: Optional[List[Dict[str, Any]]]) -> bool:
+    """Whether any track carries actual speech, as opposed to caption text.
+
+    The two are mixed in one list, so "are there tracks?" stopped being the
+    same question as "is anything audible?" the moment captions could outlive
+    a failed voice provider.
+    """
+    return any((t or {}).get("audio_url") for t in dialogue_tracks or [])
+
+
 def _scene_field(scene: Any, field: str) -> str:
     """Read one director-level field off a scene, whatever shape it is in.
 
@@ -235,6 +279,11 @@ _MDN_BOILERPLATE = re.compile(
     r"For more information check:\s*https?://\S*", re.IGNORECASE
 )
 
+#: Our own retry wrapper's prefix. The attempt count belongs in the log, not
+#: in front of the provider's sentence: it is 40 characters of the budget
+#: below, on every single failure, and it never varies with the cause.
+_RETRY_PREFIX = re.compile(r"^MuAPI request failed after \d+ attempt\(s\):\s*")
+
 
 def _provider_reason(exc: Exception) -> str:
     """A one-line, user-readable version of a provider failure.
@@ -249,6 +298,7 @@ def _provider_reason(exc: Exception) -> str:
     # cap below, and it pushed the one specific part -- the provider's own
     # explanation -- off the end of the warning the user actually reads.
     text = _MDN_BOILERPLATE.sub("", text).strip()
+    text = _RETRY_PREFIX.sub("", text).strip()
     if not text:
         return ""
     if len(text) > MAX_REASON_CHARS:
@@ -505,8 +555,10 @@ async def add_background_music(
         if music_url:
             try:
                 music = AudioFileClip(music_url).with_duration(video.duration)
-                # Dialogue remains at full level; duck music only when speech exists.
-                if dialogue_tracks:
+                # Dialogue remains at full level; duck music only when speech
+                # exists. Caption rows carry no audio, so ducking for them
+                # would quiet the ONLY sound the video has left.
+                if has_voiced_track(dialogue_tracks):
                     music = music.with_volume_scaled(0.2)
                 opened_audio.append(music)
                 layers.append(music)
@@ -569,6 +621,26 @@ async def add_background_music(
                     except Exception:
                         pass
                 logger.warning("Dialogue track could not be mixed; skipping it: %s", exc)
+
+        if not layers:
+            # Nothing to mix: music off, and either no dialogue or a voice
+            # provider that failed. Rather than write a video with NO audio
+            # stream at all, lay down a silent one. A track of silence and no
+            # track are the same thing to a viewer and very different things
+            # to everything else: editors, some phone players and several
+            # upload pipelines treat a missing stream as a malformed file, and
+            # concatenating a silent master with anything that HAS audio drops
+            # to a re-encode or loses the audio outright.
+            try:
+                from moviepy import AudioClip
+
+                silence = AudioClip(
+                    lambda t: 0 * t, duration=video.duration, fps=44100
+                )
+                opened_audio.append(silence)
+                layers.append(silence)
+            except Exception as exc:
+                logger.warning("Could not build a silent audio track: %s", exc)
 
         if layers:
             final_audio = CompositeAudioClip(layers).with_duration(video.duration)
@@ -2537,7 +2609,9 @@ class Idea2VideoPipeline:
                             language=language,
                         )
                     )
-                    dialogue_tasks.append((assembled_scene_index, idx, task))
+                    dialogue_tasks.append(
+                        (assembled_scene_index, idx, task, list(scene_dialogue_lines))
+                    )
 
                 serialized_scene = scene.model_dump() if hasattr(scene, "model_dump") else scene
                 scene_results.append(
@@ -2555,7 +2629,7 @@ class Idea2VideoPipeline:
             _check_cancel()
             failed_dialogue_scenes: List[int] = []
             dialogue_failure_reasons: List[str] = []
-            for assembled_scene_index, scene_number, task in dialogue_tasks:
+            for assembled_scene_index, scene_number, task, scene_lines in dialogue_tasks:
                 try:
                     generated_tracks = await task
                     for track in generated_tracks:
@@ -2569,6 +2643,14 @@ class Idea2VideoPipeline:
                         exc,
                     )
                     failed_dialogue_scenes.append(scene_number + 1)
+                    # The words survive even when the voice does not: the
+                    # script already holds them, and a silent film with
+                    # subtitles is watchable where a silent film without them
+                    # is a mime show the viewer cannot even tell is missing
+                    # something.
+                    dialogue_tracks.extend(
+                        caption_only_tracks(scene_lines, assembled_scene_index)
+                    )
                     # Deduped: every scene fails the same way when the cause
                     # is the request itself, and "the provider said X" five
                     # times over is noise, not information.
@@ -2588,7 +2670,12 @@ class Idea2VideoPipeline:
                         "The script has no spoken lines, so there was nothing "
                         "to voice — the video has no dialogue."
                     )
-                elif not dialogue_tracks:
+                elif not has_voiced_track(dialogue_tracks):
+                    # Not `not dialogue_tracks`: the list now also holds the
+                    # caption rows written for the scenes that failed, so the
+                    # only question it can still answer is whether anything is
+                    # AUDIBLE.
+                    #
                     # The reason is attached because without it this sentence
                     # is unactionable for everyone who reads it: the user
                     # cannot tell a provider outage from a broken request,
@@ -2599,14 +2686,14 @@ class Idea2VideoPipeline:
                     # most and costs one line.
                     warnings.append(
                         "Voice generation failed for every scene, so the video "
-                        "was rendered without dialogue."
+                        "plays silent with the dialogue shown as captions."
                         + _reason_suffix(dialogue_failure_reasons)
                     )
                 elif failed_dialogue_scenes:
                     scenes_label = ", ".join(str(n) for n in failed_dialogue_scenes)
                     warnings.append(
                         f"Voice generation failed for scene(s) {scenes_label}, "
-                        f"which play without dialogue."
+                        f"which play with captions instead of spoken lines."
                         + _reason_suffix(dialogue_failure_reasons)
                     )
 

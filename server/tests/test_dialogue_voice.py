@@ -237,3 +237,165 @@ def test_dialogue_stays_pro_only_and_flag_gated(monkeypatch):
     assert _api.estimate_generation_seconds(
         3, dialogue_enabled=True, plan="pro", demo=False
     ) == without
+
+
+def test_the_cast_can_be_replaced_without_a_deploy(monkeypatch):
+    """The provider publishes no list of valid voice values, and a wrong one
+    is only discovered by a finished drama arriving silent. When the answer
+    turns up, it has to be applicable in one restart."""
+    from tools.muapi_voice_generator import _voices
+
+    monkeypatch.setenv("MUSEFORGE_VOICE_IDS", " voice-a , voice-b ")
+    assert _voices("MUSEFORGE_VOICE_IDS", ("default",)) == ("voice-a", "voice-b")
+
+
+def test_an_unset_or_empty_override_keeps_the_shipped_cast(monkeypatch):
+    from tools.muapi_voice_generator import _voices
+
+    monkeypatch.delenv("MUSEFORGE_VOICE_IDS", raising=False)
+    assert _voices("MUSEFORGE_VOICE_IDS", ("default",)) == ("default",)
+
+    monkeypatch.setenv("MUSEFORGE_VOICE_IDS", " , ")
+    assert _voices("MUSEFORGE_VOICE_IDS", ("default",)) == ("default",)
+
+
+# --- which spelling of a voice the provider wants ------------------------
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _forget_the_negotiated_form():
+    """The accepted form is memoised for the whole process on purpose; tests
+    must not inherit one another's answer."""
+    from tools.muapi_voice_generator import MuAPIVoiceGenerator
+
+    MuAPIVoiceGenerator._accepted_form = None
+    yield
+    MuAPIVoiceGenerator._accepted_form = None
+
+
+class _Provider:
+    """A MuAPI that accepts exactly one spelling of a voice value."""
+
+    def __init__(self, accepts):
+        self.accepts = accepts
+        self.seen = []
+
+    async def generate(self, endpoint, payload, **kwargs):
+        values = [turn["voice_id"] for turn in payload["dialogue"]]
+        self.seen.append(list(values))
+        if not all(self.accepts(v) for v in values):
+            raise RuntimeError(
+                f"HTTP 400: Invalid voice parameter: {values[0]!r} is not allowed"
+            )
+        return "https://cdn/scene.mp3"
+
+
+def _generator(provider):
+    from tools.muapi_voice_generator import MuAPIVoiceGenerator
+
+    gen = MuAPIVoiceGenerator("key")
+    gen.client = provider
+    return gen
+
+
+LINES = [{"character": "Mara", "line": "It's warm."}]
+
+
+@pytest.mark.asyncio
+async def test_the_shipped_id_form_is_tried_first_and_costs_one_request():
+    """Nothing changes for a provider that was always happy."""
+    provider = _Provider(lambda v: len(v) == 20)
+    tracks = await _generator(provider).generate_scene_dialogue(LINES)
+
+    assert len(provider.seen) == 1
+    assert tracks[0]["audio_url"] == "https://cdn/scene.mp3"
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_voice_is_retried_in_the_other_spellings():
+    """The delivered failure: every request came back "Invalid voice
+    parameter", and the only way to learn what IS valid was another paid
+    render."""
+    from tools.muapi_voice_generator import MuAPIVoiceGenerator
+
+    provider = _Provider(lambda v: v in MuAPIVoiceGenerator.VOICE_LABELS.values())
+    tracks = await _generator(provider).generate_scene_dialogue(LINES)
+
+    assert tracks[0]["audio_url"] == "https://cdn/scene.mp3"
+    assert len(provider.seen) == 2
+    assert provider.seen[0][0] in MuAPIVoiceGenerator.SYSTEM_VOICE_IDS
+    assert " - " in provider.seen[1][0]
+
+
+@pytest.mark.asyncio
+async def test_a_bare_display_name_is_the_last_form_tried():
+    from tools.muapi_voice_generator import MuAPIVoiceGenerator
+
+    provider = _Provider(lambda v: v in MuAPIVoiceGenerator.VOICE_NAMES.values())
+    tracks = await _generator(provider).generate_scene_dialogue(LINES)
+
+    assert tracks[0]["audio_url"] == "https://cdn/scene.mp3"
+    assert len(provider.seen) == 3
+    assert provider.seen[2][0] in MuAPIVoiceGenerator.VOICE_NAMES.values()
+
+
+@pytest.mark.asyncio
+async def test_the_answer_is_paid_for_once_not_once_per_scene():
+    from tools.muapi_voice_generator import MuAPIVoiceGenerator
+
+    provider = _Provider(lambda v: v in MuAPIVoiceGenerator.VOICE_NAMES.values())
+    generator = _generator(provider)
+
+    await generator.generate_scene_dialogue(LINES)
+    await generator.generate_scene_dialogue(LINES)
+
+    # 3 to find it, then 1 per scene from then on -- not 3 per scene.
+    assert len(provider.seen) == 4
+    assert MuAPIVoiceGenerator._accepted_form == "name"
+
+
+@pytest.mark.asyncio
+async def test_a_failure_that_is_not_about_the_voice_is_not_shopped_around():
+    """An outage or a bad key is not fixed by respelling anything, and each
+    retry is a round trip the user waits through."""
+    calls = []
+
+    class _Down:
+        async def generate(self, endpoint, payload, **kwargs):
+            calls.append(payload)
+            raise RuntimeError("HTTP 503: upstream unavailable")
+
+    with pytest.raises(RuntimeError, match="upstream unavailable"):
+        await _generator(_Down()).generate_scene_dialogue(LINES)
+
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_every_form_failing_raises_the_provider_s_own_last_words():
+    provider = _Provider(lambda v: False)
+
+    with pytest.raises(RuntimeError, match="Invalid voice parameter"):
+        await _generator(provider).generate_scene_dialogue(LINES)
+
+    assert len(provider.seen) == 3
+
+
+@pytest.mark.asyncio
+async def test_an_operator_override_is_sent_exactly_as_written(monkeypatch):
+    """Someone who set MUSEFORGE_VOICE_IDS knows something we do not; their
+    value must not be translated into a form they did not ask for."""
+    from tools.muapi_voice_generator import MuAPIVoiceGenerator
+
+    generator = MuAPIVoiceGenerator("key")
+    generator._character_voices = {"mara": "custom-voice-7"}
+    provider = _Provider(lambda v: False)
+    generator.client = provider
+
+    with pytest.raises(RuntimeError):
+        await generator.generate_scene_dialogue(LINES)
+
+    assert {v for seen in provider.seen for v in seen} == {"custom-voice-7"}

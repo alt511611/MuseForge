@@ -101,17 +101,37 @@ def test_frame_prompt_keeps_the_face_visible_without_inviting_the_lens():
     assert "gaze stays inside the scene" in prompt
 
 
-def test_reference_portrait_binds_identity_only_not_its_gaze():
-    """The reference is a frontal headshot with its eyes on the lens; without
-    this the identity anchor drags the shot's staging along with the face."""
+def test_reference_portrait_binds_the_staging_out_but_not_the_costume():
+    """The reference is a frontal headshot, wearing the character's wardrobe,
+    with its eyes on the lens. Excluding its staging is the point; excluding
+    its clothing along with it is what let the outfit change every scene."""
     from pipelines.script2video import build_character_identity_clause
 
     mara = _char("Mara", "orange hi-vis jacket")
     clause = build_character_identity_clause([mara], matched_char=mara)
 
     assert "match that face exactly" in clause
-    assert "Take ONLY the identity from it" in clause
     assert "gaze into the lens" in clause
+    # The staging is still excluded...
+    assert "stage this shot from its own description" in clause
+    # ...and the outfit is explicitly not.
+    assert "the exact outfit worn in it" in clause
+    assert "Take ONLY the identity from it" not in clause
+
+
+def test_the_costume_lock_and_the_reference_note_do_not_contradict(monkeypatch):
+    """These two sentences sit three apart in the same prompt. When one says
+    'wear what the reference wears' and the other says 'take only the face
+    from it', the image model is free to pick, and it picked wrong."""
+    from pipelines.script2video import build_character_identity_clause
+
+    # No named wardrobe -> the costume lock points AT the reference image.
+    mara = _char("Mara")
+    clause = build_character_identity_clause([mara], matched_char=mara)
+
+    assert "EXACT SAME outfit as in the reference image" in clause
+    assert "the exact outfit worn in it" in clause
+    assert "ONLY the identity" not in clause
 
 
 def test_motion_prompt_stops_a_head_turning_to_camera_mid_shot():

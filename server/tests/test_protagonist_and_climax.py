@@ -201,3 +201,34 @@ def test_lighting_plan_is_suppressed_once_the_lights_are_out():
 
     assert plan_clause in lit
     assert plan_clause not in dark
+
+
+def test_the_video_model_is_told_the_world_has_already_changed():
+    """The still can be correctly dark and the five seconds animated out of it
+    still re-light the harbour: "lit night dock" is the strongest prior a
+    video model has, and nothing in the motion prompt contradicted it."""
+    from pipelines.script2video import build_motion_prompt
+
+    shot = SimpleNamespace(
+        motion_desc="she steps back from the container",
+        camera_movement="slow push-in",
+        expression_desc="eyes wide",
+    )
+
+    prompt = build_motion_prompt(shot, world_state="every light on the docks is out")
+
+    assert "every light on the docks is out" in prompt
+    assert "must not revert, recover or re-light" in prompt
+
+
+def test_an_unchanged_world_leaves_the_motion_prompt_exactly_as_it_was():
+    from pipelines.script2video import build_motion_prompt
+
+    shot = SimpleNamespace(
+        motion_desc="she steps back",
+        camera_movement="slow push-in",
+        expression_desc="eyes wide",
+    )
+
+    assert build_motion_prompt(shot) == build_motion_prompt(shot, world_state="  ")
+    assert "already changed" not in build_motion_prompt(shot)

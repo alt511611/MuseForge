@@ -215,11 +215,24 @@ _NO_UNNAMED_ITEMS = (
     "unless the character's own outfit names one — and if it does, it is "
     "worn in every scene, never taken off or replaced. "
 )
+# The reference portrait is deliberately generated WEARING the character's
+# wardrobe (see Idea2VideoPipeline._lock_character_portraits) precisely so it
+# can anchor the costume as well as the face -- and this sentence used to say
+# "Take ONLY the identity from it", which threw that away and told the model
+# in as many words to dress the character afresh. It contradicted the costume
+# lock two sentences above it ("wears the EXACT SAME outfit as in the
+# reference image") and it won: one delivered drama put the same worker in a
+# mustard coverall, then a glossy yellow slicker, then an orange hi-vis
+# jacket. What actually had to be excluded was never the clothing -- it was
+# the portrait's staging, which is what dragged the cast into staring down
+# the lens.
 _REFERENCE_NOTE = (
     "The attached reference image is {name}; match that face exactly. Take "
-    "ONLY the identity from it — the face, hair and build. Its pose, its "
-    "framing and its gaze into the lens belong to a portrait, not to this "
-    "shot: stage this shot from its own description instead. "
+    "the identity AND the clothing from it — the face, hair, build and the "
+    "exact outfit worn in it, down to its colour and material. Take NOTHING "
+    "else: its pose, its framing and its gaze into the lens belong to a "
+    "portrait, not to this shot: stage this shot from its own description "
+    "instead. "
 )
 
 #: What the identity clause costs before a single character is described.
@@ -510,7 +523,7 @@ def build_frame_prompt(
     ])
 
 
-def build_motion_prompt(shot, matched_char=None) -> str:
+def build_motion_prompt(shot, matched_char=None, world_state: str = "") -> str:
     """Build the prompt sent to the video (image-to-video) model.
 
     Previously this was ``shot.motion_desc`` alone, which starved the
@@ -520,6 +533,12 @@ def build_motion_prompt(shot, matched_char=None) -> str:
     different-looking person -- WITHIN a shot. Identity drift inside a shot
     happens in the video model, not the frame, so the character lock has to
     be restated here too.
+
+    ``world_state`` is the drama's event once it has happened (the blackout,
+    the flood). It was stated only to the IMAGE model, which meant the frame
+    could be correctly dark and the five seconds animated out of it had no
+    idea the lights were meant to be off -- and "a lit night harbour" is a far
+    stronger prior in a video model than anything the still can imply.
     """
     parts = []
     camera = (getattr(shot, "camera_movement", "") or "").strip().rstrip(".")
@@ -532,6 +551,13 @@ def build_motion_prompt(shot, matched_char=None) -> str:
     if expression:
         parts.append(
             f"The character's expression stays true to the beat: {expression}."
+        )
+    changed = (world_state or "").strip().rstrip(".")
+    if changed:
+        parts.append(
+            f"The world of this shot has already changed: {changed}. Hold that "
+            f"state for the entire clip — it must not revert, recover or "
+            f"re-light at any point."
         )
     name = (getattr(matched_char, "name", "") or "").strip() if matched_char else ""
     subject = name or "each character"
@@ -782,22 +808,59 @@ def is_exact_resolution_enabled() -> bool:
     )
 
 
+#: How far short of the canonical delivery size a source may fall and still be
+#: delivered AT that size.
+#:
+#: Providers hand back their own house sizes: a 16:9 order came back as
+#: 1904x1072 (multiples of 16, 0.8% short of 1920x1080), and the no-upscaling
+#: rule turned that into a 1904x1070 master -- neither a standard resolution
+#: nor exactly 16:9, for the sake of 16 pixels. The rule is there so a 768px
+#: render is not inflated to 1080p and sold as one; it was never meant to
+#: refuse the last 1% and ship an odd size instead. Within this margin the
+#: canonical size wins, because "1920x1080" is the thing every downstream
+#: player, platform and editor expects to see.
+SNAP_TO_TARGET_TOLERANCE = 0.05
+
+
+def _nearest_even(value: float) -> int:
+    """Round a pixel dimension to the NEAREST even number.
+
+    The derived side of a crop is fractional almost every time (9:16 out of a
+    1080-tall master wants 607.5px). Flooring it, as this did, always biases
+    the shape the same way and doubles the ratio error it costs: 606x1080 is
+    0.25% off 9:16 where 608x1080 is 0.09% off.
+    """
+    return max(2, int(round(value / 2)) * 2)
+
+
 def resolve_output_dimensions(
     source_width: int, source_height: int, aspect_ratio: str
 ) -> Optional[Tuple[int, int]]:
     """Dimensions the delivered video should have for ``aspect_ratio``.
 
-    The ratio is always exact. The resolution is the largest rectangle of that
-    ratio that fits inside the source, capped at the canonical delivery size --
-    so a 9:16 job ships 9:16 without ever being upscaled past what was really
-    generated. Returns None for a ratio we do not deliver, which leaves the
-    video untouched.
+    The largest rectangle of that ratio that fits inside the source, capped at
+    the canonical delivery size -- so a 9:16 job ships 9:16 without being
+    upscaled past what was really generated, except within
+    ``SNAP_TO_TARGET_TOLERANCE`` of the canonical size, where the standard
+    resolution is worth more than the handful of pixels it costs. Returns None
+    for a ratio we do not deliver, which leaves the video untouched.
+
+    The ratio is exact wherever the geometry allows it and within 0.1%
+    otherwise: both sides must be even (yuv420p halves each axis), and one
+    exact ratio in even pixels does not always exist at the source's size.
     """
     target = TARGET_RESOLUTIONS.get((aspect_ratio or "").strip())
     if not target:
         return None
     target_w, target_h = target
     if source_width <= 0 or source_height <= 0 or is_exact_resolution_enabled():
+        return target
+
+    # Close enough to the delivery size on BOTH axes to be that size. Checked
+    # per axis, so a landscape master ordered vertical never "snaps" to a
+    # shape it does not have -- its short axis is nowhere near 1920.
+    floor = 1.0 - SNAP_TO_TARGET_TOLERANCE
+    if source_width >= target_w * floor and source_height >= target_h * floor:
         return target
 
     ratio = target_w / target_h
@@ -810,7 +873,11 @@ def resolve_output_dimensions(
         height = width / ratio
     if width > target_w:
         width, height = float(target_w), float(target_h)
-    return _even_dimension(width), _even_dimension(height)
+    # The binding side keeps its own pixels; only the derived side is rounded,
+    # so the crop takes as little as the even-pixel rule allows.
+    if source_width / source_height > ratio:
+        return _nearest_even(width), _even_dimension(height)
+    return _even_dimension(width), _nearest_even(height)
 
 
 def build_geometry_filters(
@@ -1309,6 +1376,14 @@ class Script2VideoPipeline:
                     # any other path.
                     StoryboardArtist._ensure_expression([shot], scene_emotion)
 
+                    # The scene that CAUSES the change and every scene after it
+                    # are both animating a world that has already changed --
+                    # the causing scene's still already shows it, and the clip
+                    # must not undo it. Same precedence as the frame prompt.
+                    change_state = (world_change or "").strip() or (
+                        world_state or ""
+                    ).strip()
+
                     frame_prompt = build_frame_prompt(
                         style,
                         shot,
@@ -1361,7 +1436,7 @@ class Script2VideoPipeline:
                         shot.frame_url = frame_url
                         video_prompt = (
                             f"{frame_prompt} "
-                            f"{build_motion_prompt(shot, matched_char)}"
+                            f"{build_motion_prompt(shot, matched_char, world_state=change_state)}"
                         )
                     else:
                         # Frame generation + optional QA happen BEFORE video
@@ -1421,7 +1496,9 @@ class Script2VideoPipeline:
                                         i,
                                         exc,
                                     )
-                        video_prompt = build_motion_prompt(shot, matched_char)
+                        video_prompt = build_motion_prompt(
+                            shot, matched_char, world_state=change_state
+                        )
 
                     # Record this shot's final frame (post-repair, if any)
                     # as the new "most recent" reference for its character

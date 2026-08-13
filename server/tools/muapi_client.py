@@ -1,6 +1,7 @@
 """Shared MuAPI submit-and-poll client with retry/backoff resilience."""
 
 import asyncio
+import json
 import logging
 import os
 import random
@@ -51,6 +52,51 @@ _URL_KEYS = (
     "url", "audio_url", "video_url", "image_url",
     "output_url", "file_url", "signed_url", "download_url",
 )
+
+
+#: Keys a provider error message hides under, outermost first. Nested because
+#: a failed prediction arrives wrapped in its own record:
+#: ``{"detail": {"id": ..., "status": "failed", "error": "<the sentence>"}}``.
+_MESSAGE_KEYS = ("error", "message", "detail", "msg", "reason")
+
+
+def _dig_message(node: Any, depth: int = 0) -> str:
+    """The human sentence inside an error envelope, however deep it is."""
+    if depth > 5:
+        return ""
+    if isinstance(node, str):
+        return node.strip()
+    if isinstance(node, list):
+        return "; ".join(
+            part for part in (_dig_message(x, depth + 1) for x in node) if part
+        )
+    if isinstance(node, dict):
+        for key in _MESSAGE_KEYS:
+            if key in node:
+                found = _dig_message(node[key], depth + 1)
+                if found:
+                    return found
+    return ""
+
+
+def provider_message(body: str) -> str:
+    """The provider's own explanation, unwrapped from its JSON envelope.
+
+    A failed voice job reached the user as::
+
+        HTTP 400 on /api/v1/predictions/<uuid>/result | Response body:
+        {"detail":{"id":"<uuid>","status":"failed","error":"Invalid voice…
+
+    -- 214 characters of envelope in front of the only clause anyone needed,
+    which is exactly where the warning's character budget ran out. Everything
+    before ``error`` is either already known (the endpoint, the id) or noise
+    (the JSON punctuation), so the message is dug out and the wrapper dropped.
+    Returns "" when the body is not JSON, so raw bodies still print in full.
+    """
+    try:
+        return _dig_message(json.loads(body or ""))
+    except (ValueError, TypeError):
+        return ""
 
 
 def _as_url(entry: Any) -> str:
@@ -139,12 +185,31 @@ class MuAPIClient:
         response = getattr(exc, "response", None)
         if response is None:
             return f"{exc}{cls._response_detail(exc)}"
+        # When the provider explained itself, its sentence IS the failure and
+        # the URL is not: the path of a poll is the same for every endpoint,
+        # and it carries a prediction id nobody can look up. Spending the
+        # message budget on it is what left the user with a bare
+        # "Invalid voice parameter:" and no idea which value was invalid.
+        message = cls._provider_message(exc)
+        if message:
+            return f"HTTP {response.status_code}: {message[:1000]}"
         request = getattr(response, "request", None)
         where = getattr(getattr(request, "url", None), "path", "") or ""
         return f"HTTP {response.status_code} on {where}{cls._response_detail(exc)}"
 
     @staticmethod
-    def _response_detail(exc: Exception) -> str:
+    def _provider_message(exc: Exception) -> str:
+        """The provider's own words, or "" if it sent none we can find."""
+        response = getattr(exc, "response", None)
+        if response is None:
+            return ""
+        try:
+            return provider_message(response.text)
+        except Exception:
+            return ""
+
+    @classmethod
+    def _response_detail(cls, exc: Exception) -> str:
         """httpx.HTTPStatusError's default str() only includes the status
         code and URL, discarding the actual response body -- which for a
         422 (or most 4xx) almost always contains the precise validation
@@ -155,6 +220,9 @@ class MuAPIClient:
         if response is None:
             return ""
         try:
+            message = provider_message(response.text)
+            if message:
+                return f" | {message[:1000]}"
             return f" | Response body: {response.text[:1000]}"
         except Exception:
             return ""

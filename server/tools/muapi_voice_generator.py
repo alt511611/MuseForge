@@ -15,6 +15,15 @@ Two details that are easy to get wrong and fail EVERY request when wrong:
   * ``voice_id`` is a real ElevenLabs voice ID hash (the sibling
     ``elevenlabs-tts-turbo-2-5`` schema defaults it to ``21m00Tcm4TlvDq8ikWAM``),
     NOT a playground display label like "George - Warm".
+
+The schema being right is not the same as the VALUES being accepted. The spec
+declares ``voice_id`` as a bare string and publishes no list of allowed ones,
+so a rejected voice is not a 422 at submit time -- the request is accepted, a
+prediction is queued, and it comes back ``{"status": "failed", "error":
+"Invalid voice parameter: ..."}``, i.e. an entire drama's worth of scenes
+already spent. ``tools/probe_dialogue_voices.py`` asks the provider what it
+accepts for the price of one word of speech, and ``MUSEFORGE_VOICE_IDS``
+applies the answer without a deploy.
 """
 
 import hashlib
@@ -34,6 +43,21 @@ TRUTHY = {"1", "true", "yes", "on"}
 def is_dialogue_enabled() -> bool:
     """Dialogue is opt-in because every spoken line makes a paid API call."""
     return os.environ.get("MUSEFORGE_DIALOGUE_ENABLED", "0").strip().lower() in TRUTHY
+
+
+def _voices(env_name: str, default: tuple) -> tuple:
+    """A cast list, overridable without a deploy.
+
+    The accepted values for ``voice_id`` are the provider's to define and it
+    publishes no list: they are absent from its OpenAPI spec, and a wrong one
+    is only discovered by a whole drama coming back silent. When the provider
+    changes them, ``MUSEFORGE_VOICE_IDS`` etc. (comma-separated) put the new
+    ones in without waiting on a release. See tools/probe_dialogue_voices.py
+    for finding out what the provider currently accepts.
+    """
+    raw = os.environ.get(env_name, "")
+    values = tuple(v.strip() for v in raw.split(",") if v.strip())
+    return values or default
 
 
 def _estimate_line_duration_seconds(line: str) -> float:
@@ -62,7 +86,7 @@ class MuAPIVoiceGenerator:
     _CHARLOTTE = "XB0fDUnXU5powFXDhCwa"  # clear, female
     _LAURA = "FGY2WhTYpPnrIDTdsKH5"    # bright, female
 
-    #: ID -> display name. Diagnostics only; never sent to the API.
+    #: ID -> display name, used for logs and as one of the forms below.
     VOICE_NAMES = {
         _GEORGE: "George",
         _BRIAN: "Brian",
@@ -72,11 +96,38 @@ class MuAPIVoiceGenerator:
         _LAURA: "Laura",
     }
 
-    SYSTEM_VOICE_IDS = (_GEORGE, _SARAH, _BRIAN, _CHARLOTTE, _CALLUM, _LAURA)
+    #: ID -> the playground label this file shipped before the IDs. Kept
+    #: because the provider publishes no list of accepted values, so which of
+    #: these forms is right is not knowable from any documentation -- only
+    #: from the provider's answer.
+    VOICE_LABELS = {
+        _GEORGE: "George - Warm",
+        _BRIAN: "Brian - Deep, Resonant and Comforting",
+        _CALLUM: "Callum - Husky Trickster",
+        _SARAH: "Sarah - Soft",
+        _CHARLOTTE: "Charlotte - Clear",
+        _LAURA: "Laura - Enthusiast, Quirky Attitude",
+    }
+
+    #: The forms a voice value can take, in the order they are tried. Each has
+    #: been shipped as "confirmed" at some point and each has silenced a drama.
+    VOICE_FORMS = ("id", "label", "name")
+
+    #: The form the provider accepted, once anything has succeeded. Class-level
+    #: on purpose: which form is right is a fact about the provider, not about
+    #: one drama, so the second job of a process should not re-pay the
+    #: discovery. Only ever set from a request that actually worked.
+    _accepted_form: Optional[str] = None
+
+    SYSTEM_VOICE_IDS = _voices(
+        "MUSEFORGE_VOICE_IDS", (_GEORGE, _SARAH, _BRIAN, _CHARLOTTE, _CALLUM, _LAURA)
+    )
     # Gender pools over the same voices, for description-aware casting: a
     # character described as a woman must not be voiced by George.
-    FEMALE_VOICE_IDS = (_SARAH, _CHARLOTTE, _LAURA)
-    MALE_VOICE_IDS = (_GEORGE, _BRIAN, _CALLUM)
+    FEMALE_VOICE_IDS = _voices(
+        "MUSEFORGE_FEMALE_VOICE_IDS", (_SARAH, _CHARLOTTE, _LAURA)
+    )
+    MALE_VOICE_IDS = _voices("MUSEFORGE_MALE_VOICE_IDS", (_GEORGE, _BRIAN, _CALLUM))
 
     # The marker table lives in interfaces/gender.py: the screenwriter writes
     # the gender INTO the description, and this step reads it back out. Two
@@ -178,6 +229,40 @@ class MuAPIVoiceGenerator:
             )
         return lines
 
+    @classmethod
+    def _as_form(cls, voice_id: str, form: str) -> str:
+        """``voice_id`` expressed in one of ``VOICE_FORMS``.
+
+        A value with no entry in the tables -- anything set through
+        ``MUSEFORGE_VOICE_IDS`` -- is passed through untouched: an override
+        exists precisely because someone learned what the provider wants, so
+        translating it into a form they did not ask for would undo that.
+        """
+        if form == "label":
+            return cls.VOICE_LABELS.get(voice_id, voice_id)
+        if form == "name":
+            return cls.VOICE_NAMES.get(voice_id, voice_id)
+        return voice_id
+
+    @classmethod
+    def _forms_to_try(cls) -> List[str]:
+        """Which forms this request may use, best-known first."""
+        if cls._accepted_form:
+            return [cls._accepted_form]
+        return list(cls.VOICE_FORMS)
+
+    @staticmethod
+    def _is_voice_rejection(exc: Exception) -> bool:
+        """Whether the provider refused the VOICE, as opposed to anything else.
+
+        Seen as ``{"status": "failed", "error": "Invalid voice parameter: ..."}``
+        on a queued prediction, i.e. not a 422 at submit time. Deliberately
+        narrow: a timeout, a bad key or an outage must not send the job
+        shopping through voice forms, because none of them would help and each
+        costs a round trip.
+        """
+        return "voice" in str(exc or "").lower()
+
     async def generate_scene_dialogue(
         self,
         dialogue: Iterable[Any],
@@ -195,9 +280,7 @@ class MuAPIVoiceGenerator:
             return []
 
         payload = {
-            "dialogue": [
-                {"text": row["line"], "voice_id": row["voice_id"]} for row in lines
-            ],
+            "dialogue": [],
             "stability": 0.5,
         }
         # The field is `language_code`, not `language` -- the old key was not a
@@ -215,15 +298,49 @@ class MuAPIVoiceGenerator:
         # language once the code is passed.
         if not is_default(language):
             payload["language_code"] = normalize(language)
-        try:
-            audio_url = await self.client.generate(
-                self.VOICE_ENDPOINT,
-                payload,
-                poll_interval=2.0,
-                max_polls=120,
-                is_cancelled=is_cancelled,
-            )
-        except Exception as exc:
+
+        # Which spelling of a voice this endpoint wants is not in its OpenAPI
+        # spec (``voice_id`` is declared as a bare string) and not in any
+        # documentation, and getting it wrong does not fail at submit time --
+        # the prediction is queued, then comes back "Invalid voice parameter"
+        # with the scenes already rendered. So the answer is asked for rather
+        # than assumed: the forms are tried in order, and the one that works
+        # is remembered for every later request in the process. Only a
+        # rejection OF THE VOICE advances; anything else is raised at once.
+        audio_url = ""
+        last_exc: Optional[Exception] = None
+        forms = self._forms_to_try()
+        for position, form in enumerate(forms):
+            payload["dialogue"] = [
+                {"text": row["line"], "voice_id": self._as_form(row["voice_id"], form)}
+                for row in lines
+            ]
+            try:
+                audio_url = await self.client.generate(
+                    self.VOICE_ENDPOINT,
+                    payload,
+                    poll_interval=2.0,
+                    max_polls=120,
+                    is_cancelled=is_cancelled,
+                )
+            except Exception as exc:
+                last_exc = exc
+                if not self._is_voice_rejection(exc) or position + 1 >= len(forms):
+                    break
+                logger.warning(
+                    "Provider rejected the %r voice form (%s); retrying as %r.",
+                    form,
+                    exc,
+                    forms[position + 1],
+                )
+                continue
+            if type(self)._accepted_form != form:
+                logger.info("Provider accepted the %r voice form.", form)
+                type(self)._accepted_form = form
+            last_exc = None
+            break
+
+        if last_exc is not None:
             # Deliberately NOT swallowed here. Returning [] made a broken
             # request schema indistinguishable from a scene with no lines:
             # every drama shipped silent while the only trace was a warning
@@ -233,9 +350,9 @@ class MuAPIVoiceGenerator:
                 "Scene dialogue generation failed (%s voice(s), %s line(s)): %s",
                 len({row["voice_id"] for row in lines}),
                 len(lines),
-                exc,
+                last_exc,
             )
-            raise
+            raise last_exc
 
         if not audio_url:
             return []

@@ -56,10 +56,10 @@ def test_vertical_source_is_left_alone():
 def test_landscape_source_is_conformed_to_vertical():
     from pipelines.script2video import build_geometry_filters, resolve_output_dimensions
 
-    assert resolve_output_dimensions(1920, 1080, "9:16") == (606, 1080)
+    assert resolve_output_dimensions(1920, 1080, "9:16") == (608, 1080)
     filters = build_geometry_filters(1920, 1080, "9:16")
-    assert filters[0].startswith("scale=606:1080:force_original_aspect_ratio=increase")
-    assert "crop=606:1080" in filters
+    assert filters[0].startswith("scale=608:1080:force_original_aspect_ratio=increase")
+    assert "crop=608:1080" in filters
     # Cropping to fill, never padding: black bars in a vertical feed read as
     # a broken upload.
     assert not any("pad=" in f for f in filters)
@@ -137,3 +137,58 @@ def test_generate_request_rejects_an_unsupported_ratio():
     assert GenerateRequest(idea="idea", aspect_ratio="9:16").aspect_ratio == "9:16"
     with pytest.raises(pydantic.ValidationError):
         GenerateRequest(idea="idea", aspect_ratio="vertical")
+
+
+# --- the size a provider actually hands back -----------------------------
+
+
+def test_a_provider_house_size_still_ships_as_1080p():
+    """Delivered, verbatim: a 16:9 order came back 1904x1072 (the provider
+    works in multiples of 16) and the master shipped 1904x1070 -- not a
+    standard resolution, and not exactly 16:9 either, to avoid a 0.8%
+    upscale."""
+    from pipelines.script2video import resolve_output_dimensions
+
+    assert resolve_output_dimensions(1904, 1072, "16:9") == (1920, 1080)
+
+
+def test_a_genuinely_smaller_render_is_still_never_inflated():
+    """The no-upscaling rule is the point; the snap is only its last 5%."""
+    from pipelines.script2video import resolve_output_dimensions
+
+    assert resolve_output_dimensions(1280, 720, "16:9") == (1280, 720)
+    assert resolve_output_dimensions(768, 1344, "9:16") == (756, 1344)
+
+
+def test_a_landscape_master_never_snaps_to_a_vertical_it_does_not_have():
+    """Both axes have to be close, or a 1920-wide clip would 'snap' to
+    1080x1920 on the strength of its width alone and be blown up 78%."""
+    from pipelines.script2video import resolve_output_dimensions
+
+    width, height = resolve_output_dimensions(1920, 1080, "9:16")
+    assert height == 1080
+
+
+def test_the_derived_side_rounds_to_the_nearest_even_not_down():
+    """9:16 out of a 1080-tall master wants 607.5px. Flooring it to 606 costs
+    three times the ratio error of rounding to 608, every time, in the same
+    direction."""
+    from pipelines.script2video import resolve_output_dimensions
+
+    width, height = resolve_output_dimensions(1920, 1080, "9:16")
+
+    assert (width, height) == (608, 1080)
+    assert abs(width / height - 9 / 16) / (9 / 16) < 0.001
+
+
+@pytest.mark.parametrize("source", [(1920, 1080), (1904, 1072), (1280, 720), (960, 540)])
+@pytest.mark.parametrize("ratio", ["16:9", "9:16", "1:1"])
+def test_every_delivery_is_even_and_within_a_tenth_of_a_percent(source, ratio):
+    from pipelines.script2video import TARGET_RESOLUTIONS, resolve_output_dimensions
+
+    width, height = resolve_output_dimensions(source[0], source[1], ratio)
+    target_w, target_h = TARGET_RESOLUTIONS[ratio]
+
+    assert width % 2 == 0 and height % 2 == 0, "yuv420p refuses odd dimensions"
+    wanted = target_w / target_h
+    assert abs(width / height - wanted) / wanted < 0.0025
