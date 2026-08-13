@@ -527,6 +527,77 @@ def _find_watermark_font() -> Optional[str]:
     return None
 
 
+def resolve_ffmpeg_binary() -> str:
+    """The ffmpeg to shell out to, falling back to moviepy's bundled build."""
+    binary = os.environ.get("MUSEFORGE_FFMPEG_BINARY") or shutil.which("ffmpeg")
+    if binary:
+        return binary
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
+async def mux_silent_audio(video_path: str, output_path: str) -> bool:
+    """Copy ``video_path`` to ``output_path`` with a silent AAC track added.
+
+    Done in ffmpeg rather than moviepy, for two reasons that both cost a
+    production job:
+
+      * synthesising silence as a Python AudioClip and letting moviepy write
+        it produced a file whose CONTAINER DURATION was ~2000x the video's (a
+        3-second clip muxed to 5923 seconds, a 30-second drama to 13 hours).
+        Every later stage then tried to decode a million frames, and the job
+        that should have finished in a minute ran until someone killed it;
+      * ``-c:v copy`` means the picture is not re-encoded at all. The old path
+        re-encoded the entire master through moviepy to add nothing but
+        silence, paying a full generation loss and several minutes for it.
+
+    ``anullsrc`` is an infinite source, so ``-shortest`` is what ends the
+    file -- without it ffmpeg would happily write silence forever, which is
+    the same failure in a different tool.
+
+    Returns True when the muxed file was written, False when the caller should
+    fall back to shipping the video as it is.
+    """
+    try:
+        process = await asyncio.create_subprocess_exec(
+            resolve_ffmpeg_binary(),
+            "-y",
+            "-i",
+            video_path,
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=44100",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            output_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode == 0 and os.path.getsize(output_path) > 0:
+            return True
+        logger.warning(
+            "Could not add a silent audio track (ffmpeg %s): %s",
+            process.returncode,
+            (stderr or b"").decode("utf-8", "replace")[-500:],
+        )
+    except Exception as exc:
+        logger.warning("Could not add a silent audio track: %s", exc)
+    return False
+
+
 async def add_background_music(
     video_path: str,
     output_path: str,
@@ -631,22 +702,27 @@ async def add_background_music(
             # upload pipelines treat a missing stream as a malformed file, and
             # concatenating a silent master with anything that HAS audio drops
             # to a re-encode or loses the audio outright.
-            try:
-                from moviepy import AudioClip
+            #
+            # Handed to ffmpeg, which copies the picture untouched -- there is
+            # no mix to perform, so re-encoding the master through moviepy
+            # would spend a full generation loss on adding nothing. It also
+            # cannot get the duration wrong, which the moviepy version did:
+            # see mux_silent_audio.
+            video.close()
+            video = None
+            if await mux_silent_audio(video_path, output_path):
+                return output_path
+            # Could not add it -- ship the picture as it is, exactly as before
+            # a silent track was ever attempted.
+            with open(video_path, "rb") as src:
+                data = src.read()
+            with open(output_path, "wb") as dst:
+                dst.write(data)
+            return output_path
 
-                silence = AudioClip(
-                    lambda t: 0 * t, duration=video.duration, fps=44100
-                )
-                opened_audio.append(silence)
-                layers.append(silence)
-            except Exception as exc:
-                logger.warning("Could not build a silent audio track: %s", exc)
-
-        if layers:
-            final_audio = CompositeAudioClip(layers).with_duration(video.duration)
-            final = video.with_audio(final_audio)
-        else:
-            final = video
+        # There is at least one layer here: the no-layer case returned above.
+        final_audio = CompositeAudioClip(layers).with_duration(video.duration)
+        final = video.with_audio(final_audio)
         final.write_videofile(
             output_path, codec="libx264", audio_codec="aac", logger=None,
             **moviepy_encode_kwargs(),
