@@ -365,11 +365,35 @@ def test_the_budget_never_asks_for_a_clip_the_provider_will_not_make():
 
 
 def test_a_credit_buys_enough_video_for_tension_to_matter():
-    """Margin can also be raised by shrinking the product, but below ~5s per
-    credit every scene pins to the floor and the tension-based pacing stops
-    doing anything -- so the constant must stay clear of it."""
-    from interfaces.second_budget import MIN_SCENE_SECONDS, distribute_budget
+    """Margin can also be raised by shrinking the product, and pacing is the
+    first thing to die: below ~5s per credit every scene pins to the floor and
+    the tension weighting stops doing anything.
+
+    This used to assert ``max >= 2 * min``, which held while the ceiling was
+    1.5x the average (8s per credit against a 12s cap). That ratio is not a
+    property of the pacing, it is a property of the HEADROOM: the total is
+    fixed at SECONDS_PER_CREDIT x scenes, so a ceiling close to the average
+    squeezes every other scene up towards it. At 10s per credit against the
+    same 12s cap the achievable spread is 1.7x -- and no floor widens it
+    (measured: dropping the floor from 6s to 4s moves the spread by 0.00,
+    because the ceiling is what binds). Restoring 2x would mean either a 15s
+    cap, which delivered a measurably inert take, or giving back the 25% of
+    running time a credit now buys.
+
+    So the assertion tests what it always meant rather than the number it
+    happened to produce: the weighting still separates the beats, the spread
+    still uses most of the room the constants leave, and nothing is flat.
+    """
+    from interfaces.second_budget import (
+        MAX_SCENE_SECONDS,
+        MIN_SCENE_SECONDS,
+        distribute_budget,
+    )
 
     assert SECONDS_PER_CREDIT >= MIN_SCENE_SECONDS + 2
+
     durations = distribute_budget([3, 6, 8, 10, 4])
-    assert max(durations) >= 2 * min(durations), durations
+    assert len(set(durations)) >= 3, durations
+    assert max(durations) - min(durations) >= 3.0, durations
+    headroom = MAX_SCENE_SECONDS / MIN_SCENE_SECONDS
+    assert (max(durations) / min(durations)) >= 0.7 * headroom, durations

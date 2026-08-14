@@ -79,9 +79,16 @@ class MuAPIVoiceGenerator:
         "MUAPI_VOICE_MODEL", "elevenlabs-text-to-dialogue-v3"
     )
 
-    # ElevenLabs library voices, multilingual v2 -- gender/tone variety.
+    # The cast, taken from the voice selector on MuAPI's own playground page
+    # for THIS endpoint (muapi.ai/playground/elevenlabs-text-to-dialogue-v3),
+    # which offers 26 voices as id/label pairs. That selector is the "list of
+    # supported voices" the rejection message keeps pointing at and which no
+    # documentation or OpenAPI schema contains -- so these six are the first
+    # values in this file that were read from the provider rather than
+    # guessed. Names and labels below are its strings, character for
+    # character; do not retype them from memory.
     _GEORGE = "JBFqnCBsd6RMkjVDRZzb"   # warm, male
-    _BRIAN = "nPczCjzI2devNBz1zQrb"    # deep, resonant, male
+    _BRIAN = "zPhCVfO2NBER7bRLIdbq"    # deep, resonant, male
     _CALLUM = "N2lVS1w4EtoT3dr4eOWO"   # husky, male
     _SARAH = "EXAVITQu4vr4xnSDxMaL"    # soft, female
     _CHARLOTTE = "XB0fDUnXU5powFXDhCwa"  # clear, female
@@ -97,10 +104,10 @@ class MuAPIVoiceGenerator:
         _LAURA: "Laura",
     }
 
-    #: ID -> the playground label this file shipped before the IDs. Kept
-    #: because the provider publishes no list of accepted values, so which of
-    #: these forms is right is not knowable from any documentation -- only
-    #: from the provider's answer.
+    #: ID -> the provider's own label for it, verbatim from that same
+    #: selector. Kept because which spelling the API wants is still not
+    #: knowable from documentation -- the playground publishes the pairs, not
+    #: which half the endpoint validates against.
     VOICE_LABELS = {
         _GEORGE: "George - Warm",
         _BRIAN: "Brian - Deep, Resonant and Comforting",
@@ -110,11 +117,16 @@ class MuAPIVoiceGenerator:
         _LAURA: "Laura - Enthusiast, Quirky Attitude",
     }
 
-    #: The provider's OWN documented voice: the default ``voice_id`` of the
-    #: sibling ``elevenlabs-tts-turbo-2-5`` schema. It is the only value the
-    #: provider has ever published, so it is the one thing in this file that is
-    #: not a guess about its whitelist.
-    _PROVIDER_DEFAULT = "21m00Tcm4TlvDq8ikWAM"  # Rachel
+    #: The single voice the whole scene falls back to. Was Rachel
+    #: (``21m00Tcm4TlvDq8ikWAM``), reasoned across from the sibling
+    #: ``elevenlabs-tts-turbo-2-5`` schema, whose OpenAPI declares it as that
+    #: endpoint's default. A sibling's default is not this endpoint's
+    #: whitelist: Rachel is absent from the 26 voices this one publishes, and
+    #: a drama duly came back with "Invalid voice parameter:
+    #: 21m00Tcm4TlvDq8ikWAM" -- a last resort that could only ever fail, at
+    #: the cost of one more generation per scene. Now the first entry of the
+    #: provider's own list.
+    _PROVIDER_DEFAULT = "ZQe5CZNOzWyzPSCn5a3c"  # James - Husky, Engaging and Bold
 
     #: The forms a voice value can take, in the order they are tried. Each has
     #: been shipped as "confirmed" at some point and each has silenced a drama.
@@ -129,6 +141,25 @@ class MuAPIVoiceGenerator:
     #: one drama, so the second job of a process should not re-pay the
     #: discovery. Only ever set from a request that actually worked.
     _accepted_form: Optional[str] = None
+
+    #: Set once a scene has tried every form and been refused all of them.
+    #:
+    #: Whether ANY spelling works is a fact about the provider too, and the
+    #: search is not cheap: the refusal arrives on the FINISHED prediction
+    #: (the error names ``/predictions/<id>/result``, not the submit), so
+    #: every form tried is a generation that actually ran. Without this a
+    #: three-scene drama that cannot be voiced at all pays the full search
+    #: three times over -- twelve generations and the wait that goes with them
+    #: -- to learn the same thing the first scene already learned.
+    #:
+    #: Deliberately not permanent for the process: each later scene still
+    #: makes ONE attempt, so a provider that recovers mid-drama is picked up
+    #: and every scene still reports its own failure. Cleared by any success.
+    #: That one attempt uses the first form only -- exhaustion means no
+    #: spelling worked at that moment, which points at the provider being down
+    #: rather than at us holding the wrong spelling, and re-running the whole
+    #: search per scene is the cost this exists to avoid.
+    _forms_exhausted: bool = False
 
     SYSTEM_VOICE_IDS = _voices(
         "MUSEFORGE_VOICE_IDS", (_GEORGE, _SARAH, _BRIAN, _CHARLOTTE, _CALLUM, _LAURA)
@@ -262,6 +293,8 @@ class MuAPIVoiceGenerator:
         """Which forms this request may use, best-known first."""
         if cls._accepted_form:
             return [cls._accepted_form]
+        if cls._forms_exhausted:
+            return [cls.VOICE_FORMS[0]]
         return list(cls.VOICE_FORMS)
 
     @staticmethod
@@ -365,6 +398,10 @@ class MuAPIVoiceGenerator:
             except Exception as exc:
                 last_exc = exc
                 if not self._is_voice_rejection(exc) or position + 1 >= len(forms):
+                    # Every spelling refused, and this scene paid a generation
+                    # for each. The rest of the drama gets one attempt apiece.
+                    if self._is_voice_rejection(exc) and len(forms) > 1:
+                        type(self)._forms_exhausted = True
                     break
                 logger.warning(
                     "Provider rejected the %r voice form (%s); retrying as %r.",
@@ -385,6 +422,9 @@ class MuAPIVoiceGenerator:
                 else:
                     logger.info("Provider accepted the %r voice form.", form)
                 type(self)._accepted_form = form
+            # Something works after all -- whatever made the earlier scene give
+            # up is over, so later scenes get the full search back.
+            type(self)._forms_exhausted = False
             last_exc = None
             break
 

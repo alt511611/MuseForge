@@ -272,8 +272,10 @@ def _forget_the_negotiated_form():
     from tools.muapi_voice_generator import MuAPIVoiceGenerator
 
     MuAPIVoiceGenerator._accepted_form = None
+    MuAPIVoiceGenerator._forms_exhausted = False
     yield
     MuAPIVoiceGenerator._accepted_form = None
+    MuAPIVoiceGenerator._forms_exhausted = False
 
 
 class _Provider:
@@ -423,6 +425,110 @@ async def test_a_cast_no_provider_accepts_still_speaks_in_its_default_voice():
 
     assert tracks[0]["audio_url"] == "https://cdn/scene.mp3"
     assert provider.seen[-1] == [default]
+
+
+#: The voice selector on MuAPI's own playground page for this endpoint --
+#: the "list of supported voices" its rejection message points at. Pasted
+#: here so the cast can be checked against the provider's answer rather than
+#: against another copy of our own guess.
+PROVIDER_VOICE_IDS = {
+    "ZQe5CZNOzWyzPSCn5a3c": "James - Husky, Engaging and Bold",
+    "Z3R5wn05IrDiVCyEkUrK": "Arabella - Mysterious and Emotive",
+    "NNl6r8mD7vthiJatiJt1": "Bradford - Expressive and Articulate",
+    "YOq2y2Up4RgXP2HyXjE5": "Xavier - Dominating, Metallic Announcer",
+    "qDuRKMlYmrm8trt5QyBn": "Taksh - Calm, Serious and Smooth",
+    "iP95p4xoKVk53GoZ742B": "Monika Sogam - Deep and Natural",
+    "UgBBYS2sOqTuMpoF3BR0": "Mark - Casual, Relaxed and Light",
+    "5l5f8iK3YPeGga21rQIX": "Adeline - Feminine and Conversational",
+    "yoZ06aMxZJJ28mfd3POQ": "Sam - Support Agent",
+    "NOpBlnGInO9m6vDvFkFC": "Spuds Oxley - Wise and Approachable",
+    "scOwDtmlLZohaFMFCHFe": "Eve - Authentic, Energetic and Happy",
+    "N2lVS1w4EtoT3dr4eOWO": "Callum - Husky Trickster",
+    "FGY2WhTYpPnrIDTdsKH5": "Laura - Enthusiast, Quirky Attitude",
+    "zPhCVfO2NBER7bRLIdbq": "Brian - Deep, Resonant and Comforting",
+    "nPczCjzI2devNBz1zQrb": "Nathan - Virtual Radio Host",
+    "IKne3meq5aSn9XLyUdCD": "Charlie - Natural",
+    "JBFqnCBsd6RMkjVDRZzb": "George - Warm",
+    "EXAVITQu4vr4xnSDxMaL": "Sarah - Soft",
+    "XB0fDUnXU5powFXDhCwa": "Charlotte - Clear",
+    "tnSpp4vdxKPjI9w0GnoV": "Hope - Bubbly, Gossipy and Girly",
+    "DYkrAHD8iwork3YSUBbs": "Finn - Youthful, Eager and Energetic",
+    "56AoDkrOh6qfVPDXZ7Pt": "Tom - Conversations and Books",
+    "lcMyyd2HUfFzxdCaC4Ta": "Lucy - Fresh and Casual",
+    "6aDn1KB0hjpdcocrUkmq": "Tiffany - Natural and Welcoming",
+    "7ftFdxRlmR6Z9V3nTdUh": "Brock - Commanding and Loud Sergeant",
+    "bajNon13EdhNMndG3z05": "Viraj - Rich and Soft",
+}
+
+
+def test_every_shipped_voice_is_one_the_provider_publishes():
+    """The last resort used to be Rachel, reasoned across from a SIBLING
+    endpoint's OpenAPI default. She is not on this endpoint's list, so the
+    final attempt of every failing scene was one that could not succeed."""
+    from tools.muapi_voice_generator import MuAPIVoiceGenerator as G
+
+    for voice_id in (*G.SYSTEM_VOICE_IDS, G._PROVIDER_DEFAULT):
+        assert voice_id in PROVIDER_VOICE_IDS, voice_id
+
+
+def test_the_name_and_label_of_a_voice_belong_to_that_voice():
+    """`Brian` shipped pointing at nPczCjzI2devNBz1zQrb, which is the
+    provider's Nathan -- so a character cast as deep-and-resonant was voiced
+    by a radio host, and the label form sent a string the provider files
+    under a different id."""
+    from tools.muapi_voice_generator import MuAPIVoiceGenerator as G
+
+    for voice_id, label in G.VOICE_LABELS.items():
+        assert PROVIDER_VOICE_IDS[voice_id] == label
+        assert label.split(" - ")[0] == G.VOICE_NAMES[voice_id]
+
+
+@pytest.mark.asyncio
+async def test_a_drama_pays_for_the_search_once_not_once_per_scene():
+    """The refusal arrives on the FINISHED prediction, so every form tried is
+    a generation that ran. A three-scene drama that cannot be voiced at all
+    used to pay the full four-form search three times over."""
+    provider = _Provider(lambda v: False)
+    generator = _generator(provider)
+
+    for _ in range(3):
+        with pytest.raises(RuntimeError):
+            await generator.generate_scene_dialogue(LINES)
+
+    # 4 to learn nothing works, then 1 per scene -- not 4 per scene.
+    assert len(provider.seen) == 6
+
+
+@pytest.mark.asyncio
+async def test_a_provider_that_recovers_mid_drama_gets_its_cast_back():
+    """Giving up permanently would silence the rest of a drama over one bad
+    minute, so the memo is a shortcut, never a verdict."""
+    from tools.muapi_voice_generator import MuAPIVoiceGenerator
+
+    outage = {"on": True}
+
+    class _Flaky(_Provider):
+        async def generate(self, endpoint, payload, **kwargs):
+            if outage["on"]:
+                self.seen.append([t["voice_id"] for t in payload["dialogue"]])
+                raise RuntimeError("HTTP 400: Invalid voice parameter")
+            return await super().generate(endpoint, payload, **kwargs)
+
+    # Accepts the shipped ids -- the realistic recovery, since exhaustion
+    # means no spelling worked at that moment, which points at the provider
+    # being down rather than at us having the wrong one.
+    provider = _Flaky(lambda v: v in MuAPIVoiceGenerator.SYSTEM_VOICE_IDS)
+    generator = _generator(provider)
+
+    with pytest.raises(RuntimeError):
+        await generator.generate_scene_dialogue(LINES)
+    assert MuAPIVoiceGenerator._forms_exhausted is True
+
+    outage["on"] = False
+    tracks = await generator.generate_scene_dialogue(LINES)
+
+    assert tracks[0]["audio_url"] == "https://cdn/scene.mp3"
+    assert MuAPIVoiceGenerator._forms_exhausted is False
 
 
 @pytest.mark.asyncio

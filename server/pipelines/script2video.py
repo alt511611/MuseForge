@@ -185,21 +185,28 @@ def _describe_characters(visible, limit=None) -> list:
 #: SETTING's share of the budget, and one addition finally pushed the setting
 #: clause out of a crowded prompt altogether — the one clause that promises
 #: the room does not change between scenes.
+# These four sentences are priority 0 -- they are never dropped, so every
+# character they cost is taken from the clauses that ARE. Measured on a real
+# two-character scene they were 1,012 of the provider's 3,000, and the frame
+# prompt still ran ~1,000 over, so the acted expression and the lighting plan
+# were being discarded to make room for boilerplate. They have been tightened
+# to say each thing ONCE; every distinct instruction below is still here,
+# because every one of them is a delivered bug (a costume that restyled
+# itself, a hard hat that came and went, a cast that stared down the lens).
+# Shorten further only by deleting an instruction on purpose, never by
+# rewording one into vagueness.
 _APPEARANCE_LOCK = (
-    "Character appearance is FIXED for the entire story and must be "
-    "IDENTICAL to previous scenes — same face, same age, same hair length, "
-    "colour and style, same build: "
+    "Appearance is FIXED, IDENTICAL in every scene — same face, age, build, "
+    "and same hair length, colour and style: "
 )
 _COSTUME_LOCK_NAMED = (
-    "Costume is LOCKED for the whole story: each character wears only "
-    "the outfit named above, in every scene — same garment, same cut, "
-    "same colour, never restyled, swapped or changed. "
+    "Costume is LOCKED: each wears only the outfit named above, in every "
+    "scene — same garment, cut and colour, never restyled or swapped. "
 )
 _COSTUME_LOCK_REFERENCED = (
-    "Clothing is also FIXED: every character wears the EXACT SAME "
-    "outfit as in the reference image and in every other scene — same "
-    "garment, same cut, same colour. Never change or restyle the "
-    "costume between scenes. "
+    "Costume is LOCKED: every character wears the EXACT outfit from the "
+    "reference image, in every scene — same garment, cut and colour, never "
+    "restyled or swapped. "
 )
 # The costume lock above only forbids CHANGING what was named. Adding
 # something that was never named slips straight past it -- and an
@@ -210,10 +217,9 @@ _COSTUME_LOCK_REFERENCED = (
 # because it sits on the face, so a hat that appears and disappears reads as
 # a different person even when the face is held.
 _NO_UNNAMED_ITEMS = (
-    "Wear NOTHING that is not named above: no hat, cap, beanie, helmet, "
-    "hard hat, hood, mask, goggles, glasses, headset, scarf or badge "
-    "unless the character's own outfit names one — and if it does, it is "
-    "worn in every scene, never taken off or replaced. "
+    "Wear NOTHING not named above — no hat, cap, beanie, helmet, hard hat, "
+    "hood, mask, goggles, glasses, headset, scarf or badge — unless the "
+    "outfit names one, and then in every scene, never removed. "
 )
 # The reference portrait is deliberately generated WEARING the character's
 # wardrobe (see Idea2VideoPipeline._lock_character_portraits) precisely so it
@@ -227,12 +233,10 @@ _NO_UNNAMED_ITEMS = (
 # the portrait's staging, which is what dragged the cast into staring down
 # the lens.
 _REFERENCE_NOTE = (
-    "The attached reference image is {name}; match that face exactly. Take "
-    "the identity AND the clothing from it — the face, hair, build and the "
-    "exact outfit worn in it, down to its colour and material. Take NOTHING "
-    "else: its pose, its framing and its gaze into the lens belong to a "
-    "portrait, not to this shot: stage this shot from its own description "
-    "instead. "
+    "The reference image is {name}: match that face exactly and wear the "
+    "exact outfit worn in it, down to colour and material. Take NOTHING else "
+    "from it — its pose, framing and gaze into the lens belong to a portrait; "
+    "stage this shot from its own description. "
 )
 
 #: What the identity clause costs before a single character is described.
@@ -283,6 +287,78 @@ def build_character_identity_clause(characters, matched_char=None, limit=None) -
     if matched_char is not None and getattr(matched_char, "name", ""):
         clause += _REFERENCE_NOTE.format(name=matched_char.name)
     return clause
+
+
+#: How a storyboard writes someone who is HEARD but not SEEN. A drama can put
+#: a character in every scene's dialogue while never once putting them in
+#: front of the camera -- a controller on the radio, a voice on an intercom --
+#: and a shot description says so in these words.
+_OFF_SCREEN_MARKERS = (
+    "voice", "voiceover", "voice-over", "v.o.", "o.s.", "offscreen",
+    "off-screen", "off screen", "radio", "intercom", "comms", "headset",
+    "speaker", "earpiece", "walkie", "handset", "phone", "unseen",
+    "crackles", "over the line",
+)
+
+#: How far AFTER a name to look for one of those markers -- room for
+#: "Priya's voice crackles over the radio" and "Priya, on the intercom".
+#:
+#: Only after, never before, and the asymmetry is the point. The two errors
+#: here are not equal: failing to spot an off-screen voice leaves the old
+#: behaviour exactly as it was, while mistaking a PRESENT character for one
+#: costs the frame its correct anchor -- the very failure this exists to stop.
+#: A window looking backwards makes exactly that mistake on the sentence that
+#: prompted the fix: in "Priya's voice crackles over the radio as Mara presses
+#: her palm to the seal", the words behind MARA are the radio belonging to
+#: Priya. So "over the radio, Priya warns" is knowingly not caught: a missed
+#: catch is a no-op, a wrong catch is the bug.
+_OFF_SCREEN_WINDOW = 30
+
+
+def _mention_is_off_screen(text: str, at: int, name_length: int) -> bool:
+    """Whether the name at ``at`` is being heard rather than seen."""
+    after = text[at + name_length: at + name_length + _OFF_SCREEN_WINDOW]
+    return any(marker in after for marker in _OFF_SCREEN_MARKERS)
+
+
+def on_screen_name_matches(shot_text: str, characters) -> list:
+    """``(position, character)`` for every character this shot actually SHOWS.
+
+    The identity anchor for a frame is chosen by whose name appears FIRST in
+    the shot's own description -- narrative order, so "Sam looks at Maria"
+    anchors Sam. That rule reads a name as a presence, and a name is not
+    always a presence: a delivered three-scene drama had a controller who
+    exists only as a voice on the radio, and a shot written "Priya's voice
+    warns as Mara presses her palm to the seal" handed the frame PRIYA's
+    reference portrait. The picture proves it -- the face and the costume
+    both change at the same cut, from one woman in a khaki parka to a
+    different woman in a yellow slicker, and then hold for the rest of the
+    film. The costume drift everyone sees is the symptom; the swapped anchor
+    is the cause, and the frame QA cannot catch it because it verifies the
+    frame against the very character it wrongly picked.
+
+    So a mention that reads as heard-not-seen does not make its character a
+    candidate. If that leaves nobody, the caller's own fallbacks take over:
+    losing the anchor entirely is worse than anchoring to the wrong person,
+    and this only ever REMOVES candidates the old rule would have taken.
+    """
+    matches = []
+    for character in characters or []:
+        name = (getattr(character, "name", "") or "").strip().lower()
+        if not name:
+            continue
+        positions = []
+        at = shot_text.find(name)
+        while at != -1:
+            positions.append(at)
+            at = shot_text.find(name, at + 1)
+        if not positions:
+            continue
+        seen = [p for p in positions if not _mention_is_off_screen(shot_text, p, len(name))]
+        if seen:
+            matches.append((seen[0], character))
+    matches.sort(key=lambda pair: pair[0])
+    return matches
 
 
 def build_cast_closure_clause(characters) -> str:
@@ -383,10 +459,9 @@ def build_frame_prompt(
     if parts:
         # Prefer "location, time_of_day" when both exist (user-requested shape).
         setting_clause = (
-            f"Setting: {', '.join(parts)}. This scene takes place in the "
-            f"EXACT SAME physical location established in the story's opening "
-            f"shot -- identical architecture, furniture, wall decor, and "
-            f"lighting fixtures. "
+            f"Setting: {', '.join(parts)}. The EXACT SAME physical location as "
+            f"the story's opening shot -- identical architecture, furniture, "
+            f"decor and lighting fixtures. "
         )
         if change_now or change_before:
             # WITHOUT this the next sentence ("only the time-of-day lighting
@@ -403,9 +478,8 @@ def build_frame_prompt(
             )
         else:
             setting_clause += (
-                f"Only the time-of-day lighting may shift subtly per the "
-                f"story's setting_time_of_day; the room itself must not "
-                f"change. "
+                f"Only the time-of-day lighting may shift subtly; the room "
+                f"itself must not change. "
             )
     else:
         setting_clause = ""
@@ -458,18 +532,28 @@ def build_frame_prompt(
     face_clause = (
         "The character's face is clearly visible and softly lit — not a "
         "silhouette, not backlit into shadow, not turned away from camera. "
-        # ...but "visible to camera" is not "staring down the lens", and
-        # without this second sentence the model reads them as the same
-        # thing. Every reference portrait is a frontal headshot with the eyes
-        # on the lens, so the identity anchor pulls the same way: a delivered
-        # drama had both workers stopping mid-scene to look dead at the
-        # viewer, which reads as a poster, not a film. The eyeline has to be
-        # aimed at something INSIDE the story for a shot to be a shot.
-        "The character does NOT look into the lens: no eye contact with the "
-        "camera, no posing for it, no addressing the viewer. Their gaze stays "
-        "inside the scene — on the other character, or on the object they are "
-        "handling — as if the camera were not there. "
     )
+    # ...but "visible to camera" is not "staring down the lens", and without
+    # a second sentence the model reads them as the same thing. Every
+    # reference portrait is a frontal headshot with the eyes on the lens, so
+    # the identity anchor pulls the same way: a delivered drama had both
+    # workers stopping mid-scene to look dead at the viewer, which reads as a
+    # poster, not a film. The eyeline has to be aimed at something INSIDE the
+    # story for a shot to be a shot.
+    #
+    # Said ONCE. _REFERENCE_NOTE already carries it whenever a portrait is
+    # attached ("its pose, framing and gaze into the lens belong to a
+    # portrait"), and that note is priority 0 while this clause is dropped
+    # from most frames -- so repeating it here spent ~180 undroppable
+    # characters saying what had already been said, in the same prompt where
+    # the scene's own acted expression was being cut for space.
+    if matched_char is None or not getattr(matched_char, "name", ""):
+        face_clause += (
+            "The character does NOT look into the lens: no eye contact with "
+            "the camera, no posing for it, no addressing the viewer. Their "
+            "gaze stays inside the scene — on the other character, or on the "
+            "object they are handling — as if the camera were not there. "
+        )
     # Budget for the identity clause: whatever is left after the shot itself
     # and its framing, minus room for the setting clause. Everything else is
     # optional and trimmed by fit_image_prompt below.
@@ -499,27 +583,40 @@ def build_frame_prompt(
     # which is the failure this whole product exists to prevent.
     #
     # Everything else is dropped worst-priority-first when a crowded scene
-    # pushes the prompt past the provider's budget. The quality suffix goes
-    # first because it is pure polish; the setting and its lighting go last
-    # because they make the continuity promise that the room (and the light
-    # in it) does not change between shots.
+    # pushes the prompt past the provider's budget -- which, on a real
+    # two-character drama, is EVERY scene: measured on a delivered job, the
+    # assembled prompt runs ~4,700 characters against a 3,000 limit, so
+    # roughly 1,400 are dropped from every frame of every film.
+    #
+    # That makes this ladder a running order for what dies, not a safety
+    # valve, and it used to leave the decision to a tie-break. Four clauses
+    # shared priority 2, so the drop fell on whichever of them happened to
+    # read first -- and the one that reads first is the lighting plan, while
+    # the one that reads last is the acted expression. The delivered logs
+    # show the consequence: "Facial expression and body language: Jaw set
+    # hard, eyes narrowed" dropped from all three scenes, along with the
+    # face-visibility clause on one of them. Both exist because a delivered
+    # drama came back with flat faces staring down the lens; both were being
+    # discarded before a single sentence of universal boilerplate.
+    #
+    # So every optional clause now has its own rank, and the order is
+    # deliberate: what this SCENE decided outranks what every drama says.
+    # The expression is computed per beat by the storyboard artist and is the
+    # difference between a performance and a photograph; the sentences below
+    # it are identical in every film this product has ever made.
     return fit_image_prompt([
         (0, f"{style} style. "),
         (1, setting_clause),
-        # One rank BELOW the setting, though the two are a pair: within a
-        # priority the drop falls on whichever clause reads first, which
-        # meant a crowded prompt lost the place itself and kept its lamp
-        # plan. Which room the scene is in outranks how it is lit.
-        (2, lighting_clause),
+        (3, lighting_clause),
         (0, identity_clause),
-        (3, direction_clause),
+        (6, direction_clause),
         (0, f"{shot.visual_desc}. "),
         (2, expression_clause),
-        (2, face_clause),
-        (2, cast_clause),
-        (3, dialogue_clause),
+        (4, face_clause),
+        (5, cast_clause),
+        (6, dialogue_clause),
         (0, f"Shot type: {shot.shot_type}. Lens: {shot.lens}. "),
-        (4, resolve_visual_style(style).render_note),
+        (7, resolve_visual_style(style).render_note),
     ])
 
 
@@ -1325,11 +1422,7 @@ class Script2VideoPipeline:
                     # FIRST (by text position, i.e. narrative order --
                     # "Sam looks at Maria" -> Sam is the subject) in this
                     # shot's own visual_desc/motion_desc.
-                    named_matches = [
-                        (shot_text.find(c.name.lower()), c)
-                        for c in visible_chars
-                        if c.name.lower() in shot_text
-                    ]
+                    named_matches = on_screen_name_matches(shot_text, visible_chars)
                     if named_matches:
                         named_matches.sort(key=lambda pair: pair[0])
                         matched_char = named_matches[0][1]

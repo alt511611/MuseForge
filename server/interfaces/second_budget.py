@@ -39,10 +39,9 @@ from typing import List, Sequence
 #: film for the customer at IDENTICAL cost and identical margin. Not a
 #: discount: nothing about what we pay changes.
 #:
-#: Deliberately short of the 15-second ceiling. Pushing the average to the cap
-#: would pin the top scenes there (see the ceiling note) and flatten the very
-#: tension spread this module exists to express, and a 15-second single Kling
-#: shot is where drift and morphing start to show.
+#: Deliberately short of the ceiling. Pushing the average to the cap would pin
+#: the top scenes there (see the ceiling note) and flatten the very tension
+#: spread this module exists to express.
 SECONDS_PER_CREDIT = 10.0
 
 #: Floor and ceiling for any single scene, whatever the tension says. The
@@ -50,14 +49,32 @@ SECONDS_PER_CREDIT = 10.0
 #: per-scene cost -- frame + storyboard call -- from dominating); the ceiling
 #: stops one scene from eating a short drama's entire budget.
 #:
-#: The ceiling is the provider's own limit: Kling v3 accepts 3-15 (see
-#: tools/muapi_video_generator.clamp_duration), and asking for more than it
-#: accepts buys nothing. The floor rose with the budget so that the spread
-#: keeps its shape rather than the extra seconds all piling onto the climax --
-#: and a 6-second floor is what lets a two-line scene hold its captions
-#: without them being squeezed (pipelines/idea2video._lay_out_scene_captions).
+#: The ceiling was briefly the provider's own limit (Kling v3 accepts 3-15,
+#: see tools/muapi_video_generator.clamp_duration) on the reasoning that a
+#: second we are not billed for is a second worth having. The first drama
+#: rendered under it says otherwise. Its climax got the ceiling -- 15 of 30
+#: seconds -- and MEASURED half the movement of the other two scenes:
+#:
+#:     scene 1   6s   mean inter-frame motion 10.77
+#:     scene 2   9s                           10.66
+#:     scene 3  15s                            5.07
+#:
+#: Framing barely changed from second 16 to second 29; only the subtitle did.
+#: The model does not fill a longer clip with more film, it fills it with more
+#: of the same frame, so past ~12 seconds the extra time is spent on the shot
+#: standing still. Free seconds are still not free if they are dull ones.
+#:
+#: 12 keeps the whole budget (the total is set by SECONDS_PER_CREDIT, not by
+#: this) and spreads it: the same three-scene drama becomes 8/10/12 instead of
+#: 6/10/14 -- no inert 15-second take, and the opening scene gets 8 seconds
+#: instead of 6.
+#:
+#: The floor rose with the budget so the spread keeps its shape rather than
+#: the extra seconds all piling onto the climax -- and a 6-second floor is
+#: what lets a two-line scene hold its captions without them being squeezed
+#: (pipelines/idea2video._lay_out_scene_captions).
 MIN_SCENE_SECONDS = 6.0
-MAX_SCENE_SECONDS = 15.0
+MAX_SCENE_SECONDS = 12.0
 
 #: Tension assumed for a scene that does not declare one, so legacy scripts
 #: distribute evenly instead of collapsing to the floor.

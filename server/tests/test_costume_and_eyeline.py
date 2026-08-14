@@ -49,7 +49,7 @@ def test_unnamed_headwear_is_forbidden_even_with_a_named_outfit():
 
     assert "Costume is LOCKED" in clause
     assert "hard hat" in clause and "beanie" in clause
-    assert "unless the character's own outfit names one" in clause
+    assert "unless the outfit names one" in clause
 
 
 def test_the_no_additions_rule_also_covers_an_undescribed_outfit():
@@ -57,7 +57,7 @@ def test_the_no_additions_rule_also_covers_an_undescribed_outfit():
 
     clause = build_character_identity_clause([_char("Mara")])
 
-    assert "Clothing is also FIXED" in clause
+    assert "EXACT outfit from the reference image" in clause
     assert "hard hat" in clause
 
 
@@ -70,7 +70,7 @@ def test_a_named_hat_is_kept_rather_than_banned():
     )
 
     assert "yellow hard hat" in clause
-    assert "worn in every scene, never taken off or replaced" in clause
+    assert "in every scene, never removed" in clause
 
 
 def test_screenwriter_is_asked_to_settle_the_head():
@@ -129,7 +129,7 @@ def test_the_costume_lock_and_the_reference_note_do_not_contradict(monkeypatch):
     mara = _char("Mara")
     clause = build_character_identity_clause([mara], matched_char=mara)
 
-    assert "EXACT SAME outfit as in the reference image" in clause
+    assert "EXACT outfit from the reference image" in clause
     assert "the exact outfit worn in it" in clause
     assert "ONLY the identity" not in clause
 

@@ -83,7 +83,7 @@ def test_character_lock_survives_trimming(count):
     characters = [_character(i) for i in range(count)]
     prompt = _frame_prompt(characters)
 
-    assert "IDENTICAL to previous scenes" in prompt
+    assert "IDENTICAL in every scene" in prompt
     for c in characters:
         assert c.name in prompt, f"{c.name} dropped from the identity clause"
 
@@ -216,3 +216,88 @@ def test_prompt_still_opens_with_style_and_subject():
     opening — the subject has to lead."""
     prompt = _frame_prompt([_character(0)], _shot("Maya walks the pier"))
     assert prompt.startswith("Sci-Fi style. ")
+
+
+def _two_hander():
+    """A realistic scene: two described characters, both in wardrobe."""
+    from interfaces.character import CharacterInScene
+
+    return [
+        CharacterInScene(
+            idx=0,
+            name="Mara",
+            static_features=(
+                "late 30s woman, sharp jawline, dark hair pulled back into a "
+                "wet knot, weathered face, lean build"
+            ),
+            wardrobe=(
+                "yellow hi-vis rain jacket with reflective stripes over a navy "
+                "work fleece, dark trousers, black boots"
+            ),
+        ),
+        CharacterInScene(
+            idx=1,
+            name="Priya",
+            static_features=(
+                "early 40s woman, round face, black hair in a low bun, "
+                "wire-rim glasses"
+            ),
+            wardrobe="navy control-room uniform shirt, sleeves rolled",
+        ),
+    ]
+
+
+def test_the_fixed_locks_leave_room_for_what_the_scene_decided():
+    """The delivered failure, and it was in EVERY frame of EVERY drama.
+
+    The four never-dropped lock sentences cost 1,012 of the provider's 3,000
+    characters, the assembled prompt ran ~1,000 over, and so the clauses that
+    describe THIS beat were cut to pay for boilerplate: the job's own log
+    shows "Facial expression and body language: Jaw set hard, eyes narrowed"
+    dropped from all three scenes, together with the lighting-continuity
+    clause. Flat faces and a drifting lamp plan, bought with characters spent
+    saying "costume is locked" in two different sentences.
+    """
+    from pipelines.script2video import (
+        IDENTITY_CLAUSE_OVERHEAD,
+        build_character_identity_clause,
+    )
+
+    assert IDENTITY_CLAUSE_OVERHEAD <= 800, IDENTITY_CLAUSE_OVERHEAD
+    clause = build_character_identity_clause(_two_hander(), limit=None)
+    assert len(clause) <= 1100, len(clause)
+
+
+def test_a_crowded_two_hander_still_carries_its_acting_and_its_light():
+    """The whole point of the budget work: on a scene heavy enough to overflow,
+    what survives must be the shot, the cast lock, the room, the light and the
+    performance -- not the film-grain note."""
+    from pipelines.script2video import build_frame_prompt
+
+    shot = _shot(
+        "Medium close-up of Mara pressed against the container door, gloved "
+        "hand flat on the level-one seal, the interior glow bleeding around "
+        "the frame and catching the rain on her jacket while the quay recedes "
+        "into fog behind her, gantry cranes looming out of focus, sodium light "
+        "raking across wet steel and the seal number just legible under her "
+        "glove as she leans her weight into it"
+    )
+    shot.expression_desc = "Jaw set hard, eyes narrowed against the light"
+
+    prompt = build_frame_prompt(
+        "Cinematic",
+        shot,
+        setting_location="container terminal quayside",
+        setting_time_of_day="night",
+        setting_era="present day",
+        has_dialogue=True,
+        characters=_two_hander(),
+        matched_char=_two_hander()[0],
+    )
+
+    assert len(prompt) <= 3000
+    assert "Facial expression and body language" in prompt
+    assert "Lighting continuity" in prompt
+    assert "clearly visible and softly lit" in prompt
+    assert "Mara" in prompt and "Priya" in prompt
+    assert "Setting: container terminal quayside" in prompt
