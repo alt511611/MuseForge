@@ -309,3 +309,50 @@ async def test_assemble_skips_subtitles_without_dialogue(tmp_path, monkeypatch):
         ["scene0.mp4"], str(tmp_path / "job"), plan="free"
     )
     burn.assert_not_awaited()
+
+
+def test_the_closing_caption_clears_the_fade_to_black(monkeypatch):
+    """A silent drama's last line exists ONLY as text, and the master fades
+    over its final FADE_OUT_SECONDS -- so the sentence the whole film builds
+    to was being read while the picture went dark under it. Measured on a
+    delivered 30.2s drama: 64 grey levels down to 9 across the last 0.75s,
+    final cue still up."""
+    from pipelines import idea2video
+
+    monkeypatch.setattr(
+        idea2video, "_scene_boundaries", lambda paths: [0.0, 6.0, 15.0, 30.0]
+    )
+    tracks = [
+        {"character": "Mara", "line": "I can't.", "scene_index": 2},
+        {"character": "Mara", "line": "Look at it. It's the only light left.", "scene_index": 2},
+    ]
+
+    times = _cue_times(
+        idea2video.build_srt_from_dialogue_tracks(tracks, scene_paths=["a", "b", "c"])
+    )
+
+    assert times[-1][1] <= 30.0 - idea2video.FADE_OUT_SECONDS
+
+
+def test_a_spoken_last_line_keeps_its_timing_through_the_fade(monkeypatch):
+    """When the line is actually voiced, the audio is the timing that
+    matters: pulling the caption off it to dodge the fade would desync the
+    two, and the viewer can hear the word either way."""
+    from pipelines import idea2video
+
+    monkeypatch.setattr(idea2video, "_scene_boundaries", lambda paths: [0.0, 30.0])
+    tracks = [
+        {
+            "character": "Mara",
+            "line": "Look at it. It's the only light left, Priya, the only one.",
+            "scene_index": 0,
+            "audio_url": "https://cdn/scene.mp3",
+            "duration_seconds": 29.5,
+        },
+    ]
+
+    times = _cue_times(
+        idea2video.build_srt_from_dialogue_tracks(tracks, scene_paths=["a"])
+    )
+
+    assert times[-1][1] > 30.0 - idea2video.FADE_OUT_SECONDS

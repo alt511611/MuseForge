@@ -162,3 +162,64 @@ def test_motion_prompt_forbids_mirroring():
     prompt = build_motion_prompt(shot, None)
     assert "never mirror the composition" in prompt
     assert "screen direction" in prompt.lower()
+
+
+# --- who the frame is anchored to ---------------------------------------
+
+
+def _char(name, **kw):
+    from interfaces.character import CharacterInScene
+
+    return CharacterInScene(
+        idx=kw.pop("idx", 0), name=name, static_features=kw.pop("features", "a face"), **kw
+    )
+
+
+def test_a_voice_on_the_radio_does_not_win_the_frames_identity_anchor():
+    """The delivered failure. A controller who exists only on the radio was
+    named first in a shot's description, so the frame was rendered from HER
+    reference portrait -- and the face and costume both changed at that cut,
+    from one woman in a khaki parka to another in a yellow slicker, holding
+    wrong for the rest of the film."""
+    from pipelines.script2video import on_screen_name_matches
+
+    mara, priya = _char("Mara"), _char("Priya", idx=1)
+    shot = (
+        "priya's voice crackles over the radio as mara presses her palm "
+        "flat to the container seal"
+    ).lower()
+
+    matches = on_screen_name_matches(shot, [mara, priya])
+
+    assert [c.name for _, c in matches] == ["Mara"]
+
+
+def test_the_narrative_order_rule_still_decides_between_two_present_people():
+    """The rule this guards was itself a fix -- "Sam looks at Maria" must
+    anchor Sam -- so it has to survive untouched when both are in the room."""
+    from pipelines.script2video import on_screen_name_matches
+
+    sam, maria = _char("Sam"), _char("Maria", idx=1)
+    matches = on_screen_name_matches("sam looks at maria across the table", [sam, maria])
+
+    assert [c.name for _, c in matches] == ["Sam", "Maria"]
+
+
+def test_a_character_both_heard_and_seen_is_still_a_candidate():
+    """Only a name whose EVERY mention is off-screen is disqualified; someone
+    who speaks over the radio and then walks into shot is present."""
+    from pipelines.script2video import on_screen_name_matches
+
+    priya = _char("Priya")
+    shot = "priya's voice on the radio, then priya steps out of the doorway"
+
+    assert [c.name for _, c in on_screen_name_matches(shot, [priya])] == ["Priya"]
+
+
+def test_an_all_off_screen_cast_leaves_the_callers_own_fallbacks_to_decide():
+    """Removing every candidate must not be worse than the old rule: the
+    caller falls back to the locked set plate, or to the first character."""
+    from pipelines.script2video import on_screen_name_matches
+
+    priya = _char("Priya")
+    assert on_screen_name_matches("priya's voice over the intercom", [priya]) == []

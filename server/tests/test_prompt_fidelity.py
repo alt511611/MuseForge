@@ -134,8 +134,7 @@ def test_missing_wardrobe_pins_the_costume_to_the_reference():
     clause = build_character_identity_clause(
         [CharacterInScene(idx=0, name="Marcus", static_features="man, 40s")]
     )
-    assert "EXACT SAME" in clause
-    assert "outfit" in clause
+    assert "EXACT outfit from the reference image" in clause
 
 
 def test_stated_wardrobe_is_named_and_needs_no_pin():

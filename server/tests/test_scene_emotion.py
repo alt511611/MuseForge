@@ -186,7 +186,7 @@ def test_identity_clause_pins_every_on_screen_character():
 
     assert "Ayse (50s woman, grey bun)" in clause
     assert "Elif (20s woman, long dark hair)" in clause
-    assert "IDENTICAL to previous scenes" in clause
+    assert "IDENTICAL in every scene" in clause
     # The referenced character must be identified so the model knows which
     # face the attached image belongs to.
     assert "reference image is Ayse" in clause
@@ -303,3 +303,34 @@ async def test_emotion_and_identity_reach_the_image_model(monkeypatch, tmp_path)
     # BOTH characters pinned, even though only one reference image is sent.
     assert "Ayse (50s woman, grey bun)" in prompt
     assert "Elif (20s woman, long dark hair)" in prompt
+
+
+def test_the_acted_expression_outlives_the_boilerplate_in_a_crowded_prompt():
+    """Measured on a delivered job: the assembled frame prompt runs ~4,700
+    characters against a 3,000 limit, so ~1,400 are dropped from EVERY frame.
+    Four clauses used to share one priority, so the drop fell on whichever
+    read first -- and the scene's own acted expression, which reads last, went
+    in all three scenes while universal boilerplate survived."""
+    from pipelines.script2video import fit_image_prompt
+
+    # The delivered clause sizes, from the job's own log lines.
+    segments = [
+        (0, "X" * 2100),          # style + identity lock + visual_desc + framing
+        (1, "SETTING" + "s" * 400),
+        (3, "LIGHTING" + "l" * 317),
+        (2, "EXPRESSION" + "e" * 366),
+        (4, "FACE" + "f" * 374),
+        (5, "CAST" + "c" * 245),
+        (6, "DIRECTION" + "d" * 279),
+        (7, "QUALITY" + "q" * 255),
+    ]
+
+    prompt = fit_image_prompt(segments, limit=3000)
+
+    assert "EXPRESSION" in prompt
+    assert "SETTING" in prompt
+    # The boilerplate that reads the same in every drama ever made is what
+    # gives way for it.
+    assert "QUALITY" not in prompt
+    assert "DIRECTION" not in prompt
+    assert "CAST" not in prompt
