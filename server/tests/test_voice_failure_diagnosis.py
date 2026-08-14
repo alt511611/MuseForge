@@ -163,7 +163,12 @@ def test_the_http_failure_leads_with_what_the_provider_said():
     )
     exc = httpx.HTTPStatusError("400", request=request, response=response)
 
-    assert MuAPIClient._describe(exc) == "HTTP 400: Invalid voice"
+    described = MuAPIClient._describe(exc)
+
+    # The sentence leads; the path follows it, because "refused at submit" and
+    # "refused after the scene was generated" otherwise read identically.
+    assert described.startswith("HTTP 400: Invalid voice")
+    assert "/api/v1/predictions/u/result" in described
 
 
 def test_a_wordless_failure_still_reports_status_and_path():

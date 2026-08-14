@@ -29,11 +29,12 @@ applies the answer without a deploy.
 import hashlib
 import logging
 import os
+import re
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from interfaces import gender as gender_of
 from interfaces.language import DEFAULT_LANGUAGE, is_default, normalize
-from tools.muapi_client import MuAPIClient
+from tools.muapi_client import MuAPICancelled, MuAPIClient
 
 logger = logging.getLogger(__name__)
 
@@ -109,9 +110,19 @@ class MuAPIVoiceGenerator:
         _LAURA: "Laura - Enthusiast, Quirky Attitude",
     }
 
+    #: The provider's OWN documented voice: the default ``voice_id`` of the
+    #: sibling ``elevenlabs-tts-turbo-2-5`` schema. It is the only value the
+    #: provider has ever published, so it is the one thing in this file that is
+    #: not a guess about its whitelist.
+    _PROVIDER_DEFAULT = "21m00Tcm4TlvDq8ikWAM"  # Rachel
+
     #: The forms a voice value can take, in the order they are tried. Each has
     #: been shipped as "confirmed" at some point and each has silenced a drama.
-    VOICE_FORMS = ("id", "label", "name")
+    #: ``default`` is the last resort and is not a spelling of the cast at all:
+    #: it puts the WHOLE scene in the provider's own published voice. One voice
+    #: for every character is a real loss, and it is still the smaller loss --
+    #: the alternative at that point is a drama that says nothing.
+    VOICE_FORMS = ("id", "label", "name", "default")
 
     #: The form the provider accepted, once anything has succeeded. Class-level
     #: on purpose: which form is right is a fact about the provider, not about
@@ -242,6 +253,8 @@ class MuAPIVoiceGenerator:
             return cls.VOICE_LABELS.get(voice_id, voice_id)
         if form == "name":
             return cls.VOICE_NAMES.get(voice_id, voice_id)
+        if form == "default":
+            return cls._PROVIDER_DEFAULT
         return voice_id
 
     @classmethod
@@ -253,15 +266,30 @@ class MuAPIVoiceGenerator:
 
     @staticmethod
     def _is_voice_rejection(exc: Exception) -> bool:
-        """Whether the provider refused the VOICE, as opposed to anything else.
+        """Whether respelling the voice could plausibly fix this failure.
 
-        Seen as ``{"status": "failed", "error": "Invalid voice parameter: ..."}``
-        on a queued prediction, i.e. not a 422 at submit time. Deliberately
-        narrow: a timeout, a bad key or an outage must not send the job
-        shopping through voice forms, because none of them would help and each
-        costs a round trip.
+        The named case is ``{"status": "failed", "error": "Invalid voice
+        parameter: ..."}`` on a queued prediction. Matching only that word is
+        what made the fix stop working: the same rejection also arrives as a
+        submit-time ``HTTP 400: Internal Error, Please try again later.`` --
+        the provider knowing perfectly well which voice it disliked (it says so
+        on the prediction record) and telling us nothing. Three scenes gave up
+        after one request each and the drama shipped silent, with the two
+        remaining spellings never tried.
+
+        So the test is the STATUS, not the wording: a 4xx is the provider
+        refusing what we sent, and what we sent that it could refuse is the
+        voice. 5xx, timeouts, cancellation and a missing key are none of our
+        business to respell -- they cannot be fixed by another spelling and
+        each attempt is a round trip the user waits through.
         """
-        return "voice" in str(exc or "").lower()
+        if isinstance(exc, MuAPICancelled):
+            return False
+        text = str(exc or "")
+        if "voice" in text.lower():
+            return True
+        status = re.search(r"HTTP (\d{3})", text)
+        return bool(status) and status.group(1).startswith("4")
 
     async def generate_scene_dialogue(
         self,
@@ -309,11 +337,22 @@ class MuAPIVoiceGenerator:
         # rejection OF THE VOICE advances; anything else is raised at once.
         audio_url = ""
         last_exc: Optional[Exception] = None
-        forms = self._forms_to_try()
-        for position, form in enumerate(forms):
+        # Two forms that spell this cast identically are one attempt, not two:
+        # an operator's MUSEFORGE_VOICE_IDS value is passed through untouched
+        # by "id", "label" and "name" alike, so the search used to send the
+        # same rejected body three times before reaching anything new.
+        attempts: List[tuple] = []
+        for form in self._forms_to_try():
+            values = [self._as_form(row["voice_id"], form) for row in lines]
+            if attempts and attempts[-1][1] == values:
+                continue
+            attempts.append((form, values))
+
+        forms = [form for form, _ in attempts]
+        for position, (form, values) in enumerate(attempts):
             payload["dialogue"] = [
-                {"text": row["line"], "voice_id": self._as_form(row["voice_id"], form)}
-                for row in lines
+                {"text": row["line"], "voice_id": value}
+                for row, value in zip(lines, values)
             ]
             try:
                 audio_url = await self.client.generate(
@@ -335,7 +374,16 @@ class MuAPIVoiceGenerator:
                 )
                 continue
             if type(self)._accepted_form != form:
-                logger.info("Provider accepted the %r voice form.", form)
+                if form == "default":
+                    logger.warning(
+                        "Provider rejected every cast voice; the drama is being "
+                        "spoken entirely in the provider's default voice (%s). "
+                        "Run tools/probe_dialogue_voices.py and set "
+                        "MUSEFORGE_VOICE_IDS to restore the cast.",
+                        self._PROVIDER_DEFAULT,
+                    )
+                else:
+                    logger.info("Provider accepted the %r voice form.", form)
                 type(self)._accepted_form = form
             last_exc = None
             break

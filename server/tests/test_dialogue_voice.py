@@ -381,7 +381,48 @@ async def test_every_form_failing_raises_the_provider_s_own_last_words():
     with pytest.raises(RuntimeError, match="Invalid voice parameter"):
         await _generator(provider).generate_scene_dialogue(LINES)
 
+    assert len(provider.seen) == 4
+
+
+@pytest.mark.asyncio
+async def test_an_opaque_4xx_is_still_treated_as_a_refused_voice():
+    """The delivered failure. The provider refuses the voice at submit time
+    and says only "Internal Error, Please try again later." -- no word this
+    file could match. Every scene gave up after one request and the drama
+    shipped silent with two working spellings never tried."""
+    from tools.muapi_voice_generator import MuAPIVoiceGenerator
+
+    class _Coy(_Provider):
+        async def generate(self, endpoint, payload, **kwargs):
+            try:
+                return await super().generate(endpoint, payload, **kwargs)
+            except RuntimeError:
+                raise RuntimeError(
+                    "MuAPI request failed after 1 attempt(s): "
+                    "HTTP 400: Internal Error, Please try again later."
+                ) from None
+
+    provider = _Coy(lambda v: v in MuAPIVoiceGenerator.VOICE_NAMES.values())
+    tracks = await _generator(provider).generate_scene_dialogue(LINES)
+
+    assert tracks[0]["audio_url"] == "https://cdn/scene.mp3"
     assert len(provider.seen) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_cast_no_provider_accepts_still_speaks_in_its_default_voice():
+    """One voice for every character is a loss; a drama that says nothing at
+    all is a bigger one. The provider's own published default is the last
+    thing tried before giving up."""
+    from tools.muapi_voice_generator import MuAPIVoiceGenerator
+
+    default = MuAPIVoiceGenerator._PROVIDER_DEFAULT
+    provider = _Provider(lambda v: v == default)
+
+    tracks = await _generator(provider).generate_scene_dialogue(LINES)
+
+    assert tracks[0]["audio_url"] == "https://cdn/scene.mp3"
+    assert provider.seen[-1] == [default]
 
 
 @pytest.mark.asyncio
@@ -398,4 +439,8 @@ async def test_an_operator_override_is_sent_exactly_as_written(monkeypatch):
     with pytest.raises(RuntimeError):
         await generator.generate_scene_dialogue(LINES)
 
-    assert {v for seen in provider.seen for v in seen} == {"custom-voice-7"}
+    # Sent once as written -- not three times, because "id", "label" and
+    # "name" all spell an unknown value the same way -- and then only the
+    # provider's own default, which is the last resort before silence.
+    sent = [v for seen in provider.seen for v in seen]
+    assert sent == ["custom-voice-7", MuAPIVoiceGenerator._PROVIDER_DEFAULT]
