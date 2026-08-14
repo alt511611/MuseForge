@@ -1,37 +1,63 @@
 """Fixed per-drama second budget, distributed across scenes by tension.
 
-The provider bills per SECOND of generated video; the product sells CREDITS
-per scene. Left unlinked, those two units drift apart: the storyboard agent
-chose each scene's length independently, so an identical 1-credit charge
-bought anywhere from 5 to 9 seconds -- a 24-point swing in gross margin that
-the customer, not the operator, decided.
+The product sells CREDITS per scene. Left unlinked from what a scene actually
+is, the two units drift apart: the storyboard agent chose each scene's length
+independently, so an identical 1-credit charge bought anywhere from 5 to 9
+seconds of screen time -- a swing the customer, not the operator, decided.
 
 This module ties them together. A drama gets a total budget of
 ``SECONDS_PER_CREDIT x scenes`` seconds, fixed and known BEFORE any credit is
 charged. Dramatic tension then decides how that total is *distributed* -- a
 climax still runs long and a quiet setup still runs short -- but it can no
-longer change the total. Cost becomes deterministic at charge time, so margin
-is flat regardless of what the story does, while the pacing benefit survives.
+longer change the total. The delivered product is deterministic at charge
+time, while the pacing benefit survives.
+
+WHAT A SECOND COSTS (this is the whole reason the numbers below are what they
+are). The video endpoint this pipeline runs on --
+``kling-v3.0-standard/pro-image-to-video`` via MuAPI -- is billed **per
+generation, not per second**: $0.72 for one clip, whether that clip is 3
+seconds or 15. So the unit we buy is a SCENE, and seconds within a scene are
+free until the provider's 15-second ceiling. A budget set below that ceiling
+is not saving money; it is declining video we have already paid for.
+
+That is a fact about one price list, not a law, and it points the opposite way
+from the per-second endpoints in the same family (``*-omni-*``, $0.084/sec)
+where every extra second is real money. If this pipeline is ever pointed at a
+per-second endpoint, SECONDS_PER_CREDIT stops being free and has to come back
+down -- see tests/test_pricing_coherence.py, which pins the cost model these
+constants assume.
 """
 
 from typing import List, Sequence
 
 #: Seconds of finished video one credit buys.
 #:
-#: Set to match the average scene length the previous free-choice behaviour
-#: actually produced (measured: 39s across 5 scenes = 7.8s), so moving to a
-#: budget is revenue-neutral -- customers get the same video for the same
-#: credits, they just get a promise the system can keep. Lowering this is a
-#: real price rise per second of output; raising it is a discount. It is a
-#: business number, deliberately a single constant.
-SECONDS_PER_CREDIT = 8.0
+#: Was 8.0, matching the average the previous free-choice behaviour happened
+#: to produce. Under per-generation billing that average was leaving a third
+#: of each paid clip on the table: 8 seconds and 12 seconds cost the operator
+#: the same $0.72. Raised to 10 -- which, with the ceiling below, is 25% more
+#: film for the customer at IDENTICAL cost and identical margin. Not a
+#: discount: nothing about what we pay changes.
+#:
+#: Deliberately short of the 15-second ceiling. Pushing the average to the cap
+#: would pin the top scenes there (see the ceiling note) and flatten the very
+#: tension spread this module exists to express, and a 15-second single Kling
+#: shot is where drift and morphing start to show.
+SECONDS_PER_CREDIT = 10.0
 
 #: Floor and ceiling for any single scene, whatever the tension says. The
 #: floor keeps a beat from becoming an unreadable flash (and keeps the fixed
 #: per-scene cost -- frame + storyboard call -- from dominating); the ceiling
 #: stops one scene from eating a short drama's entire budget.
-MIN_SCENE_SECONDS = 4.0
-MAX_SCENE_SECONDS = 12.0
+#:
+#: The ceiling is the provider's own limit: Kling v3 accepts 3-15 (see
+#: tools/muapi_video_generator.clamp_duration), and asking for more than it
+#: accepts buys nothing. The floor rose with the budget so that the spread
+#: keeps its shape rather than the extra seconds all piling onto the climax --
+#: and a 6-second floor is what lets a two-line scene hold its captions
+#: without them being squeezed (pipelines/idea2video._lay_out_scene_captions).
+MIN_SCENE_SECONDS = 6.0
+MAX_SCENE_SECONDS = 15.0
 
 #: Tension assumed for a scene that does not declare one, so legacy scripts
 #: distribute evenly instead of collapsing to the floor.
