@@ -43,6 +43,28 @@ class SceneRegenerationUnavailable(Exception):
     """
 
 
+def _make_voice_generator(api_key: str, demo: bool, working_dir: str = ""):
+    """Pick the dialogue backend. Defaults to MuAPI, unchanged.
+
+    ``MUSEFORGE_VOICE_PROVIDER=elevenlabs`` goes to ElevenLabs directly, which
+    exists because MuAPI's wrapper of that same model rejects the voices its
+    own model page publishes -- delivered logs show its id, its published
+    label and its bare name all refused for one catalogue voice. Going direct
+    also returns per-line timings, so captions on that path are measured
+    rather than estimated. Lazy-imported so a deployment that never sets the
+    variable does not import httpx clients it will not use.
+    """
+    if os.environ.get("MUSEFORGE_VOICE_PROVIDER", "muapi").strip().lower() == "elevenlabs":
+        from tools.elevenlabs_voice_generator import ElevenLabsVoiceGenerator
+
+        return ElevenLabsVoiceGenerator(
+            os.environ.get("ELEVENLABS_API_KEY", ""),
+            demo=demo,
+            working_dir=working_dir,
+        )
+    return MuAPIVoiceGenerator(api_key, demo=demo)
+
+
 def _make_music_generator(api_key: str, demo: bool):
     """Pick the music-generation backend. Defaults to MuAPI unchanged.
     MUSEFORGE_MUSIC_PROVIDER=falai opts into fal.ai Beatoven
@@ -896,14 +918,29 @@ def build_srt_from_dialogue_tracks(
             or _estimate_line_duration_seconds(line)
         )
         row: Dict[str, Any] = {"text": text, "duration": duration}
+        row["voiced"] = bool(str(track.get("audio_url") or "").strip())
 
         if "start_seconds" in track:
-            row["start"] = float(track["start_seconds"])
-            row["end"] = float(
-                track["end_seconds"]
-                if "end_seconds" in track
-                else row["start"] + duration
+            start = float(track["start_seconds"])
+            end = float(
+                track["end_seconds"] if "end_seconds" in track else start + duration
             )
+            # Explicit timings are SCENE-RELATIVE when the track names a scene,
+            # and absolute when it does not. A provider that measures its own
+            # speech (ElevenLabs returns voice_segments per line) measures it
+            # from the start of the audio it just made -- which is this scene's
+            # audio, laid down at this scene's offset by the mixer. Read as
+            # absolute, every measured cue in the drama would pile onto the
+            # opening shot. Callers that time the whole master themselves pass
+            # no scene_index and are untouched.
+            if "scene_index" in track:
+                bounds_index = int(track["scene_index"])
+                if 0 <= bounds_index <= len(bounds) - 2:
+                    offset = bounds[bounds_index]
+                    start += offset
+                    end += offset
+            row["start"] = start
+            row["end"] = end
         else:
             scene_index = int(track.get("scene_index", 0))
             row["scene_index"] = scene_index
@@ -913,7 +950,23 @@ def build_srt_from_dialogue_tracks(
     for scene_index, positions in by_scene.items():
         if 0 <= scene_index <= last_scene:
             scene_start = bounds[scene_index]
-            span = max(0.0, bounds[scene_index + 1] - scene_start)
+            scene_end = bounds[scene_index + 1]
+            # The master fades to black over its last FADE_OUT_SECONDS (see
+            # finish_master), and a caption burned underneath fades with it --
+            # so a drama that has no voices, and whose closing line therefore
+            # exists ONLY as text, ends on its most important sentence going
+            # dark as it is being read. Measured on a delivered 30.2s drama:
+            # the picture drops from 64 to 9 grey levels over the last 0.75s
+            # with the final cue still up.
+            #
+            # Only for a scene with no recording: when the line is actually
+            # spoken, the audio is the timing that matters and pulling the
+            # caption off it to dodge the fade would desync the two.
+            if scene_index == last_scene and not any(
+                rows[at].get("voiced") for at in positions
+            ):
+                scene_end = max(scene_start, scene_end - FADE_OUT_SECONDS)
+            span = max(0.0, scene_end - scene_start)
         else:
             scene_start, span = 0.0, 0.0
         placed = _lay_out_scene_captions(
@@ -2657,7 +2710,11 @@ class Idea2VideoPipeline:
                 "Spoken dialogue is switched off on this server, so the video "
                 "was rendered without voices."
             )
-        voice_gen = MuAPIVoiceGenerator(self.api_key, demo=self.demo) if dialogue_requested else None
+        voice_gen = (
+            _make_voice_generator(self.api_key, self.demo, working_dir)
+            if dialogue_requested
+            else None
+        )
         if voice_gen is not None:
             # Cast the whole ensemble up front, gender-matched to each
             # character's description -- otherwise the per-line hash fallback
