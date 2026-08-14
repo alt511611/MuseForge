@@ -97,8 +97,11 @@ const ANNUAL_DISCOUNT_PERCENT = 10;
 
 /** What one credit buys, in seconds of finished film. Mirrors
  *  server/interfaces/second_budget.SECONDS_PER_CREDIT — the single number that
- *  makes our credit comparable to a competitor's metered one. */
-const SECONDS_PER_CREDIT = 8;
+ *  makes our credit comparable to a competitor's metered one. Raised 8 → 10
+ *  when we learned the video provider bills per clip rather than per second,
+ *  so the extra seconds cost nothing; test_pricing_coherence pins the two
+ *  sides together. */
+const SECONDS_PER_CREDIT = 10;
 
 /** Rate shown on the card. Annual is quoted PER MONTH because that is the
  *  number buyers compare across products; the yearly total is spelled out

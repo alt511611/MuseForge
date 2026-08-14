@@ -773,6 +773,14 @@ def _estimate_line_duration_seconds(line: str) -> float:
 
 
 def _probe_audio_duration_seconds(audio_url: str) -> Optional[float]:
+    # A caption-only row has no recording by definition, and asking moviepy to
+    # open "" still spawns an FFMPEG_AudioReader that dies before it has a
+    # `proc` to close -- which is the `AttributeError: 'FFMPEG_AudioReader'
+    # object has no attribute 'proc'` traceback that fills the job log of every
+    # drama whose voice provider failed, once per line, looking like the crash
+    # that silenced it rather than a swallowed no-op.
+    if not (audio_url or "").strip():
+        return None
     try:
         from moviepy import AudioFileClip
 
@@ -786,8 +794,19 @@ def _probe_audio_duration_seconds(audio_url: str) -> Optional[float]:
         return None
 
 
-def _scene_start_offsets(scene_paths: Optional[List[str]]) -> List[float]:
-    """Absolute start time of each scene in the concatenated drama (seconds)."""
+#: Breath between two spoken lines, so consecutive captions do not swap on the
+#: same frame.
+CAPTION_GAP_SECONDS = 0.2
+
+
+def _scene_boundaries(scene_paths: Optional[List[str]]) -> List[float]:
+    """Absolute start time of each scene, plus the end of the last one.
+
+    One entry longer than the scene list on purpose: a line belonging to the
+    final scene needs somewhere to stop just as much as the others do. A scene
+    whose duration could not be probed contributes 0, which collapses its span
+    to nothing -- read downstream as "unknown", never as "no room".
+    """
     starts: List[float] = []
     elapsed = 0.0
     for path in scene_paths or []:
@@ -808,7 +827,39 @@ def _scene_start_offsets(scene_paths: Optional[List[str]]) -> List[float]:
                 except Exception:
                     pass
         elapsed += duration
+    starts.append(elapsed)
     return starts
+
+
+def _lay_out_scene_captions(
+    durations: List[float], span: float
+) -> List[Tuple[float, float]]:
+    """Sequential (start, end) pairs for one scene's lines, inside ``span``.
+
+    Without a real voice track the durations are guesses from the word count,
+    and a guess that runs long used to run straight past the cut: the last
+    line of a scene stayed on screen over the first line of the next, so the
+    drama showed two cues at once -- twice with the SAME speaker named on both
+    rows, which reads as a broken renderer rather than a conversation. Since
+    the picture is the thing that cannot be stretched, the guesses are what
+    give: when a scene's lines do not fit its shot they are scaled down to it
+    together, keeping their proportions and their order.
+
+    ``span`` of 0 means the scene's length is unknown (no paths passed, or a
+    clip that would not probe), and then nothing is scaled -- an unknown
+    boundary is not a boundary to squeeze against.
+    """
+    gaps = CAPTION_GAP_SECONDS * max(0, len(durations) - 1)
+    needed = sum(durations) + gaps
+    scale = span / needed if span > 0 and needed > span else 1.0
+
+    placed: List[Tuple[float, float]] = []
+    cursor = 0.0
+    for duration in durations:
+        end = cursor + duration * scale
+        placed.append((cursor, end))
+        cursor = end + CAPTION_GAP_SECONDS * scale
+    return placed
 
 
 def build_srt_from_dialogue_tracks(
@@ -818,14 +869,20 @@ def build_srt_from_dialogue_tracks(
     """Build an SRT document from dialogue tracks.
 
     Timing mirrors ``add_background_music``: lines within a scene are laid
-    out sequentially from that scene's start, with a short gap between lines.
-    Tracks may optionally carry explicit ``start_seconds`` / ``end_seconds``
-    (or ``duration_seconds``) for tests / pre-timed callers.
+    out sequentially from that scene's start, with a short gap between lines,
+    and the whole scene's worth of captions is kept inside that scene's shot
+    (see ``_lay_out_scene_captions``). Tracks may optionally carry explicit
+    ``start_seconds`` / ``end_seconds`` (or ``duration_seconds``), which are
+    honoured as given -- a caller that timed its own cues knows more than any
+    estimate here.
     """
-    scene_starts = _scene_start_offsets(scene_paths)
-    line_offsets: Dict[int, float] = {}
-    blocks: List[str] = []
-    index = 0
+    bounds = _scene_boundaries(scene_paths)
+    last_scene = len(bounds) - 2  # bounds carries the final scene's end too
+
+    # Two passes: a scene cannot be fitted to its shot until every line in it
+    # is known, and the lines arrive one at a time.
+    rows: List[Dict[str, Any]] = []
+    by_scene: Dict[int, List[int]] = {}
 
     for track in dialogue_tracks or []:
         line = str(track.get("line") or "").strip()
@@ -833,42 +890,48 @@ def build_srt_from_dialogue_tracks(
             continue
         character = str(track.get("character") or "").strip()
         text = f"{character}: {line}" if character else line
+        duration = float(
+            track.get("duration_seconds")
+            or _probe_audio_duration_seconds(str(track.get("audio_url") or ""))
+            or _estimate_line_duration_seconds(line)
+        )
+        row: Dict[str, Any] = {"text": text, "duration": duration}
 
         if "start_seconds" in track:
-            start = float(track["start_seconds"])
-            if "end_seconds" in track:
-                end = float(track["end_seconds"])
-            else:
-                duration = float(
-                    track.get("duration_seconds")
-                    or _probe_audio_duration_seconds(str(track.get("audio_url") or ""))
-                    or _estimate_line_duration_seconds(line)
-                )
-                end = start + duration
+            row["start"] = float(track["start_seconds"])
+            row["end"] = float(
+                track["end_seconds"]
+                if "end_seconds" in track
+                else row["start"] + duration
+            )
         else:
             scene_index = int(track.get("scene_index", 0))
-            scene_start = (
-                scene_starts[scene_index]
-                if 0 <= scene_index < len(scene_starts)
-                else 0.0
-            )
-            local_start = line_offsets.get(scene_index, 0.0)
-            start = scene_start + local_start
-            duration = float(
-                track.get("duration_seconds")
-                or _probe_audio_duration_seconds(str(track.get("audio_url") or ""))
-                or _estimate_line_duration_seconds(line)
-            )
-            end = start + duration
-            line_offsets[scene_index] = local_start + duration + 0.2
+            row["scene_index"] = scene_index
+            by_scene.setdefault(scene_index, []).append(len(rows))
+        rows.append(row)
 
+    for scene_index, positions in by_scene.items():
+        if 0 <= scene_index <= last_scene:
+            scene_start = bounds[scene_index]
+            span = max(0.0, bounds[scene_index + 1] - scene_start)
+        else:
+            scene_start, span = 0.0, 0.0
+        placed = _lay_out_scene_captions(
+            [rows[at]["duration"] for at in positions], span
+        )
+        for at, (local_start, local_end) in zip(positions, placed):
+            rows[at]["start"] = scene_start + local_start
+            rows[at]["end"] = scene_start + local_end
+
+    blocks: List[str] = []
+    for index, row in enumerate(rows, 1):
+        start = row["start"]
+        end = row["end"]
         if end <= start:
             end = start + 1.0
-
-        index += 1
         # SRT uses blank lines between cues; escape nothing special beyond
         # stripping carriage returns so a single cue stays one logical block.
-        safe_text = text.replace("\r\n", "\n").replace("\r", "\n")
+        safe_text = str(row["text"]).replace("\r\n", "\n").replace("\r", "\n")
         blocks.append(
             f"{index}\n"
             f"{_format_srt_timestamp(start)} --> {_format_srt_timestamp(end)}\n"

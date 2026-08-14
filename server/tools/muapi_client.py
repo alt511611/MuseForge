@@ -185,16 +185,17 @@ class MuAPIClient:
         response = getattr(exc, "response", None)
         if response is None:
             return f"{exc}{cls._response_detail(exc)}"
-        # When the provider explained itself, its sentence IS the failure and
-        # the URL is not: the path of a poll is the same for every endpoint,
-        # and it carries a prediction id nobody can look up. Spending the
-        # message budget on it is what left the user with a bare
-        # "Invalid voice parameter:" and no idea which value was invalid.
-        message = cls._provider_message(exc)
-        if message:
-            return f"HTTP {response.status_code}: {message[:1000]}"
+        # When the provider explained itself, its sentence IS the failure, so
+        # it leads. The path follows it rather than crowding it out: a voice
+        # refused at submit and a voice refused on the finished prediction read
+        # identically ("HTTP 400: Internal Error, Please try again later.") and
+        # mean different things -- one spent nothing, the other spent a scene.
         request = getattr(response, "request", None)
         where = getattr(getattr(request, "url", None), "path", "") or ""
+        message = cls._provider_message(exc)
+        if message:
+            tail = f" (on {where})" if where else ""
+            return f"HTTP {response.status_code}: {message[:1000]}{tail}"
         return f"HTTP {response.status_code} on {where}{cls._response_detail(exc)}"
 
     @staticmethod

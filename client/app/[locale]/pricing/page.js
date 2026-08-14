@@ -22,7 +22,7 @@ const FAQ_KEYS = [1, 2, 3, 4];
 
 const EN_TITLE = "Pricing — Plans & Credits";
 const EN_DESCRIPTION =
-  "MuseForge pricing: start free with demo mode, then scale to Creator (from $53/mo) or Pro (from $116/mo) — 10% off when billed yearly. One credit is 8 seconds of finished film. Buy extra credits any time, cancel whenever you like.";
+  "MuseForge pricing: start free with demo mode, then scale to Creator (from $53/mo) or Pro (from $116/mo) — 10% off when billed yearly. One credit is 10 seconds of finished film. Buy extra credits any time, cancel whenever you like.";
 
 export function generateMetadata({ params: { locale } }) {
   if (!isLocale(locale)) return {};

@@ -5,8 +5,13 @@ Stripe-facing constants here, the pricing page the customer reads, and the
 Stripe dashboard itself (outside the repo). These tests pin the two that ARE
 in the repo, plus the structural rules a ladder has to satisfy to make sense.
 
-The margin figures use the provider's real, linear rate: $0.11 per generated
-second, and one credit buys SECONDS_PER_CREDIT seconds.
+The margin figures use the provider's real rate, which is NOT linear in
+seconds: ``kling-v3.0-standard/pro-image-to-video`` on MuAPI bills $0.72 per
+GENERATION for any clip from 3 to 15 seconds. The model here used to multiply
+$0.11 by SECONDS_PER_CREDIT, which made every extra second look like a cost it
+is not -- it would have reported a margin collapse for a change that does not
+move the invoice by a cent, and talked the operator out of handing customers
+video they had already paid for.
 """
 
 import os
@@ -21,9 +26,11 @@ os.environ.setdefault("MUAPI_KEY", "test-key-not-real")
 from interfaces.second_budget import SECONDS_PER_CREDIT  # noqa: E402
 from stripe_integration import CREDIT_PACKAGES, PLAN_CREDITS  # noqa: E402
 
-KLING_PER_SECOND = 0.11
+#: Flat, per clip, any duration the endpoint accepts. Verify against MuAPI's
+#: pricing table before trusting a margin figure computed from it.
+KLING_PER_GENERATION = 0.72
 FIXED_PER_SCENE = 0.067  # frame + storyboard call + amortised portraits
-CREDIT_COST = SECONDS_PER_CREDIT * KLING_PER_SECOND + FIXED_PER_SCENE
+CREDIT_COST = KLING_PER_GENERATION + FIXED_PER_SCENE
 
 #: What the pricing page shows. Kept here so a change on one side without the
 #: other fails loudly instead of shipping a page that lies about the product.
@@ -175,6 +182,17 @@ def test_page_states_what_a_credit_buys():
         "the pricing page must state the same seconds-per-credit the pipeline uses"
     )
 
+    # The same figure is sold again in the search snippet, which no test
+    # covered -- so the page could be right while Google quoted the old
+    # number to everyone who had not clicked yet.
+    path = os.path.join(
+        os.path.dirname(__file__), "..", "..",
+        "client", "app", "[locale]", "pricing", "page.js",
+    )
+    with open(path, encoding="utf-8") as f:
+        meta = f.read()
+    assert f"One credit is {int(SECONDS_PER_CREDIT)} seconds" in meta
+
 
 def test_annual_totals_in_env_example_match_the_discount():
     """Stripe's annual Prices are created by hand from these numbers."""
@@ -273,6 +291,77 @@ def test_env_example_documents_the_same_numbers():
 
 
 # --- what a credit actually buys ----------------------------------------
+
+
+def test_plan_feature_strings_claim_the_right_running_time():
+    """"Up to 16 scenes (~2 min)" is SECONDS_PER_CREDIT stated in another
+    unit, in eight languages, and nothing tied it to the constant -- so the
+    raise to 10s left every plan card understating the product by a minute."""
+    from api import PLAN_MAX_SCENES
+
+    path = os.path.join(
+        os.path.dirname(__file__), "..", "..", "client", "lib", "i18n", "t-a.js"
+    )
+    with open(path, encoding="utf-8") as f:
+        strings = f.read()
+
+    for plan, scenes in PLAN_MAX_SCENES.items():
+        expected = round(scenes * SECONDS_PER_CREDIT / 60)
+        for quoted in re.findall(
+            rf"plan_{plan}_features:\s*\"[^\"]*?\(~(\d+) (?:min|dk)\)", strings
+        ):
+            assert int(quoted) == expected, (
+                f"{plan}: card says ~{quoted} min, "
+                f"{scenes} scenes x {SECONDS_PER_CREDIT}s is ~{expected}"
+            )
+
+
+def test_the_cost_model_matches_the_endpoint_the_pipeline_calls():
+    """Every margin above assumes the provider bills per CLIP. The same model
+    family also ships per-second endpoints (``*-omni-*``, $0.084/sec) that
+    would make SECONDS_PER_CREDIT a cost driver again -- and the switch is one
+    environment variable, with nothing else in the code to notice it. Fail
+    here rather than quietly reporting a margin that stopped being true."""
+    from tools.muapi_video_generator import PRO_ENDPOINT, STANDARD_ENDPOINT
+
+    for endpoint in (STANDARD_ENDPOINT, PRO_ENDPOINT):
+        assert "omni" not in endpoint, (
+            f"{endpoint} is billed per second; CREDIT_COST here is per "
+            "generation, and SECONDS_PER_CREDIT is no longer free"
+        )
+
+
+def test_raising_the_second_budget_does_not_move_the_margin():
+    """The property the 8 -> 10 raise rests on: under per-clip billing, what a
+    credit COSTS is independent of what a credit BUYS. If this ever couples,
+    the seconds handed out have to be re-argued as a discount."""
+    assert CREDIT_COST == KLING_PER_GENERATION + FIXED_PER_SCENE
+    margins = {plan: _margin(PLAN_PRICES[plan], PLAN_CREDITS[plan]) for plan in PLAN_CREDITS}
+
+    for budget in (8.0, 10.0, 15.0):
+        cost = KLING_PER_GENERATION + FIXED_PER_SCENE  # no `budget` term
+        assert cost == CREDIT_COST, budget
+    for plan, margin in margins.items():
+        assert MIN_MARGIN <= margin <= MAX_MARGIN, f"{plan}: {margin:.1f}%"
+
+
+def test_the_budget_never_asks_for_a_clip_the_provider_will_not_make():
+    """MAX_SCENE_SECONDS now sits exactly on the provider's ceiling. One step
+    past it and clamp_duration silently trims the scene -- delivering less
+    film than the customer was quoted, with nothing in the logs."""
+    from interfaces.second_budget import (
+        MAX_SCENE_SECONDS,
+        MIN_SCENE_SECONDS,
+        distribute_budget,
+    )
+    from tools.muapi_video_generator import clamp_duration
+
+    assert clamp_duration(MIN_SCENE_SECONDS) == MIN_SCENE_SECONDS
+    assert clamp_duration(MAX_SCENE_SECONDS) == MAX_SCENE_SECONDS
+
+    for tensions in ([10, 1, 1, 1, 10], [5] * 5, [1, 3, 6, 9, 10], [10], [1, 10]):
+        durations = distribute_budget(tensions)
+        assert [clamp_duration(d) for d in durations] == [int(d) for d in durations]
 
 
 def test_a_credit_buys_enough_video_for_tension_to_matter():

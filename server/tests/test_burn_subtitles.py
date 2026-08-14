@@ -51,6 +51,108 @@ def test_build_srt_skips_empty_lines():
     assert "1\n00:00:01,000 --> 00:00:02,000\nB: Hello\n" in srt
 
 
+def _cue_times(srt):
+    """(start, end) of every cue, in seconds."""
+
+    def _seconds(stamp):
+        hours, minutes, rest = stamp.split(":")
+        secs, millis = rest.split(",")
+        return int(hours) * 3600 + int(minutes) * 60 + int(secs) + int(millis) / 1000
+
+    times = []
+    for row in srt.splitlines():
+        if "-->" in row:
+            start, end = (part.strip() for part in row.split("-->"))
+            times.append((_seconds(start), _seconds(end)))
+    return times
+
+
+def test_a_caption_row_is_not_probed_for_audio_it_never_had():
+    """Opening "" as an audio clip left a moviepy reader to die mid-init, and
+    its traceback -- one per line, per scene -- was the loudest thing in the
+    log of a drama whose voice provider had failed."""
+    from pipelines.idea2video import _probe_audio_duration_seconds
+
+    assert _probe_audio_duration_seconds("") is None
+    assert _probe_audio_duration_seconds("   ") is None
+
+
+def test_captions_never_overrun_into_the_next_scene(monkeypatch):
+    """The delivered failure: the estimated duration of a scene's last line
+    ran past the cut, so two cues were on screen at once -- once with the same
+    speaker named on both rows, which reads as a broken renderer."""
+    from pipelines import idea2video
+
+    # Two 4-second shots holding lines that "want" far longer than that.
+    monkeypatch.setattr(
+        idea2video, "_scene_boundaries", lambda paths: [0.0, 4.0, 8.0]
+    )
+    tracks = [
+        {"character": "Mira", "line": "Tomas — the lights—", "scene_index": 0},
+        {
+            "character": "Tomas",
+            "line": "Voss, walk away from it. Now, before it opens.",
+            "scene_index": 0,
+        },
+        {"character": "Tomas", "line": "Get away from it! Voss, get away!", "scene_index": 1},
+    ]
+
+    times = _cue_times(
+        idea2video.build_srt_from_dialogue_tracks(tracks, scene_paths=["a", "b"])
+    )
+
+    assert len(times) == 3
+    for (_, end), (next_start, _) in zip(times, times[1:]):
+        assert end <= next_start
+    assert times[1][1] <= 4.0  # scene 0's last word is gone before the cut
+    assert times[2][0] >= 4.0
+    # Squeezed, not truncated: every line still gets a share of its shot.
+    assert times[0][1] > times[0][0]
+
+
+def test_captions_keep_their_estimated_length_when_the_scene_fits(monkeypatch):
+    """Scaling is for lines that do not fit. A shot with room to spare must
+    time its captions exactly as before."""
+    from pipelines import idea2video
+
+    monkeypatch.setattr(idea2video, "_scene_boundaries", lambda paths: [0.0, 60.0])
+
+    times = _cue_times(
+        idea2video.build_srt_from_dialogue_tracks(
+            [
+                {"character": "Mara", "line": "It's warm.", "scene_index": 0},
+                {"character": "Mara", "line": "Something is alive.", "scene_index": 0},
+            ],
+            scene_paths=["a"],
+        )
+    )
+
+    assert times[0] == (0.0, 1.2)  # the estimator's floor, untouched
+    assert times[1][0] == pytest.approx(1.4)  # + the 0.2s breath
+
+
+def test_an_unprobeable_scene_is_not_squeezed_to_nothing(monkeypatch):
+    """A clip that would not open reports a 0-length span. Unknown is not the
+    same as "no room" -- treating it as room would collapse every caption in
+    that scene onto one frame."""
+    from pipelines import idea2video
+
+    monkeypatch.setattr(idea2video, "_scene_boundaries", lambda paths: [0.0, 0.0])
+
+    times = _cue_times(
+        idea2video.build_srt_from_dialogue_tracks(
+            [
+                {"character": "Mara", "line": "It's warm.", "scene_index": 0},
+                {"character": "Mara", "line": "Something is alive.", "scene_index": 0},
+            ],
+            scene_paths=["a"],
+        )
+    )
+
+    assert times[0][1] == 1.2
+    assert times[1][0] > times[0][1]
+
+
 @pytest.mark.asyncio
 async def test_burn_subtitles_fails_open_when_ffmpeg_fails(tmp_path, monkeypatch):
     from pipelines import idea2video
