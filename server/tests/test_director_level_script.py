@@ -453,3 +453,106 @@ def _async_return(value):
         return value
 
     return _inner
+
+
+def test_the_schema_the_model_is_shown_is_itself_valid_json():
+    """The prompt ends with "Respond ONLY with valid JSON matching this schema"
+    and then shows one. If that example does not parse, the instruction is
+    asking the model to match something impossible -- and a model that mirrors
+    the malformed part returns a script the pipeline then refuses to read,
+    which surfaces to the user as "the script came back in a form we could not
+    read" with no clue as to whose fault it was.
+
+    Not hypothetical: writing an empty-string default as an escaped pair
+    renders into the prompt as three consecutive quote characters. One field
+    written that way sat deep in the example and was tolerated for months; a
+    second one put the break on its SIXTH line, where a model establishes the
+    shape of its whole answer.
+    """
+    import json
+    import re
+
+    from agents.screenwriter import ScreenwriterAgent
+
+    block = re.search(r"\{[\s\S]*\}", ScreenwriterAgent.SYSTEM_PROMPT)
+    assert block, "the prompt no longer shows a schema at all"
+    json.loads(block.group())
+
+
+# --- reading what the model actually wrote ------------------------------
+#
+# A delivered failure, in full:
+#
+#   JSONDecodeError: Expecting property name enclosed in double quotes:
+#   line 31 column 5 | stop_reason=end_turn
+#
+# `end_turn` means the model finished. The script was complete and correct,
+# and the job was failed -- and the user asked to try again -- over one stray
+# comma two thirds of the way down it.
+
+
+def _agent():
+    from agents.screenwriter import ScreenwriterAgent
+
+    return ScreenwriterAgent(api_key="")
+
+
+def test_a_trailing_comma_no_longer_costs_a_whole_script():
+    """The exact shape of the production failure."""
+    body = """```json
+    {
+      "title": "The Container That Hummed",
+      "characters": [
+        {"name": "Deniz", "role": "protagonist",}
+      ],
+      "scenes": [{"action": "she breaks the seal", "tension": 9},]
+    }
+    ```"""
+    data = _agent()._parse_json(body)
+    assert data["title"] == "The Container That Hummed"
+    assert data["characters"][0]["name"] == "Deniz"
+    assert len(data["scenes"]) == 1
+
+
+def test_a_note_the_model_left_itself_is_not_fatal():
+    body = """{
+      "title": "Gece Vardiyasi",  // en iyi baslik bu
+      /* sahneler asagida */
+      "scenes": []
+    }"""
+    assert _agent()._parse_json(body)["title"] == "Gece Vardiyasi"
+
+
+def test_dialogue_that_looks_like_broken_json_is_left_alone():
+    """A line of dialogue may contain a comma before a brace, or a double
+    slash. A regex cannot tell that from a trailing comma; the scanner can,
+    and getting this wrong would silently rewrite what a character says."""
+    body = """{
+      "title": "Yol",
+      "logline": "He said, } and then // nothing",
+      "scenes": []
+    }"""
+    data = _agent()._parse_json(body)
+    assert data["logline"] == "He said, } and then // nothing"
+
+
+def test_clean_json_is_not_touched():
+    body = '{"title": "A", "scenes": [{"action": "b"}]}'
+    assert _agent()._parse_json(body)["scenes"][0]["action"] == "b"
+
+
+def test_a_truncated_script_still_fails():
+    """The repair must not become a parser. A cut-off answer has to fail
+    loudly -- 'fixing' it into something plausible would render half a film
+    and charge for it."""
+    import pytest as _pytest
+
+    with _pytest.raises(Exception):
+        _agent()._parse_json('{"title": "A", "scenes": [{"action": "b"')
+
+
+def test_no_json_at_all_is_still_an_error():
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        _agent()._parse_json("I cannot write that script.")

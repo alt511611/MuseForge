@@ -15,6 +15,69 @@ from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
 logger = logging.getLogger(__name__)
 
 
+def _repair_json(text: str) -> str:
+    """Remove the two things models put in JSON that JSON does not allow.
+
+    Trailing commas before a closing brace or bracket, and `//` or `/* */`
+    comments. Nothing else: this is a repair, not a parser, and a repair that
+    starts guessing at missing quotes or unbalanced braces would eventually
+    "fix" a truncated script into a plausible-looking one and render it.
+
+    Written as a scanner rather than a regex because both edits are only valid
+    OUTSIDE string values, and a line of dialogue is perfectly entitled to
+    contain ``, }`` or ``//``. A regex cannot tell those apart; this can.
+    """
+    out: List[str] = []
+    in_string = False
+    escaped = False
+    index = 0
+    length = len(text)
+
+    while index < length:
+        char = text[index]
+
+        if in_string:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+
+        if char == '"':
+            in_string = True
+            out.append(char)
+            index += 1
+            continue
+
+        if char == "/" and index + 1 < length:
+            nxt = text[index + 1]
+            if nxt == "/":
+                while index < length and text[index] != "\n":
+                    index += 1
+                continue
+            if nxt == "*":
+                end = text.find("*/", index + 2)
+                index = length if end == -1 else end + 2
+                continue
+
+        if char in "}]":
+            # Walk back over whitespace to find the previous meaningful
+            # character; if it is a comma, it was trailing.
+            back = len(out) - 1
+            while back >= 0 and out[back].isspace():
+                back -= 1
+            if back >= 0 and out[back] == ",":
+                del out[back]
+        out.append(char)
+        index += 1
+
+    return "".join(out)
+
+
 class ScriptGenerationFailed(Exception):
     """No LLM provider could write a script for the user's idea.
 
@@ -136,7 +199,7 @@ Respond ONLY with valid JSON matching this schema:
   "logline": "string",
   "theme": "the controlling idea in one sentence",
   "visual_motif": "one recurring visual element restaged across scenes",
-  "cliffhanger": "micro-drama mode ONLY: the unanswered question the last frame leaves - otherwise \"\"",
+  "cliffhanger": "micro-drama mode ONLY: the unanswered question the last frame leaves - otherwise an empty string",
   "mood": "string",
   "estimated_duration_seconds": 30,
   "setting_location": "e.g. coastal village wooden pier",
@@ -156,7 +219,7 @@ Respond ONLY with valid JSON matching this schema:
       "emotion": "e.g. tearful reconciliation",
       "dramatic_function": "setup|inciting_incident|rising_action|turning_point|climax|resolution",
       "turn": "the concrete thing that changes in this scene",
-      "world_change": "climax scene ONLY: what visibly changes about the place itself - otherwise \"\"",
+      "world_change": "climax scene ONLY: what visibly changes about the place itself - otherwise an empty string",
       "subtext": "what they really mean underneath the lines",
       "staging": "blocking: who is where, hands, the object the scene turns on",
       "tension": 4
@@ -537,10 +600,42 @@ event with a character describing it."""
         )
 
     def _parse_json(self, text: str) -> dict:
+        """Read the model's script, forgiving the ways models write JSON.
+
+        Strictness here is not rigour, it is waste. A delivered failure:
+
+            JSONDecodeError: Expecting property name enclosed in double quotes:
+            line 31 column 5 | stop_reason=end_turn
+
+        ``end_turn`` means the model finished its answer. The script was
+        complete and correct -- a title, a theme, a cast, five scenes -- and
+        the whole job was failed, and the user told to try again, over ONE
+        stray comma about two thirds of the way down.
+
+        So a strict parse is tried first and, only when it fails, the response
+        is repaired for the small set of things language models actually do
+        (trailing commas, `//` notes to themselves) and parsed again. The
+        repair is logged: models getting worse at this is something an
+        operator should be able to see, not something that silently costs
+        retries.
+        """
         match = re.search(r"\{[\s\S]*\}", text)
-        if match:
-            return json.loads(match.group())
-        raise ValueError("No JSON found in response")
+        if not match:
+            raise ValueError("No JSON found in response")
+        body = match.group()
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError as strict_error:
+            repaired = _repair_json(body)
+            if repaired == body:
+                raise
+            data = json.loads(repaired)  # still raises if it was worse than this
+            logger.warning(
+                "Script JSON needed repair before it would parse (%s). The "
+                "model's answer was usable; only its punctuation was not.",
+                strict_error.msg,
+            )
+            return data
 
     def _write_template(
         self,
