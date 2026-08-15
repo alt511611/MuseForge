@@ -6,11 +6,13 @@ import os
 import re
 import shutil
 import tempfile
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from agents.screenwriter import ScreenwriterAgent, ScriptGenerationFailed
+from interfaces import ass_captions
 from interfaces.character import CharacterInScene, DramaScript
 from interfaces.film_look import build_film_look_filters
+from interfaces import micro_drama
 from interfaces.language import DEFAULT_LANGUAGE
 from interfaces.second_budget import billable_seconds, distribute_budget
 from interfaces.transitions import plan_transitions
@@ -23,11 +25,13 @@ from pipelines.script2video import (
     concatenate_videos,
     concatenate_videos_with_transitions,
     download_video,
+    trim_to_duration,
     is_scene_transitions_enabled,
     moviepy_encode_kwargs,
     video_encode_args,
 )
 from tools.muapi_lipsync import is_lipsync_enabled, make_lipsync
+from tools.muapi_sfx_generator import MuAPISFXGenerator, is_foley_enabled
 from tools.muapi_voice_generator import MuAPIVoiceGenerator, is_dialogue_enabled
 
 logger = logging.getLogger(__name__)
@@ -620,14 +624,361 @@ async def mux_silent_audio(video_path: str, output_path: str) -> bool:
     return False
 
 
+#: Level each layer sits at before the mix, relative to the dialogue it is
+#: sharing a film with.
+#:
+#: These are not taste. Speech is the only layer whose intelligibility is
+#: non-negotiable, so it runs at unity and everything else is placed under it:
+#: the score far enough down to be felt rather than followed, and foley close
+#: enough to speech to make objects feel present without competing with the
+#: words describing them.
+MUSIC_LEVEL = 0.55
+FOLEY_LEVEL = 0.65
+
+#: Sidechain ducking: how the score gets out of the way of a line, and comes
+#: back between lines.
+#:
+#: The previous mixer scaled music to a flat 20% for the ENTIRE film the
+#: moment any line was voiced -- so a drama with three lines in it played its
+#: whole score at a fifth of the intended level, including the long stretches
+#: with nobody speaking, which is where a score is supposed to do its work.
+#: Ducking replaces one permanent decision with a continuous one.
+#:
+#: ``ratio`` 8 with this threshold lands around -10 to -12dB under speech;
+#: ``attack`` is fast enough not to clip the first syllable and ``release``
+#: slow enough that the music does not pump between words inside one line.
+#: ffmpeg's own read/write timeout for remote inputs, in MICROseconds (its
+#: unit, not a typo). 20 seconds: long enough for a slow CDN, short enough
+#: that a dead one costs a fallback rather than a hung job.
+MIX_NETWORK_TIMEOUT_US = 20_000_000
+
+DUCK_THRESHOLD = 0.045
+DUCK_RATIO = 8
+DUCK_ATTACK_MS = 15
+DUCK_RELEASE_MS = 320
+
+
+def _ffmpeg_time_ms(seconds: float) -> int:
+    """Milliseconds for adelay, never negative (it silently drops the input)."""
+    return max(0, int(round(float(seconds or 0.0) * 1000)))
+
+
+def build_audio_mix_graph(
+    music_index: Optional[int],
+    dialogue: List[Tuple[int, float]],
+    foley: List[Tuple[int, float]],
+    duration: float,
+) -> Optional[str]:
+    """The filter_complex that mixes one drama's audio.
+
+    ``dialogue`` and ``foley`` are (ffmpeg input index, start seconds) pairs;
+    ``music_index`` is the score's input index, if there is one. Returns None
+    when there is nothing to mix, so the caller can lay down silence instead
+    of running an encode that changes nothing.
+
+    The shape, and why:
+
+        dialogue -> adelay -> amix ----------------> [speech] --------+
+                                     |                               |
+                                     +-> (sidechain) -> ducks music --+--> amix
+        music ----> volume -----------------------------------------+
+        foley ----> adelay -> volume -> amix ------------------------+
+
+    ``asplit`` on the speech bus is what makes the ducking possible at all:
+    sidechaincompress CONSUMES its control input, so the speech that steers
+    the compressor cannot also be the speech that reaches the mix.
+    """
+    chains: List[str] = []
+    layers: List[str] = []
+
+    speech_labels: List[str] = []
+    for position, (index, start) in enumerate(dialogue):
+        label = f"d{position}"
+        chains.append(
+            f"[{index}:a]adelay={_ffmpeg_time_ms(start)}:all=1,"
+            f"aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
+            f"[{label}]"
+        )
+        speech_labels.append(f"[{label}]")
+
+    speech_bus: Optional[str] = None
+    if speech_labels:
+        if len(speech_labels) == 1:
+            chains.append(f"{speech_labels[0]}acopy[speechraw]")
+        else:
+            # normalize=0: amix's default divides every input by their count,
+            # which would quietly halve a scene's dialogue for the crime of
+            # having two lines in it.
+            chains.append(
+                f"{''.join(speech_labels)}amix=inputs={len(speech_labels)}"
+                f":normalize=0:dropout_transition=0[speechraw]"
+            )
+        speech_bus = "speech"
+        chains.append("[speechraw]asplit=2[speech][sc]")
+
+    if music_index is not None:
+        chains.append(f"[{music_index}:a]volume={MUSIC_LEVEL}[musicraw]")
+        if speech_bus:
+            chains.append(
+                f"[musicraw][sc]sidechaincompress="
+                f"threshold={DUCK_THRESHOLD}:ratio={DUCK_RATIO}"
+                f":attack={DUCK_ATTACK_MS}:release={DUCK_RELEASE_MS}[music]"
+            )
+        else:
+            chains.append("[musicraw]acopy[music]")
+        layers.append("[music]")
+
+    foley_labels: List[str] = []
+    for position, (index, start) in enumerate(foley):
+        label = f"f{position}"
+        chains.append(
+            f"[{index}:a]adelay={_ffmpeg_time_ms(start)}:all=1,"
+            f"volume={FOLEY_LEVEL},"
+            f"aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
+            f"[{label}]"
+        )
+        foley_labels.append(f"[{label}]")
+    if foley_labels:
+        chains.append(
+            f"{''.join(foley_labels)}amix=inputs={len(foley_labels)}"
+            f":normalize=0:dropout_transition=0[foley]"
+        )
+        layers.append("[foley]")
+
+    if speech_bus:
+        layers.append(f"[{speech_bus}]")
+
+    if not layers:
+        return None
+
+    if len(layers) == 1:
+        chains.append(f"{layers[0]}acopy[mixed]")
+    else:
+        chains.append(
+            f"{''.join(layers)}amix=inputs={len(layers)}"
+            f":normalize=0:dropout_transition=0[mixed]"
+        )
+
+    # apad + atrim: the mix must be exactly as long as the picture. Shorter and
+    # the container's streams disagree about where the file ends (players stop
+    # early, some editors refuse the file); longer and the master grows a tail
+    # of black. alimiter catches the sum of three layers clipping without
+    # squashing the dynamics that make the ducking audible.
+    chains.append(
+        f"[mixed]apad,atrim=0:{max(0.1, float(duration)):.3f},"
+        f"alimiter=limit=0.95,"
+        f"aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[aout]"
+    )
+    return ";".join(chains)
+
+
+async def mix_audio_layers(
+    video_path: str,
+    output_path: str,
+    music_url: Optional[str] = None,
+    dialogue_tracks: Optional[List[Dict[str, Any]]] = None,
+    scene_paths: Optional[List[str]] = None,
+    sfx_tracks: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[str]:
+    """Mix score, foley and dialogue in ONE ffmpeg pass. None when it can't.
+
+    Three things this does that the moviepy mixer cannot:
+
+    * **The score ducks.** Under each line and back up between them, instead
+      of one flat -14dB applied to the whole film (see DUCK_THRESHOLD).
+    * **Foley has somewhere to go.** A third bus, laid at each scene's own
+      start (see tools/muapi_sfx_generator).
+    * **The picture is not re-encoded.** ``-c:v copy``: the mix costs a
+      generation loss of nothing, where moviepy re-encodes every frame of the
+      master to attach an audio stream to it.
+
+    Returns None rather than raising on any problem, so the caller can fall
+    back to the mixer that has always shipped.
+    """
+    duration = _probe_video_duration(video_path)
+    if duration <= 0:
+        return None
+
+    dialogue_tracks = dialogue_tracks or []
+    sfx_tracks = sfx_tracks or []
+
+    scene_durations = [_probe_video_duration(path) for path in scene_paths or []]
+    scene_starts: List[float] = []
+    elapsed = 0.0
+    for scene_duration in scene_durations:
+        scene_starts.append(elapsed)
+        elapsed += scene_duration
+
+    # The same speech plan the SRT builder reads, so the words on screen and
+    # the words in the air cannot disagree about when they happen.
+    anchors = plan_scene_speech_anchors(dialogue_tracks, scene_starts, duration)
+
+    inputs: List[str] = []
+    dialogue_inputs: List[Tuple[int, float]] = []
+    foley_inputs: List[Tuple[int, float]] = []
+    music_index: Optional[int] = None
+
+    def _add_input(source: str) -> int:
+        inputs.append(source)
+        return len(inputs)  # +1 because input 0 is the video
+
+    if music_url:
+        music_index = _add_input(music_url)
+
+    line_offsets: Dict[int, float] = {}
+    for track in dialogue_tracks:
+        audio_url = str(track.get("audio_url") or "").strip()
+        if not audio_url:
+            continue  # caption-only row; its words are in the SRT, not the mix
+        scene_index = int(track.get("scene_index", 0))
+        anchor = anchors.get(
+            scene_index,
+            scene_starts[scene_index] if 0 <= scene_index < len(scene_starts) else 0.0,
+        )
+        local = line_offsets.get(scene_index, 0.0)
+        start = anchor + local
+        if start >= duration:
+            continue
+        dialogue_inputs.append((_add_input(audio_url), start))
+        measured = _probe_audio_duration_seconds(audio_url) or float(
+            track.get("duration_seconds") or 0.0
+        )
+        line_offsets[scene_index] = local + max(0.0, measured) + 0.2
+
+    for track in sfx_tracks:
+        audio_url = str(track.get("audio_url") or "").strip()
+        if not audio_url:
+            continue
+        scene_index = int(track.get("scene_index", 0))
+        start = (
+            scene_starts[scene_index]
+            if 0 <= scene_index < len(scene_starts)
+            else 0.0
+        )
+        if start >= duration:
+            continue
+        foley_inputs.append((_add_input(audio_url), start))
+
+    graph = build_audio_mix_graph(music_index, dialogue_inputs, foley_inputs, duration)
+    if not graph:
+        return None
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    command = [resolve_ffmpeg_binary(), "-y", "-i", video_path]
+    for source in inputs:
+        # Music and foley arrive as provider URLs and are read over the
+        # network by ffmpeg itself -- no download step, but also no Python
+        # timeout around it. A provider whose CDN stalls would otherwise hold
+        # the mixing stage open indefinitely at the very end of a paid job.
+        if "://" in source:
+            command += ["-rw_timeout", str(MIX_NETWORK_TIMEOUT_US)]
+        command += ["-i", source]
+    command += [
+        "-filter_complex",
+        graph,
+        "-map",
+        "0:v",
+        "-map",
+        "[aout]",
+        # The whole reason this path exists at the encode level: the master's
+        # picture is copied through untouched.
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        output_path,
+    ]
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+    except Exception as exc:
+        logger.warning("ffmpeg mixer unavailable, falling back to moviepy: %s", exc)
+        return None
+
+    if process.returncode == 0 and os.path.isfile(output_path):
+        logger.info(
+            "Mixed %d dialogue, %d foley and %s music layer(s) with ducking, "
+            "picture copied.",
+            len(dialogue_inputs),
+            len(foley_inputs),
+            "1" if music_index is not None else "0",
+        )
+        return output_path
+
+    logger.warning(
+        "ffmpeg mix failed (exit=%s), falling back to moviepy: %s",
+        process.returncode,
+        stderr.decode("utf-8", errors="replace")[-1000:],
+    )
+    try:
+        os.unlink(output_path)
+    except OSError:
+        pass
+    return None
+
+
 async def add_background_music(
     video_path: str,
     output_path: str,
     music_url: Optional[str] = None,
     dialogue_tracks: Optional[List[Dict[str, Any]]] = None,
     scene_paths: Optional[List[str]] = None,
+    sfx_tracks: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
-    """Mix music and timed dialogue once, with dialogue louder than music."""
+    """Lay the drama's audio over its picture.
+
+    Tries the ffmpeg mixer first (real ducking, a foley bus, no re-encode of
+    the picture) and falls back to the moviepy one that has shipped every
+    drama this product has made. Keeping both is deliberate: this is the last
+    stage that can turn a finished render into a file with no sound, and a
+    silent master is indistinguishable from a broken product.
+    """
+    mixed = await mix_audio_layers(
+        video_path,
+        output_path,
+        music_url=music_url,
+        dialogue_tracks=dialogue_tracks,
+        scene_paths=scene_paths,
+        sfx_tracks=sfx_tracks,
+    )
+    if mixed:
+        return mixed
+    return await _mix_with_moviepy(
+        video_path,
+        output_path,
+        music_url=music_url,
+        dialogue_tracks=dialogue_tracks,
+        scene_paths=scene_paths,
+    )
+
+
+async def _mix_with_moviepy(
+    video_path: str,
+    output_path: str,
+    music_url: Optional[str] = None,
+    dialogue_tracks: Optional[List[Dict[str, Any]]] = None,
+    scene_paths: Optional[List[str]] = None,
+) -> str:
+    """Mix music and timed dialogue once, with dialogue louder than music.
+
+    The FALLBACK mixer. ``mix_audio_layers`` does this in ffmpeg with real
+    ducking, a foley layer and no re-encode of the picture; this one stays
+    because it is the code that has shipped every drama this product has made,
+    and a mixing pass is not a place to have exactly one implementation.
+
+    Its ducking is a blunt instrument by comparison: the score is scaled to a
+    fixed 20% for the WHOLE film as soon as any line is voiced, rather than
+    dipping under each line and coming back up between them.
+    """
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     video = None
     opened_audio = []
@@ -676,6 +1027,13 @@ async def add_background_music(
             scene_starts.append(elapsed)
             elapsed += duration
         line_offsets: Dict[int, float] = {}
+        # Where each scene's speech actually begins, which is its picture
+        # unless an earlier scene's speech is still running (see
+        # plan_scene_speech_anchors). Captions are laid out from the same plan,
+        # so the words on screen and the words in the air cannot disagree.
+        speech_anchors = plan_scene_speech_anchors(
+            dialogue_tracks, scene_starts, float(video.duration or 0.0)
+        )
 
         for track in dialogue_tracks:
             dialogue = None
@@ -686,18 +1044,21 @@ async def add_background_music(
                     # per scene; later lines carry text for SRT only).
                     continue
                 scene_index = int(track.get("scene_index", 0))
-                scene_start = (
+                scene_start = speech_anchors.get(
+                    scene_index,
                     scene_starts[scene_index]
                     if 0 <= scene_index < len(scene_starts)
-                    else 0.0
+                    else 0.0,
                 )
                 local_start = line_offsets.get(scene_index, 0.0)
                 dialogue = AudioFileClip(audio_url)
-                available = (
-                    scene_durations[scene_index] - local_start
-                    if 0 <= scene_index < len(scene_durations)
-                    else video.duration - scene_start - local_start
-                )
+                # Clipped at the END OF THE FILM and nowhere else. It used to
+                # be clipped at the end of the SCENE, which meant a line longer
+                # than its shot was cut off mid-word -- audibly, every time,
+                # and worse the faster the picture was cut. Letting it run over
+                # the join is an audio bridge, which is what makes fast cutting
+                # legible in the first place.
+                available = float(video.duration or 0.0) - (scene_start + local_start)
                 if available <= 0:
                     dialogue.close()
                     continue
@@ -853,6 +1214,161 @@ def _scene_boundaries(scene_paths: Optional[List[str]]) -> List[float]:
     return starts
 
 
+#: Silence left between one scene's speech and the next scene's, when the
+#: first has run past its own picture. Long enough to read as a new line
+#: rather than as one run-on sentence; short enough not to feel like a gap.
+SPEECH_GAP_SECONDS = 0.35
+
+
+#: Word-at-a-time captions: the vertical-video convention, where the line
+#: appears in short bursts timed to the voice instead of as one block held for
+#: its whole duration.
+#:
+#: OFF by default, because it is a house style rather than an improvement: a
+#: 16:9 drama wants broadcast-style subtitles, and burning karaoke cues into
+#: one would look like a mistake. It needs measured word timings, which only
+#: the direct ElevenLabs path returns (tools/elevenlabs_voice_generator.
+#: _word_timings) -- with any other voice provider this silently does nothing,
+#: which is the correct behaviour: guessing word times from a word count would
+#: put the highlight on the wrong word, and a wrong karaoke caption is far
+#: more distracting than none.
+def is_word_captions_enabled() -> bool:
+    return os.environ.get("MUSEFORGE_WORD_CAPTIONS", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+#: Words per burst, and the longest a burst may stay up. Three words is about
+#: what the eye takes in a single fixation at reading distance on a phone.
+WORDS_PER_CAPTION_CHUNK = 3
+MAX_CHUNK_SECONDS = 1.4
+
+
+def chunk_words_into_cues(
+    words: List[Dict[str, Any]],
+    words_per_chunk: int = WORDS_PER_CAPTION_CHUNK,
+    max_seconds: float = MAX_CHUNK_SECONDS,
+) -> List[Dict[str, Any]]:
+    """Group timed words into short cues, each ending where the next begins.
+
+    A chunk is closed by whichever comes first: the word count, the time
+    limit, or a word that ends a sentence -- breaking a cue across "." would
+    put the start of the next sentence on screen before it is spoken.
+    """
+    cues: List[Dict[str, Any]] = []
+    current: List[Dict[str, Any]] = []
+
+    def _flush():
+        if not current:
+            return
+        cues.append(
+            {
+                "text": " ".join(str(word["text"]) for word in current),
+                "start": float(current[0]["start"]),
+                "end": float(current[-1]["end"]),
+            }
+        )
+        current.clear()
+
+    for word in words or []:
+        current.append(word)
+        spans = float(current[-1]["end"]) - float(current[0]["start"])
+        ends_sentence = str(word["text"]).rstrip()[-1:] in {".", "!", "?", "…", ":"}
+        if len(current) >= words_per_chunk or spans >= max_seconds or ends_sentence:
+            _flush()
+    _flush()
+    return cues
+
+
+def _scene_speech_lengths(
+    dialogue_tracks: Optional[List[Dict[str, Any]]],
+) -> Dict[int, float]:
+    """How long each scene's speech actually runs, keyed by scene index.
+
+    Measured where the provider measured it (ElevenLabs returns per-line
+    ``end_seconds`` inside the scene's own audio file) and summed from
+    per-line durations otherwise, which is the shape the MuAPI voice path
+    returns.
+    """
+    lengths: Dict[int, float] = {}
+    for track in dialogue_tracks or []:
+        if not str(track.get("line") or "").strip():
+            continue
+        # A scene whose voice generation failed carries subtitle rows and no
+        # sound (see caption_only_tracks). Counting those as speech would make
+        # a LATER scene's real dialogue wait for a silence -- the film would
+        # hold its audio back for lines nobody can hear.
+        if track.get("caption_only"):
+            continue
+        scene_index = int(track.get("scene_index", 0))
+        if "end_seconds" in track:
+            lengths[scene_index] = max(
+                lengths.get(scene_index, 0.0), float(track["end_seconds"])
+            )
+        else:
+            duration = float(track.get("duration_seconds") or 0.0)
+            if duration <= 0:
+                duration = _estimate_line_duration_seconds(
+                    str(track.get("line") or "")
+                )
+            lengths[scene_index] = (
+                lengths.get(scene_index, 0.0) + duration + CAPTION_GAP_SECONDS
+            )
+    return lengths
+
+
+def plan_scene_speech_anchors(
+    dialogue_tracks: Optional[List[Dict[str, Any]]],
+    scene_starts: Sequence[float],
+    master_duration: float = 0.0,
+) -> Dict[int, float]:
+    """Where each scene's speech begins on the master timeline.
+
+    Normally that is simply where the scene's picture begins. It stops being
+    that as soon as the picture is cut faster than the speech: a four-second
+    line under a two-second scene has to finish somewhere, and the two honest
+    options are to cut the sentence off or to let it play over the next shot.
+
+    Film has an answer, and it is the second one. Speech carrying across a cut
+    (an audio bridge, an L-cut) is ordinary grammar — it is a large part of
+    why fast cutting works at all, because the ear stitches what the eye is
+    being shown in pieces. Truncating mid-word, which is what this pipeline
+    used to do at every scene border, is not grammar; it is a defect the
+    viewer hears as a broken file.
+
+    So a scene's speech starts at its picture, or after the previous scene's
+    speech has finished, whichever is later. Two consequences worth stating:
+
+    * Speech never overlaps speech. Two characters talking over each other is
+      a deliberate effect, not something that should happen because a shot
+      ran short.
+    * Captions and audio come from THIS function, both of them. They used to
+      derive their timings independently from scene offsets, which was fine
+      only while neither could move; the moment speech is allowed to drift,
+      a second opinion about where it drifted to is a desync.
+    """
+    lengths = _scene_speech_lengths(dialogue_tracks)
+    anchors: Dict[int, float] = {}
+    floor = 0.0
+    for scene_index in sorted(lengths):
+        picture_start = (
+            float(scene_starts[scene_index])
+            if 0 <= scene_index < len(scene_starts)
+            else 0.0
+        )
+        start = max(picture_start, floor)
+        if master_duration > 0:
+            # Never anchor past the end of the film: a line placed there is a
+            # line nobody can hear, and a caption placed there never shows.
+            start = min(start, max(0.0, master_duration - 0.1))
+        anchors[scene_index] = start
+        floor = start + lengths[scene_index] + SPEECH_GAP_SECONDS
+    return anchors
+
+
 def _lay_out_scene_captions(
     durations: List[float], span: float
 ) -> List[Tuple[float, float]]:
@@ -884,6 +1400,51 @@ def _lay_out_scene_captions(
     return placed
 
 
+def build_kinetic_ass(
+    dialogue_tracks: List[Dict[str, Any]],
+    scene_paths: Optional[List[str]] = None,
+    width: int = 1080,
+    height: int = 1920,
+) -> str:
+    """Kinetic captions for the tracks that carry measured word timings.
+
+    Returns "" when no track does, which is the honest answer for every voice
+    provider except the direct ElevenLabs path: the effect depends entirely on
+    knowing when each word is said, and a highlight on the wrong word reads as
+    a broken player rather than as a style.
+
+    Timing comes from the same speech plan the mixer and the SRT builder use
+    (plan_scene_speech_anchors), so all three agree about when a line happens
+    even when it has run past its own scene.
+    """
+    bounds = _scene_boundaries(scene_paths)
+    anchors = plan_scene_speech_anchors(
+        dialogue_tracks, bounds[:-1], bounds[-1] if bounds else 0.0
+    )
+
+    cues: List[ass_captions.CaptionCue] = []
+    emphasis: set = set()
+    for track in dialogue_tracks or []:
+        words = track.get("words")
+        if not words:
+            continue
+        scene_index = int(track.get("scene_index", 0))
+        offset = anchors.get(
+            scene_index,
+            bounds[scene_index] if 0 <= scene_index < len(bounds) - 1 else 0.0,
+        )
+        emphasis |= ass_captions.emphasis_stems(str(track.get("emphasis") or ""))
+        for cue in ass_captions.chunk_into_cues(words):
+            cue.start += offset
+            cue.end += offset
+            for word in cue.words:
+                word.start += offset
+                word.end += offset
+            cues.append(cue)
+
+    return ass_captions.build_ass(cues, width, height, emphasis=emphasis)
+
+
 def build_srt_from_dialogue_tracks(
     dialogue_tracks: List[Dict[str, Any]],
     scene_paths: Optional[List[str]] = None,
@@ -900,6 +1461,14 @@ def build_srt_from_dialogue_tracks(
     """
     bounds = _scene_boundaries(scene_paths)
     last_scene = len(bounds) - 2  # bounds carries the final scene's end too
+    # The same speech plan the mixer lays the audio down from. Deriving the
+    # two independently was safe only while speech could not move; now that a
+    # line may run past its own scene (see plan_scene_speech_anchors), a
+    # second opinion about where it starts is a desync between the sound and
+    # the subtitle.
+    speech_anchors = plan_scene_speech_anchors(
+        dialogue_tracks, bounds[:-1], bounds[-1] if bounds else 0.0
+    )
 
     # Two passes: a scene cannot be fitted to its shot until every line in it
     # is known, and the lines arrive one at a time.
@@ -920,6 +1489,30 @@ def build_srt_from_dialogue_tracks(
         row: Dict[str, Any] = {"text": text, "duration": duration}
         row["voiced"] = bool(str(track.get("audio_url") or "").strip())
 
+        # Word-at-a-time captions, when the provider measured the words and
+        # the deployment asked for them. Emitted INSTEAD of the whole-line cue
+        # (not alongside it -- two overlapping cues is how libass ends up
+        # stacking the same sentence twice on screen), and only where real
+        # timings exist, so nothing here is ever guessed.
+        words = track.get("words") if is_word_captions_enabled() else None
+        if words and "scene_index" in track:
+            scene_index = int(track["scene_index"])
+            offset = speech_anchors.get(
+                scene_index,
+                bounds[scene_index] if 0 <= scene_index <= last_scene else 0.0,
+            )
+            for cue in chunk_words_into_cues(words):
+                rows.append(
+                    {
+                        "text": cue["text"],
+                        "duration": cue["end"] - cue["start"],
+                        "voiced": row["voiced"],
+                        "start": offset + cue["start"],
+                        "end": offset + cue["end"],
+                    }
+                )
+            continue
+
         if "start_seconds" in track:
             start = float(track["start_seconds"])
             end = float(
@@ -936,7 +1529,10 @@ def build_srt_from_dialogue_tracks(
             if "scene_index" in track:
                 bounds_index = int(track["scene_index"])
                 if 0 <= bounds_index <= len(bounds) - 2:
-                    offset = bounds[bounds_index]
+                    # The scene's SPEECH offset, not its picture offset: they
+                    # are the same number until a line runs past its own shot,
+                    # and after that only this one follows the audio.
+                    offset = speech_anchors.get(bounds_index, bounds[bounds_index])
                     start += offset
                     end += offset
             row["start"] = start
@@ -949,8 +1545,13 @@ def build_srt_from_dialogue_tracks(
 
     for scene_index, positions in by_scene.items():
         if 0 <= scene_index <= last_scene:
-            scene_start = bounds[scene_index]
-            scene_end = bounds[scene_index + 1]
+            scene_start = speech_anchors.get(scene_index, bounds[scene_index])
+            # A scene whose speech was pushed later than its own picture has
+            # no scene-shaped window left to squeeze its cues into; the film's
+            # end is then the only real boundary.
+            scene_end = max(bounds[scene_index + 1], scene_start)
+            if scene_end <= scene_start:
+                scene_end = bounds[-1] if bounds else scene_start
             # The master fades to black over its last FADE_OUT_SECONDS (see
             # finish_master), and a caption burned underneath fades with it --
             # so a drama that has no voices, and whose closing line therefore
@@ -1131,6 +1732,80 @@ def _escape_subtitles_filter_path(path: str) -> str:
     return escaped
 
 
+async def _burn_kinetic_captions(
+    video_path: str,
+    output_path: str,
+    dialogue_tracks: List[Dict[str, Any]],
+    scene_paths: Optional[List[str]] = None,
+) -> Optional[str]:
+    """Burn word-by-word captions, or return None to leave it to the SRT path.
+
+    None is returned for every ordinary reason not to do this -- no measured
+    word timings in any track, an ffmpeg that cannot render ASS, a failed
+    encode -- so the caller simply carries on and burns the plain captions it
+    always has.
+    """
+    width, height = _probe_video_size(video_path)
+    document = build_kinetic_ass(
+        dialogue_tracks, scene_paths=scene_paths, width=width or 1080, height=height or 1920
+    )
+    if not document.strip():
+        return None
+
+    ass_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".ass",
+            prefix="museforge_kinetic_",
+            dir=os.path.dirname(output_path) or ".",
+            delete=False,
+            encoding="utf-8",
+        ) as handle:
+            ass_path = handle.name
+            handle.write(document)
+
+        process = await asyncio.create_subprocess_exec(
+            resolve_ffmpeg_binary(),
+            "-y",
+            "-i",
+            video_path,
+            "-vf",
+            f"ass={_escape_subtitles_filter_path(ass_path)}",
+            *video_encode_args(),
+            # The mix is already made and must survive being written over.
+            "-c:a",
+            "copy",
+            output_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode == 0 and os.path.isfile(output_path):
+            return output_path
+        logger.warning(
+            "Kinetic caption burn failed (exit=%s), falling back to plain "
+            "captions: %s",
+            process.returncode,
+            stderr.decode("utf-8", errors="replace")[-800:],
+        )
+    except Exception as exc:
+        logger.warning(
+            "Kinetic captions unavailable, falling back to plain captions: %s", exc
+        )
+    finally:
+        if ass_path:
+            try:
+                os.unlink(ass_path)
+            except OSError:
+                pass
+    try:
+        os.unlink(output_path)
+    except OSError:
+        pass
+    return None
+
+
 async def burn_subtitles(
     video_path: str,
     output_path: str,
@@ -1155,6 +1830,17 @@ async def burn_subtitles(
 
     if not dialogue_tracks:
         return _copy_through()
+
+    # Kinetic captions first, when the deployment asked for them AND the voice
+    # provider measured its words. Not a fallback chain out of caution: these
+    # are two different house styles, and the plain one is right for a 16:9
+    # drama in the same way the kinetic one is right for a vertical feed.
+    if is_word_captions_enabled():
+        kinetic = await _burn_kinetic_captions(
+            video_path, output_path, dialogue_tracks, scene_paths
+        )
+        if kinetic:
+            return kinetic
 
     srt_path = None
     try:
@@ -1976,17 +2662,35 @@ class Idea2VideoPipeline:
                 only_scenes=resync,
             )
 
-        final_path = await self._assemble_final_drama(
+        # A retake keeps the cut's order, so the foley beds are still keyed to
+        # the right clips and travel as they are. The hook is rebuilt rather
+        # than reused: the scene it is taken from may be the one just retaken.
+        sfx_tracks = [dict(t) for t in (state.get("sfx_tracks") or [])]
+        assembly_paths, assembly_dialogue, assembly_sfx = await self._with_cold_open(
             scene_paths,
+            [
+                {"clip_index": position, "script": scene.get("script") or {}}
+                for position, scene in enumerate(ordered)
+            ],
+            dialogue_tracks,
+            sfx_tracks,
+            working_dir,
+            narrative_mode=previous_result.get("narrative_mode", ""),
+            language=previous_result.get("language", DEFAULT_LANGUAGE),
+        )
+
+        final_path = await self._assemble_final_drama(
+            assembly_paths,
             working_dir,
             progress_callback,
             state.get("music_url"),
             previous_result.get("plan", "free"),
             is_cancelled=is_cancelled,
-            dialogue_tracks=dialogue_tracks,
+            dialogue_tracks=assembly_dialogue,
             director_style=previous_result.get("director_style", "cinematic_balanced"),
             transitions=plan_transitions([s["script"] for s in ordered]),
             aspect_ratio=previous_result.get("aspect_ratio", "16:9"),
+            sfx_tracks=assembly_sfx,
         )
 
         # Update just the re-rendered scenes' records, then re-archive them so
@@ -2356,6 +3060,32 @@ class Idea2VideoPipeline:
                 if int(track.get("scene_index", -1)) == origin:
                     dialogue_tracks.append({**track, "scene_index": position})
 
+        # Foley is re-keyed exactly like dialogue and for the same reason: a
+        # bed is addressed by its clip's POSITION in the cut, so a reorder that
+        # moved the dialogue and left the sound of the room behind would put
+        # scene 3's footsteps under scene 1's picture.
+        sfx_tracks: List[Dict[str, Any]] = []
+        for position, entry in enumerate(entries):
+            origin = clip_index_by_scene.get(entry["index"])
+            if origin is None:
+                continue
+            for track in state.get("sfx_tracks") or []:
+                if int(track.get("scene_index", -1)) == origin:
+                    sfx_tracks.append({**track, "scene_index": position})
+
+        scene_paths, dialogue_tracks, sfx_tracks = await self._with_cold_open(
+            scene_paths,
+            [
+                {"clip_index": position, "script": entry["scene"].get("script") or {}}
+                for position, entry in enumerate(entries)
+            ],
+            dialogue_tracks,
+            sfx_tracks,
+            working_dir,
+            narrative_mode=previous_result.get("narrative_mode", ""),
+            language=previous_result.get("language", DEFAULT_LANGUAGE),
+        )
+
         _check_cancel()
         final_path = await self._assemble_final_drama(
             scene_paths,
@@ -2368,6 +3098,7 @@ class Idea2VideoPipeline:
             director_style=previous_result.get("director_style", "cinematic_balanced"),
             transitions=plan_transitions([e["scene"]["script"] for e in entries]),
             aspect_ratio=previous_result.get("aspect_ratio", "16:9"),
+            sfx_tracks=sfx_tracks,
         )
 
         # The source scenes are kept intact (with their original clips) so the
@@ -2388,6 +3119,251 @@ class Idea2VideoPipeline:
         await progress("complete", "New cut ready", 100, {"video_url": result["video_url"]})
         return result
 
+    async def _with_cold_open(
+        self,
+        scene_paths: List[str],
+        scene_records: List[Dict[str, Any]],
+        dialogue_tracks: Optional[List[Dict[str, Any]]],
+        sfx_tracks: Optional[List[Dict[str, Any]]],
+        working_dir: str,
+        narrative_mode: str = "",
+        language: str = DEFAULT_LANGUAGE,
+    ) -> Tuple[List[str], List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Put the hook in front of the film, and move everything timed with it.
+
+        Written as one function used by all three assembly paths -- the first
+        render, a retake, and a re-cut -- because it was first written as one:
+        the hook lived only in the initial assembly, so re-cutting a
+        micro-drama or retaking a single scene of one silently produced a film
+        with no hook at all. A derived clip that only one of three assembly
+        paths knows about is a feature that disappears the moment the customer
+        edits anything.
+
+        Rebuilt rather than carried across: a re-cut may have reordered the
+        scenes, so the climax the hook is taken from may not be the one it was
+        taken from last time. The teaser has to follow the story, not the file.
+        """
+        if not scene_paths:
+            return scene_paths, list(dialogue_tracks or []), list(sfx_tracks or [])
+        if not (
+            micro_drama.is_micro_drama(narrative_mode)
+            and micro_drama.is_cold_open_enabled()
+        ):
+            return scene_paths, list(dialogue_tracks or []), list(sfx_tracks or [])
+
+        cold_open = await self._build_cold_open(
+            scene_records, scene_paths, working_dir, language=language
+        )
+        if not cold_open:
+            return scene_paths, list(dialogue_tracks or []), list(sfx_tracks or [])
+
+        offset = len(cold_open)
+        logger.info("Cold open: %d clip(s) in front of the drama.", offset)
+        return (
+            cold_open + scene_paths,
+            self.shift_track_scenes(dialogue_tracks, offset),
+            self.shift_track_scenes(sfx_tracks, offset),
+        )
+
+    async def _build_cold_open(
+        self,
+        scene_results: List[Dict[str, Any]],
+        scene_paths: List[str],
+        working_dir: str,
+        language: str = DEFAULT_LANGUAGE,
+    ) -> List[str]:
+        """A glimpse of the climax, then a card, to put in front of the film.
+
+        Returns the clips to PREPEND, or [] when there is nothing to build.
+        Nothing here generates video: the teaser is the last second and a half
+        of a scene that has already been rendered and paid for, which is what
+        a flash-forward is — the same footage, shown early.
+
+        The last second and a half specifically, because that is where the
+        acted peak lands (interfaces/acting) and where the scene's own cut to
+        the reaction sits. The opening of a clip is where a model settles into
+        motion; nobody was ever hooked by that.
+        """
+        declared = None
+        most_tense = None
+        for scene in scene_results:
+            clip_index = scene.get("clip_index")
+            if clip_index is None or not (0 <= clip_index < len(scene_paths)):
+                continue  # a scene that produced no clip has nothing to show
+            script = scene.get("script") or {}
+            if str(_scene_field(script, "dramatic_function") or "").lower() == "climax":
+                declared = scene
+            if most_tense is None or _scene_tension(script) > _scene_tension(
+                most_tense.get("script") or {}
+            ):
+                most_tense = scene
+        # A script that names its climax is believed. One that does not
+        # (legacy scripts carry no dramatic_function) falls back to the most
+        # tense scene that actually produced a clip -- tracked separately,
+        # because deciding both in one pass is how "the peak" quietly became
+        # "the first scene".
+        climax = declared or most_tense
+        if climax is None:
+            return []
+
+        source = scene_paths[int(climax["clip_index"])]
+        teaser = await trim_to_duration(
+            source,
+            os.path.join(working_dir, "cold_open_teaser.mp4"),
+            micro_drama.COLD_OPEN_SECONDS,
+        )
+        if teaser == source:
+            # Nothing was trimmed, so the "teaser" would be the whole scene
+            # played twice. That is not a hook, it is a repeat.
+            return []
+
+        card = await self._build_title_card(teaser, working_dir, language)
+        return [teaser, card] if card else [teaser]
+
+    async def _build_title_card(
+        self,
+        reference_clip: str,
+        working_dir: str,
+        language: str = DEFAULT_LANGUAGE,
+    ) -> Optional[str]:
+        """A black card reading "EARLIER", matched to the film's geometry.
+
+        Without it the teaser reads as a continuity error rather than as a
+        flash-forward — the viewer has no way to know the shock they just saw
+        has not happened yet. Returns None if it cannot be made (no font, no
+        encoder), which leaves the teaser in place: a hook without a card is
+        still a hook.
+        """
+        font = _find_watermark_font()
+        if not font:
+            logger.info("No font available for the cold-open card; skipping it.")
+            return None
+        width, height = _probe_video_size(reference_clip)
+        if width <= 0 or height <= 0:
+            return None
+        fps = 24
+        text = micro_drama.card_text(language)
+        output_path = os.path.join(working_dir, "cold_open_card.mp4")
+        # Sized off the frame's shorter side for the same reason captions are
+        # (see CAPTION_HEIGHT_FRACTION): one fixed size cannot serve both a
+        # vertical and a horizontal master.
+        font_size = max(16, int(round(min(width, height) * 0.075)))
+        draw = (
+            f"drawtext=fontfile='{font}':text='{text}':fontcolor=white"
+            f":fontsize={font_size}:x=(w-text_w)/2:y=(h-text_h)/2"
+            f":alpha='if(lt(t,0.2),t/0.2,if(lt(t,0.75),1,(1-(t-0.75)/0.25)))'"
+        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                resolve_ffmpeg_binary(),
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                f"color=c=black:s={width}x{height}:r={fps}:d={micro_drama.TITLE_CARD_SECONDS}",
+                "-vf",
+                draw,
+                *video_encode_args(),
+                "-an",
+                output_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await process.communicate()
+            if process.returncode == 0 and os.path.isfile(output_path):
+                return output_path
+            logger.warning(
+                "Cold-open card failed (exit=%s): %s",
+                process.returncode,
+                stderr.decode("utf-8", errors="replace")[-500:],
+            )
+        except Exception as exc:
+            logger.warning("Cold-open card unavailable: %s", exc)
+        return None
+
+    @staticmethod
+    def shift_track_scenes(
+        tracks: Optional[List[Dict[str, Any]]], offset: int
+    ) -> List[Dict[str, Any]]:
+        """Move every track's scene index along by ``offset``.
+
+        Prepending the cold open puts clips in front of scene 0, and every
+        piece of timed audio and every caption is addressed by its POSITION in
+        that list. Without this shift the drama's first line would be laid
+        over the teaser and each one after it would land a scene early — the
+        exact failure the speech anchors exist to prevent, reintroduced by the
+        hook.
+        """
+        if not tracks or offset <= 0:
+            return list(tracks or [])
+        return [
+            {**track, "scene_index": int(track.get("scene_index", 0)) + offset}
+            for track in tracks
+        ]
+
+    async def _generate_foley(
+        self,
+        scene_results: List[Dict[str, Any]],
+        scene_paths: List[str],
+        is_cancelled: Optional[Callable[[], bool]] = None,
+    ) -> List[Dict[str, Any]]:
+        """A sound bed per scene, or an empty list. Never raises.
+
+        The prompt is the scene's own ``audio_desc`` -- the storyboard agent
+        has written one for every shot since the field existed, and until now
+        nothing read it, so every drama this product has made was designed
+        with a soundtrack it then threw away.
+
+        Scenes are generated concurrently and failures are swallowed per
+        scene: foley is the layer a film can most afford to lose, and it is
+        being added at the very end of a job the customer has already paid
+        for.
+        """
+        if self.demo or not is_foley_enabled() or not scene_paths:
+            return []
+
+        generator = MuAPISFXGenerator(self.api_key, demo=self.demo)
+
+        async def _one(scene: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            clip_index = scene.get("clip_index")
+            if clip_index is None or not (0 <= clip_index < len(scene_paths)):
+                return None
+            shots = scene.get("shots") or []
+            # The master shot's note describes the scene; a two-second cutaway
+            # of a face has nothing of its own to sound like.
+            audio_desc = next(
+                (str(s.get("audio_desc") or "").strip() for s in shots if s.get("audio_desc")),
+                "",
+            )
+            duration = _probe_video_duration(scene_paths[clip_index])
+            if duration <= 0:
+                return None
+            try:
+                url = await generator.generate_scene_sfx(
+                    audio_desc,
+                    duration=duration,
+                    scene_emotion=_scene_emotion(scene.get("script")),
+                    is_cancelled=is_cancelled,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Foley failed for scene %s, continuing without it: %s",
+                    scene.get("index"),
+                    exc,
+                )
+                return None
+            if not url:
+                return None
+            return {"scene_index": int(clip_index), "audio_url": url}
+
+        results = await asyncio.gather(
+            *[_one(scene) for scene in scene_results], return_exceptions=True
+        )
+        tracks = [r for r in results if isinstance(r, dict)]
+        if tracks:
+            logger.info("Generated foley for %d scene(s).", len(tracks))
+        return tracks
+
     async def _assemble_final_drama(
         self,
         scene_paths: List[str],
@@ -2400,6 +3376,7 @@ class Idea2VideoPipeline:
         director_style: str = "cinematic_balanced",
         transitions: Optional[List[float]] = None,
         aspect_ratio: str = "16:9",
+        sfx_tracks: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Concatenate all scene videos, color-grade, add background music,
         burn dialogue captions (when tracks present), then watermark
@@ -2459,13 +3436,23 @@ class Idea2VideoPipeline:
             await progress_callback("music", "Adding background music", 93)
 
         with_music_path = os.path.join(working_dir, "drama_with_music.mp4")
-        if dialogue_tracks:
+        # Foley rides in beside the score and the dialogue rather than in a
+        # pass of its own: a second pass would mean a second encode of the
+        # same master (see mix_audio_layers).
+        #
+        # The bare three-argument call is kept for the case where there is
+        # neither dialogue nor foley, and not only for tidiness: passing a
+        # keyword whose value is None still changes the call's shape, and the
+        # music-only path is the one every existing caller and test double
+        # was written against.
+        if dialogue_tracks or sfx_tracks:
             await add_background_music(
                 graded_path,
                 with_music_path,
                 music_url,
                 dialogue_tracks=dialogue_tracks,
                 scene_paths=scene_paths,
+                sfx_tracks=sfx_tracks,
             )
         else:
             await add_background_music(graded_path, with_music_path, music_url)
@@ -2518,6 +3505,7 @@ class Idea2VideoPipeline:
         preset_characters: Optional[List[Dict[str, Any]]] = None,
         language: str = DEFAULT_LANGUAGE,
         dialogue_enabled: bool = False,
+        narrative_mode: str = "",
     ) -> DramaScript:
         """Phase A: screenwriting only — no portraits / frames / video."""
 
@@ -2544,6 +3532,9 @@ class Idea2VideoPipeline:
             # on produces no voices, no captions and, with music off, a master
             # with no audio stream at all.
             require_dialogue=dialogue_enabled,
+            # Cinematic or micro-drama: two different dramatic curves, not one
+            # curve at two lengths (see interfaces/micro_drama).
+            narrative_mode=narrative_mode,
         )
 
     async def continue_from_script(
@@ -2565,6 +3556,7 @@ class Idea2VideoPipeline:
         library_characters: Optional[List[Dict[str, Any]]] = None,
         location_image_override: Optional[str] = None,
         language: str = DEFAULT_LANGUAGE,
+        narrative_mode: str = "",
     ) -> dict:
         """Phase B: everything after screenwriting (portraits → scenes → assemble)."""
         os.makedirs(working_dir, exist_ok=True)
@@ -2924,6 +3916,11 @@ class Idea2VideoPipeline:
                             scene_dialogue_lines,
                             is_cancelled=is_cancelled,
                             language=language,
+                            # The same beat the face is playing. Without it a
+                            # scene could look like grief and sound like a
+                            # weather report -- the picture was directed and
+                            # the voice was not.
+                            emotion=_scene_emotion(scene),
                         )
                     )
                     dialogue_tasks.append(
@@ -2943,15 +3940,38 @@ class Idea2VideoPipeline:
                     }
                 )
 
+            # Foley, one bed per scene, from the sound note the storyboard has
+            # been writing into every shot and nothing has ever read
+            # (StoryboardShot.audio_desc). A cent a scene, and the layer that
+            # most separates a drama from a slideshow with music over it.
+            #
+            # Fired here rather than beside the scene render because it wants
+            # the FINISHED clip's length, and because a foley failure must not
+            # be able to take a rendered scene down with it.
+            sfx_tracks = await self._generate_foley(
+                scene_results, scene_paths, is_cancelled=is_cancelled
+            )
+
             _check_cancel()
             failed_dialogue_scenes: List[int] = []
             dialogue_failure_reasons: List[str] = []
             for assembled_scene_index, scene_number, task, scene_lines in dialogue_tasks:
                 try:
                     generated_tracks = await task
+                    # The scene's TURN travels with its lines. Kinetic
+                    # captions emphasise the words a scene actually turns on
+                    # (see interfaces/ass_captions.emphasis_stems), and the
+                    # screenwriter has already written that sentence -- which
+                    # is both free and, unlike a list of trigger words, in
+                    # whatever language the drama is in.
+                    turn = _scene_field(script.scenes[scene_number], "turn")
                     for track in generated_tracks:
                         dialogue_tracks.append(
-                            {**track, "scene_index": assembled_scene_index}
+                            {
+                                **track,
+                                "scene_index": assembled_scene_index,
+                                "emphasis": turn,
+                            }
                         )
                 except Exception as exc:
                     logger.warning(
@@ -3065,6 +4085,20 @@ class Idea2VideoPipeline:
                     video_url = shots[-1]["video_url"]
                     break
         else:
+            # The hook, for dramas written to the micro-drama shape: a glimpse
+            # of the climax, a card, and only then scene 1. Prepended to the
+            # CLIP LIST rather than spliced in afterwards, so the duration
+            # check, the captions and the mix all see the same film.
+            scene_paths, dialogue_tracks, sfx_tracks = await self._with_cold_open(
+                scene_paths,
+                scene_results,
+                dialogue_tracks,
+                sfx_tracks,
+                working_dir,
+                narrative_mode=narrative_mode,
+                language=language,
+            )
+
             final_path = await self._assemble_final_drama(
                 scene_paths,
                 working_dir,
@@ -3080,6 +4114,7 @@ class Idea2VideoPipeline:
                     [s["script"] for s in scene_results if s.get("clip_index") is not None]
                 ),
                 aspect_ratio=aspect_ratio,
+                sfx_tracks=sfx_tracks,
             )
             # Measure the real assembled length before upload/cleanup — the
             # screenwriter's estimated_duration_seconds is a pre-generation
@@ -3148,6 +4183,12 @@ class Idea2VideoPipeline:
                 "music_url": music_url,
                 "user_requirement": user_requirement,
                 "dialogue_tracks": dialogue_tracks,
+                # Foley is generated once, per scene, and paid for once. A
+                # re-cut or a retake that did not carry it forward would
+                # silently deliver a quieter film than the one the customer
+                # already has -- and would have no way to get it back without
+                # re-generating every bed.
+                "sfx_tracks": sfx_tracks,
             },
             "scenes": scene_results,
             "director_style": director_style,
@@ -3158,6 +4199,7 @@ class Idea2VideoPipeline:
             # survives the Supabase round-trip that a new jobs column would
             # have needed a migration for.
             "language": language,
+            "narrative_mode": micro_drama.resolve_mode(narrative_mode),
             "demo": self.demo,
             "music_enabled": bool(music_url) if not self.demo else False,
             "dialogue_enabled": bool(dialogue_tracks) if not self.demo else False,
@@ -3195,6 +4237,7 @@ class Idea2VideoPipeline:
         preset_characters: Optional[List[Dict[str, Any]]] = None,
         location_image_override: Optional[str] = None,
         language: str = DEFAULT_LANGUAGE,
+        narrative_mode: str = "",
     ) -> dict:
         """Full end-to-end run (script + production). Default path unchanged."""
         script = await self.write_script_only(
@@ -3207,6 +4250,7 @@ class Idea2VideoPipeline:
             preset_characters=preset_characters,
             language=language,
             dialogue_enabled=dialogue_enabled,
+            narrative_mode=narrative_mode,
         )
         return await self.continue_from_script(
             script=script,
@@ -3226,4 +4270,5 @@ class Idea2VideoPipeline:
             library_characters=preset_characters,
             location_image_override=location_image_override,
             language=language,
+            narrative_mode=narrative_mode,
         )

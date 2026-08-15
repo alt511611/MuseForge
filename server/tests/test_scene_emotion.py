@@ -142,7 +142,14 @@ async def test_template_fallback_carries_scene_emotion():
         ],
         scene_emotion="tearful reconciliation",
     )
-    assert shots[0].expression_desc == "tearful reconciliation"
+    # The scene's own tag survives, and interfaces/acting adds the anatomical
+    # floor underneath it -- "tearful reconciliation" alone is drawn as a face
+    # doing nothing in particular, which is the failure this path guards.
+    assert shots[0].expression_desc.startswith("tearful reconciliation")
+    assert "jaw" in shots[0].expression_desc
+    # And the shot knows where the performance LANDS, which is what the
+    # start-to-end interpolation animates toward.
+    assert "tear" in shots[0].expression_peak_desc
 
 
 # --- frame prompt ------------------------------------------------------

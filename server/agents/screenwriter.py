@@ -9,6 +9,7 @@ from typing import List, Optional
 from interfaces import gender as gender_of
 from interfaces.character import CharacterProfile, DramaScript, ScriptScene
 from interfaces.language import DEFAULT_LANGUAGE, is_default, name_of
+from interfaces.micro_drama import SCREENWRITER_CLAUSE, is_micro_drama
 from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
 
 logger = logging.getLogger(__name__)
@@ -135,6 +136,7 @@ Respond ONLY with valid JSON matching this schema:
   "logline": "string",
   "theme": "the controlling idea in one sentence",
   "visual_motif": "one recurring visual element restaged across scenes",
+  "cliffhanger": "micro-drama mode ONLY: the unanswered question the last frame leaves - otherwise \"\"",
   "mood": "string",
   "estimated_duration_seconds": 30,
   "setting_location": "e.g. coastal village wooden pier",
@@ -219,7 +221,10 @@ event with a character describing it."""
         self.demo = demo
 
     def _system_prompt(
-        self, language: str = DEFAULT_LANGUAGE, require_dialogue: bool = False
+        self,
+        language: str = DEFAULT_LANGUAGE,
+        require_dialogue: bool = False,
+        narrative_mode: str = "",
     ) -> str:
         """The system prompt for this drama's language and audio mode.
 
@@ -232,6 +237,12 @@ event with a character describing it."""
             prompt += self.LANGUAGE_CLAUSE.format(language=name_of(language))
         if require_dialogue:
             prompt += self.DIALOGUE_CLAUSE
+        # LAST, deliberately: it contradicts the base prompt's dramatic curve
+        # and its demand for a resolution, and a model weighs a late override
+        # against what came before instead of blending the two into a shape
+        # that is neither (see interfaces/micro_drama).
+        if is_micro_drama(narrative_mode):
+            prompt += SCREENWRITER_CLAUSE
         return prompt
 
     async def write_script(
@@ -243,11 +254,14 @@ event with a character describing it."""
         preset_characters: Optional[List[dict]] = None,
         language: str = DEFAULT_LANGUAGE,
         require_dialogue: bool = False,
+        narrative_mode: str = "",
     ) -> DramaScript:
         # Demo mode must stay fast and free of real network calls --
         # matches MuAPIImageGenerator/MuAPIVideoGenerator's demo behavior.
         if self.demo:
-            return self._write_template(idea, style, num_scenes, preset_characters)
+            return self._write_template(
+                idea, style, num_scenes, preset_characters, narrative_mode
+            )
 
         preset_block = ""
         if preset_characters:
@@ -277,7 +291,7 @@ event with a character describing it."""
         if self.muapi_key and is_muapi_llm_enabled():
             try:
                 content = await complete_via_muapi(
-                    self._system_prompt(language, require_dialogue),
+                    self._system_prompt(language, require_dialogue, narrative_mode),
                     prompt,
                     max_tokens=self.MAX_SCRIPT_TOKENS,
                 )
@@ -308,6 +322,7 @@ event with a character describing it."""
                 preset_characters,
                 language,
                 require_dialogue,
+                narrative_mode,
             )
 
         # 3) No provider answered. The deterministic template is NOT an
@@ -379,6 +394,7 @@ event with a character describing it."""
         preset_characters: Optional[List[dict]] = None,
         language: str = DEFAULT_LANGUAGE,
         require_dialogue: bool = False,
+        narrative_mode: str = "",
     ) -> DramaScript:
         import anthropic
 
@@ -422,7 +438,7 @@ event with a character describing it."""
             async with client.messages.stream(
                 model="claude-sonnet-5",
                 max_tokens=self.MAX_SCRIPT_TOKENS,
-                system=self._system_prompt(language, require_dialogue),
+                system=self._system_prompt(language, require_dialogue, narrative_mode),
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:
                 message = await stream.get_final_message()
@@ -532,6 +548,7 @@ event with a character describing it."""
         style: str,
         num_scenes: int,
         preset_characters: Optional[List[dict]] = None,
+        narrative_mode: str = "",
     ) -> DramaScript:
         title = idea[:60].strip().rstrip(".") or "Untitled Drama"
         protagonist = self._extract_protagonist(idea)
@@ -621,10 +638,40 @@ event with a character describing it."""
             4: ["setup", "inciting_incident", "climax", "resolution"],
             5: ["setup", "inciting_incident", "rising_action", "climax", "resolution"],
         }
-        shape = shapes[max(2, min(num_scenes, 5))]
-        scenes = [
-            ScriptScene(dialogue=[], dramatic_function=fn, **beats[fn]) for fn in shape
-        ]
+        # The micro-drama shape opens ON the shock and refuses to resolve --
+        # the opposite curve, not a shortened version of the same one (see
+        # interfaces/micro_drama). The template has to know it too: a key-less
+        # run that quietly produces a three-act film is a run that ignored the
+        # mode the caller asked for.
+        micro_shapes = {
+            2: ["inciting_incident", "climax"],
+            3: ["inciting_incident", "setup", "climax"],
+            4: ["inciting_incident", "setup", "rising_action", "climax"],
+            5: [
+                "inciting_incident",
+                "setup",
+                "rising_action",
+                "turning_point",
+                "climax",
+            ],
+        }
+        micro = is_micro_drama(narrative_mode)
+        table = micro_shapes if micro else shapes
+        shape = table[max(2, min(num_scenes, 5))]
+        # ...and the curve that goes with it: a shock, a fall, then the climb.
+        micro_tensions = {
+            "inciting_incident": 9,
+            "setup": 5,
+            "rising_action": 7,
+            "turning_point": 8,
+            "climax": 10,
+        }
+        scenes = []
+        for fn in shape:
+            beat = dict(beats.get(fn) or beats["rising_action"])
+            if micro:
+                beat["tension"] = micro_tensions.get(fn, beat.get("tension", 5))
+            scenes.append(ScriptScene(dialogue=[], dramatic_function=fn, **beat))
 
         return DramaScript(
             generated_by="template",

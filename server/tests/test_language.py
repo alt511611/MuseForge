@@ -89,7 +89,9 @@ def test_the_language_reaches_both_provider_paths():
     import inspect
 
     source = inspect.getsource(ScreenwriterAgent.write_script)
-    assert "self._system_prompt(language, require_dialogue)" in source, "MuAPI path"
+    assert (
+        "self._system_prompt(language, require_dialogue, narrative_mode)" in source
+    ), "MuAPI path"
     assert "language" in inspect.signature(
         ScreenwriterAgent._write_with_claude
     ).parameters

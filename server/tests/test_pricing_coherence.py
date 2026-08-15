@@ -26,11 +26,58 @@ os.environ.setdefault("MUAPI_KEY", "test-key-not-real")
 from interfaces.second_budget import SECONDS_PER_CREDIT  # noqa: E402
 from stripe_integration import CREDIT_PACKAGES, PLAN_CREDITS  # noqa: E402
 
-#: Flat, per clip, any duration the endpoint accepts. Verify against MuAPI's
-#: pricing table before trusting a margin figure computed from it.
+#: Flat, per clip, any duration the endpoint accepts.
+#:
+#: VERIFIED against muapi.ai/pricing on 2026-08-14, along with everything in
+#: MUAPI_RATES below. Re-check before trusting a margin figure computed here;
+#: the whole point of writing the rates down is that the next person does not
+#: have to guess at them, and a stale number is worse than no number.
 KLING_PER_GENERATION = 0.72
 FIXED_PER_SCENE = 0.067  # frame + storyboard call + amortised portraits
 CREDIT_COST = KLING_PER_GENERATION + FIXED_PER_SCENE
+
+#: The rest of MuAPI's list, as observed, kept here because the SHAPE of these
+#: prices is the thing that decides what this product can do -- not their size.
+#:
+#: There are two billing shapes in the catalogue and they are not comparable:
+#:
+#:   FLAT, per generation, any length the endpoint accepts:
+#:     kling-v3.0-standard/pro-image-to-video   $0.72   (up to 15s)
+#:     veo3.1-lite-image-to-video               $0.30
+#:     wan2.2-image-to-video                    $0.30
+#:     ovi-image-to-video                       $0.20
+#:     wan2.2-spicy-image-to-video              $0.20
+#:     flux-pulid            (frame)            $0.04
+#:     flux-kontext-pro-i2i  (edit / end frame) $0.03
+#:     flux-kontext-dev-i2i  (edit / end frame) $0.02
+#:
+#:   PER SECOND, where every extra second is real money:
+#:     kling-v3-turbo-standard-image-to-video   $0.112/s  ($0.56 per 5s)
+#:     kling-v3-turbo-pro-image-to-video        $0.14/s   ($0.70 per 5s)
+#:     kling-v3.0-omni-standard-image-to-video  $0.084/s base, $0.112/s w/ audio
+#:     seedance-2.5-image-to-video              $0.34/s (720p), $0.17/s (480p)
+#:     seedance-2.5-image-to-video-480p         $0.17/s
+#:     kling-v3.0-std-motion-control  (V2V)     $0.10/s
+#:
+#: The counter-intuitive consequence, and the reason this block exists: the
+#: "cheap"-sounding endpoints are the expensive ones for this workload. A
+#: 3-second reaction shot costs $0.336 on turbo-standard and $0.51 on seedance
+#: 480p, but only $0.30 on veo3.1-lite and $0.20 on ovi -- because those are
+#: flat, and a short clip does not get a discount from a per-second rate it
+#: gets a smaller bill from a rate we are not paying at all.
+MUAPI_RATES = {
+    "kling-v3.0-standard-image-to-video": 0.72,
+    "kling-v3.0-pro-image-to-video": 0.72,
+    "veo3.1-lite-image-to-video": 0.30,
+    "ovi-image-to-video": 0.20,
+    "flux-pulid": 0.04,
+    "flux-kontext-pro-i2i": 0.03,
+}
+
+#: One extra image per shot, for the acted end frame (interfaces/acting,
+#: MUSEFORGE_ACTING_END_FRAME). Off by default; this is what turning it on
+#: costs.
+END_FRAME_COST = MUAPI_RATES["flux-kontext-pro-i2i"]
 
 #: What the pricing page shows. Kept here so a change on one side without the
 #: other fails loudly instead of shipping a page that lies about the product.
@@ -61,6 +108,48 @@ def test_subscription_margin_is_healthy(plan):
 def test_pack_margin_is_healthy(pack):
     margin = _margin(PACK_PRICES[pack], CREDIT_PACKAGES[pack]["credits"])
     assert MIN_MARGIN <= margin <= MAX_MARGIN, f"{pack}: {margin:.1f}%"
+
+
+# --- what the acting and pacing work costs -------------------------------
+
+
+@pytest.mark.parametrize("plan", sorted(PLAN_CREDITS))
+def test_end_frame_acting_still_clears_the_margin_floor(plan):
+    """Rendering the acted peak as a real end frame adds one image per shot.
+
+    It is off by default (MUSEFORGE_ACTING_END_FRAME) because it costs money,
+    not because it is risky -- so what it costs is pinned rather than
+    estimated in a commit message nobody reads again.
+    """
+    rate = PLAN_PRICES[plan] / PLAN_CREDITS[plan]
+    margin = (rate - (CREDIT_COST + END_FRAME_COST)) / rate * 100
+    assert margin >= MIN_MARGIN, f"{plan}: {margin:.1f}% with end-frame acting"
+
+
+@pytest.mark.parametrize("plan", sorted(PLAN_CREDITS))
+def test_a_flat_priced_reaction_shot_is_affordable(plan):
+    """The second angle a micro-drama wants, costed against the real list.
+
+    This is the test to consult before lifting the one-shot-per-scene cap in
+    StoryboardArtist. A reaction shot on a FLAT endpoint (veo3.1-lite, which
+    the router already whitelists and which takes `last_image`) clears the
+    floor; the same shot on a per-second endpoint does not, which is the exact
+    opposite of how those endpoints read on the price list.
+    """
+    rate = PLAN_PRICES[plan] / PLAN_CREDITS[plan]
+    reaction = MUAPI_RATES["veo3.1-lite-image-to-video"] + MUAPI_RATES["flux-pulid"]
+    margin = (rate - (CREDIT_COST + reaction)) / rate * 100
+    assert margin >= MIN_MARGIN, f"{plan}: {margin:.1f}% with a reaction shot"
+
+
+def test_a_per_second_reaction_shot_is_the_expensive_option():
+    """Pins the counter-intuitive fact, so nobody 'optimises' into turbo.
+
+    A 3-second turbo clip costs more than a 15-second flat one is allowed to,
+    per second of screen time -- and more than veo3.1-lite costs outright.
+    """
+    turbo_3s = 3 * 0.112
+    assert turbo_3s > MUAPI_RATES["veo3.1-lite-image-to-video"]
 
 
 # --- the ladder has to make sense ---------------------------------------

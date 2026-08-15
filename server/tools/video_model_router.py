@@ -23,6 +23,23 @@ no code deploy:
     MUAPI_VIDEO_MODEL_ACTION=<muapi-slug>         # fast motion, chases, fights
     MUAPI_VIDEO_MODEL_DIALOGUE=<muapi-slug>       # faces talking, lip detail
     MUAPI_VIDEO_MODEL_ESTABLISHING=<muapi-slug>   # empty sets, landscapes, inserts
+
+PICKING A SLUG: CHECK THE BILLING SHAPE, NOT THE HEADLINE PRICE. MuAPI's
+catalogue mixes two models of charging, and for the short clips this pipeline
+makes they rank in the opposite order to how they read:
+
+    kling-v3.0-standard-image-to-video   $0.72  FLAT, up to 15 seconds
+    veo3.1-lite-image-to-video           $0.30  FLAT
+    ovi-image-to-video                   $0.20  FLAT
+    kling-v3-turbo-standard-image-to-video  $0.112 PER SECOND
+    seedance-2.5-image-to-video-480p        $0.17  PER SECOND
+
+"Turbo" and "480p" sound like the budget options and are not: a 3-second
+insert costs $0.34 on turbo and $0.51 on seedance-480p, against $0.30 for the
+same shot on veo3.1-lite -- which also takes `last_image`, so it can carry an
+acted end frame where turbo cannot (see _ENDPOINT_FIELDS). Verified against
+muapi.ai/pricing on 2026-08-14; the full table lives in
+tests/test_pricing_coherence.MUAPI_RATES, which pins the margin consequences.
 """
 
 import os
@@ -33,13 +50,30 @@ from typing import List, Optional
 ACTION = "action"
 DIALOGUE = "dialogue"
 ESTABLISHING = "establishing"
+#: A two-second cutaway to the face that is listening. Its own profile because
+#: it is the one shot whose economics differ from every other: it is short, it
+#: is bought in ADDITION to the scene's master rather than instead of it, and
+#: it is the only place a $0.30 endpoint is preferable to the $0.72 one.
+REACTION = "reaction"
 STANDARD = "standard"
 
 _ENV_BY_PROFILE = {
     ACTION: "MUAPI_VIDEO_MODEL_ACTION",
     DIALOGUE: "MUAPI_VIDEO_MODEL_DIALOGUE",
     ESTABLISHING: "MUAPI_VIDEO_MODEL_ESTABLISHING",
+    REACTION: "MUAPI_VIDEO_MODEL_REACTION",
 }
+
+#: The reaction profile is the one with a default, because it is the one whose
+#: whole purpose is to cost less than the plan endpoint. Routing it to Kling
+#: would mean paying $0.72 for two seconds of a face -- the same price as the
+#: master, for a fraction of the film -- which is not a second angle, it is a
+#: second full scene. veo3.1-lite is $0.30 flat and takes `last_image`, so the
+#: acted peak still reaches it (turbo, the other cheap-sounding option, takes
+#: neither the end frame nor a flat price).
+#:
+#: Overridable like any other profile; MUAPI_VIDEO_MODEL_REACTION wins.
+DEFAULT_REACTION_MODEL = "veo3.1-lite-image-to-video"
 
 #: Words that mean "the picture moves a lot". Matched against the shot's
 #: motion/camera description, which is where the storyboard agent puts them.
@@ -107,11 +141,23 @@ def classify_shot(
 
 
 def configured_model(profile: str) -> Optional[str]:
-    """The MuAPI slug an operator pinned to this profile, if any."""
+    """The MuAPI slug for this profile: the operator's, else the default.
+
+    Only REACTION has a default, and only because a reaction shot routed to
+    the plan endpoint defeats its own purpose -- see DEFAULT_REACTION_MODEL.
+    Every other profile still resolves to nothing unless configured, which is
+    what keeps a deployment that sets no routing env identical to how it has
+    always behaved.
+    """
     env = _ENV_BY_PROFILE.get(profile)
     if not env:
         return None
-    return (os.environ.get(env, "") or "").strip() or None
+    configured = (os.environ.get(env, "") or "").strip()
+    if configured:
+        return configured
+    if profile == REACTION:
+        return DEFAULT_REACTION_MODEL
+    return None
 
 
 def model_chain(profile: str, plan: str = "free") -> List[str]:
@@ -168,7 +214,7 @@ _ENDPOINT_FIELDS = {
     "kling-v3-turbo-pro-image-to-video": frozenset({"duration"}),
     "kling-v3-turbo-standard-image-to-video": frozenset({"duration"}),
     # Veo takes an end frame and an aspect ratio, but no audio flag (its audio
-    # is always on). Its `duration` is a single-value enum -- see _FIXED_DURATION.
+    # is always on). Its `duration` is a single-value enum -- see FIXED_DURATION.
     "veo3.1-image-to-video": frozenset({"duration", "last_image", "aspect_ratio"}),
     "veo3.1-fast-image-to-video": frozenset({"duration", "last_image", "aspect_ratio"}),
     "veo3.1-lite-image-to-video": frozenset({"duration", "last_image", "aspect_ratio"}),
@@ -192,6 +238,53 @@ _NO_DURATION = frozenset(
 )
 
 
+#: Endpoints whose `duration` is a single-value ENUM rather than a range.
+#:
+#: Read off the model's own API Reference on muapi.ai (veo3.1-lite: "duration
+#: int, Options: 8, Default: 8"), and the reason this map exists rather than a
+#: comment: `clamp_duration` bounds a value to 3-15, which is right for Kling
+#: and wrong here -- a scene budgeted at 6 or 10 seconds would be sent as 6 or
+#: 10, rejected as a 422, read by the fallback chain as "this endpoint does not
+#: exist" and silently demoted to Standard. A routed Veo would have been
+#: configured, expected, billed for in planning, and never once actually run.
+#:
+#: A shot sent here comes back at the model's fixed length regardless of the
+#: second budget (interfaces/second_budget), so the caller has to trim it --
+#: which is exactly what a short reaction shot wants anyway.
+FIXED_DURATION = {
+    "veo3.1-image-to-video": 8,
+    "veo3.1-fast-image-to-video": 8,
+    "veo3.1-lite-image-to-video": 8,
+}
+
+#: Aspect ratios an endpoint actually accepts, where that is narrower than
+#: what this product sells. Veo's enum is 16:9 and 9:16 only, so a square job
+#: routed there is another silent demotion -- dropping the field lets the
+#: model use its own default instead of failing the call.
+SUPPORTED_ASPECT_RATIOS = {
+    "veo3.1-image-to-video": frozenset({"16:9", "9:16"}),
+    "veo3.1-fast-image-to-video": frozenset({"16:9", "9:16"}),
+    "veo3.1-lite-image-to-video": frozenset({"16:9", "9:16"}),
+}
+
+
+def fixed_duration(endpoint: str) -> Optional[int]:
+    """The only duration this endpoint accepts, or None when it takes a range."""
+    return FIXED_DURATION.get((endpoint or "").strip())
+
+
+def accepts_aspect_ratio(endpoint: str, aspect_ratio: str) -> bool:
+    """Whether this endpoint's enum includes ``aspect_ratio``.
+
+    True for every endpoint with no declared restriction, so an unknown model
+    keeps the previous behaviour.
+    """
+    allowed = SUPPORTED_ASPECT_RATIOS.get((endpoint or "").strip())
+    if not allowed:
+        return True
+    return (aspect_ratio or "").strip() in allowed
+
+
 def optional_fields(endpoint: str) -> frozenset:
     """Which optional fields this endpoint accepts, beyond prompt + image_url."""
     endpoint = (endpoint or "").strip()
@@ -208,5 +301,12 @@ def is_routing_active() -> bool:
     Only used for logging/telemetry: it distinguishes "routing ran and chose
     the usual endpoint" from "routing is not configured at all", which is
     otherwise indistinguishable in the logs.
+
+    Reads the environment directly rather than through configured_model(),
+    which now answers for the reaction profile whether or not an operator said
+    anything -- routing "being active" is a question about configuration, and
+    a built-in default is not configuration.
     """
-    return any(configured_model(profile) for profile in _ENV_BY_PROFILE)
+    return any(
+        (os.environ.get(env, "") or "").strip() for env in _ENV_BY_PROFILE.values()
+    )

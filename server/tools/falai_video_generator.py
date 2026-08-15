@@ -99,6 +99,7 @@ class FalAIVideoGenerator:
         plan: str = "free",
         is_cancelled: Optional[Callable[[], bool]] = None,
         shot_profile: Optional[str] = None,
+        last_image: Optional[str] = None,
     ) -> str:
         # shot_profile is MuAPI-only routing (tools/video_model_router); this
         # backend exposes a single endpoint, so it is accepted and ignored
@@ -116,6 +117,13 @@ class FalAIVideoGenerator:
             "image_url": image_url,
             "duration": _duration_str(duration),
         }
+        # The acted peak (interfaces/acting), when the caller rendered one.
+        # This endpoint's own docs describe exactly this use -- "taking a start
+        # frame and an end frame, animating the transition between them" --
+        # under `end_image_url`. Sent only when present, so the default payload
+        # stays byte-identical to what this endpoint has always received.
+        if last_image:
+            payload["end_image_url"] = last_image
 
         handle = await self.client.submit(self.ENDPOINT, arguments=payload)
         request_id = handle.request_id

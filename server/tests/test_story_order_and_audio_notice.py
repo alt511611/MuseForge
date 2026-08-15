@@ -141,7 +141,7 @@ async def test_the_dialogue_toggle_reaches_the_screenwriter(monkeypatch):
 
     async def fake_write_script(self, idea, style="Cinematic", num_scenes=3,
                                 user_requirement="", preset_characters=None,
-                                language="en", require_dialogue=False):
+                                language="en", require_dialogue=False, **_):
         captured["require_dialogue"] = require_dialogue
         return DramaScript(title="T", logline="L", scenes=[{"action": "A."}])
 

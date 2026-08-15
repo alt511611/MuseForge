@@ -195,6 +195,54 @@ class MuAPIImageGenerator:
                 self.LEGACY_SIZE_ENDPOINT, fallback_payload, is_cancelled=is_cancelled
             )
 
+    #: Image-to-image EDIT model, used only by :meth:`edit_image`.
+    #:
+    #: Deliberately NOT the same knob as KONTEXT_ENDPOINT. That one defaults to
+    #: flux-pulid, which is an IDENTITY model: give it a photograph and a
+    #: prompt and it returns the same face in a picture of its own choosing --
+    #: new framing, new background, new light. That is exactly right for
+    #: rendering a scene from a locked portrait, and exactly wrong for the end
+    #: frame of an interpolation, where everything except the face must survive
+    #: byte-for-byte or the video model morphs the whole image instead of the
+    #: performance.
+    EDIT_ENDPOINT = os.environ.get("MUSEFORGE_EDIT_MODEL", "flux-kontext-pro-i2i")
+
+    async def edit_image(
+        self,
+        prompt: str,
+        image_url: str,
+        aspect_ratio: str = "16:9",
+        is_cancelled=None,
+    ) -> str:
+        """Edit an existing image, keeping its composition.
+
+        Raises on failure rather than falling back to a text-to-image or
+        identity model: a "fallback" here would return a DIFFERENT picture of
+        the same person, and handing that to Kling as an end frame produces a
+        five-second warp between two unrelated compositions -- visibly worse
+        than not having an end frame at all. The caller fails open by dropping
+        the end frame entirely (see pipelines/script2video).
+        """
+        if self.demo:
+            return _demo_image_url(prompt + "|edit", aspect_ratio)
+
+        payload = {
+            "prompt": clamp_prompt(prompt),
+            # The Kontext family takes a LIST -- confirmed against MuAPI's own
+            # 422 ({"loc": ["body", "images_list"]}), same as the reference
+            # path below.
+            "images_list": [image_url],
+            "aspect_ratio": aspect_ratio,
+        }
+        logger.info(
+            "Sending %s EDIT request (prompt starts: %.80s)",
+            self.EDIT_ENDPOINT,
+            prompt,
+        )
+        return await self.client.generate(
+            self.EDIT_ENDPOINT, payload, is_cancelled=is_cancelled
+        )
+
     async def generate_image_with_reference(
         self,
         prompt: str,
