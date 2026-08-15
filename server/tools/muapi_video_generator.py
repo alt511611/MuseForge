@@ -111,13 +111,23 @@ class MuAPIVideoGenerator:
         to Standard. A routed model would have been configured, charged for in
         expectation, and never once actually run.
         """
-        from tools.video_model_router import optional_fields
+        from tools.video_model_router import (
+            accepts_aspect_ratio,
+            fixed_duration,
+            optional_fields,
+        )
 
-        allowed = optional_fields(endpoint or endpoint_for_plan("free"))
+        target = endpoint or endpoint_for_plan("free")
+        allowed = optional_fields(target)
 
         payload: Dict[str, Any] = {"prompt": prompt, "image_url": image_url}
         if "duration" in allowed:
-            payload["duration"] = clamp_duration(duration)
+            # Some endpoints declare a single-value duration enum rather than a
+            # range (Veo: 8 and only 8). clamp_duration's 3-15 bound is Kling's,
+            # and sending a Kling-shaped number to one of those is a 422 that
+            # the fallback chain misreads as a missing endpoint.
+            only = fixed_duration(target)
+            payload["duration"] = only if only else clamp_duration(duration)
         if "generate_audio" in allowed:
             payload["generate_audio"] = generate_audio
         if "last_image" in allowed and last_image:
@@ -125,8 +135,13 @@ class MuAPIVideoGenerator:
         # Kling i2v derives aspect from the source image and has no such field;
         # Seedance and Veo do take one, and left unset they can letterbox a
         # vertical frame back to 16:9.
+        # ...and an endpoint that takes the field may still not take THIS
+        # value: Veo's enum is 16:9 and 9:16, while this product also sells
+        # 1:1. Omitting it lets the model fall back to its own default rather
+        # than rejecting the call.
         if "aspect_ratio" in allowed and aspect_ratio:
-            payload["aspect_ratio"] = aspect_ratio
+            if accepts_aspect_ratio(target, aspect_ratio):
+                payload["aspect_ratio"] = aspect_ratio
         return payload
 
     async def generate_video_from_image(
@@ -138,7 +153,22 @@ class MuAPIVideoGenerator:
         plan: str = "free",
         is_cancelled=None,
         shot_profile: Optional[str] = None,
+        last_image: Optional[str] = None,
     ) -> str:
+        """Animate ``image_url``; land on ``last_image`` when one is given.
+
+        ``last_image`` is the acted PEAK of the shot (see interfaces/acting).
+        Given both ends, the Kling v3.0 family interpolates between them, so
+        the expression change is something the model must physically perform
+        rather than something the prompt merely asks for.
+
+        It is passed to every endpoint in the chain and dropped by ``_payload``
+        for the ones whose schema has no such field -- the turbo variants take
+        prompt/image_url/duration and nothing else, so a shot that demotes to
+        turbo simply animates from its start frame. That is a silent quality
+        loss, not a failure, and it is the right trade: a 422 here would cost
+        the whole shot.
+        """
         if self.demo:
             return DEMO_VIDEO_URL
 
@@ -174,6 +204,7 @@ class MuAPIVideoGenerator:
                 image_url,
                 duration,
                 generate_audio=is_native_audio_enabled(),
+                last_image=last_image,
                 endpoint=endpoint,
                 aspect_ratio=aspect_ratio,
             )

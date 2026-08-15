@@ -124,3 +124,8 @@ class DramaScript(BaseModel):
     # deliberately restaged across scenes. This is what makes a set of shots
     # read as a single film rather than a slideshow.
     visual_motif: str = ""
+    # The unanswered question the last frame leaves behind. Written only in
+    # micro-drama mode (see interfaces/micro_drama), where a drama that ties
+    # itself off has given nobody a reason to come back. Empty in cinematic
+    # mode, which resolves on purpose.
+    cliffhanger: str = ""

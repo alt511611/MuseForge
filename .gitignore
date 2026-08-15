@@ -31,3 +31,7 @@ server/jobs_output/
 *.swp
 .idea/
 .vscode/
+# Claude Code's own working directory. It holds local settings and, more to
+# the point, git WORKTREES -- checked-out copies of this repo's source. Commit
+# it once and every grep for a function returns it twice, from two versions.
+.claude/

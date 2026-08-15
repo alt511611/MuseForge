@@ -32,6 +32,7 @@ import os
 import re
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from interfaces import acting
 from interfaces import gender as gender_of
 from interfaces.language import DEFAULT_LANGUAGE, is_default, normalize
 from tools.muapi_client import MuAPICancelled, MuAPIClient
@@ -329,6 +330,7 @@ class MuAPIVoiceGenerator:
         dialogue: Iterable[Any],
         is_cancelled: Optional[Callable[[], bool]] = None,
         language: str = DEFAULT_LANGUAGE,
+        emotion: str = "",
     ) -> List[Dict[str, Any]]:
         """Generate all non-empty scene lines in ONE ElevenLabs dialogue request.
 
@@ -339,10 +341,25 @@ class MuAPIVoiceGenerator:
         lines = self._parse_lines(dialogue)
         if not lines or self.demo:
             return []
+        # The scene's beat, spoken. This endpoint is Eleven v3 behind a
+        # reseller, so it reads the same bracketed audio tags -- on the first
+        # line only, for the reasons in ElevenLabsVoiceGenerator.
+        # ``spoken_text`` is what is sent; ``line`` stays the written line,
+        # which is what the caption shows.
+        for row in lines:
+            row["spoken_text"] = row["line"]
+        tag = acting.voice_tag(emotion)
+        if tag:
+            lines[0]["spoken_text"] = f"{tag}{lines[0]['line']}"
 
         payload = {
             "dialogue": [],
-            "stability": 0.5,
+            # Per-beat rather than a flat 0.5: interfaces/acting maps the
+            # scene's emotion to how far the read may move from the voice's
+            # default. Same table that picks the face, so the delivery and the
+            # expression cannot disagree. Without an emotion this is exactly
+            # the 0.5 it always was.
+            "stability": acting.voice_stability(emotion) if (emotion or "").strip() else 0.5,
         }
         # The field is `language_code`, not `language` -- the old key was not a
         # field this endpoint declares, so it carried no hint at all and every
@@ -384,7 +401,7 @@ class MuAPIVoiceGenerator:
         forms = [form for form, _ in attempts]
         for position, (form, values) in enumerate(attempts):
             payload["dialogue"] = [
-                {"text": row["line"], "voice_id": value}
+                {"text": row.get("spoken_text") or row["line"], "voice_id": value}
                 for row, value in zip(lines, values)
             ]
             try:

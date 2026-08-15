@@ -83,3 +83,79 @@ services:
       # earn one). Master switch: compositing costs memory, cuts do not.
       - key: MUSEFORGE_SCENE_TRANSITIONS
         value: ""
+
+      # ── Voice provider ───────────────────────────────────────────────────
+      # Both declared as `sync: false` rather than with a value, because this
+      # blueprint must not be able to CLEAR them: a value here overwrites
+      # whatever the dashboard holds on the next sync, and one of them is a key.
+      #
+      # Going direct to ElevenLabs is not only about price. It is the only path
+      # that returns per-line timings and per-CHARACTER alignment, and the
+      # kinetic caption style below is built on that alignment -- so with the
+      # MuAPI voice wrapper, MUSEFORGE_WORD_CAPTIONS silently does nothing.
+      - key: MUSEFORGE_VOICE_PROVIDER
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+
+      # ── Acting, pacing and sound design ──────────────────────────────────
+      # Everything below is OFF when empty, which is the shipped default. The
+      # keys are declared anyway so an operator can find them in the dashboard
+      # instead of in the source -- same reasoning as MUSEFORGE_DIALOGUE_ENABLED
+      # above.
+
+      # Acted end frames: the shot's start frame is edited into the emotional
+      # peak and handed to the video model as `last_image`, so the performance
+      # is interpolated rather than described. Costs one image per shot
+      # (~$0.03) and needs an EDIT model, never an identity model -- see
+      # MUSEFORGE_EDIT_MODEL. Fail-open: any error animates from one frame.
+      - key: MUSEFORGE_ACTING_END_FRAME
+        value: ""
+      - key: MUSEFORGE_EDIT_MODEL
+        value: ""
+
+      # A second angle on the scenes that earn it (tension 8+): a two-second
+      # cutaway on the listening face. ~$0.34 a scene, which takes a Pro-plan
+      # scene from ~78% margin to ~69% -- above the floor the pricing tests
+      # enforce, but a business decision rather than a default.
+      - key: MUSEFORGE_REACTION_SHOTS
+        value: ""
+      # The cutaway's model. Empty uses veo3.1-lite ($0.30 FLAT, takes an end
+      # frame). Do not point this at Kling: $0.72 for two seconds of a face is
+      # not a second angle, it is a second scene.
+      - key: MUAPI_VIDEO_MODEL_REACTION
+        value: ""
+
+      # Internal cutting: rhythm cut out of one generation's own pixels, at no
+      # provider cost and without changing the scene's length. Empty = auto,
+      # which follows the director style's pacing.
+      - key: MUSEFORGE_INTERNAL_CUTS
+        value: ""
+
+      # Impact on the cut frame: one-frame flash, decaying shake, chromatic
+      # aberration. Empty = auto (only where a real cut exists, at tension 10).
+      - key: MUSEFORGE_IMPACT
+        value: ""
+
+      # Foley: a generated sound bed per scene, prompted from the storyboard's
+      # own audio note. $0.01 a scene -- the cheapest thing this product can
+      # buy, and the layer that most separates a drama from a slideshow.
+      - key: MUSEFORGE_FOLEY
+        value: ""
+      - key: MUAPI_SFX_MODEL
+        value: ""
+
+      # Kinetic (word-by-word) captions. Requires the ElevenLabs voice path
+      # above for measured word timings; falls back to plain captions without
+      # it rather than guessing, because a highlight on the wrong word reads as
+      # a broken player.
+      - key: MUSEFORGE_WORD_CAPTIONS
+        value: ""
+
+      # Narrative shape. "micro_drama" opens on the shock, refuses to resolve,
+      # and puts a cold-open teaser in front of the film. Also selectable per
+      # job via the API's `narrative_mode`, which outranks this.
+      - key: MUSEFORGE_NARRATIVE_MODE
+        value: ""
+      - key: MUSEFORGE_COLD_OPEN
+        value: ""

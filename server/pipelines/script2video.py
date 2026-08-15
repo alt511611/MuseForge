@@ -10,10 +10,13 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import httpx
 
 from agents.storyboard_artist import StoryboardArtist
+from interfaces import acting
 from interfaces.camera import get_director_style
 from interfaces.character import CharacterInScene
 from interfaces.color_grade import get_color_grade
 from interfaces.lighting import resolve_lighting
+from interfaces.impact import build_impact_filters, plan_impacts
+from interfaces.pacing import plan_internal_cuts
 from interfaces.visual_style import PHOTOREAL_RENDER
 from interfaces.visual_style import resolve as resolve_visual_style
 from tools.character_qa import (
@@ -24,6 +27,8 @@ from tools.character_qa import (
 from tools.muapi_image_generator import MuAPIImageGenerator
 from tools.muapi_video_generator import MuAPIVideoGenerator
 from tools.muapi_client import MuAPICancelled
+from interfaces.shot_plan import REACTION as REACTION_ROLE
+from tools.video_model_router import REACTION as REACTION_PROFILE
 from tools.video_model_router import classify_shot
 
 logger = logging.getLogger(__name__)
@@ -645,7 +650,21 @@ def build_motion_prompt(shot, matched_char=None, world_state: str = "") -> str:
     if motion:
         parts.append(f"{motion}.")
     expression = (getattr(shot, "expression_desc", "") or "").strip().rstrip(".")
-    if expression:
+    peak = (getattr(shot, "expression_peak_desc", "") or "").strip().rstrip(".")
+    if expression and peak:
+        # A performance is a CHANGE, and a video model given one static
+        # description animates a photograph of that description: the face sits
+        # at "grief" for the whole clip and drifts. Naming both ends turns the
+        # shot into a journey the model has to travel -- and when an end frame
+        # was rendered too (see the acting path in Script2VideoPipeline.run) it
+        # is the same journey stated twice, in words and in pixels, which is
+        # exactly what an interpolating model wants.
+        parts.append(
+            f"Performance arc — the shot OPENS on: {expression}. Over the clip "
+            f"it builds, and by the final second it LANDS on: {peak}. Play the "
+            f"change as one continuous human beat, not as a cut or a jump."
+        )
+    elif expression:
         parts.append(
             f"The character's expression stays true to the beat: {expression}."
         )
@@ -1001,6 +1020,38 @@ def build_geometry_filters(
     ]
 
 
+def _probe_duration(video_path: str) -> float:
+    """Length of ``video_path`` in seconds, or 0.0 when it cannot be read.
+
+    0.0 means "unknown", and every caller treats that as a reason to do
+    nothing rather than as a zero-length clip.
+    """
+    try:
+        from moviepy import VideoFileClip
+
+        with VideoFileClip(video_path) as clip:
+            return float(clip.duration or 0.0)
+    except Exception as exc:
+        logger.warning("Could not probe the duration of %s: %s", video_path, exc)
+        return 0.0
+
+
+def _probe_fps(video_path: str) -> float:
+    """Frame rate, or 24 when it cannot be read.
+
+    24 rather than 0 on failure: the frame rate is only used to size a
+    one-FRAME flash, and a flash sized from the wrong rate is still a flash,
+    while one sized from zero is a division by it.
+    """
+    try:
+        from moviepy import VideoFileClip
+
+        with VideoFileClip(video_path) as clip:
+            return float(clip.fps or 24.0)
+    except Exception:
+        return 24.0
+
+
 def _probe_dimensions(video_path: str) -> Tuple[int, int]:
     """(width, height) of ``video_path``, or (0, 0) when it cannot be read."""
     try:
@@ -1137,6 +1188,204 @@ async def concatenate_videos_with_transitions(
     except OSError:
         pass
     return await concatenate_videos(paths, out_path)
+
+
+def _resolve_ffmpeg_binary() -> str:
+    """The ffmpeg to shell out to, in the order this pipeline has always used.
+
+    Production installs it in the image; a dev machine may only have moviepy's
+    bundled imageio-ffmpeg. Written once because the same eight lines were
+    already pasted into concatenate_videos() and apply_color_grade().
+    """
+    binary = os.environ.get("MUSEFORGE_FFMPEG_BINARY") or shutil.which("ffmpeg")
+    if binary:
+        return binary
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
+def build_internal_cut_filter(
+    cuts: Sequence[Any], width: int, height: int
+) -> str:
+    """ffmpeg ``filter_complex`` that re-cuts one clip into several framings.
+
+    Each framing is trimmed out of the source, punched in by its own zoom and
+    scaled back to the clip's original size, then all of them are concatenated
+    in order. Because the framings tile the source (see interfaces/pacing) the
+    result is the same length as the input, frame for frame — only the framing
+    changes at each join.
+
+    ``setpts=PTS-STARTPTS`` on every segment is what makes this work at all:
+    a trimmed segment keeps its original timestamps, so concatenating three of
+    them without rebasing produces a clip whose presentation times jump
+    backwards, which players read as a broken file.
+    """
+    chains: List[str] = []
+    labels: List[str] = []
+    for index, cut in enumerate(cuts):
+        label = f"c{index}"
+        steps = [
+            f"trim=start={cut.start:.3f}:end={cut.end:.3f}",
+            "setpts=PTS-STARTPTS",
+        ]
+        if cut.zoom and cut.zoom > 1.0:
+            # Even dimensions: yuv420p halves both axes, so x264 refuses odd
+            # ones -- and a crop is fractional almost every time.
+            crop_w = _even_dimension(width / cut.zoom)
+            crop_h = _even_dimension(height / cut.zoom)
+            offset_x = _even_dimension((width - crop_w) / 2)
+            offset_y = _even_dimension((height - crop_h) * cut.y_bias)
+            steps.append(f"crop={crop_w}:{crop_h}:{offset_x}:{offset_y}")
+            steps.append(f"scale={width}:{height}:flags=lanczos")
+            steps.append("setsar=1")
+        chains.append(f"[0:v]{','.join(steps)}[{label}]")
+        labels.append(f"[{label}]")
+    chains.append(f"{''.join(labels)}concat=n={len(labels)}:v=1:a=0[cut]")
+    return ";".join(chains)
+
+
+async def trim_to_duration(
+    video_path: str,
+    output_path: str,
+    seconds: float,
+    from_head: bool = True,
+) -> str:
+    """Cut a clip down to ``seconds``, keeping its END by default.
+
+    Under flat per-generation billing the length asked for and the length cut
+    in are different numbers (see interfaces/shot_plan): a master is generated
+    at the scene's full budget and delivered shorter to make room for a
+    reaction, and a reaction endpoint with a fixed duration enum returns eight
+    seconds whatever it is asked for.
+
+    Which end goes is a directing decision, not a technicality. A generated
+    clip spends its opening moments settling into motion and its final frame
+    on the acted peak (interfaces/acting), so the head is what is dropped.
+
+    Fail-open, and honest about it: the ORIGINAL path is returned when nothing
+    was trimmed, so a caller that assumes ``output_path`` exists is wrong.
+    """
+    if not video_path or not os.path.isfile(video_path) or seconds <= 0:
+        return video_path
+
+    duration = _probe_duration(video_path)
+    # Nothing to do, and nothing to gamble: a clip already at or under the
+    # target must not be re-encoded (a generation loss for no picture) and
+    # must never be stretched.
+    if duration <= 0 or duration <= seconds + 0.05:
+        return video_path
+
+    start = max(0.0, duration - seconds) if from_head else 0.0
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    try:
+        process = await asyncio.create_subprocess_exec(
+            _resolve_ffmpeg_binary(),
+            "-y",
+            # Before -i: seeks by keyframe, which is fast and accurate enough
+            # here because the clip is re-encoded immediately afterwards.
+            "-ss",
+            f"{start:.3f}",
+            "-i",
+            video_path,
+            "-t",
+            f"{seconds:.3f}",
+            *video_encode_args(),
+            "-an",
+            output_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode == 0 and os.path.isfile(output_path):
+            return output_path
+        logger.warning(
+            "Trim to %.2fs failed (exit=%s), keeping the full clip: %s",
+            seconds,
+            process.returncode,
+            stderr.decode("utf-8", errors="replace")[-500:],
+        )
+    except Exception as exc:
+        logger.warning("Trim unavailable, keeping the full clip: %s", exc)
+
+    try:
+        os.unlink(output_path)
+    except OSError:
+        pass
+    return video_path
+
+
+async def apply_internal_cuts(
+    video_path: str,
+    output_path: str,
+    cuts: Sequence[Any],
+) -> str:
+    """Re-cut a scene into its planned framings. Fail-open, like every
+    finishing stage here: any problem ships the uncut scene rather than
+    failing a paid job.
+
+    Returns the path actually written, which is ``video_path`` itself when
+    nothing was done — callers should use the return value rather than assume
+    ``output_path`` exists.
+    """
+    if not cuts or len(cuts) < 2:
+        return video_path
+
+    width, height = _probe_dimensions(video_path)
+    if width <= 0 or height <= 0:
+        # The crop geometry is computed from the real frame size; guessing it
+        # would either letterbox the scene or fail the encode.
+        logger.warning(
+            "Internal cuts skipped: could not read the dimensions of %s",
+            os.path.basename(video_path),
+        )
+        return video_path
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    filter_complex = build_internal_cut_filter(cuts, width, height)
+    logger.info(
+        "Cutting %s into %d framings (zooms: %s)",
+        os.path.basename(video_path),
+        len(cuts),
+        ", ".join(f"{c.zoom:.2f}x" for c in cuts),
+    )
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            _resolve_ffmpeg_binary(),
+            "-y",
+            "-i",
+            video_path,
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[cut]",
+            *video_encode_args(),
+            output_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode == 0 and os.path.isfile(output_path):
+            return output_path
+        logger.warning(
+            "Internal cut pass failed (exit=%s), shipping the uncut scene: %s",
+            process.returncode,
+            stderr.decode("utf-8", errors="replace")[-1000:],
+        )
+    except Exception as exc:
+        logger.warning(
+            "Internal cut pass unavailable, shipping the uncut scene: %s", exc
+        )
+
+    try:
+        os.unlink(output_path)
+    except OSError:
+        pass
+    return video_path
 
 
 def _grade_strength(preset_strength: float) -> float:
@@ -1291,6 +1540,193 @@ class Script2VideoPipeline:
         self.video_gen = _make_video_generator(api_key, demo)
         self.storyboard_artist = StoryboardArtist(demo=demo)
 
+    async def _apply_scene_pacing(
+        self,
+        scene_path: str,
+        working_dir: str,
+        director_style: str,
+        scene_tension: int,
+        shots: Sequence[Any],
+    ) -> str:
+        """Cut the assembled scene into its planned framings, or leave it be.
+
+        Returns the path to use as the scene clip. Everything about this is
+        fail-safe by construction: the plan is empty unless the director style
+        asks for it, the cut preserves the clip's exact duration, and any
+        ffmpeg trouble returns the original path untouched.
+        """
+        if self.demo or not scene_path or not os.path.isfile(scene_path):
+            return scene_path
+
+        # A scene that bought a real second angle is already cut. Adding
+        # digital punch-ins on top of it does not double the rhythm, it
+        # doubles the JOINS -- six seconds carrying two generated angles and
+        # three synthetic ones is not pace, it is noise. The post-cut exists
+        # for scenes that could not afford a second camera; where one was
+        # afforded, it stands down.
+        #
+        # What that scene gets instead is the impact pass: it HAS a cut, and a
+        # cut is the only place a flash and a shake belong.
+        if len(shots or []) > 1:
+            logger.info(
+                "Scene has %d generated angles; skipping the post-cut pacing "
+                "pass in favour of the impact pass.",
+                len(shots),
+            )
+            return await self._apply_impact(
+                scene_path,
+                working_dir=working_dir,
+                shots=shots,
+                scene_tension=scene_tension,
+            )
+
+        pacing = get_director_style(director_style).pacing
+        duration = _probe_duration(scene_path)
+        shot_type = ""
+        if shots:
+            shot_type = getattr(shots[0], "shot_type", "") or ""
+        cuts = plan_internal_cuts(
+            duration,
+            tension=scene_tension,
+            shot_type=shot_type,
+            pacing=pacing,
+        )
+        if not cuts:
+            return scene_path
+
+        cut_path = os.path.join(working_dir, "scene_cut.mp4")
+        return await apply_internal_cuts(scene_path, cut_path, cuts)
+
+    async def _apply_impact(
+        self,
+        scene_path: str,
+        working_dir: str,
+        shots: Sequence[Any],
+        scene_tension: int,
+    ) -> str:
+        """Flash and shake the frame where the scene cuts, or leave it alone.
+
+        The cut position is the master's DELIVERED length -- the same number
+        the trim used, so the hit lands on the join rather than near it.
+        """
+        duration = _probe_duration(scene_path)
+        cut_at = float(getattr(shots[0], "deliver_seconds", 0.0) or 0.0)
+        beats = plan_impacts(cut_at or None, tension=scene_tension, duration=duration)
+        if not beats:
+            return scene_path
+
+        width, height = _probe_dimensions(scene_path)
+        filters = build_impact_filters(beats, width, height, fps=_probe_fps(scene_path))
+        if not filters:
+            return scene_path
+
+        output_path = os.path.join(working_dir, "scene_impact.mp4")
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        logger.info(
+            "Impact at %.2fs of %s (%d filter(s))",
+            beats[0].at_seconds,
+            os.path.basename(scene_path),
+            len(filters),
+        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                _resolve_ffmpeg_binary(),
+                "-y",
+                "-i",
+                scene_path,
+                "-vf",
+                ",".join(filters),
+                *video_encode_args(),
+                "-an",
+                output_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await process.communicate()
+            if process.returncode == 0 and os.path.isfile(output_path):
+                return output_path
+            logger.warning(
+                "Impact pass failed (exit=%s), shipping the scene unhit: %s",
+                process.returncode,
+                stderr.decode("utf-8", errors="replace")[-800:],
+            )
+        except Exception as exc:
+            logger.warning("Impact pass unavailable, shipping the scene unhit: %s", exc)
+
+        try:
+            os.unlink(output_path)
+        except OSError:
+            pass
+        return scene_path
+
+    async def _render_end_frame(
+        self,
+        frame_url: Optional[str],
+        shot,
+        matched_char=None,
+        aspect_ratio: str = "16:9",
+        is_cancelled: Optional[Callable[[], bool]] = None,
+    ) -> Optional[str]:
+        """Edit this shot's start frame into its acted peak, or return None.
+
+        The peak comes from interfaces/acting, not from the LLM, so it is the
+        same on every render of the same scene. The EDIT (rather than a second
+        generation from the portrait) is the whole trick: an identity model
+        given the same face returns a different picture of it -- new framing,
+        new background -- and interpolating between two different pictures is
+        a warp, not a performance. Only the face may move between the two ends.
+
+        Returns None for every reason there might be not to do this, and never
+        raises: no character in the shot, the feature switched off, no edit
+        method on the configured image provider, or the edit itself failing.
+        A shot without an end frame is exactly the shot this pipeline produced
+        before any of this existed.
+        """
+        if not frame_url or not acting.is_end_frame_enabled():
+            return None
+        # An end frame is a FACE landing somewhere. On an establishing plate or
+        # an insert there is no face to act, and asking an edit model to change
+        # "the expression" of an empty room is how a doorway grows eyes.
+        if matched_char is None:
+            return None
+        peak = (getattr(shot, "expression_peak_desc", "") or "").strip()
+        if not peak:
+            return None
+        edit_image = getattr(self.image_gen, "edit_image", None)
+        if edit_image is None:
+            logger.info(
+                "End-frame acting is on but %s has no edit_image(); animating "
+                "from the start frame alone.",
+                type(self.image_gen).__name__,
+            )
+            return None
+
+        prompt = acting.end_frame_edit_prompt(
+            peak=peak,
+            shot_visual=getattr(shot, "visual_desc", "") or "",
+            character_desc=getattr(matched_char, "static_features", "") or "",
+        )
+        try:
+            end_frame_url = await edit_image(
+                prompt, frame_url, aspect_ratio, is_cancelled=is_cancelled
+            )
+        except MuAPICancelled:
+            # A cancellation is the user's decision, not a provider failure --
+            # let it travel so the job stops instead of quietly finishing.
+            raise
+        except Exception as exc:
+            logger.warning(
+                "End frame could not be rendered (%s: %s); animating from the "
+                "start frame alone.",
+                type(exc).__name__,
+                exc,
+            )
+            return None
+        if not end_frame_url:
+            return None
+        logger.info("Shot acted between two frames: peak=%.60s", peak)
+        return end_frame_url
+
     async def run(
         self,
         script: str,
@@ -1378,6 +1814,10 @@ class Script2VideoPipeline:
             user_brief=user_brief,
             story_so_far=story_so_far,
             not_yet=not_yet,
+            # Not a prompt input: it decides whether this scene may buy a
+            # second angle at all, since the lip-sync pass cannot carry a
+            # mouth across a cut it never sees.
+            lipsync_enabled=lipsync_enabled,
         )
 
         shot_videos: List[Optional[str]] = [None] * len(shots)
@@ -1519,6 +1959,10 @@ class Script2VideoPipeline:
                     char_desc = matched_char.static_features if matched_char else ""
                     qa_result = {"character_ok": True, "setting_ok": True}
                     frame_url = None
+                    # Stays None on the one-step reference-to-video path: that
+                    # provider binds identity from a portrait and never renders
+                    # a start frame, so there is nothing to edit into a peak.
+                    end_frame_url = None
 
                     if one_step_reference_video:
                         # Portrait (or last dynamic frame) is the element
@@ -1593,6 +2037,21 @@ class Script2VideoPipeline:
                             shot, matched_char, world_state=change_state
                         )
 
+                        # The acted PEAK, rendered as a real end frame so the
+                        # video model has to interpolate the performance rather
+                        # than merely be told about it (interfaces/acting).
+                        #
+                        # Everything here is fail-open and opt-in: without an
+                        # edit model configured, or on any error, `last_image`
+                        # stays None and the shot animates exactly as before.
+                        end_frame_url = await self._render_end_frame(
+                            frame_url=frame_url,
+                            shot=shot,
+                            matched_char=matched_char,
+                            aspect_ratio=aspect_ratio,
+                            is_cancelled=is_cancelled,
+                        )
+
                     # Record this shot's final frame (post-repair, if any)
                     # as the new "most recent" reference for its character
                     # -- the NEXT shot/scene featuring them will prefer this
@@ -1608,15 +2067,30 @@ class Script2VideoPipeline:
                     # shot it is, not just on the plan: a talking close-up and
                     # a chase fail in different ways, and an empty-set plate
                     # needs neither's strengths. See tools/video_model_router.
-                    shot_profile = classify_shot(
-                        motion_desc=getattr(shot, "motion_desc", "") or "",
-                        visual_desc=getattr(shot, "visual_desc", "") or "",
-                        camera_movement=getattr(shot, "camera_movement", "") or "",
-                        shot_type=getattr(shot, "shot_type", "") or "",
-                        has_dialogue=has_dialogue,
-                        scene_tension=scene_tension,
-                        has_character=matched_char is not None,
-                    )
+                    # A cutaway is routed by what it IS, not by what its words
+                    # look like: two seconds of a listening face is the one
+                    # shot in the drama that should not be bought at the
+                    # master's price (see video_model_router.REACTION).
+                    if (getattr(shot, "role", "") or "") == REACTION_ROLE:
+                        shot_profile = REACTION_PROFILE
+                    else:
+                        shot_profile = classify_shot(
+                            motion_desc=getattr(shot, "motion_desc", "") or "",
+                            visual_desc=getattr(shot, "visual_desc", "") or "",
+                            camera_movement=getattr(shot, "camera_movement", "") or "",
+                            shot_type=getattr(shot, "shot_type", "") or "",
+                            has_dialogue=has_dialogue,
+                            scene_tension=scene_tension,
+                            has_character=matched_char is not None,
+                        )
+                    video_kwargs: Dict[str, Any] = {}
+                    # Passed ONLY when there is one. Every video backend in
+                    # this repo accepts `last_image`, but the call site is a
+                    # duck-typed interface -- a provider (or a test double)
+                    # written before the end-frame path existed must not
+                    # TypeError on a keyword that would have been None anyway.
+                    if end_frame_url:
+                        video_kwargs["last_image"] = end_frame_url
                     video_url = await self.video_gen.generate_video_from_image(
                         prompt=video_prompt,
                         image_url=frame_url if not one_step_reference_video else reference_url,
@@ -1625,6 +2099,7 @@ class Script2VideoPipeline:
                         plan=plan,
                         is_cancelled=is_cancelled,
                         shot_profile=shot_profile,
+                        **video_kwargs,
                     )
                 except MuAPICancelled as exc:
                     # Translate the low-level "stopped polling mid-wait"
@@ -1643,6 +2118,12 @@ class Script2VideoPipeline:
                 # from the job record -- which model profile handled it -- rather
                 # than by re-deriving the classification from the prompt text.
                 meta["shot_profile"] = shot_profile
+                # Whether this shot was ACTED between two frames or animated
+                # from one. A "the faces are flat" report is otherwise
+                # impossible to attribute: the end frame is opt-in, endpoint
+                # dependent and fail-open, so its absence is invisible.
+                meta["end_frame_url"] = end_frame_url
+                meta["acted_interpolation"] = bool(end_frame_url)
                 # Which lock actually anchored this shot. Without it, a
                 # "the room keeps changing" report cannot be told apart from
                 # "the wrong character was matched" after the fact.
@@ -1672,6 +2153,20 @@ class Script2VideoPipeline:
                 if not self.demo:
                     local_path = os.path.join(working_dir, f"shot_{i}.mp4")
                     await download_video(video_url, local_path)
+                    # Generated length and delivered length are different
+                    # numbers under flat billing (interfaces/shot_plan): the
+                    # master gives up its opening seconds to make room for the
+                    # cutaway, and the cutaway endpoint returns a fixed eight
+                    # seconds whatever it was asked for. Both are trimmed here,
+                    # before the scene is assembled, so the scene's total is
+                    # exactly the budget the credit bought.
+                    deliver = float(getattr(shot, "deliver_seconds", 0.0) or 0.0)
+                    if deliver > 0:
+                        local_path = await trim_to_duration(
+                            local_path,
+                            os.path.join(working_dir, f"shot_{i}_cut.mp4"),
+                            deliver,
+                        )
                     shot_videos[i] = local_path
 
                 async with progress_lock:
@@ -1700,6 +2195,19 @@ class Script2VideoPipeline:
             output_path = shot_videos[0]
         elif len(shot_videos) > 1:
             await concatenate_videos(shot_videos, output_path)
+
+        # Rhythm, out of the generation we already paid for: the scene is
+        # delivered as a sequence of framings cut from its own pixels rather
+        # than as one unbroken take (see interfaces/pacing). Same length, same
+        # cost, and the only stage in the chain that can make a 10-second shot
+        # feel like a micro-drama instead of a slow one.
+        output_path = await self._apply_scene_pacing(
+            output_path,
+            working_dir=working_dir,
+            director_style=director_style,
+            scene_tension=scene_tension,
+            shots=shots,
+        )
 
         await progress("scene_complete", f"Scene {scene_idx + 1} complete", 100, {"path": output_path})
         return {"path": output_path, "url": primary_url, "shots": shot_meta}

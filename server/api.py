@@ -293,6 +293,11 @@ class GenerateRequest(BaseModel):
     # from the wording of their idea. Unrecognised values normalise to English
     # rather than erroring -- see interfaces/language.
     language: str = "en"
+    # Which dramatic shape to write to. "cinematic" resolves; "micro_drama"
+    # opens on the shock and ends on the question, and turns on the cold-open
+    # hook (see interfaces/micro_drama). Defaults to the cinematic shape, so
+    # every existing client keeps the product it already had.
+    narrative_mode: str = Field(default="cinematic", pattern=r"^(cinematic|micro_drama)$")
     user_requirement: str = ""
     character_image: Optional[str] = None
     character_name: str = ""
@@ -848,6 +853,7 @@ async def generate(
         num_scenes=req.num_scenes,
         user_requirement=req.user_requirement,
         language=normalize_language(req.language),
+        narrative_mode=req.narrative_mode,
         demo=demo,
         user_id=current_user.user_id if current_user else None,
         user_email=current_user.email if current_user else None,

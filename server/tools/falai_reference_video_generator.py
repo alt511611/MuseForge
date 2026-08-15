@@ -91,6 +91,7 @@ class FalAIReferenceVideoGenerator:
         plan: str = "free",
         is_cancelled: Optional[Callable[[], bool]] = None,
         shot_profile: Optional[str] = None,
+        last_image: Optional[str] = None,
     ) -> str:
         # plan kept for signature parity; this endpoint has no HD/standard mode.
         # shot_profile likewise: MuAPI-only routing (tools/video_model_router).
@@ -113,6 +114,11 @@ class FalAIReferenceVideoGenerator:
             "duration": _duration_str(duration),
             "aspect_ratio": _aspect_ratio(aspect_ratio),
         }
+        # Acted peak (interfaces/acting) as the shot's last frame -- the field
+        # this endpoint's schema already declares (see the module docstring's
+        # `end_image_url`). Omitted when absent so nothing changes by default.
+        if last_image:
+            payload["end_image_url"] = last_image
 
         result = await fal_generate(
             self.client,

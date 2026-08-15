@@ -44,6 +44,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import httpx
 
+from interfaces import acting
 from interfaces import gender as gender_of
 from interfaces.language import DEFAULT_LANGUAGE, is_default, normalize
 
@@ -166,7 +167,9 @@ class ElevenLabsVoiceGenerator:
             return self._character_voices[key]
         return self._assign(key, self.SYSTEM_VOICE_IDS)
 
-    def _parse_lines(self, dialogue: Iterable[Any]) -> List[Dict[str, str]]:
+    def _parse_lines(
+        self, dialogue: Iterable[Any], emotion: str = ""
+    ) -> List[Dict[str, str]]:
         lines: List[Dict[str, str]] = []
         for item in dialogue or []:
             if isinstance(item, dict):
@@ -185,6 +188,40 @@ class ElevenLabsVoiceGenerator:
                     "voice_id": self.voice_id_for_character(character),
                 }
             )
+        return self._direct_delivery(lines, emotion)
+
+    @staticmethod
+    def _direct_delivery(
+        lines: List[Dict[str, str]], emotion: str = ""
+    ) -> List[Dict[str, str]]:
+        """Put the scene's emotion into the DELIVERY, not just the words.
+
+        Eleven v3 reads bracketed audio tags inline in the text -- "[furious]",
+        "[voice breaking]" -- and interfaces/acting already decided which one
+        this beat is, from the same table that decided the face. A scene whose
+        picture is a woman with tears breaking over her lower lid, read in the
+        even, pleasant default voice, is the single loudest tell that a drama
+        was generated rather than performed.
+
+        The tag goes on the FIRST line only, and deliberately:
+
+        * v3 carries delivery forward through a dialogue turn, so tagging every
+          line does not make the scene more emotional -- it makes each line
+          restart the emotion from zero, which reads as an actor being
+          re-directed between sentences.
+        * The tag is spoken by nobody but it IS text, so it costs characters on
+          a per-character bill, and it is one more thing that can survive into
+          the caption if anything downstream ever reads `line` instead of the
+          untouched copy kept in ``track["line"]``.
+
+        ``spoken_text`` is what gets sent; ``line`` stays exactly what the
+        screenwriter wrote, because that is what the subtitle shows.
+        """
+        for row in lines:
+            row["spoken_text"] = row["line"]
+        tag = acting.voice_tag(emotion)
+        if tag and lines:
+            lines[0]["spoken_text"] = f"{tag}{lines[0]['line']}"
         return lines
 
     # --- the provider ----------------------------------------------------
@@ -241,11 +278,96 @@ class ElevenLabsVoiceGenerator:
             out.write(raw)
         return path
 
+    @staticmethod
+    def _word_timings(
+        alignment: Optional[Dict[str, Any]], lines: List[Dict[str, str]]
+    ) -> Dict[int, List[Dict[str, Any]]]:
+        """Per-WORD timings for each line, read off the character alignment.
+
+        ``/with-timestamps`` returns two things this pipeline can use. The
+        first, ``voice_segments``, gives a start and end per LINE and is what
+        the SRT builder has always used. The second, ``alignment``, gives a
+        start and end per CHARACTER of the whole combined audio -- which is
+        everything needed for the word-at-a-time captions that vertical video
+        has standardised on, and it costs nothing extra because it arrives in
+        the same response that was already paid for.
+
+        The walk is deliberately tolerant. The character stream is the
+        provider's normalisation of what was sent, so it may differ from the
+        written line in whitespace, punctuation, or the audio tag that was
+        prefixed to it (see _direct_delivery) -- and a strict matcher would
+        return nothing at the first surprise. Instead each line consumes the
+        stream until its own non-space characters are accounted for; anything
+        that does not line up is skipped rather than fatal, and a line that
+        cannot be resolved simply has no word timings and falls back to the
+        whole-line cue.
+        """
+        if not isinstance(alignment, dict):
+            return {}
+        characters = alignment.get("characters") or []
+        starts = alignment.get("character_start_times_seconds") or []
+        ends = alignment.get("character_end_times_seconds") or []
+        if not characters or len(characters) != len(starts) or len(starts) != len(ends):
+            return {}
+
+        by_line: Dict[int, List[Dict[str, Any]]] = {}
+        cursor = 0
+        for index, row in enumerate(lines):
+            text = row.get("spoken_text") or row.get("line") or ""
+            words: List[Dict[str, Any]] = []
+            current: List[str] = []
+            current_start: Optional[float] = None
+            current_end: Optional[float] = None
+
+            for wanted in text:
+                if wanted.isspace():
+                    # Word boundary in the written line; the stream's own
+                    # spacing is not trusted to agree.
+                    if current:
+                        words.append(
+                            {
+                                "text": "".join(current),
+                                "start": float(current_start or 0.0),
+                                "end": float(current_end or 0.0),
+                            }
+                        )
+                        current, current_start, current_end = [], None, None
+                    continue
+                # Advance to this character in the stream, skipping whatever
+                # the provider inserted or normalised away.
+                found = -1
+                for at in range(cursor, min(len(characters), cursor + 40)):
+                    if str(characters[at]) == wanted:
+                        found = at
+                        break
+                if found < 0:
+                    continue
+                cursor = found + 1
+                if current_start is None:
+                    current_start = float(starts[found])
+                current_end = float(ends[found])
+                current.append(wanted)
+
+            if current:
+                words.append(
+                    {
+                        "text": "".join(current),
+                        "start": float(current_start or 0.0),
+                        "end": float(current_end or 0.0),
+                    }
+                )
+            # A word list that never advanced is worse than none: it would
+            # pin every cue of the line to zero.
+            if words and words[-1]["end"] > words[0]["start"]:
+                by_line[index] = words
+        return by_line
+
     async def generate_scene_dialogue(
         self,
         dialogue: Iterable[Any],
         is_cancelled: Optional[Callable[[], bool]] = None,
         language: str = DEFAULT_LANGUAGE,
+        emotion: str = "",
     ) -> List[Dict[str, Any]]:
         """Speak a whole scene in one request, and keep the timings it returns.
 
@@ -255,7 +377,7 @@ class ElevenLabsVoiceGenerator:
         the SRT builder honours as given -- so this path's captions are
         measured rather than guessed from the word count.
         """
-        lines = self._parse_lines(dialogue)
+        lines = self._parse_lines(dialogue, emotion)
         if not lines or self.demo:
             return []
         if not self.api_key:
@@ -265,10 +387,23 @@ class ElevenLabsVoiceGenerator:
             # `inputs`, not the reseller's `dialogue`: the wrapper renamed the
             # field, and sending the wrong one is a 422 before a note is sung.
             "inputs": [
-                {"text": row["line"], "voice_id": row["voice_id"]} for row in lines
+                {
+                    # The tagged text, not the written line -- see
+                    # _direct_delivery. The written line is what the caption
+                    # shows and it is kept untouched on the track below.
+                    "text": row.get("spoken_text") or row["line"],
+                    "voice_id": row["voice_id"],
+                }
+                for row in lines
             ],
             "model_id": DIALOGUE_MODEL,
         }
+        # How far the delivery may move from the voice's default reading.
+        # Sent only when the scene declared an emotion: with no beat to play,
+        # the provider's own default (0.5) is the right answer and stating it
+        # would only pin a number we have no opinion about.
+        if (emotion or "").strip():
+            payload["stability"] = acting.voice_stability(emotion)
         # Sent only for non-English, same reasoning as the MuAPI path: omitted
         # means auto-detect, which is right for English and unreliable on the
         # two-word lines a micro-drama is made of.
@@ -320,6 +455,8 @@ class ElevenLabsVoiceGenerator:
                 "estimated timings for this scene."
             )
 
+        words_by_line = self._word_timings(data.get("alignment"), lines)
+
         tracks: List[Dict[str, Any]] = []
         for i, row in enumerate(lines):
             track: Dict[str, Any] = {
@@ -336,6 +473,12 @@ class ElevenLabsVoiceGenerator:
                 track["duration_seconds"] = _estimate_line_duration_seconds(
                     row["line"]
                 )
+            words = words_by_line.get(i)
+            if words:
+                # Scene-relative, exactly like start_seconds above, so the SRT
+                # builder offsets them with the same anchor and cannot drift
+                # from the line they belong to.
+                track["words"] = words
             if i == 0:
                 track["audio_url"] = audio_path
             tracks.append(track)

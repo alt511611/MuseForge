@@ -155,6 +155,11 @@ def _sb_row_to_dict(row: dict) -> dict:
         "num_scenes": row.get("num_scenes", 3),
         "user_requirement": row.get("user_requirement", ""),
         "language": result.get("language") or DEFAULT_LANGUAGE,
+        # Also not a column, and recovered the same way: the pipeline records
+        # the mode it wrote to in the result, so a job replayed from storage
+        # still reports the shape it was actually made in rather than the
+        # default one.
+        "narrative_mode": result.get("narrative_mode") or "cinematic",
         "demo": row.get("demo", False),
         "music_enabled": row.get("music_enabled", False),
         "dialogue_enabled": row.get("dialogue_enabled", False),
@@ -394,6 +399,9 @@ class Job:
     # not replayed the migration yet. It is recorded on the result instead,
     # which already survives the Supabase round-trip.
     language: str = "en"
+    # "cinematic" or "micro_drama" -- the dramatic shape the script is written
+    # to, and whether the finished cut gets a cold-open hook.
+    narrative_mode: str = "cinematic"
     demo: bool = False
     user_id: Optional[str] = None
     user_email: Optional[str] = None
@@ -459,6 +467,7 @@ class Job:
             # happens to still remember it.
             "user_requirement": self.user_requirement,
             "language": self.language,
+            "narrative_mode": self.narrative_mode,
             "demo": self.demo,
             "user_id": self.user_id,
             "user_email": self.user_email,
@@ -1033,6 +1042,7 @@ async def run_generation_job(job: Job, api_key: str):
                         # the (possibly silent) script is already written and
                         # approved.
                         dialogue_enabled=job.dialogue_enabled,
+                        narrative_mode=job.narrative_mode,
                     ),
                     timeout=PIPELINE_HARD_TIMEOUT_SECONDS,
                 )
@@ -1066,6 +1076,7 @@ async def run_generation_job(job: Job, api_key: str):
                     num_scenes=job.num_scenes,
                     aspect_ratio=job.aspect_ratio,
                     language=job.language,
+                    narrative_mode=job.narrative_mode,
                     working_dir=working_dir,
                     progress_callback=progress_callback,
                     is_cancelled=is_cancelled,
@@ -1442,6 +1453,7 @@ async def run_continue_from_script_job(job: Job, api_key: str, script_data: Dict
                 user_requirement=job.user_requirement,
                 aspect_ratio=job.aspect_ratio,
                 language=job.language,
+                narrative_mode=job.narrative_mode,
                 working_dir=working_dir,
                 progress_callback=progress_callback,
                 is_cancelled=is_cancelled,

@@ -305,7 +305,9 @@ async def test_a_failed_voice_layer_tells_the_user_what_the_provider_said(
         def cast_characters(self, characters):
             return {}
 
-        async def generate_scene_dialogue(self, dialogue, is_cancelled=None, language="en"):
+        async def generate_scene_dialogue(
+            self, dialogue, is_cancelled=None, language="en", emotion=""
+        ):
             raise RuntimeError(
                 "MuAPI request failed after 1 attempt(s): 422 | Response "
                 "body: {'detail': 'voice_id is not valid'}"
@@ -414,7 +416,9 @@ async def test_a_dead_voice_provider_ships_a_subtitled_film_not_a_mime_show(
         def cast_characters(self, characters):
             return {}
 
-        async def generate_scene_dialogue(self, dialogue, is_cancelled=None, language="en"):
+        async def generate_scene_dialogue(
+            self, dialogue, is_cancelled=None, language="en", emotion=""
+        ):
             raise RuntimeError("HTTP 400: Invalid voice parameter")
 
     monkeypatch.setenv("MUSEFORGE_DIALOGUE_ENABLED", "1")

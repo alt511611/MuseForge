@@ -6,9 +6,11 @@ import os
 import re
 from typing import List, Optional
 
+from interfaces import acting
 from interfaces.camera import get_director_style
 from interfaces.character import CharacterInScene
 from interfaces.shot import StoryboardShot
+from interfaces.shot_plan import plan_scene_shots
 from interfaces.visual_style import resolve as resolve_visual_style
 from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
 
@@ -171,17 +173,25 @@ Respond ONLY with valid JSON array containing a single shot object:
         user_brief: str = "",
         story_so_far: str = "",
         not_yet: str = "",
+        # Whether this scene will be lip-synced. Not a prompt input: it decides
+        # whether the scene may buy a second ANGLE, because the lip-sync pass
+        # drives a mouth across the whole scene clip and cannot see a cut in
+        # the middle of it (see interfaces/shot_plan.plan_scene_shots).
+        lipsync_enabled: bool = False,
     ) -> List[StoryboardShot]:
         preset = get_director_style(director_style)
 
         # Demo mode must stay fast and free of real network calls --
         # matches MuAPIImageGenerator/MuAPIVideoGenerator's demo behavior.
         if self.demo:
-            return self._clamp_durations(
+            return self._finish_shots(
                 self._design_template(script, characters, preset, scene_emotion),
+                scene_emotion,
                 is_finale,
                 scene_tension,
                 scene_duration,
+                characters=characters,
+                lipsync_enabled=lipsync_enabled,
             )
 
         prompt = self._build_prompt(
@@ -215,14 +225,21 @@ Respond ONLY with valid JSON array containing a single shot object:
                 )
                 data = json.loads(re.search(r"\[[\s\S]*\]", content).group())
                 shots = [StoryboardShot(**s) for s in data]
-                self._ensure_expression(shots, scene_emotion)
                 if shots:
                     # Hard cap: never produce more than 1 shot per scene
                     # (cost control) — this path was previously missing
                     # the same cap already applied to the direct-Anthropic
                     # fallback below, silently defeating the cost fix
                     # since MuAPI is the PRIMARY path, tried first.
-                    return self._clamp_durations(shots[:1], is_finale, scene_tension, scene_duration)
+                    return self._finish_shots(
+                        shots[:1],
+                        scene_emotion,
+                        is_finale,
+                        scene_tension,
+                        scene_duration,
+                        characters=characters,
+                        lipsync_enabled=lipsync_enabled,
+                    )
             except Exception as exc:
                 raw_snippet = locals().get("content", "<no content received>")
                 logger.warning(
@@ -252,17 +269,27 @@ Respond ONLY with valid JSON array containing a single shot object:
                 story_so_far=story_so_far,
                 not_yet=not_yet,
             )
-            self._ensure_expression(shots, scene_emotion)
             if shots:
                 # Hard cap: never produce more than 1 shot per scene (cost control).
-                return self._clamp_durations(shots[:1], is_finale, scene_tension, scene_duration)
+                return self._finish_shots(
+                    shots[:1],
+                    scene_emotion,
+                    is_finale,
+                    scene_tension,
+                    scene_duration,
+                    characters=characters,
+                    lipsync_enabled=lipsync_enabled,
+                )
 
         # 3) Last resort: deterministic template, never crashes generation.
-        return self._clamp_durations(
+        return self._finish_shots(
             self._design_template(script, characters, preset, scene_emotion),
+            scene_emotion,
             is_finale,
             scene_tension,
             scene_duration,
+            characters=characters,
+            lipsync_enabled=lipsync_enabled,
         )
 
     @classmethod
@@ -335,6 +362,164 @@ Respond ONLY with valid JSON array containing a single shot object:
                     # falls back to its face-visibility clause.
                     pass
         return shots
+
+    @classmethod
+    def _apply_acting_beats(
+        cls, shots: List[StoryboardShot], scene_emotion: str
+    ) -> List[StoryboardShot]:
+        """Give every shot an onset and a PEAK, deterministically.
+
+        Runs after ``_ensure_expression``, and does two different jobs:
+
+        * ``expression_desc`` gains an anatomical floor from
+          interfaces/acting -- "cold resentment" on its own is drawn as a face
+          doing nothing, which is the flat, generated look this exists to kill.
+          An agent that already wrote something specific keeps its own words
+          (see acting.onset_expression).
+        * ``expression_peak_desc`` is set unconditionally. Nothing else fills
+          it: the LLM is never asked for the peak, because the peak has to be
+          identical across re-renders of the same scene or a retake silently
+          re-acts the film. It is the target of the start-to-end frame
+          interpolation, and it is also what tells the video model where the
+          performance is GOING even when no end frame is rendered.
+        """
+        for shot in shots:
+            try:
+                written = (getattr(shot, "expression_desc", "") or "").strip()
+                shot.expression_desc = acting.onset_expression(scene_emotion, written)
+                shot.expression_peak_desc = acting.peak_expression(scene_emotion)
+            except AttributeError:
+                # Immutable/slotted shot objects from older callers and tests:
+                # the shot simply animates without a staged peak, exactly as
+                # it did before this existed.
+                continue
+        return shots
+
+    @classmethod
+    def _finish_shots(
+        cls,
+        shots: List[StoryboardShot],
+        scene_emotion: str,
+        is_finale: bool,
+        tension: int = 0,
+        budget: float = 0.0,
+        characters: Optional[List[CharacterInScene]] = None,
+        lipsync_enabled: bool = False,
+    ) -> List[StoryboardShot]:
+        """Every path's last step: expression, acting beats, angles, durations.
+
+        Written once because it was previously written three times and the
+        three had already drifted -- the template path never got
+        ``_ensure_expression`` at all, so a key-less run produced shots whose
+        only emotional content was whatever the scene tag happened to say.
+        """
+        cls._ensure_expression(shots, scene_emotion)
+        cls._apply_acting_beats(shots, scene_emotion)
+        shots = cls._clamp_durations(shots, is_finale, tension, budget)
+        return cls._apply_shot_plan(
+            shots, scene_emotion, tension, characters or [], lipsync_enabled
+        )
+
+    @classmethod
+    def _apply_shot_plan(
+        cls,
+        shots: List[StoryboardShot],
+        scene_emotion: str,
+        tension: int,
+        characters: List[CharacterInScene],
+        lipsync_enabled: bool = False,
+    ) -> List[StoryboardShot]:
+        """Give a peak scene a second angle, and set generate/deliver lengths.
+
+        The reaction shot is DERIVED, not asked for. Sending the model a
+        second prompt would cost another LLM round trip on the critical path
+        and would answer differently on every render of the same scene -- and
+        the answer is not open anyway: the cutaway is a close-up of the face
+        that is listening, playing the same beat from the other side. What the
+        agent decides (the moment, the staging, the emotion) is inherited from
+        the master shot it is cut against, which is also what keeps the two
+        halves of the cut describing one continuous event.
+        """
+        if not shots:
+            return shots
+        master = shots[0]
+        plan = plan_scene_shots(
+            float(getattr(master, "duration_seconds", 0.0) or 0.0),
+            tension=tension,
+            lipsync_enabled=lipsync_enabled,
+        )
+        master.role = plan[0].role
+        master.deliver_seconds = plan[0].deliver_seconds
+        if len(plan) < 2:
+            return shots
+
+        reaction = cls._build_reaction_shot(master, scene_emotion, characters)
+        reaction.duration_seconds = plan[1].generate_seconds
+        reaction.deliver_seconds = plan[1].deliver_seconds
+        reaction.role = plan[1].role
+        return [master, reaction]
+
+    #: Who the cutaway is ON. A drama with two people in the scene cuts to the
+    #: OTHER one -- that is what a reaction shot is, and the pipeline can hold
+    #: their face because every character carries a locked portrait. With only
+    #: one person on screen there is nobody to cut to, so the cut goes tighter
+    #: on the same face instead, which is a cut-in rather than a reverse but
+    #: still a change of framing bought with a real generation.
+    @classmethod
+    def _build_reaction_shot(
+        cls,
+        master: StoryboardShot,
+        scene_emotion: str,
+        characters: List[CharacterInScene],
+    ) -> StoryboardShot:
+        visible = [c for c in characters if getattr(c, "is_visible", True)]
+        master_text = f"{master.visual_desc} {master.motion_desc}".lower()
+        # The subject of the master is whoever it names first; the reaction is
+        # anyone else. Named explicitly in visual_desc because that is what the
+        # frame step matches on to pick the right locked portrait
+        # (script2video.on_screen_name_matches) -- get the name wrong here and
+        # the cut lands on a stranger.
+        subject = next(
+            (c for c in visible if (c.name or "").lower() in master_text), None
+        )
+        other = next((c for c in visible if c is not subject), None)
+
+        peak = (getattr(master, "expression_peak_desc", "") or "").strip()
+        if other is not None:
+            who = other.name
+            visual = (
+                f"Tight close-up on {who}'s face as they take in what has just "
+                f"happened. {who} is listening, not speaking."
+            )
+            expression = (
+                f"{who} reacting in the moment: {peak}" if peak else f"{who} reacting"
+            )
+        else:
+            who = subject.name if subject is not None else "the character"
+            visual = (
+                f"Extreme close-up on {who}'s eyes and mouth as the moment "
+                f"lands. Nothing else in frame."
+            )
+            expression = peak or "the moment landing on the face"
+
+        return StoryboardShot(
+            idx=master.idx + 1,
+            visual_desc=visual,
+            # A cutaway holds. Movement in a two-second insert reads as a
+            # camera error, not as energy.
+            motion_desc=(
+                "Almost still: the smallest involuntary movement only — a "
+                "blink, a swallow, the breath catching."
+            ),
+            expression_desc=expression,
+            expression_peak_desc=peak,
+            audio_desc=getattr(master, "audio_desc", "") or "",
+            shot_type="extreme close-up",
+            camera_movement="static",
+            # Longer glass compresses and isolates: the lens a cutaway is
+            # actually shot on, and visibly different from the master's.
+            lens="85mm",
+        )
 
     def _build_prompt(
         self,
