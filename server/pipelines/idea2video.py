@@ -15,6 +15,7 @@ from interfaces.film_look import build_film_look_filters
 from interfaces import micro_drama
 from interfaces.language import DEFAULT_LANGUAGE
 from interfaces.second_budget import billable_seconds, distribute_budget
+from interfaces.shot_plan import plan_shot_scales
 from interfaces.transitions import plan_transitions
 from interfaces.visual_style import resolve as resolve_visual_style
 from pipelines.script2video import (
@@ -435,6 +436,11 @@ def _even(value: float) -> int:
 FADE_IN_SECONDS = 0.6
 FADE_OUT_SECONDS = 0.9
 
+#: Sample rate every delivered master carries. 48kHz is what platforms,
+#: editors and players expect; anything above it is bandwidth spent where no
+#: listener can follow.
+DELIVERY_SAMPLE_RATE = 48000
+
 
 def is_finishing_enabled() -> bool:
     """Master finishing pass (fades + loudness normalization). Default ON;
@@ -514,8 +520,17 @@ async def finalize_master(video_path: str, output_path: str) -> str:
                 # I: integrated loudness target; TP: true-peak ceiling;
                 # LRA: allowed loudness range. -14 LUFS / -1.5 dBTP is the
                 # common streaming delivery spec.
-                "loudnorm=I=-14:TP=-1.5:LRA=11"
+                "loudnorm=I=-14:TP=-1.5:LRA=11,"
+                # loudnorm works internally at 192kHz and leaves the stream
+                # there, so ffmpeg picks whatever rate the encoder will take
+                # next -- measured on a delivered master: 96kHz AAC. Nothing
+                # in a drama needs it, no platform asks for it, and at a fixed
+                # 192kbps the extra bandwidth is spent on inaudible headroom
+                # instead of on the dialogue. 48kHz is the delivery standard.
+                f"aresample={DELIVERY_SAMPLE_RATE}"
             ),
+            "-ar",
+            str(DELIVERY_SAMPLE_RATE),
             "-c:a",
             "aac",
             "-b:a",
@@ -2543,6 +2558,9 @@ class Idea2VideoPipeline:
         # take's files in place would corrupt the old clip while the master
         # still points at it, leaving the user with neither version if this
         # take then fails.
+        # Recomputed rather than stored: it is a pure function of the script,
+        # and the script is what a retake re-reads anyway.
+        retake_scales = plan_shot_scales(script.scenes)
         new_paths: Dict[int, str] = {}
         new_shots: Dict[int, Any] = {}
         takes: Dict[int, int] = {}
@@ -2595,6 +2613,12 @@ class Idea2VideoPipeline:
                     theme=getattr(script, "theme", "") or "",
                     visual_motif=getattr(script, "visual_motif", "") or "",
                     user_brief=getattr(script, "user_brief", "") or "",
+                    # The SAME framing plan the first pass used, so a retake
+                    # cannot quietly hand this scene the setup its neighbour
+                    # already has.
+                    scene_shot_scale=(
+                        retake_scales[index] if index < len(retake_scales) else ""
+                    ),
                 )
             if not scene_result.get("path"):
                 raise SceneRegenerationUnavailable(
@@ -3781,6 +3805,7 @@ class Idea2VideoPipeline:
                 "scene_concurrency": scene_concurrency,
             }
 
+        shot_scales = plan_shot_scales(script.scenes)
         scene_slots: List[Optional[Dict[str, Any]]] = [None] * len(script.scenes)
         scene_semaphore = asyncio.Semaphore(scene_concurrency)
         progress_lock = asyncio.Lock()
@@ -3854,6 +3879,13 @@ class Idea2VideoPipeline:
                     # the screenwriter's paraphrase; the brief is what the user
                     # actually asked for, so shot design is held to it.
                     user_brief=getattr(script, "user_brief", "") or "",
+                    # Planned across the whole script BEFORE any scene is
+                    # designed. Scenes are storyboarded in parallel, so this is
+                    # the only place in the system that can see two of them at
+                    # once -- and repetition is only visible from there.
+                    scene_shot_scale=(
+                        shot_scales[idx] if idx < len(shot_scales) else ""
+                    ),
                 )
                 async with progress_lock:
                     completed_scenes += 1

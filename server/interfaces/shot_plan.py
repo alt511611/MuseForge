@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import List
+from typing import Any, List, Sequence
 
 TRUTHY = {"1", "true", "yes", "on"}
 FALSY = {"0", "false", "no", "off"}
@@ -170,6 +170,75 @@ def plan_scene_shots(
             trim_from_head=True,
         ),
     ]
+
+
+#: Shot scales, widest to tightest. The ladder is what makes "vary the
+#: framing" a computation rather than a hope: a collision is resolved by
+#: stepping along it, in the direction the drama is already moving.
+SCALE_LADDER = ("wide shot", "medium shot", "close-up", "extreme close-up")
+
+
+def _base_scale(function: str, tension: int) -> str:
+    """The framing a scene wants on its own, before its neighbours are known."""
+    function = (function or "").strip().lower()
+    if function == "climax" or tension >= 9:
+        return "close-up"
+    if function in ("setup", "establishing") or tension <= 4:
+        return "wide shot"
+    if tension >= 7 or function in ("turning_point", "inciting_incident"):
+        return "medium shot"
+    return "medium shot"
+
+
+def plan_shot_scales(scenes: Sequence[Any]) -> List[str]:
+    """One framing per scene, guaranteed not to repeat back to back.
+
+    Scenes are storyboarded independently and, by default, in PARALLEL -- so
+    nothing tells scene 2 that scene 1 was a medium two-shot. Measured on a
+    delivered drama: its first two scenes were the same framing of the same
+    two people, eighteen seconds of one setup, and neither shot was wrong on
+    its own. Repetition is only visible from outside a scene, which is exactly
+    where no part of the pipeline was standing.
+
+    Derived from the SCRIPT rather than from rendered results, for the same
+    reason the story-state fence is (see idea2video._format_story_state): the
+    results do not exist yet when the decision has to be made, and a plan that
+    waits for them would have to give up rendering scenes concurrently.
+
+    A collision is broken by stepping along SCALE_LADDER in the direction the
+    story is already going -- tighter when the scene is more tense than the one
+    before it, wider when it is calmer. That is not a tie-break dressed up as
+    grammar: cutting tighter as a drama escalates is what escalation looks
+    like, and a climax pushed from close-up to extreme close-up is a better
+    climax, not a compromise.
+    """
+    scales: List[str] = []
+    previous_tension = 0
+    for scene in scenes or []:
+        function = _scene_attr(scene, "dramatic_function")
+        try:
+            tension = int(_scene_attr(scene, "tension") or 0)
+        except (TypeError, ValueError):
+            tension = 0
+
+        scale = _base_scale(function, tension)
+        if scales and scale == scales[-1]:
+            index = SCALE_LADDER.index(scale)
+            step = 1 if tension >= previous_tension else -1
+            nudged = index + step
+            if not 0 <= nudged < len(SCALE_LADDER):
+                nudged = index - step  # at an end of the ladder; go the other way
+            if 0 <= nudged < len(SCALE_LADDER):
+                scale = SCALE_LADDER[nudged]
+        scales.append(scale)
+        previous_tension = tension
+    return scales
+
+
+def _scene_attr(scene: Any, field: str) -> str:
+    if isinstance(scene, dict):
+        return str(scene.get(field) or "")
+    return str(getattr(scene, field, "") or "")
 
 
 def delivered_seconds(plan: List[PlannedShot]) -> float:

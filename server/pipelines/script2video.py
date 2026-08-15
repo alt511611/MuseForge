@@ -240,8 +240,21 @@ _NO_UNNAMED_ITEMS = (
 _REFERENCE_NOTE = (
     "The reference image is {name}: match that face exactly and wear the "
     "exact outfit worn in it, down to colour and material. Take NOTHING else "
+    # The eyeline is stated POSITIVELY and folded into this sentence rather
+    # than added after it, because this block is never dropped and every
+    # character it costs is taken from the scene's own description -- the
+    # budget guard in tests/test_image_prompt_budget holds it under 800.
+    #
+    # "Do not copy the portrait's gaze" is a rule about the REFERENCE. It
+    # never says where the eyes go in THIS shot, so a model can obey it to the
+    # letter and still turn them to the lens, which is the strongest prior a
+    # frontal portrait gives it. Measured on a delivered drama: both workers
+    # stopped mid-scene to look dead at the viewer. Naming the target ("on the
+    # other character") also works far better on an image model than naming
+    # the prohibition.
     "from it — its pose, framing and gaze into the lens belong to a portrait; "
-    "stage this shot from its own description. "
+    "stage this shot from its own description, eyes in the scene, not on the "
+    "camera. "
 )
 
 #: What the identity clause costs before a single character is described.
@@ -1762,6 +1775,9 @@ class Script2VideoPipeline:
         not_yet: str = "",
         world_change: str = "",
         world_state: str = "",
+        # The framing this scene must use, planned across the whole drama so
+        # two scenes in a row cannot come back as the same setup.
+        scene_shot_scale: str = "",
     ) -> Dict[str, Any]:
         os.makedirs(working_dir, exist_ok=True)
         portraits = character_portraits or {}
@@ -1814,6 +1830,7 @@ class Script2VideoPipeline:
             user_brief=user_brief,
             story_so_far=story_so_far,
             not_yet=not_yet,
+            scene_shot_scale=scene_shot_scale,
             # Not a prompt input: it decides whether this scene may buy a
             # second angle at all, since the lip-sync pass cannot carry a
             # mouth across a cut it never sees.

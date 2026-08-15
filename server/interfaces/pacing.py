@@ -106,6 +106,27 @@ WIDE_Y_BIAS = 0.50
 #: Tension at or above this cuts at the fast end of the hold range.
 FAST_TENSION = 8
 
+#: A take this long gets cut internally whatever the director style says.
+#:
+#: Not a taste call -- measured on a delivered 30-second drama whose three
+#: scenes ran 8, 10 and 12 seconds. Mean inter-frame motion:
+#:
+#:     scene 1   8.0s   18.3
+#:     scene 2  10.0s   21.1
+#:     scene 3  12.1s   11.3     <- the climax
+#:
+#: The longest scene moved at HALF the rate of the others, and it was the
+#: climax. This is the same effect second_budget documents at 15 seconds,
+#: still present at 12: the model does not fill a longer clip with more film,
+#: it fills it with more of the same frame.
+#:
+#: Lowering the ceiling instead does not work. The budget's average is 10
+#: seconds a scene, so a 10-second ceiling leaves nothing to distribute and
+#: turns an 8/10/12 rhythm into 10/10/10 -- it would flatten the very spread
+#: that makes the drama breathe, to fix a problem that lives inside ONE scene.
+#: Cutting the long take costs nothing and leaves the spread alone.
+LONG_TAKE_SECONDS = 11.0
+
 
 def _flag(name: str) -> str:
     return os.environ.get(name, "").strip().lower()
@@ -127,14 +148,28 @@ def mode() -> str:
     return "auto"
 
 
-def is_enabled(pacing: str = "medium") -> bool:
-    """Whether this drama's director style wants its scenes cut internally."""
+def is_enabled(pacing: str = "medium", duration: float = 0.0) -> bool:
+    """Whether this scene gets cut internally.
+
+    Two ways to earn it under ``auto``. The first is style: a Dynamic Action
+    drama is asking for this and a Slow Cinematic one is asking for its
+    opposite. The second is LENGTH, and it overrides the style -- past
+    LONG_TAKE_SECONDS the take stops being a choice and starts being a
+    measured problem (see that constant). A slow style still gets slow
+    framings; what it stops getting is twelve seconds of a picture that has
+    stopped moving.
+    """
     setting = mode()
     if setting == "on":
         return True
     if setting == "off":
         return False
-    return (pacing or "").strip().lower() == "fast"
+    if (pacing or "").strip().lower() == "fast":
+        return True
+    try:
+        return float(duration or 0.0) >= LONG_TAKE_SECONDS
+    except (TypeError, ValueError):
+        return False
 
 
 def _hold_seconds(tension: int) -> float:
@@ -175,7 +210,7 @@ def plan_internal_cuts(
         length = float(duration or 0.0)
     except (TypeError, ValueError):
         return []
-    if not is_enabled(pacing) or length < MIN_CLIP_SECONDS:
+    if not is_enabled(pacing, duration=length) or length < MIN_CLIP_SECONDS:
         return []
 
     hold = _hold_seconds(tension)

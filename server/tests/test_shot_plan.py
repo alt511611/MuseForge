@@ -359,3 +359,108 @@ async def test_trimming_keeps_the_end_where_the_performance_lands(tmp_path):
     # Nearer the source's ending than its opening, and not marginally.
     assert abs(kept - tail) < abs(kept - head)
     assert kept > (head + tail) / 2
+
+
+# --- framing across the drama, not inside one scene ---------------------
+#
+# Measured on a delivered 30-second drama: its first two scenes were the same
+# framing of the same two people -- eighteen seconds of one setup. Neither
+# shot was wrong on its own, which is the point. Repetition is only visible
+# from OUTSIDE a scene, and scenes are designed independently and in parallel,
+# so no part of the pipeline was standing there.
+
+
+def _scenes(*pairs):
+    return [{"dramatic_function": f, "tension": t} for f, t in pairs]
+
+
+def test_no_two_scenes_in_a_row_share_a_setup():
+    scales = shot_plan.plan_shot_scales(
+        _scenes(("setup", 3), ("setup", 2), ("rising_action", 6),
+                ("climax", 10), ("resolution", 3))
+    )
+    assert all(a != b for a, b in zip(scales, scales[1:])), scales
+
+
+def test_the_climax_is_where_the_face_is():
+    scales = shot_plan.plan_shot_scales(
+        _scenes(("setup", 3), ("rising_action", 6), ("climax", 10))
+    )
+    assert scales == ["wide shot", "medium shot", "close-up"]
+
+
+def test_a_collision_tightens_when_the_drama_escalates():
+    """Cutting tighter as it escalates is what escalation looks like -- the
+    tie-break is grammar, not a coin toss."""
+    scales = shot_plan.plan_shot_scales(_scenes(("climax", 9), ("climax", 10)))
+    assert scales == ["close-up", "extreme close-up"]
+
+
+def test_a_collision_widens_when_it_settles():
+    scales = shot_plan.plan_shot_scales(_scenes(("setup", 4), ("resolution", 2)))
+    assert scales[0] == "wide shot"
+    assert scales[1] == "medium shot"  # nowhere wider to go, so it steps in
+
+
+def test_every_scale_is_on_the_ladder():
+    scales = shot_plan.plan_shot_scales(
+        _scenes(*[("rising_action", t) for t in range(1, 11)])
+    )
+    assert all(s in shot_plan.SCALE_LADDER for s in scales)
+
+
+def test_a_script_with_no_scenes_plans_nothing():
+    assert shot_plan.plan_shot_scales([]) == []
+    assert shot_plan.plan_shot_scales(None) == []
+
+
+def test_it_reads_pydantic_scenes_too():
+    from interfaces.character import ScriptScene
+
+    scales = shot_plan.plan_shot_scales(
+        [
+            ScriptScene(action="a", dialogue=[], dramatic_function="setup", tension=3),
+            ScriptScene(action="b", dialogue=[], dramatic_function="climax", tension=10),
+        ]
+    )
+    assert scales == ["wide shot", "close-up"]
+
+
+# --- and it reaches the shot designer -----------------------------------
+
+
+def test_the_framing_reaches_the_prompt_as_binding():
+    line = StoryboardArtist._format_scale_line("extreme close-up")
+    assert "BINDING" in line
+    assert "extreme close-up" in line
+    assert "consecutive" in line
+
+
+def test_no_plan_adds_nothing_to_the_prompt():
+    assert StoryboardArtist._format_scale_line("") == ""
+
+
+@pytest.mark.asyncio
+async def test_the_deterministic_fallback_honours_the_plan_too():
+    """Demo mode and every key-less run go through the template. One that
+    hardcodes "medium shot" puts the defect back in the only mode where no
+    model can be blamed for it."""
+    artist = StoryboardArtist(api_key="", demo=True)
+    shots = await artist.design_storyboard(
+        script="She opens it.",
+        characters=[CharacterInScene(idx=0, name="Mira", static_features="30s woman")],
+        scene_shot_scale="extreme close-up",
+    )
+    assert shots[0].shot_type == "extreme close-up"
+
+
+def test_a_designer_that_ignores_the_plan_is_logged_not_overridden(caplog):
+    """The brief outranks the plan and only the agent has read it, so drift is
+    made visible rather than silently rewritten."""
+    import logging
+
+    shots = [_shot(shot_type="wide shot")]
+    with caplog.at_level(logging.INFO):
+        StoryboardArtist._note_scale_drift(shots, "close-up")
+    assert shots[0].shot_type == "wide shot"
+    assert "over the planned" in caplog.text

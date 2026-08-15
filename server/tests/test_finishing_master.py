@@ -14,6 +14,22 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+
+def _has_ffmpeg():
+    import shutil
+
+    if shutil.which("ffmpeg"):
+        return True
+    try:
+        import imageio_ffmpeg  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+_HAS_FFMPEG = _has_ffmpeg()
 os.environ.setdefault("MUAPI_KEY", "test-key-not-real")
 
 from interfaces.character import CharacterInScene, DramaScript, ScriptScene  # noqa: E402
@@ -250,3 +266,37 @@ def test_music_hint_reaches_the_generator_prompt():
 
     source = inspect.getsource(MuAPIMusicGenerator.generate_instrumental)
     assert "style_hint" in source
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _HAS_FFMPEG, reason="ffmpeg not available")
+async def test_the_master_is_delivered_at_48khz(tmp_path):
+    """loudnorm works internally at 192kHz and leaves the stream there, so
+    ffmpeg picks whatever the encoder will take next -- measured on a
+    delivered master: 96kHz AAC. No platform asks for it, nothing in a drama
+    needs it, and at a fixed bitrate it spends bandwidth on headroom nobody
+    can hear instead of on the dialogue.
+    """
+    import subprocess
+
+    from pipelines.idea2video import (
+        DELIVERY_SAMPLE_RATE,
+        finalize_master,
+        resolve_ffmpeg_binary,
+    )
+
+    ff = resolve_ffmpeg_binary()
+    source = str(tmp_path / "with_audio.mp4")
+    subprocess.run(
+        [ff, "-y", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=24:duration=6",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=6:sample_rate=96000",
+         "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "96000", "-shortest", source],
+        check=True, capture_output=True,
+    )
+
+    out = await finalize_master(source, str(tmp_path / "finished.mp4"))
+    probe = subprocess.run(
+        [ff, "-hide_banner", "-i", out], capture_output=True, text=True
+    ).stderr
+    audio_line = [l for l in probe.splitlines() if "Audio:" in l][0]
+    assert f"{DELIVERY_SAMPLE_RATE} Hz" in audio_line, audio_line
