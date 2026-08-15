@@ -69,6 +69,18 @@ in frame (e.g. "eyes brimming with tears, trembling chin, shoulders finally drop
 she exhales"). Never write "neutral", "calm", "expressionless", or a blank value unless
 the scene is genuinely emotionless. Repeat the key expression inside visual_desc too.
 
+SHOW THE CHANGE ON THE FACE, NOT FROM ACROSS THE STREET. When the notes name
+what changes about the place — the lights dying, the water rising, the fire
+taking — that change is mandatory AND it does not license a wide shot. Both
+instructions are live at once, and this is how they resolve: film the change
+in the SAME frame as the character, through what it does to them. The light
+that used to be on their face is gone and one source is left; the glow moves
+across their features; the darkness starts behind their shoulder. A blackout
+filmed by retreating to a wide is a picture of a location — technically
+correct, dramatically nothing, and the one moment in your drama where nobody
+can see a face is the moment it turns. If the change genuinely cannot be read
+without distance, take the wide AND keep a character large in the foreground.
+
 KEEP FACES READABLE. Faces must be clearly visible and lit well enough to read the
 expression — soft key light on the face. Do NOT design pure silhouettes, backlit
 shapes, faces turned away from camera, or faces hidden by shadow; those destroy the
@@ -173,6 +185,9 @@ Respond ONLY with valid JSON array containing a single shot object:
         user_brief: str = "",
         story_so_far: str = "",
         not_yet: str = "",
+        # The framing this scene must use, decided across the whole drama so
+        # consecutive scenes cannot repeat a setup (interfaces/shot_plan).
+        scene_shot_scale: str = "",
         # Whether this scene will be lip-synced. Not a prompt input: it decides
         # whether the scene may buy a second ANGLE, because the lip-sync pass
         # drives a mouth across the whole scene clip and cannot see a cut in
@@ -185,13 +200,16 @@ Respond ONLY with valid JSON array containing a single shot object:
         # matches MuAPIImageGenerator/MuAPIVideoGenerator's demo behavior.
         if self.demo:
             return self._finish_shots(
-                self._design_template(script, characters, preset, scene_emotion),
+                self._design_template(
+                    script, characters, preset, scene_emotion, scene_shot_scale
+                ),
                 scene_emotion,
                 is_finale,
                 scene_tension,
                 scene_duration,
                 characters=characters,
                 lipsync_enabled=lipsync_enabled,
+                scene_shot_scale=scene_shot_scale,
             )
 
         prompt = self._build_prompt(
@@ -213,6 +231,7 @@ Respond ONLY with valid JSON array containing a single shot object:
             user_brief=user_brief,
             story_so_far=story_so_far,
             not_yet=not_yet,
+            scene_shot_scale=scene_shot_scale,
         )
 
         # 1) MuAPI first, but opt-in only -- its LLM slug is a guess, so it
@@ -239,6 +258,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                         scene_duration,
                         characters=characters,
                         lipsync_enabled=lipsync_enabled,
+                        scene_shot_scale=scene_shot_scale,
                     )
             except Exception as exc:
                 raw_snippet = locals().get("content", "<no content received>")
@@ -268,6 +288,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                 user_brief=user_brief,
                 story_so_far=story_so_far,
                 not_yet=not_yet,
+                scene_shot_scale=scene_shot_scale,
             )
             if shots:
                 # Hard cap: never produce more than 1 shot per scene (cost control).
@@ -279,17 +300,21 @@ Respond ONLY with valid JSON array containing a single shot object:
                     scene_duration,
                     characters=characters,
                     lipsync_enabled=lipsync_enabled,
+                    scene_shot_scale=scene_shot_scale,
                 )
 
         # 3) Last resort: deterministic template, never crashes generation.
         return self._finish_shots(
-            self._design_template(script, characters, preset, scene_emotion),
+            self._design_template(
+                    script, characters, preset, scene_emotion, scene_shot_scale
+                ),
             scene_emotion,
             is_finale,
             scene_tension,
             scene_duration,
             characters=characters,
             lipsync_enabled=lipsync_enabled,
+            scene_shot_scale=scene_shot_scale,
         )
 
     @classmethod
@@ -405,6 +430,7 @@ Respond ONLY with valid JSON array containing a single shot object:
         budget: float = 0.0,
         characters: Optional[List[CharacterInScene]] = None,
         lipsync_enabled: bool = False,
+        scene_shot_scale: str = "",
     ) -> List[StoryboardShot]:
         """Every path's last step: expression, acting beats, angles, durations.
 
@@ -415,10 +441,36 @@ Respond ONLY with valid JSON array containing a single shot object:
         """
         cls._ensure_expression(shots, scene_emotion)
         cls._apply_acting_beats(shots, scene_emotion)
+        cls._note_scale_drift(shots, scene_shot_scale)
         shots = cls._clamp_durations(shots, is_finale, tension, budget)
         return cls._apply_shot_plan(
             shots, scene_emotion, tension, characters or [], lipsync_enabled
         )
+
+    @classmethod
+    def _note_scale_drift(cls, shots: List[StoryboardShot], planned: str) -> None:
+        """Log when the designer ignored the planned framing. Never overrides.
+
+        The plan is binding in the prompt and NOT enforced in code, on purpose:
+        the user's brief outranks everything (it may demand a locked-off wide),
+        and the agent is the only party that has read it. Silently rewriting
+        ``shot_type`` would also leave a shot whose description composes for
+        one framing and whose field claims another.
+
+        So drift is made visible instead. A model that starts ignoring this is
+        a model that has quietly reintroduced eighteen seconds of one setup,
+        and that should show up in a log rather than in a delivered drama.
+        """
+        planned = (planned or "").strip().lower()
+        if not planned or not shots:
+            return
+        actual = (getattr(shots[0], "shot_type", "") or "").strip().lower()
+        if actual and actual != planned:
+            logger.info(
+                "Shot designer chose %r over the planned %r for this scene.",
+                actual,
+                planned,
+            )
 
     @classmethod
     def _apply_shot_plan(
@@ -542,6 +594,7 @@ Respond ONLY with valid JSON array containing a single shot object:
         user_brief: str = "",
         story_so_far: str = "",
         not_yet: str = "",
+        scene_shot_scale: str = "",
     ) -> str:
         """The user turn for a shot-design call, for EITHER provider path.
 
@@ -558,6 +611,7 @@ Respond ONLY with valid JSON array containing a single shot object:
         return (
             f"{self._format_user_brief_block(user_brief)}"
             f"Scene script: {script}\n"
+            f"{self._format_scale_line(scene_shot_scale)}"
             f"{self._format_emotion_line(scene_emotion)}"
             f"{self._format_direction_block(scene_direction)}"
             f"{self._format_story_state(story_so_far, not_yet)}"
@@ -596,6 +650,27 @@ Respond ONLY with valid JSON array containing a single shot object:
             "below. Honour its wardrobe, props, location, framing and camera "
             "rules exactly; never design a shot that contradicts it:\n"
             f"{brief}\n\n"
+        )
+
+    @staticmethod
+    def _format_scale_line(scene_shot_scale: str = "") -> str:
+        """The framing this scene must use, decided across the whole drama.
+
+        Binding, and it outranks this prompt's own "match shot scale to the
+        beat" guidance for one reason that guidance cannot see: scenes are
+        designed independently and in parallel, so nothing else in the system
+        knows what the PREVIOUS scene looked like. Repetition is only visible
+        from outside a scene (see interfaces/shot_plan.plan_shot_scales).
+        """
+        scale = (scene_shot_scale or "").strip()
+        if not scale:
+            return ""
+        return (
+            f"FRAMING FOR THIS SCENE — BINDING: {scale}. This was chosen "
+            f"across the whole drama so that no two consecutive scenes repeat "
+            f"the same setup; a shot that is right on its own but identical to "
+            f"the one before it makes two scenes read as one long take. Set "
+            f'"shot_type" to exactly this, and compose for it.\n'
         )
 
     @staticmethod
@@ -744,6 +819,7 @@ Respond ONLY with valid JSON array containing a single shot object:
         user_brief: str = "",
         story_so_far: str = "",
         not_yet: str = "",
+        scene_shot_scale: str = "",
     ) -> List[StoryboardShot]:
         try:
             import anthropic
@@ -767,6 +843,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                 user_brief=user_brief,
                 story_so_far=story_so_far,
                 not_yet=not_yet,
+                scene_shot_scale=scene_shot_scale,
             )
             # Same migration as agents/screenwriter.py, for the same two
             # reasons. (1) Sonnet 5 runs adaptive thinking by default, so
@@ -828,7 +905,16 @@ Respond ONLY with valid JSON array containing a single shot object:
         characters: List[CharacterInScene],
         preset,
         scene_emotion: str = "",
+        scene_shot_scale: str = "",
     ) -> List[StoryboardShot]:
+        """The deterministic fallback. It honours the framing plan too.
+
+        Not an afterthought: this path runs in demo mode and whenever no LLM
+        answers, and a fallback that hardcodes "medium shot" for every scene
+        reintroduces the exact defect the plan exists to prevent -- three
+        scenes of identical framing -- in the one mode where nothing can be
+        blamed on a model.
+        """
         char_name = next((c.name for c in characters if c.is_visible), "Character")
         emotion = (scene_emotion or "").strip()
         emotion_clause = f", {emotion}" if emotion else ""
@@ -839,7 +925,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                 motion_desc=f"{preset.pacing} camera movement, {preset.storyboard_guidance[:80]}",
                 expression_desc=emotion,
                 audio_desc="ambient atmospheric sound",
-                shot_type="medium shot",
+                shot_type=(scene_shot_scale or "medium shot"),
                 camera_movement="slow push-in" if preset.pacing == "slow" else "tracking shot",
                 lens=preset.default_lens,
                 duration_seconds=5.0,

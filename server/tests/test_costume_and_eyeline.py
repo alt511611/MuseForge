@@ -158,3 +158,34 @@ def test_storyboard_setting_lock_allows_the_scripted_world_change():
     from agents.storyboard_artist import StoryboardArtist
 
     assert "The ONE exception" in StoryboardArtist.SYSTEM_PROMPT
+
+
+def test_the_eyeline_is_stated_where_it_cannot_be_dropped():
+    """Measured on a delivered drama: both workers stopped mid-scene to look
+    dead at the viewer.
+
+    The prompt did carry an eyeline rule, but it had been made conditional on
+    there being NO reference character -- i.e. it was absent from almost every
+    frame -- on the reasoning that the reference note already said "its gaze
+    into the lens belongs to a portrait". That sentence is a rule about the
+    REFERENCE. It never says where the eyes go in this shot, so a model can
+    obey it and still turn them to the lens, which is the strongest prior a
+    frontal portrait gives it.
+    """
+    from pipelines.script2video import build_character_identity_clause
+
+    mara = _char("Mara", "orange hi-vis jacket")
+    clause = build_character_identity_clause([mara], matched_char=mara)
+
+    # Positive: image models follow "the eyes are on X" far better than
+    # "the eyes are not on Y".
+    assert "eyes in the scene" in clause
+    assert "not on the camera" in clause
+
+
+def test_the_eyeline_did_not_cost_the_scene_its_own_words():
+    """This block is never dropped, so every character it takes comes out of
+    the clauses that describe THIS beat (see test_image_prompt_budget)."""
+    from pipelines.script2video import IDENTITY_CLAUSE_OVERHEAD
+
+    assert IDENTITY_CLAUSE_OVERHEAD <= 800, IDENTITY_CLAUSE_OVERHEAD

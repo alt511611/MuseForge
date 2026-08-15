@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("MUAPI_KEY", "test-key-not-real")
 
 from interfaces import pacing  # noqa: E402
+from interfaces import pacing as pacing_mod  # noqa: E402
 from interfaces.pacing import (  # noqa: E402
     MIN_CLIP_SECONDS,
     MIN_HOLD_SECONDS,
@@ -223,3 +224,40 @@ async def test_no_plan_means_no_re_encode(tmp_path):
     assert await apply_internal_cuts(str(source), str(tmp_path / "cut.mp4"), []) == str(
         source
     )
+
+
+# --- long takes earn a cut whatever the style says ----------------------
+#
+# Measured on a delivered 30-second drama (scenes of 8, 10 and 12 seconds):
+#
+#     scene 1   8.0s   mean inter-frame motion 18.3
+#     scene 2  10.0s                           21.1
+#     scene 3  12.1s                           11.3   <- the climax
+#
+# The longest scene moved at half the rate of the others, and it was the one
+# the story turns on.
+
+
+def test_a_long_take_is_cut_even_in_a_slow_style(monkeypatch):
+    _fast(monkeypatch)
+    assert plan_internal_cuts(12.0, tension=5, pacing="slow")
+    assert plan_internal_cuts(12.0, tension=5, pacing="medium")
+
+
+def test_a_short_take_still_follows_the_director(monkeypatch):
+    """The length rule is a floor under the style, not a replacement for it:
+    a slow style still gets slow framings on scenes that are working."""
+    _fast(monkeypatch)
+    assert plan_internal_cuts(8.0, tension=5, pacing="slow") == []
+    assert plan_internal_cuts(8.0, tension=5, pacing="fast")
+
+
+def test_the_threshold_is_where_the_measurement_put_it(monkeypatch):
+    _fast(monkeypatch)
+    assert plan_internal_cuts(pacing_mod.LONG_TAKE_SECONDS - 0.1, pacing="slow") == []
+    assert plan_internal_cuts(pacing_mod.LONG_TAKE_SECONDS, pacing="slow")
+
+
+def test_off_still_means_off(monkeypatch):
+    monkeypatch.setenv("MUSEFORGE_INTERNAL_CUTS", "off")
+    assert plan_internal_cuts(12.0, tension=10, pacing="slow") == []
