@@ -126,10 +126,23 @@ async def test_the_same_line_reads_the_same_in_both_formats(tmp_path):
     landscape = await _render(tmp_path, 1920, 1080)
     vertical = await _render(tmp_path, 1080, 1920)
 
-    assert abs(landscape["width_fraction"] - vertical["width_fraction"]) < 0.30, (
+    # Compared in PIXELS, not as a fraction of the frame.
+    #
+    # The fraction was always a proxy for "the same physical reading size",
+    # and it stopped being a good one once captions were typeset to the
+    # broadcast standard of 42 characters a line (interfaces/subtitles): the
+    # same 42 characters at the same physical size necessarily occupy a
+    # smaller SHARE of a wider frame. Measured here: 702px of 1920 against
+    # 768px of 1080 -- 37% versus 71% of the width, and 9% apart in the only
+    # unit a viewer's eye actually works in.
+    landscape_px = landscape["width_fraction"] * 1920
+    vertical_px = vertical["width_fraction"] * 1080
+    assert abs(landscape_px - vertical_px) / landscape_px < 0.25, (
         landscape,
         vertical,
     )
+    # ...and neither format is allowed to become a wall of text.
+    assert landscape["lines"] <= 2 and vertical["lines"] <= 2
 
 
 def test_the_two_formats_get_the_same_physical_font():
@@ -168,6 +181,11 @@ def test_the_style_always_carries_the_readability_settings():
 
     for size in [(1920, 1080), (1080, 1920), (0, 0)]:
         style = build_caption_style(*size)
-        assert "BorderStyle=3" in style, size  # opaque box behind the text
+        # Outline and drop shadow, not the opaque box (=3) this used to draw.
+        # The box is legible and is also the single most recognisable mark of
+        # an auto-captioned video -- it is what YouTube's own auto-captions
+        # look like. Streaming services burn outlined type instead.
+        assert "BorderStyle=1" in style, size
+        assert "Outline=" in style and "Shadow=" in style, size
         assert "PrimaryColour=&H00FFFFFF" in style, size
         assert "MarginL=" in style and "MarginR=" in style, size

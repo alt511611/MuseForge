@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from agents.screenwriter import ScreenwriterAgent, ScriptGenerationFailed
 from interfaces import ass_captions
+from interfaces import subtitles
 from interfaces.character import CharacterInScene, DramaScript
 from interfaces.film_look import build_film_look_filters
 from interfaces import micro_drama
@@ -1196,6 +1197,10 @@ def _probe_audio_duration_seconds(audio_url: str) -> Optional[float]:
 #: same frame.
 CAPTION_GAP_SECONDS = 0.2
 
+#: Air between one cue and the next. Two frames at 24fps: enough that a change
+#: of caption registers as a change, short enough not to read as a dropout.
+CUE_GAP_SECONDS = 0.08
+
 
 def _scene_boundaries(scene_paths: Optional[List[str]]) -> List[float]:
     """Absolute start time of each scene, plus the end of the last one.
@@ -1495,7 +1500,12 @@ def build_srt_from_dialogue_tracks(
         if not line:
             continue
         character = str(track.get("character") or "").strip()
-        text = f"{character}: {line}" if character else line
+        # Typeset to the broadcast conventions rather than dumped onto one
+        # line with a name in front of it (see interfaces/subtitles): the
+        # speaker is named only when a deployment asks for SDH, and a line too
+        # long for two 42-character lines becomes SEVERAL cues instead of one
+        # unreadable one.
+        text = f"{subtitles.format_speaker(character)}{line}"
         duration = float(
             track.get("duration_seconds")
             or _probe_audio_duration_seconds(str(track.get("audio_url") or ""))
@@ -1593,19 +1603,41 @@ def build_srt_from_dialogue_tracks(
             rows[at]["end"] = scene_start + local_end
 
     blocks: List[str] = []
-    for index, row in enumerate(rows, 1):
+    index = 0
+    for row in rows:
         start = row["start"]
         end = row["end"]
         if end <= start:
             end = start + 1.0
-        # SRT uses blank lines between cues; escape nothing special beyond
-        # stripping carriage returns so a single cue stays one logical block.
-        safe_text = str(row["text"]).replace("\r\n", "\n").replace("\r", "\n")
-        blocks.append(
-            f"{index}\n"
-            f"{_format_srt_timestamp(start)} --> {_format_srt_timestamp(end)}\n"
-            f"{safe_text}\n"
-        )
+        # A line too long for two legal lines becomes SEVERAL cues, and its
+        # time is divided between them in proportion to how much there is to
+        # read -- which is what makes the split honest rather than cosmetic:
+        # each cue is on screen for as long as its own words need.
+        cue_texts = subtitles.split_into_cues(str(row["text"])) or [str(row["text"])]
+        total_chars = sum(len(c) for c in cue_texts) or 1
+        span = end - start
+        cursor = start
+        for position, cue_text in enumerate(cue_texts):
+            share = span * (len(cue_text) / total_chars)
+            cue_end = end if position == len(cue_texts) - 1 else cursor + share
+            if cue_end <= cursor:
+                cue_end = cursor + 0.5
+            index += 1
+            # SRT uses blank lines between cues; strip carriage returns so a
+            # single cue stays one logical block, and lay the text out over at
+            # most two lines broken where the prose breaks.
+            safe_text = (
+                subtitles.wrap_cue(cue_text).replace("\r\n", "\n").replace("\r", "\n")
+            )
+            blocks.append(
+                f"{index}\n"
+                f"{_format_srt_timestamp(cursor)} --> "
+                f"{_format_srt_timestamp(cue_end)}\n"
+                f"{safe_text}\n"
+            )
+            # Two frames of air between cues, so a change of caption reads as
+            # a change rather than as a re-render of the same one.
+            cursor = min(cue_end + CUE_GAP_SECONDS, end)
 
     return "\n".join(blocks)
 
@@ -1677,9 +1709,23 @@ def build_caption_style(width: int, height: int) -> str:
         font_size = max(8, round(min(width, height) * CAPTION_HEIGHT_FRACTION * scale))
         margin_v = max(8, round(height * CAPTION_BOTTOM_MARGIN_FRACTION * scale))
         margin_side = max(4, round(width * CAPTION_SIDE_MARGIN_FRACTION * scale))
+    # Outline and shadow scaled to the type, not fixed: a 1-unit outline that
+    # is right at 22pt disappears at 40 and swallows the letters at 12.
+    outline = max(1, round(font_size * 0.09))
+    shadow = max(1, round(font_size * 0.05))
     return (
         f"FontSize={font_size},PrimaryColour=&H00FFFFFF,"
-        f"OutlineColour=&H00000000,BorderStyle=3,Outline=1,Shadow=0,"
+        # BorderStyle=1 — outline and drop shadow, NOT the opaque box (=3)
+        # this used to draw.
+        #
+        # The box is legible; it is also the single most recognisable mark of
+        # an automatically captioned video, because it is what YouTube's own
+        # auto-captions draw. Every streaming service burns white type with a
+        # black outline and a soft shadow instead, and it reads over a graded
+        # night exterior perfectly well once the outline is sized to the font
+        # rather than left at one unit.
+        f"OutlineColour=&H00000000,BackColour=&H80000000,"
+        f"BorderStyle=1,Outline={outline},Shadow={shadow},"
         f"Alignment=2,MarginV={margin_v},"
         f"MarginL={margin_side},MarginR={margin_side}"
     )

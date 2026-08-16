@@ -390,8 +390,8 @@ def test_caption_rows_reach_the_srt_with_estimated_timings():
         )
     )
 
-    assert "Mara: It's warm." in srt
-    assert "Mara: Something is alive in there." in srt
+    assert "It's warm." in srt
+    assert "Something is alive in there." in srt
     assert "00:00:00,000 -->" in srt
     # The second cue starts after the first, not on top of it.
     assert srt.count("-->") == 2

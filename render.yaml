@@ -149,6 +149,11 @@ services:
       # above for measured word timings; falls back to plain captions without
       # it rather than guessing, because a highlight on the wrong word reads as
       # a broken player.
+      # Speaker names in subtitles. Off: broadcast names a speaker only when
+      # the picture cannot. SDH deployments want the opposite.
+      - key: MUSEFORGE_SPEAKER_LABELS
+        value: ""
+
       - key: MUSEFORGE_WORD_CAPTIONS
         value: ""
 
