@@ -27,10 +27,15 @@ def test_build_srt_from_dialogue_tracks_timestamps_and_text():
 
     assert "1\n" in srt
     assert "00:00:01,500 --> 00:00:03,250" in srt
-    assert "Ava: We leave at dawn." in srt
+    # No speaker prefix: broadcast names a speaker only when the picture
+    # cannot (off screen, ambiguous), never as a matter of course -- and on a
+    # 42-character line "Ava: " is a tenth of the budget spent telling the
+    # viewer what they are already looking at. See interfaces/subtitles.
+    assert "We leave at dawn." in srt
+    assert "Ava:" not in srt
     assert "2\n" in srt
     assert "00:00:04,000 --> 00:00:06,000" in srt
-    assert "Ben: I'll be ready." in srt
+    assert "I'll be ready." in srt
 
 
 def test_build_srt_skips_empty_lines():
@@ -48,7 +53,7 @@ def test_build_srt_skips_empty_lines():
         ]
     )
     assert "A:" not in srt
-    assert "1\n00:00:01,000 --> 00:00:02,000\nB: Hello\n" in srt
+    assert "1\n00:00:01,000 --> 00:00:02,000\nHello\n" in srt
 
 
 def _cue_times(srt):

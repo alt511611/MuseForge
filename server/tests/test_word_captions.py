@@ -52,8 +52,28 @@ def test_an_audio_tag_does_not_shift_the_words():
     words = ElevenLabsVoiceGenerator._word_timings(
         _alignment("[voice breaking] Gitme"), lines
     )
-    spoken = [w["text"] for w in words[0]]
-    assert spoken[-1] == "Gitme"
+    assert [w["text"] for w in words[0]] == ["Gitme"]
+
+
+def test_an_audio_tag_is_never_shown_to_the_viewer():
+    """Measured on a delivered drama: the picture read "[fearfully] Control's
+    gone" in burned-in captions.
+
+    The tag is a direction to the actor. It has to be WALKED, because the
+    character stream contains it and skipping it would throw the rest of the
+    line out of alignment — but it must never be emitted as a caption word.
+    """
+    lines = [{"line": "Control's gone.", "spoken_text": "[fearfully] Control's gone."}]
+    words = ElevenLabsVoiceGenerator._word_timings(
+        _alignment("[fearfully] Control's gone."), lines
+    )
+
+    shown = [w["text"] for w in words[0]]
+    assert shown == ["Control's", "gone."]
+    assert not any("[" in w or "]" in w for w in shown)
+    # ...and the surviving words still carry the times the provider measured,
+    # which start AFTER the tag's characters.
+    assert words[0][0]["start"] == pytest.approx(1.2)
 
 
 def test_two_lines_do_not_share_a_cursor():
@@ -149,7 +169,7 @@ def test_word_captions_are_off_by_default(monkeypatch):
         scene_paths=["a.mp4"],
     )
     assert _cue_count(srt) == 1
-    assert "Ayse: Beni burada bırakma" in srt
+    assert "Beni burada bırakma" in srt
 
 
 def test_word_captions_replace_the_line_cue_when_enabled(monkeypatch):
@@ -184,7 +204,7 @@ def test_a_provider_without_word_timings_still_gets_line_captions(monkeypatch):
 
     monkeypatch.setattr(pipeline, "_scene_boundaries", lambda paths: [0.0, 6.0])
     srt = build_srt_from_dialogue_tracks([_track()], scene_paths=["a.mp4"])
-    assert "Ayse: Beni burada bırakma" in srt
+    assert "Beni burada bırakma" in srt
 
 
 # --- delivery ----------------------------------------------------------

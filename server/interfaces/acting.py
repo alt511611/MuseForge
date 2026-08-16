@@ -133,10 +133,16 @@ _BEATS: Tuple[Tuple[Tuple[str, ...], ActingBeat], ...] = (
         ActingBeat(
             label="fear",
             onset="alert and still: eyes wide, lips slightly parted, body frozen",
+            # "eyes flaring white above the iris" and "mouth pulled wide and
+            # open" were an anatomist's description handed to a literal-minded
+            # image model, which drew exactly what they say: glowing white
+            # eyes and a scream. A delivered drama ended on that frame. Fear
+            # is written as MUSCLE now -- what lifts, tightens and stops --
+            # with no word that can be read as a change to the eye itself.
             peak=(
-                "eyes flaring white above the iris, upper eyelids straining, brows "
-                "raised and drawn together, mouth pulled wide and open, a visible "
-                "swallow moving the throat"
+                "upper eyelids lifting hard, brows raised and drawn together, "
+                "nostrils widening, lips parting a little as the breath stops, "
+                "a visible swallow moving the throat"
             ),
             voice_tag="fearfully",
             stability=0.3,
@@ -148,10 +154,12 @@ _BEATS: Tuple[Tuple[Tuple[str, ...], ActingBeat], ...] = (
         ActingBeat(
             label="shock",
             onset="mid-thought, unguarded: expression still settled on the last moment",
+            # "blood leaving the cheeks" is the same hazard as fear's white
+            # eyes: an image model can render the noun rather than the effect.
             peak=(
                 "the face catching up all at once: eyes snapping wide, eyebrows "
-                "shooting up, jaw dropping slightly open, head drawing back a "
-                "fraction, blood leaving the cheeks"
+                "shooting up, jaw loosening, head drawing back a fraction, the "
+                "colour going out of the face"
             ),
             voice_tag="breathless",
             stability=0.3,
@@ -377,6 +385,16 @@ def end_frame_edit_prompt(
         f"Change ONLY the facial expression to: {peak}.",
         "The person must remain the same person, in the same place, at the same "
         "moment -- this is the same frame a fraction of a second later.",
+        # The peak vocabulary is anatomical, and an image model can take an
+        # anatomical phrase as a material one: "eyes flaring white" came back
+        # as eyes that literally glowed, on the closing frame of a delivered
+        # drama. The change is muscular by definition, so say so -- a limit
+        # holds where a better adjective only moves the problem.
+        "The change is MUSCULAR ONLY: eyelids, brows, nostrils, lips, jaw and "
+        "throat. Eye colour, iris and pupil stay exactly as they are -- no "
+        "glowing, no whitening, no light coming from the eyes. Keep the face "
+        "human and photographic: no horror or monster effect, no exaggeration "
+        "past what a real face can hold.",
         "Do not re-frame, do not zoom, do not move the camera, do not change "
         "what is in the background.",
     ]
