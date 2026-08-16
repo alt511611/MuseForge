@@ -9,6 +9,12 @@ import httpx
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+
+async def _no_sleep(_seconds):
+    """Backoff without the wait."""
+    return None
+
 os.environ.setdefault("MUAPI_KEY", "test-key")
 
 
@@ -107,3 +113,109 @@ async def test_retryable_server_error_still_retries(monkeypatch):
             )
 
     assert calls["n"] == 3
+
+
+# --- a died inference is retried, not re-polled --------------------------
+#
+# The delivered failure, in full:
+#
+#   Internal error: MuAPI request failed after 1 attempt(s): HTTP 400:
+#   Inference error occurred while processing the request. Please try again
+#   or contact support if the issue persists.
+#   (on /api/v1/predictions/0d0d82a9-79b8-47c6-b55a-1203bbbe3255/result)
+#
+# One frame of a three-scene drama, fourteen seconds in, and the whole job
+# died. Two separate things were wrong and only one of them is the obvious
+# one.
+
+
+def test_a_died_inference_is_recognised_as_transient():
+    """`HTTP 400` on a bare GET of a prediction id is not a client error --
+    there is no body to get wrong. It is the provider reporting that its own
+    inference failed, in the one message that tells you to try again."""
+    from tools.muapi_client import MuAPIError, is_transient_inference_error
+
+    assert is_transient_inference_error(
+        MuAPIError(
+            "MuAPI request failed after 1 attempt(s): HTTP 400: Inference "
+            "error occurred while processing the request. Please try again "
+            "or contact support if the issue persists."
+        )
+    )
+    assert is_transient_inference_error(MuAPIError('MuAPI job failed: {"status":"failed"}'))
+
+
+def test_an_endpoint_rejection_is_not_retried():
+    """A 404 or 422 fails identically every time; re-sending it is a loop
+    that ends in the same place having spent the customer's time."""
+    from tools.muapi_client import MuAPIError, is_transient_inference_error
+
+    assert not is_transient_inference_error(MuAPIError("HTTP 404: not found"))
+    assert not is_transient_inference_error(
+        MuAPIError("HTTP 422: field `size` is required")
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_generation_is_submitted_rather_than_the_poll_repeated(
+    monkeypatch,
+):
+    """Retrying the GET would be useless: that prediction is dead and answers
+    400 for as long as anyone asks it. What has to be retried is the
+    generation."""
+    from tools.muapi_client import MuAPIClient, MuAPIError
+
+    monkeypatch.setattr("asyncio.sleep", _no_sleep)
+    client = MuAPIClient("k")
+    attempts = []
+
+    async def _once(endpoint, payload, poll_interval, max_polls, is_cancelled):
+        attempts.append(endpoint)
+        if len(attempts) < 3:
+            raise MuAPIError("HTTP 400: Inference error occurred. Please try again")
+        return "https://cdn/frame.png"
+
+    monkeypatch.setattr(client, "_generate_once", _once)
+    assert await client.generate("flux-pulid", {}) == "https://cdn/frame.png"
+    assert len(attempts) == 3, attempts
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_job_is_never_retried(monkeypatch):
+    from tools.muapi_client import MuAPICancelled, MuAPIClient
+
+    monkeypatch.setattr("asyncio.sleep", _no_sleep)
+    client = MuAPIClient("k")
+    attempts = []
+
+    async def _once(*a, **k):
+        attempts.append(1)
+        raise MuAPICancelled("stopped")
+
+    monkeypatch.setattr(client, "_generate_once", _once)
+    with pytest.raises(MuAPICancelled):
+        await client.generate("flux-pulid", {})
+    assert len(attempts) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_image_path_falls_back_once_the_retries_are_spent(monkeypatch):
+    """After the client has re-submitted and still failed, the generator's own
+    fallback to a different model has to recognise the error -- it did not,
+    which is why this reached the user as a dead job rather than a frame from
+    the backup endpoint."""
+    from tools.muapi_client import MuAPIError
+    from tools.muapi_image_generator import MuAPIImageGenerator
+
+    generator = MuAPIImageGenerator("k")
+    seen = []
+
+    async def _generate(endpoint, payload, **kwargs):
+        seen.append(endpoint)
+        if endpoint != generator.LEGACY_SIZE_ENDPOINT:
+            raise MuAPIError("HTTP 400: Inference error occurred. Please try again")
+        return "https://cdn/fallback.png"
+
+    monkeypatch.setattr(generator.client, "generate", _generate)
+    assert await generator.generate_image("a still") == "https://cdn/fallback.png"
+    assert generator.LEGACY_SIZE_ENDPOINT in seen
