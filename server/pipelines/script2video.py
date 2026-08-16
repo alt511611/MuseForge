@@ -692,15 +692,33 @@ def build_motion_prompt(shot, matched_char=None, world_state: str = "") -> str:
     subject = name or "each character"
     parts.append(
         f"Keep {subject}'s facial identity EXACTLY as in the source image "
-        f"throughout the shot — no morphing, no face changes. "
+        f"throughout the shot — the same face in the last frame as in the "
+        f"first. "
         f"Preserve the source image's screen direction: characters keep "
-        f"facing the same way, never mirror the composition. "
+        f"facing the same way, and the composition keeps its left-to-right "
+        f"order. "
         # The frame can be staged correctly and the video model still turn a
         # head to the lens mid-shot -- it is animating a still, and "look at
         # the viewer" is the strongest attractor a portrait-trained model has.
         f"Nobody turns to look at the camera or acknowledges it; eyelines "
         f"stay inside the scene. "
-        f"Natural, subtle human motion; no warping or distortion."
+        # This used to read "Natural, SUBTLE human motion; no warping or
+        # distortion", and it got what it asked for: a delivered shot measured
+        # a mean frame-to-frame difference of 5-8 over seven seconds -- two
+        # people standing still while the dialogue played. An image-to-video
+        # model already biases hard toward its source frame; telling it to
+        # keep the motion subtle on top of that animates a photograph.
+        #
+        # The negations went with it. Kling's API declares no negative_prompt
+        # (checked against MuAPI's OpenAPI spec: prompt, image_url, duration,
+        # last_image, aspect_ratio, generate_audio -- and nothing else), so
+        # "no warping, no distortion" is not a negative prompt, it is three
+        # more nouns in the positive one.
+        f"The action described above is fully PERFORMED within the clip, at "
+        f"real human speed and with real weight — bodies shift, hands and "
+        f"heads move, clothing and hair carry the movement. Photographic "
+        f"realism throughout: real skin texture, real fabric, natural "
+        f"depth of field."
     )
     return " ".join(parts)
 
