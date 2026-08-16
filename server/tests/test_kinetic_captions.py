@@ -99,6 +99,10 @@ def test_a_pause_between_words_is_not_swallowed():
 
 
 def test_cues_are_short_bursts_and_break_at_sentences():
+    """A cue never spans a full stop, and the sentence after it is divided
+    EVENLY rather than filled to the brim: four words are 2 + 2, not 3 + 1.
+    Greedy filling is what left single words flickering past on their own --
+    see test_no_cue_is_left_holding_one_word."""
     cues = ass_captions.chunk_into_cues(
         _words(
             ("Bitti.", 0.0, 0.5),
@@ -108,7 +112,8 @@ def test_cues_are_short_bursts_and_break_at_sentences():
             ("basliyor", 1.8, 2.4),
         )
     )
-    assert [len(c.words) for c in cues] == [1, 3, 1]
+    # "Bitti." is a one-word SENTENCE, which nothing can divide.
+    assert [len(c.words) for c in cues] == [1, 2, 2]
 
 
 def test_the_scenes_turn_decides_what_is_emphasised():
@@ -239,3 +244,92 @@ def test_the_document_renders_without_libass_complaining(tmp_path):
     assert out.exists() and out.stat().st_size > 0
     # libass reports a malformed script on stderr while still exiting 0.
     assert "Error" not in result.stderr or "ass" not in result.stderr.lower()
+
+
+# --- what a delivered drama put on screen --------------------------------
+#
+# Read off the burned-in captions of a delivered 7-second harbour drama, in
+# order: "That's not cargo" / "lighting." / "Probably a bad" / "seal on a" /
+# "reefer unit." / "Log it and" / "move on."
+#
+# Filling each cue to three words and letting the last take the remainder put
+# a lone "lighting." on screen -- and the cue before it, "That's not cargo",
+# read as a finished sentence asserting the opposite of the line that was
+# spoken.
+
+
+def _timed(sentence):
+    """One word every 0.4s, which is roughly speech pace."""
+    return _words(
+        *[(w, i * 0.4, i * 0.4 + 0.35) for i, w in enumerate(sentence.split())]
+    )
+
+
+def _texts(sentence):
+    return [
+        " ".join(w.text for w in cue.words)
+        for cue in ass_captions.chunk_into_cues(_timed(sentence))
+    ]
+
+
+def test_a_four_word_sentence_is_split_evenly_not_greedily():
+    """The delivered failure, verbatim."""
+    assert _texts("That's not cargo lighting.") == ["That's not", "cargo lighting."]
+
+
+def test_no_cue_is_left_holding_one_word():
+    for sentence in [
+        "That's not cargo lighting.",
+        "Log it and move on.",
+        "Probably a bad seal on a reefer unit.",
+        "It's already been called in a hundred times.",
+        "Mira, I need you to open the door and step away from it now.",
+    ]:
+        sizes = [len(c.words) for c in ass_captions.chunk_into_cues(_timed(sentence))]
+        assert len(sizes) == 1 or min(sizes) >= 2, (sentence, sizes)
+
+
+def test_a_cue_never_exceeds_the_single_fixation_budget():
+    """The nudge onto a phrase boundary must not buy its break with a fourth
+    word -- three is the whole premise of the style."""
+    for sentence in [
+        "Probably a bad seal on a reefer unit.",
+        "It's already been called in a hundred times.",
+        "Mira, I need you to open the door and step away from it now.",
+    ]:
+        sizes = [len(c.words) for c in ass_captions.chunk_into_cues(_timed(sentence))]
+        assert max(sizes) <= ass_captions.WORDS_PER_CUE, (sentence, sizes)
+
+
+def test_the_break_moves_in_front_of_a_linking_word():
+    """"Log it and" strands the conjunction that opens the next clause."""
+    assert _texts("Log it and move on.") == ["Log it", "and move on."]
+
+
+def test_a_one_word_sentence_is_still_allowed_to_stand_alone():
+    """The floor is a rule about DIVISION, not a rule that invents words."""
+    assert _texts("Run.") == ["Run."]
+
+
+def test_every_word_survives_the_chunking():
+    for sentence in [
+        "That's not cargo lighting.",
+        "Sal, you seeing this? That one's glowing.",
+        "Mira, I need you to open the door and step away from it now.",
+    ]:
+        cues = ass_captions.chunk_into_cues(_timed(sentence))
+        rebuilt = " ".join(w.text for c in cues for w in c.words)
+        assert rebuilt == " ".join(sentence.split()), sentence
+
+
+def test_cue_timings_still_come_from_the_words():
+    """Re-chunking must not invent a timeline: each cue starts on its first
+    word and ends on its last."""
+    cues = ass_captions.chunk_into_cues(_timed("Log it and move on."))
+
+    for cue in cues:
+        assert cue.start == cue.words[0].start
+        assert cue.end == cue.words[-1].end
+    # ...and they stay in order, with no overlap.
+    for earlier, later in zip(cues, cues[1:]):
+        assert earlier.end <= later.start
