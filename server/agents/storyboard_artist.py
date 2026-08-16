@@ -16,6 +16,108 @@ from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
 
 logger = logging.getLogger(__name__)
 
+#: How many shots a scene is allowed to be made of.
+#:
+#: ONE, and this is the single biggest reason a finished drama does not feel
+#: like a film. A film is made of shots: two people talking are covered from
+#: two angles, and the cut between them is the grammar the whole medium runs
+#: on. This ships every scene as one continuous take from one generated
+#: frame, so an eight-second exchange is eight seconds of one framing --
+#: measured on a delivered drama as a mean frame-to-frame difference of 8 for
+#: its whole length, which is a photograph that moves slightly.
+#:
+#: It is a COST cap, not a craft decision: each extra shot is another frame
+#: generation plus another image-to-video call, so coverage roughly doubles
+#: or triples what a scene costs to make. interfaces/pacing's internal cuts
+#: exist as the free substitute -- they punch in on the frame we already
+#: have, which buys rhythm but not a second angle.
+#:
+#: Raise it to buy real coverage. The storyboard is asked for exactly this
+#: many shots, so the value reaches the model as well as the slice.
+DEFAULT_SHOTS_PER_SCENE = 1
+
+
+def shots_per_scene() -> int:
+    """The configured shot count, clamped to something a scene can hold."""
+    raw = os.environ.get("MUSEFORGE_SHOTS_PER_SCENE", "").strip()
+    if not raw:
+        return DEFAULT_SHOTS_PER_SCENE
+    try:
+        return max(1, min(4, int(raw)))
+    except ValueError:
+        logger.warning(
+            "MUSEFORGE_SHOTS_PER_SCENE=%r is not a number; using %d.",
+            raw,
+            DEFAULT_SHOTS_PER_SCENE,
+        )
+        return DEFAULT_SHOTS_PER_SCENE
+
+
+#: The two sentences in SYSTEM_PROMPT that hard-code a shot count, and what
+#: they have to become when the scene is allowed coverage. Rewritten rather
+#: than contradicted by a clause appended below them: a prompt that says "you
+#: only get ONE shot" at the top and "cover it in three" at the bottom leaves
+#: the model to choose, and this codebase has already paid for that once --
+#: the costume lock and the reference note disagreed about clothing, and the
+#: model dressed the cast afresh every scene.
+_SINGLE_SHOT_SENTENCES = (
+    (
+        "Design exactly 1 shot for the given scene script.",
+        "Design exactly {count} shots for the given scene script.",
+    ),
+    (
+        "CHOOSE THE RIGHT MOMENT. You only get ONE shot for this scene, so it "
+        "must capture the",
+        "CHOOSE THE RIGHT MOMENTS. You get {count} shots for this scene, and "
+        "together they must capture the",
+    ),
+    (
+        "Respond ONLY with valid JSON array containing a single shot object:",
+        "Respond ONLY with valid JSON array containing {count} shot objects, "
+        "in playing order:",
+    ),
+)
+
+
+def coverage_clause(count: int) -> str:
+    """What to tell the storyboard when a scene may hold more than one shot."""
+    if count <= 1:
+        return ""
+    return (
+        f"\n\nCOVER THE SCENE IN {count} SHOTS. Make them DIFFERENT shots: "
+        f"change the shot_type and the angle between them the way coverage "
+        f"does — a wide that establishes, then the closer framing the beat "
+        f"actually plays in, and on a two-hander cut to whoever is speaking "
+        f"or reacting. Two shots of the same size from the same angle are one "
+        f"shot with a join in it. Their duration_seconds must SUM to the "
+        f"scene's length: divide it between them rather than giving each the "
+        f"whole scene."
+    )
+
+
+def system_prompt_for(base: str, count: int) -> str:
+    """``base`` rewritten for a scene that may hold ``count`` shots.
+
+    Returned unchanged at a count of one, so every existing deployment sends
+    a byte-identical prompt.
+    """
+    if count <= 1:
+        return base
+    prompt = base
+    for original, replacement in _SINGLE_SHOT_SENTENCES:
+        if original not in prompt:
+            # The prompt was edited and this sentence moved. Better to leave
+            # it alone and let the appended clause carry the instruction than
+            # to silently half-rewrite the brief.
+            logger.warning(
+                "Storyboard prompt no longer contains %.40s...; coverage is "
+                "requested by the appended clause alone.",
+                original,
+            )
+            continue
+        prompt = prompt.replace(original, replacement.format(count=count))
+    return prompt + coverage_clause(count)
+
 
 class StoryboardArtist:
     SYSTEM_PROMPT = """You are a master storyboard artist for cinematic productions.
@@ -240,18 +342,20 @@ Respond ONLY with valid JSON array containing a single shot object:
         if self.muapi_key and is_muapi_llm_enabled():
             try:
                 content = await complete_via_muapi(
-                    self.SYSTEM_PROMPT, prompt, max_tokens=self.MAX_SHOT_TOKENS
+                    system_prompt_for(self.SYSTEM_PROMPT, shots_per_scene()),
+                        prompt,
+                        max_tokens=self.MAX_SHOT_TOKENS * shots_per_scene(),
                 )
                 data = json.loads(re.search(r"\[[\s\S]*\]", content).group())
                 shots = [StoryboardShot(**s) for s in data]
                 if shots:
-                    # Hard cap: never produce more than 1 shot per scene
-                    # (cost control) — this path was previously missing
-                    # the same cap already applied to the direct-Anthropic
-                    # fallback below, silently defeating the cost fix
-                    # since MuAPI is the PRIMARY path, tried first.
+                    # Cost cap, now configurable -- see
+                    # DEFAULT_SHOTS_PER_SCENE. This path was previously
+                    # missing the cap already applied to the direct-Anthropic
+                    # fallback below, silently defeating the cost fix since
+                    # MuAPI is the PRIMARY path, tried first.
                     return self._finish_shots(
-                        shots[:1],
+                        shots[:shots_per_scene()],
                         scene_emotion,
                         is_finale,
                         scene_tension,
@@ -291,9 +395,9 @@ Respond ONLY with valid JSON array containing a single shot object:
                 scene_shot_scale=scene_shot_scale,
             )
             if shots:
-                # Hard cap: never produce more than 1 shot per scene (cost control).
+                # Cost cap, now configurable -- see DEFAULT_SHOTS_PER_SCENE.
                 return self._finish_shots(
-                    shots[:1],
+                    shots[:shots_per_scene()],
                     scene_emotion,
                     is_finale,
                     scene_tension,
@@ -859,7 +963,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                 # Thinking and text share this budget, so the pre-thinking
                 # 2048 now leaves very little for the shot list itself.
                 max_tokens=self.MAX_SHOT_TOKENS,
-                system=self.SYSTEM_PROMPT,
+                system=system_prompt_for(self.SYSTEM_PROMPT, shots_per_scene()),
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:
                 message = await stream.get_final_message()
