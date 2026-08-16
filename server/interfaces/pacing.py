@@ -125,7 +125,17 @@ FAST_TENSION = 8
 #: turns an 8/10/12 rhythm into 10/10/10 -- it would flatten the very spread
 #: that makes the drama breathe, to fix a problem that lives inside ONE scene.
 #: Cutting the long take costs nothing and leaves the spread alone.
-LONG_TAKE_SECONDS = 11.0
+#:
+#: Lowered from 11.0 to 7.0 by a second delivered drama, which the viewer
+#: described as photographs that move. Its scenes ran 8.0s, 10.1s and ~12s and
+#: only the last cleared 11, so the two DIALOGUE scenes played as single
+#: unbroken framings on two people talking -- mean inter-frame motion of 8
+#: across both, against 15-38 in the scene that was cut. The original
+#: measurement asked when a take stops moving; the honest question is when a
+#: viewer stops believing it was directed, and eight seconds on one framing is
+#: past that. 7.0 leaves a genuinely short take (a 5- or 6-second beat) to the
+#: director's style, which is the distinction worth keeping.
+LONG_TAKE_SECONDS = 7.0
 
 
 def _flag(name: str) -> str:
@@ -156,8 +166,13 @@ def is_enabled(pacing: str = "medium", duration: float = 0.0) -> bool:
     opposite. The second is LENGTH, and it overrides the style -- past
     LONG_TAKE_SECONDS the take stops being a choice and starts being a
     measured problem (see that constant). A slow style still gets slow
-    framings; what it stops getting is twelve seconds of a picture that has
-    stopped moving.
+    framings, and still gets to hold a genuinely short take; what it stops
+    getting is eight seconds of a picture that has stopped moving.
+
+    This is the cheap substitute for coverage, not coverage itself: the
+    framings are punch-ins on the one frame the scene already has (see
+    agents/storyboard_artist.DEFAULT_SHOTS_PER_SCENE, which is what actually
+    caps a scene at a single camera).
     """
     setting = mode()
     if setting == "on":

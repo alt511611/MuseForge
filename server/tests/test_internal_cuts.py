@@ -43,9 +43,15 @@ def _fast(monkeypatch):
 
 
 def test_slow_styles_are_left_alone(monkeypatch):
+    """...on a take short enough to be a choice. Ten seconds is not: the
+    length rule overrides the style past LONG_TAKE_SECONDS, and a delivered
+    drama's 10.1-second dialogue scene, held on one framing, is what lowered
+    that threshold to 7."""
     _fast(monkeypatch)
-    assert plan_internal_cuts(10.0, tension=9, pacing="slow") == []
-    assert plan_internal_cuts(10.0, tension=9, pacing="medium") == []
+    assert plan_internal_cuts(6.0, tension=9, pacing="slow") == []
+    assert plan_internal_cuts(6.0, tension=9, pacing="medium") == []
+    # ...and the override still bites above it, whatever the style asked for.
+    assert plan_internal_cuts(10.0, tension=9, pacing="slow")
 
 
 def test_fast_styles_are_cut(monkeypatch):
@@ -246,10 +252,10 @@ def test_a_long_take_is_cut_even_in_a_slow_style(monkeypatch):
 
 def test_a_short_take_still_follows_the_director(monkeypatch):
     """The length rule is a floor under the style, not a replacement for it:
-    a slow style still gets slow framings on scenes that are working."""
+    a slow style still gets to hold a genuinely short beat."""
     _fast(monkeypatch)
-    assert plan_internal_cuts(8.0, tension=5, pacing="slow") == []
-    assert plan_internal_cuts(8.0, tension=5, pacing="fast")
+    assert plan_internal_cuts(6.0, tension=5, pacing="slow") == []
+    assert plan_internal_cuts(6.0, tension=5, pacing="fast")
 
 
 def test_the_threshold_is_where_the_measurement_put_it(monkeypatch):
@@ -261,3 +267,44 @@ def test_the_threshold_is_where_the_measurement_put_it(monkeypatch):
 def test_off_still_means_off(monkeypatch):
     monkeypatch.setenv("MUSEFORGE_INTERNAL_CUTS", "off")
     assert plan_internal_cuts(12.0, tension=10, pacing="slow") == []
+
+
+# --- what the delivered drama measured -----------------------------------
+
+
+def test_an_eight_second_dialogue_scene_is_not_one_framing(monkeypatch):
+    """The viewer's words were "photographs that move". Their drama's scenes
+    ran 8.0s, 10.1s and ~12s; only the last cleared the old 11-second
+    threshold, so the two DIALOGUE scenes played as single unbroken framings
+    on two people talking."""
+    _fast(monkeypatch)
+
+    for length in (8.0, 10.1):
+        cuts = plan_internal_cuts(length, tension=6, pacing="medium")
+        assert len(cuts) >= 2, f"{length}s scene left as one framing"
+        # And the segments still tile the clip exactly.
+        assert abs(sum(c.duration for c in cuts) - length) < 1e-6
+        assert cuts[0].start == 0.0
+        assert abs(cuts[-1].end - length) < 1e-6
+
+
+def test_the_last_second_is_still_protected(monkeypatch):
+    """Lowering the threshold must not start cutting across the acted peak."""
+    _fast(monkeypatch)
+
+    for length in (8.0, 10.1, 12.0):
+        cuts = plan_internal_cuts(length, tension=6, pacing="medium")
+        joins = [c.start for c in cuts[1:]]
+        assert all(join <= length - pacing_mod.TAIL_GUARD_SECONDS for join in joins), (
+            length,
+            joins,
+        )
+
+
+def test_a_clip_too_short_to_cut_is_still_left_alone(monkeypatch):
+    """MIN_CLIP_SECONDS is the floor the threshold must never cross: below it
+    the beats are too short to read as beats."""
+    _fast(monkeypatch)
+
+    assert pacing_mod.LONG_TAKE_SECONDS >= pacing_mod.MIN_CLIP_SECONDS
+    assert plan_internal_cuts(4.0, tension=10, pacing="fast") == []
