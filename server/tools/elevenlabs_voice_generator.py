@@ -313,26 +313,38 @@ class ElevenLabsVoiceGenerator:
         by_line: Dict[int, List[Dict[str, Any]]] = {}
         cursor = 0
         for index, row in enumerate(lines):
-            text = row.get("spoken_text") or row.get("line") or ""
+            written = row.get("line") or ""
+            text = row.get("spoken_text") or written
+            # The audio tag is a DIRECTION TO THE ACTOR, not a spoken word.
+            # It has to be walked, because the character stream contains it
+            # and skipping it here would throw the whole line out of
+            # alignment -- but it must never be EMITTED, or the viewer reads
+            # "[fearfully] Control's gone" burned into the picture. Seen in a
+            # delivered drama exactly that way.
+            prefix_len = max(0, len(text) - len(written)) if written else 0
             words: List[Dict[str, Any]] = []
             current: List[str] = []
             current_start: Optional[float] = None
             current_end: Optional[float] = None
+            word_at = 0
 
-            for wanted in text:
+            for position, wanted in enumerate(text):
                 if wanted.isspace():
                     # Word boundary in the written line; the stream's own
                     # spacing is not trusted to agree.
                     if current:
-                        words.append(
-                            {
-                                "text": "".join(current),
-                                "start": float(current_start or 0.0),
-                                "end": float(current_end or 0.0),
-                            }
-                        )
+                        if word_at >= prefix_len:
+                            words.append(
+                                {
+                                    "text": "".join(current),
+                                    "start": float(current_start or 0.0),
+                                    "end": float(current_end or 0.0),
+                                }
+                            )
                         current, current_start, current_end = [], None, None
                     continue
+                if not current:
+                    word_at = position
                 # Advance to this character in the stream, skipping whatever
                 # the provider inserted or normalised away.
                 found = -1
@@ -348,7 +360,7 @@ class ElevenLabsVoiceGenerator:
                 current_end = float(ends[found])
                 current.append(wanted)
 
-            if current:
+            if current and word_at >= prefix_len:
                 words.append(
                     {
                         "text": "".join(current),

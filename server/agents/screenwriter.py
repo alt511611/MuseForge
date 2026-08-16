@@ -261,7 +261,16 @@ EVERY scene needs at least one line in its "dialogue" list, and an empty dialogu
 list is not acceptable in any scene. Keep lines short, speakable and few (one to
 three per scene) — this is film dialogue over a picture, not a radio play. The
 climax's stated event still has to be SEEN, not merely narrated: never replace the
-event with a character describing it."""
+event with a character describing it.
+
+A LINE IS NOT THE EVENT. Giving a character "The power's gone" does not make the
+lights go out — it makes someone say so while the lamps stay on, which is what a
+viewer sees and does not believe. This is the specific way a voiced script fails
+that a silent one cannot, because dialogue offers an easy way to discharge the
+brief without filming it. So on the scene where the event happens: "world_change"
+names what the camera sees become different, the "action" shows it happening, and
+the dialogue is what someone says WHILE it happens — a reaction, an order, a
+half-finished sentence. Never a report of it, and never the only place it exists."""
 
     #: Token budget for a director-level script. Shared by BOTH provider
     #: paths: the MuAPI route is tried FIRST, so raising it only on the
@@ -409,7 +418,86 @@ event with a character describing it."""
         """
         script.user_brief = (idea or "").strip()
         cls._apply_brief_gender(script)
+        cls._apply_brief_event(script)
         return script
+
+    #: Unmistakable, world-SCALE changes of state, matched against the brief.
+    #: Deliberately short and blunt: this list decides whether a scene gets to
+    #: break the drama's locked lighting, so a false positive is expensive and
+    #: a miss costs only what the product already does today. Ambiguous verbs
+    #: are left out on purpose -- "burns" is as often a candle as a warehouse,
+    #: and "stops" is usually a person.
+    _WORLD_EVENT_CUES = (
+        r"power (?:dies|goes out|fails|cuts out|is cut)",
+        r"lights? (?:go out|goes out|die|dies|fail|fails)",
+        r"go(?:es)? (?:dark|black)",
+        r"black(?:s)? out",
+        r"blackout",
+        r"floods?",
+        r"explodes?",
+        r"collapses?",
+        r"elektri(?:k|ği|kler)\w* (?:kesil\w+|gider|gidiyor)",
+        r"ışıklar\w* sön\w+",
+        r"karanlığa göm\w+",
+        r"kararır|kararıyor",
+        r"çöker|çöküyor",
+        r"patlar|patlıyor",
+    )
+
+    @classmethod
+    def _apply_brief_event(cls, script: DramaScript) -> None:
+        """Put the brief's stated event back when the script dropped it.
+
+        `world_change` is the only field that lets a scene break the drama's
+        locked lighting, so a script that leaves it empty can never show a
+        blackout however well the rest is written. Observed twice: a brief
+        whose whole point was "the city's power dies the moment she opens it"
+        came back with the lights on both times -- the second time with a
+        character SAYING the power was gone, which is the failure the voiced
+        script makes easy.
+
+        This does not invent an event. It copies the user's own clause into
+        the field that exists to carry it, and only when the writer left that
+        field empty everywhere. A script that named its own change is left
+        alone: the model read the whole brief; this reads a word list.
+        """
+        scenes = [s for s in (script.scenes or []) if hasattr(s, "world_change")]
+        if not scenes or any((s.world_change or "").strip() for s in scenes):
+            return
+        clause = cls._world_event_clause(script.user_brief)
+        if not clause:
+            return
+        target = next(
+            (s for s in scenes if (s.dramatic_function or "").strip().lower() == "climax"),
+            scenes[-1],
+        )
+        target.world_change = clause
+        logger.info(
+            "No scene declared a world_change; restored the brief's own event "
+            "onto the %s scene: %r",
+            (target.dramatic_function or "last").strip() or "last",
+            clause,
+        )
+
+    @classmethod
+    def _world_event_clause(cls, brief: str) -> str:
+        """The one clause of the brief that states a change to the world.
+
+        Returns "" unless EXACTLY one clause matches: two matches mean the
+        brief describes more than one change and picking between them is a
+        judgement this cannot make, so it defers rather than guesses.
+        """
+        text = " ".join((brief or "").split())
+        if not text:
+            return ""
+        clauses = [c.strip(" ,;—-") for c in re.split(r"[.;—]|,\s*and\b|\band\b", text)]
+        hits = [
+            clause
+            for clause in clauses
+            if clause
+            and any(re.search(cue, clause, re.IGNORECASE) for cue in cls._WORLD_EVENT_CUES)
+        ]
+        return hits[0] if len(hits) == 1 else ""
 
     @staticmethod
     def _apply_brief_gender(script: DramaScript) -> None:
