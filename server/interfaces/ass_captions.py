@@ -27,6 +27,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
+# The same break vocabulary the broadcast-style path uses. Two tables of
+# linking words would let a caption break before "on" in one renderer and
+# after it in the other.
+from interfaces.subtitles import _BREAK_BEFORE, _CLAUSE_END, _SENTENCE_END
+
 #: Words on screen at once. Three is about what the eye takes in a single
 #: fixation at phone reading distance; four starts to be read rather than
 #: seen, which defeats the point.
@@ -110,37 +115,137 @@ def emphasis_stems(*sources: str) -> set:
     return stems
 
 
+def _ends_sentence(text: str) -> bool:
+    return text.rstrip()[-1:] in _SENTENCE_END
+
+
+def _chunk_sizes(count: int, words_per_cue: int) -> List[int]:
+    """How to divide ``count`` words into cues of at most ``words_per_cue``.
+
+    Evenly, rather than greedily. Filling each cue to the brim and letting the
+    last one take what is left is what put a lone "lighting." on screen after
+    "That's not cargo" -- four words spent as 3 + 1 instead of 2 + 2. A
+    one-word cue is a flicker, and the chunk in front of it had already read
+    as a finished sentence that said the opposite of the line.
+    """
+    if count <= words_per_cue:
+        return [count] if count else []
+    cue_count = -(-count // words_per_cue)  # ceil
+    base, extra = divmod(count, cue_count)
+    # The bigger cues go first: a caption sequence that shortens as it goes
+    # reads as winding down, which is the right shape for a spoken line.
+    return [base + 1] * extra + [base] * (cue_count - extra)
+
+
+#: No cue holds fewer than this, so nothing flickers past as a lone word.
+#: Relaxed only for a sentence that is genuinely one word long ("Run.").
+MIN_WORDS_PER_CUE = 2
+
+
+def _word(words: List[CaptionWord], index: int) -> str:
+    return words[index].text.strip("\"'([").casefold()
+
+
+def _boundary_score(words: List[CaptionWord], at: int) -> int:
+    """How good a cue break before ``words[at]`` is. Higher is better.
+
+    The same ranking the broadcast path uses, applied to bursts instead of
+    lines: break after punctuation, break BEFORE a linking word, and never
+    strand one at the end of a cue -- "seal on a" hands the reader a
+    preposition with nothing to attach it to, and the object arrives in the
+    next cue.
+    """
+    if at <= 0 or at >= len(words):
+        return -99
+    if words[at - 1].text.rstrip().endswith(_CLAUSE_END):
+        return 2
+    if _word(words, at - 1) in _BREAK_BEFORE:
+        return -1
+    if _word(words, at) in _BREAK_BEFORE:
+        return 1
+    return 0
+
+
+def _boundaries(sentence: List[CaptionWord], words_per_cue: int) -> List[int]:
+    """Where to cut one sentence into cues.
+
+    An even split decides the sizes; the phrasing is then allowed to move a
+    boundary by one word, but ONLY when that lands on a better break and
+    leaves every cue within its legal size. The even sizing is what removes
+    orphans, so a nudge that would reintroduce one is refused -- which is the
+    whole reason this is a filter over candidates rather than a search for
+    the prettiest break.
+    """
+    total = len(sentence)
+    sizes = _chunk_sizes(total, words_per_cue)
+    bounds: List[int] = []
+    running = 0
+    for size in sizes[:-1]:
+        running += size
+        bounds.append(running)
+
+    floor = MIN_WORDS_PER_CUE if total >= MIN_WORDS_PER_CUE * 2 else 1
+    for i, boundary in enumerate(bounds):
+        previous = bounds[i - 1] if i else 0
+        following = bounds[i + 1] if i + 1 < len(bounds) else total
+        current_score = _boundary_score(sentence, boundary)
+        for candidate in (boundary - 1, boundary + 1):
+            if not floor <= candidate - previous <= words_per_cue:
+                continue
+            if not floor <= following - candidate <= words_per_cue:
+                continue
+            if _boundary_score(sentence, candidate) > current_score:
+                bounds[i] = candidate
+                break
+    return bounds
+
+
 def chunk_into_cues(
     words: Sequence[Dict],
     words_per_cue: int = WORDS_PER_CUE,
 ) -> List[CaptionCue]:
-    """Group timed words into bursts, breaking at sentence ends."""
-    cues: List[CaptionCue] = []
-    current: List[CaptionWord] = []
+    """Group timed words into bursts, breaking at sentence ends.
 
-    def _flush():
-        if current:
+    Sentences are chunked one at a time -- a cue never spans a full stop --
+    and each sentence is divided EVENLY rather than greedily, so no cue is
+    left holding a single orphaned word.
+    """
+    parsed = [
+        CaptionWord(
+            text=str(raw.get("text") or ""),
+            start=float(raw.get("start") or 0.0),
+            end=float(raw.get("end") or 0.0),
+        )
+        for raw in words or []
+    ]
+
+    # One sentence at a time: a cue that spans a full stop asks the reader to
+    # start a new thought halfway through a burst.
+    sentences: List[List[CaptionWord]] = []
+    current: List[CaptionWord] = []
+    for word in parsed:
+        current.append(word)
+        if _ends_sentence(word.text):
+            sentences.append(current)
+            current = []
+    if current:
+        sentences.append(current)
+
+    cues: List[CaptionCue] = []
+    for sentence in sentences:
+        at = 0
+        for end in _boundaries(sentence, words_per_cue) + [len(sentence)]:
+            chunk = sentence[at:end]
+            if not chunk:
+                continue
             cues.append(
                 CaptionCue(
-                    start=current[0].start,
-                    end=current[-1].end,
-                    words=list(current),
+                    start=chunk[0].start,
+                    end=chunk[-1].end,
+                    words=list(chunk),
                 )
             )
-            current.clear()
-
-    for raw in words or []:
-        current.append(
-            CaptionWord(
-                text=str(raw.get("text") or ""),
-                start=float(raw.get("start") or 0.0),
-                end=float(raw.get("end") or 0.0),
-            )
-        )
-        ends_sentence = current[-1].text.rstrip()[-1:] in {".", "!", "?", "…", ":"}
-        if len(current) >= words_per_cue or ends_sentence:
-            _flush()
-    _flush()
+            at = end
     return cues
 
 

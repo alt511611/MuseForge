@@ -61,9 +61,11 @@ def test_motion_prompt_carries_camera_expression_and_identity():
     assert "Camera: slow push-in." in prompt
     assert "her hand crosses the table slowly" in prompt
     assert "chin trembling, eyes brimming" in prompt
-    # The character lock, restated for the ANIMATION step.
+    # The character lock, restated for the ANIMATION step. Stated positively:
+    # the model this goes to declares no negative_prompt, so "no morphing" was
+    # never a negation, only another noun in the prompt.
     assert "Keep Elif's facial identity EXACTLY as in the source image" in prompt
-    assert "no morphing" in prompt
+    assert "the same face in the last frame as in the first" in prompt
 
 
 def test_motion_prompt_degrades_without_optional_fields():

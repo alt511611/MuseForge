@@ -155,12 +155,16 @@ def test_storyboard_prompt_teaches_the_rule():
     assert "frame-left" in prompt and "screen-RIGHT" in prompt
 
 
-def test_motion_prompt_forbids_mirroring():
+def test_motion_prompt_holds_the_screen_direction():
+    """Stated as the order to KEEP rather than the flip to avoid: the video
+    model takes no negative prompt, so a forbidden thing is just a mentioned
+    thing."""
     from interfaces.shot import StoryboardShot
 
     shot = StoryboardShot(idx=0, visual_desc="x", motion_desc="hands meet")
     prompt = build_motion_prompt(shot, None)
-    assert "never mirror the composition" in prompt
+    assert "characters keep facing the same way" in prompt
+    assert "keeps its left-to-right order" in prompt
     assert "screen direction" in prompt.lower()
 
 
@@ -223,3 +227,52 @@ def test_an_all_off_screen_cast_leaves_the_callers_own_fallbacks_to_decide():
 
     priya = _char("Priya")
     assert on_screen_name_matches("priya's voice over the intercom", [priya]) == []
+
+
+def test_the_motion_prompt_does_not_ask_for_stillness():
+    """A delivered 7-second shot measured a mean frame-to-frame difference of
+    5-8: two people standing still while the dialogue played. The prompt was
+    asking for it -- "Natural, SUBTLE human motion" -- on top of an
+    image-to-video model's own bias toward its source frame."""
+    from interfaces.shot import StoryboardShot
+
+    prompt = build_motion_prompt(
+        StoryboardShot(idx=0, visual_desc="x", motion_desc="she hauls the door open"),
+        None,
+    )
+
+    assert "subtle" not in prompt.casefold()
+    assert "fully PERFORMED within the clip" in prompt
+    assert "real human speed" in prompt
+
+
+def test_the_motion_prompt_names_nothing_it_does_not_want():
+    """Kling's I2V endpoints declare prompt, image_url, duration, last_image,
+    aspect_ratio and generate_audio -- no negative_prompt. Every "no X" in the
+    prompt is therefore X, mentioned."""
+    from interfaces.shot import StoryboardShot
+
+    prompt = build_motion_prompt(
+        StoryboardShot(idx=0, visual_desc="x", motion_desc="hands meet"), None
+    ).casefold()
+
+    for unwanted in ("morphing", "warping", "distortion"):
+        assert unwanted not in prompt, unwanted
+
+
+def test_the_shot_still_leads_the_prompt():
+    """The universal block is appended, never prepended: an image-to-video
+    model weights the opening, and what this SHOT decided has to be there."""
+    from interfaces.shot import StoryboardShot
+
+    prompt = build_motion_prompt(
+        StoryboardShot(
+            idx=0,
+            visual_desc="x",
+            motion_desc="she hauls the door open",
+            camera_movement="slow push-in",
+        ),
+        None,
+    )
+
+    assert prompt.startswith("Camera: slow push-in. she hauls the door open.")

@@ -692,15 +692,33 @@ def build_motion_prompt(shot, matched_char=None, world_state: str = "") -> str:
     subject = name or "each character"
     parts.append(
         f"Keep {subject}'s facial identity EXACTLY as in the source image "
-        f"throughout the shot — no morphing, no face changes. "
+        f"throughout the shot — the same face in the last frame as in the "
+        f"first. "
         f"Preserve the source image's screen direction: characters keep "
-        f"facing the same way, never mirror the composition. "
+        f"facing the same way, and the composition keeps its left-to-right "
+        f"order. "
         # The frame can be staged correctly and the video model still turn a
         # head to the lens mid-shot -- it is animating a still, and "look at
         # the viewer" is the strongest attractor a portrait-trained model has.
         f"Nobody turns to look at the camera or acknowledges it; eyelines "
         f"stay inside the scene. "
-        f"Natural, subtle human motion; no warping or distortion."
+        # This used to read "Natural, SUBTLE human motion; no warping or
+        # distortion", and it got what it asked for: a delivered shot measured
+        # a mean frame-to-frame difference of 5-8 over seven seconds -- two
+        # people standing still while the dialogue played. An image-to-video
+        # model already biases hard toward its source frame; telling it to
+        # keep the motion subtle on top of that animates a photograph.
+        #
+        # The negations went with it. Kling's API declares no negative_prompt
+        # (checked against MuAPI's OpenAPI spec: prompt, image_url, duration,
+        # last_image, aspect_ratio, generate_audio -- and nothing else), so
+        # "no warping, no distortion" is not a negative prompt, it is three
+        # more nouns in the positive one.
+        f"The action described above is fully PERFORMED within the clip, at "
+        f"real human speed and with real weight — bodies shift, hands and "
+        f"heads move, clothing and hair carry the movement. Photographic "
+        f"realism throughout: real skin texture, real fabric, natural "
+        f"depth of field."
     )
     return " ".join(parts)
 
@@ -715,6 +733,68 @@ async def download_video(url: str, path: str) -> str:
     return path
 
 
+#: The frame rate every clip is conformed to before a re-encoding concat.
+#: Providers return 24.00, 24.08 and 24.09 for the same order, and the concat
+#: filter refuses a graph whose inputs disagree.
+CONCAT_FPS = 24
+
+
+#: How far a concatenated master may sit from the sum of its parts. Joins move
+#: the total by a frame or two; anything past this is a broken timeline.
+CONCAT_DURATION_TOLERANCE = 0.02
+
+
+def _probe_duration(video_path: str) -> float:
+    """Duration in seconds, or 0.0 when it cannot be read."""
+    try:
+        from moviepy import VideoFileClip
+
+        with VideoFileClip(video_path) as clip:
+            return float(clip.duration or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _concat_is_intact(out_path: str, expected: float) -> bool:
+    """Whether a concatenated file actually holds all the footage.
+
+    An exit code of 0 does not mean the join worked. ffmpeg's concat DEMUXER
+    copies packets without re-timing them, so inputs whose frame rates and
+    timebases disagree -- 24.00 at tbn 12288 beside 24.09 at tbn 19272, which
+    is what this pipeline produces the moment one scene is cut and another is
+    not -- are written with timestamps that do not describe them. The file is
+    valid, playable, and the wrong length: measured, 30.0s of clips came out
+    as a 47.1s master at 15.37fps in one direction, and as a 7.04s master
+    (the first clip alone) in the delivered job that prompted this.
+
+    So the output is measured instead of trusted, and a bad join falls through
+    to a tier that re-encodes rather than being returned as a success.
+    """
+    if expected <= 0:
+        return True  # nothing to compare against
+    actual = _probe_duration(out_path)
+    if actual <= 0:
+        return False
+    return abs(actual - expected) / expected <= CONCAT_DURATION_TOLERANCE
+
+
+def _ffmpeg_binary() -> str:
+    """The ffmpeg to shell out to, falling back to moviepy's bundled build.
+
+    Local dev and test environments often have only imageio-ffmpeg's binary;
+    the production image installs ffmpeg proper.
+    """
+    binary = os.environ.get("MUSEFORGE_FFMPEG_BINARY") or shutil.which("ffmpeg")
+    if binary:
+        return binary
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
 async def concatenate_videos(paths: List[str], out_path: str) -> str:
     """Concatenate clips with low-memory fallbacks.
 
@@ -724,6 +804,11 @@ async def concatenate_videos(paths: List[str], out_path: str) -> str:
     fail-open behavior.
     """
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+
+    # What the master has to come out as, measured before anything is written.
+    # Every tier below is checked against it: a join that loses or invents
+    # footage must not be returned as a success just because ffmpeg exited 0.
+    expected_duration = sum(_probe_duration(path) for path in paths)
 
     # 1) Native concat demuxer: near-zero memory because packets are copied
     # without decoding/re-encoding. This requires matching codecs/streams.
@@ -743,16 +828,7 @@ async def concatenate_videos(paths: List[str], out_path: str) -> str:
                 escaped = os.path.abspath(path).replace("'", "'\\''")
                 concat_file.write(f"file '{escaped}'\n")
 
-        ffmpeg_binary = os.environ.get("MUSEFORGE_FFMPEG_BINARY") or shutil.which("ffmpeg")
-        if not ffmpeg_binary:
-            # Local dev/test environments may only have moviepy's bundled
-            # imageio-ffmpeg binary; production Docker installs ffmpeg.
-            try:
-                import imageio_ffmpeg
-
-                ffmpeg_binary = imageio_ffmpeg.get_ffmpeg_exe()
-            except Exception:
-                ffmpeg_binary = "ffmpeg"
+        ffmpeg_binary = _ffmpeg_binary()
 
         process = await asyncio.create_subprocess_exec(
             ffmpeg_binary,
@@ -772,12 +848,20 @@ async def concatenate_videos(paths: List[str], out_path: str) -> str:
         )
         _, stderr = await process.communicate()
         if process.returncode == 0 and os.path.isfile(out_path):
-            return out_path
-        logger.warning(
-            "ffmpeg concat stream-copy failed (exit=%s), using moviepy chain: %s",
-            process.returncode,
-            stderr.decode("utf-8", errors="replace")[-1000:],
-        )
+            if _concat_is_intact(out_path, expected_duration):
+                return out_path
+            logger.warning(
+                "ffmpeg concat stream-copy reported success but produced "
+                "%.2fs from %.2fs of clips; re-encoding instead.",
+                _probe_duration(out_path),
+                expected_duration,
+            )
+        else:
+            logger.warning(
+                "ffmpeg concat stream-copy failed (exit=%s), using moviepy chain: %s",
+                process.returncode,
+                stderr.decode("utf-8", errors="replace")[-1000:],
+            )
     except Exception as exc:
         logger.warning("ffmpeg concat unavailable, using moviepy chain: %s", exc)
     finally:
@@ -806,9 +890,18 @@ async def concatenate_videos(paths: List[str], out_path: str) -> str:
             out_path, codec="libx264", audio=False, logger=None,
             **moviepy_encode_kwargs(),
         )
-        return out_path
+        # "chain" plays clips back to back without re-timing them either, so
+        # it inherits the same frame-rate hazard as the demuxer above.
+        if _concat_is_intact(out_path, expected_duration):
+            return out_path
+        logger.warning(
+            "moviepy chain concat produced %.2fs from %.2fs of clips; "
+            "re-encoding through the concat filter instead.",
+            _probe_duration(out_path),
+            expected_duration,
+        )
     except Exception as exc:
-        logger.warning("moviepy chain concat failed, using raw byte-copy: %s", exc)
+        logger.warning("moviepy chain concat failed: %s", exc)
     finally:
         if final is not None:
             try:
@@ -821,16 +914,99 @@ async def concatenate_videos(paths: List[str], out_path: str) -> str:
             except Exception:
                 pass
 
-    # 3) Preserve the existing last-resort raw byte-copy fallback.
+    # 3) ffmpeg's concat FILTER, which decodes and re-encodes.
+    #
+    # The demuxer above needs matching codecs, profiles, frame rates and
+    # stream layouts; the filter needs none of that, so it is the tier that
+    # actually handles clips that disagree -- which, in this pipeline, is the
+    # normal case. A scene rendered as a single shot ships the provider's own
+    # file (Main profile, 24.00fps, WITH an audio track) while a scene that
+    # was cut ships our re-encode (High profile, 24.09fps, silent). Delivered:
+    # one such job concatenated 7.04s + 11.0s + 12.0s into a 7.04s master.
+    if await _concat_by_filter(paths, out_path) and _concat_is_intact(
+        out_path, expected_duration
+    ):
+        return out_path
+
     try:
-        with open(out_path, "wb") as f:
-            for p in paths:
-                with open(p, "rb") as src:
-                    f.write(src.read())
+        os.unlink(out_path)
+    except OSError:
+        pass
+
+    # 4) Last resort. NOT the byte-append this replaced: concatenating mp4
+    # FILES produces a file whose first moov atom describes only the first
+    # clip, so every player reads exactly that clip and silently discards the
+    # rest. It never worked for more than one input -- it just failed in a
+    # shape that looked like success, which is how two thirds of a paid
+    # three-scene drama went out as a valid, playable, seven-second file.
+    #
+    # Copying the first clip loses the same footage, but it says so.
+    logger.error(
+        "Could not concatenate %d clips by any method; delivering the first "
+        "scene ALONE. %d scene(s) are missing from this drama.",
+        len(paths),
+        max(0, len(paths) - 1),
+    )
+    try:
+        shutil.copyfile(paths[0], out_path)
     except Exception as exc:
-        # Keep the pipeline fail-open even if a source disappears mid-copy.
-        logger.error("raw concat fallback failed: %s", exc)
+        logger.error("even the single-clip fallback failed: %s", exc)
     return out_path
+
+
+async def _concat_by_filter(paths: List[str], out_path: str) -> bool:
+    """Concatenate by decoding every clip and re-encoding one timeline.
+
+    Each input is conformed first -- scaled to the first clip's frame, square
+    pixels, one frame rate -- because the concat filter requires agreement on
+    all three and refuses the whole graph when one input differs.
+    """
+    if not paths:
+        return False
+    try:
+        width, height = _probe_dimensions(paths[0])
+        if width <= 0 or height <= 0:
+            return False
+
+        command: List[str] = [_ffmpeg_binary(), "-y"]
+        for path in paths:
+            command += ["-i", path]
+        chains = "".join(
+            f"[{i}:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},setsar=1,fps={CONCAT_FPS}[v{i}];"
+            for i in range(len(paths))
+        )
+        streams = "".join(f"[v{i}]" for i in range(len(paths)))
+        command += [
+            "-filter_complex",
+            f"{chains}{streams}concat=n={len(paths)}:v=1:a=0[out]",
+            "-map",
+            "[out]",
+            # Audio is deliberately dropped here exactly as the stream-copy
+            # path drops it with -an: the voice is mixed onto the master later,
+            # and carrying a provider's incidental audio through would double
+            # it up under the dialogue.
+            "-an",
+            *video_encode_args(),
+            out_path,
+        ]
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode == 0 and os.path.isfile(out_path):
+            logger.info("Concatenated %d clips with the concat filter.", len(paths))
+            return True
+        logger.warning(
+            "ffmpeg concat filter failed (exit=%s): %s",
+            process.returncode,
+            stderr.decode("utf-8", errors="replace")[-1000:],
+        )
+    except Exception as exc:
+        logger.warning("ffmpeg concat filter unavailable: %s", exc)
+    return False
 
 
 # --- Encode quality ---------------------------------------------------------
