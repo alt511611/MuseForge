@@ -4,7 +4,11 @@ import hashlib
 import logging
 import os
 
-from tools.muapi_client import MuAPIClient, MuAPIError
+from tools.muapi_client import (
+    MuAPIClient,
+    MuAPIError,
+    is_transient_inference_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -174,10 +178,13 @@ class MuAPIImageGenerator:
         except MuAPIError as exc:
             message = str(exc).lower()
             is_schema_rejection = "404" in message or "422" in message
-            is_runtime_failure = (
-                '"status":"failed"' in message.replace(" ", "")
-                or "internal error" in message
-            )
+            # Shared with the video path via the client, because the shape of
+            # a provider-side failure is the same whatever is being generated
+            # -- and because this check had already missed one: a delivered
+            # job died on `HTTP 400: Inference error occurred ... Please try
+            # again`, which matched neither of the two strings that used to be
+            # listed here and so was re-raised instead of falling back.
+            is_runtime_failure = is_transient_inference_error(exc)
             if not (is_schema_rejection or is_runtime_failure):
                 raise
 
@@ -289,10 +296,13 @@ class MuAPIImageGenerator:
         except MuAPIError as exc:
             message = str(exc).lower()
             is_schema_rejection = "404" in message or "422" in message
-            is_runtime_failure = (
-                '"status":"failed"' in message.replace(" ", "")
-                or "internal error" in message
-            )
+            # Shared with the video path via the client, because the shape of
+            # a provider-side failure is the same whatever is being generated
+            # -- and because this check had already missed one: a delivered
+            # job died on `HTTP 400: Inference error occurred ... Please try
+            # again`, which matched neither of the two strings that used to be
+            # listed here and so was re-raised instead of falling back.
+            is_runtime_failure = is_transient_inference_error(exc)
             if not (is_schema_rejection or is_runtime_failure):
                 raise
 

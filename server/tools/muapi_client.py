@@ -20,6 +20,53 @@ DEFAULT_MAX_RETRIES = 3
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 
 
+#: How many EXTRA generations to submit when the provider's inference fails.
+#:
+#: Not the same thing as the HTTP retry above, and the difference is the whole
+#: point. A delivered failure::
+#:
+#:     MuAPI request failed after 1 attempt(s): HTTP 400: Inference error
+#:     occurred while processing the request. Please try again or contact
+#:     support if the issue persists.
+#:     (on /api/v1/predictions/0d0d82a9-.../result)
+#:
+#: That 400 came from a bare GET of a prediction id -- a request with no body
+#: and nothing to get wrong -- so it is not a client error at all; it is the
+#: provider saying its own inference died, in the one place its own message
+#: tells you to try again. Retrying the GET would be useless: that prediction
+#: is dead and will 400 forever. What has to be retried is the GENERATION.
+#:
+#: Worth knowing before raising it: if MuAPI bills failed inferences, each
+#: extra attempt is another charge. Two is chosen to survive a blip without
+#: turning a systematically failing model into a bill.
+GENERATION_RETRY_ATTEMPTS = int(
+    os.environ.get("MUSEFORGE_GENERATION_RETRIES", "2") or 2
+)
+
+#: Fragments that mark a provider-side inference failure rather than a bad
+#: request. Matched case-insensitively against the whole error text.
+_TRANSIENT_INFERENCE_MARKERS = (
+    "inference error",
+    "please try again",
+    "internal error",
+    '"status":"failed"',
+    "job failed",
+)
+
+
+def is_transient_inference_error(exc: Exception) -> bool:
+    """True when the provider's inference failed and a fresh attempt may work.
+
+    Deliberately narrow. A 404 or a 422 means this endpoint does not exist or
+    will not take this payload, and re-sending it is a loop that ends in the
+    same place having spent the customer's time; those keep failing fast.
+    """
+    message = str(exc).lower().replace(" ", "")
+    return any(
+        marker.replace(" ", "") in message for marker in _TRANSIENT_INFERENCE_MARKERS
+    )
+
+
 class MuAPIError(Exception):
     """Raised when a MuAPI request fails in a non-recoverable way."""
 
@@ -292,6 +339,49 @@ class MuAPIClient:
         raise MuAPIError(f"MuAPI job timed out after {max_polls * poll_interval}s")
 
     async def generate(
+        self,
+        endpoint: str,
+        payload: Dict[str, Any],
+        poll_interval: float = DEFAULT_POLL_INTERVAL,
+        max_polls: int = DEFAULT_MAX_POLLS,
+        is_cancelled: Optional[Callable[[], bool]] = None,
+    ) -> str:
+        """Submit a job and wait for its file, re-submitting a died inference.
+
+        The retry here is a NEW prediction, not another poll of the old one:
+        an inference that failed leaves a prediction that answers 400 for as
+        long as anyone asks it (see GENERATION_RETRY_ATTEMPTS). Cancellation
+        and endpoint rejections are never retried -- the first is the user's
+        decision and the second would fail identically every time.
+        """
+        last_exc: Optional[MuAPIError] = None
+        for attempt in range(GENERATION_RETRY_ATTEMPTS + 1):
+            if is_cancelled and is_cancelled():
+                raise MuAPICancelled(f"Job cancelled before {endpoint}")
+            try:
+                return await self._generate_once(
+                    endpoint, payload, poll_interval, max_polls, is_cancelled
+                )
+            except MuAPICancelled:
+                raise
+            except MuAPIError as exc:
+                last_exc = exc
+                if attempt >= GENERATION_RETRY_ATTEMPTS or not is_transient_inference_error(exc):
+                    raise
+                backoff = min(2**attempt + random.uniform(0, 0.5), 10.0)
+                logger.warning(
+                    "%s inference failed (attempt %d/%d), submitting a fresh "
+                    "generation in %.1fs: %s",
+                    endpoint,
+                    attempt + 1,
+                    GENERATION_RETRY_ATTEMPTS + 1,
+                    backoff,
+                    exc,
+                )
+                await asyncio.sleep(backoff)
+        raise last_exc or MuAPIError(f"{endpoint} never attempted")
+
+    async def _generate_once(
         self,
         endpoint: str,
         payload: Dict[str, Any],
