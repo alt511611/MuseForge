@@ -67,6 +67,40 @@ def is_transient_inference_error(exc: Exception) -> bool:
     )
 
 
+#: Fragments that mark the provider REFUSING the reference image itself --
+#: it looked at the picture, did not find what the prompt asks it to work
+#: with, and declined. Seen in production as::
+#:
+#:     HTTP 400: input image does not contain the object described in the
+#:     prompt (on /api/v1/predictions/4342ef6c-.../result)
+#:
+#: which killed a paid three-scene job at frame 1/2 of scene 1.
+_REFERENCE_REJECTION_MARKERS = (
+    "does not contain the object",
+    "input image does not contain",
+    "no face detected",
+    "no face found",
+    "could not detect a face",
+)
+
+
+def is_reference_rejection(exc: Exception) -> bool:
+    """True when the provider refused the REFERENCE IMAGE, not the request.
+
+    Distinct from :func:`is_transient_inference_error` because the remedy is
+    the opposite one. A transient inference failure wants the SAME call again;
+    this verdict is deterministic -- the portrait will still not contain the
+    object on the second, third and fourth ask -- so re-sending it only spends
+    money to arrive at the same 400. What can still succeed is the same prompt
+    with the reference dropped: a frame without character lock, which is worse
+    than a locked frame and enormously better than a failed job.
+    """
+    message = str(exc).lower().replace(" ", "")
+    return any(
+        marker.replace(" ", "") in message for marker in _REFERENCE_REJECTION_MARKERS
+    )
+
+
 class MuAPIError(Exception):
     """Raised when a MuAPI request fails in a non-recoverable way."""
 

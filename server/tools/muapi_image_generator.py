@@ -7,6 +7,7 @@ import os
 from tools.muapi_client import (
     MuAPIClient,
     MuAPIError,
+    is_reference_rejection,
     is_transient_inference_error,
 )
 
@@ -303,22 +304,29 @@ class MuAPIImageGenerator:
             # again`, which matched neither of the two strings that used to be
             # listed here and so was re-raised instead of falling back.
             is_runtime_failure = is_transient_inference_error(exc)
-            if not (is_schema_rejection or is_runtime_failure):
+            # The provider read the portrait and refused it. Carrying the same
+            # reference into the fallback endpoint would carry the refusal with
+            # it, so this is the one case where the fallback drops it: the
+            # scene renders unlocked rather than not at all.
+            is_ref_rejected = is_reference_rejection(exc)
+            if not (is_schema_rejection or is_runtime_failure or is_ref_rejected):
                 raise
 
             logger.warning(
-                "%s failed (schema_rejection=%s, runtime_failure=%s): %s; "
-                "falling back to %s reference payload",
+                "%s failed (schema_rejection=%s, runtime_failure=%s, "
+                "reference_rejected=%s): %s; falling back to %s %s",
                 endpoint,
                 is_schema_rejection,
                 is_runtime_failure,
+                is_ref_rejected,
                 exc,
                 self.LEGACY_SIZE_ENDPOINT,
+                "WITHOUT the reference" if is_ref_rejected else "reference payload",
             )
             fallback_payload = self._legacy_size_payload(
                 prompt,
                 aspect_ratio,
-                reference_url,
+                None if is_ref_rejected else reference_url,
             )
             return await self.client.generate(
                 self.LEGACY_SIZE_ENDPOINT,
