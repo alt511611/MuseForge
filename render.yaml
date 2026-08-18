@@ -42,6 +42,13 @@ services:
         value: "https://your-project.vercel.app"
       - key: MUSEFORGE_JOBS_DIR
         value: /tmp/museforge_jobs
+      # INFO is what makes a delivered job explainable after the fact: the
+      # second budget it was costed at, which stage declined lip sync, how
+      # many scenes got foley. Nothing configured logging before, so those
+      # lines went to logging.lastResort and were dropped at WARNING. Set
+      # WARNING here for the old quiet, DEBUG only while chasing something.
+      - key: MUSEFORGE_LOG_LEVEL
+        value: "INFO"
       # Long Pro jobs (up to 24 sequential scenes) need generous timeouts.
       # Generation runs as a FastAPI BackgroundTask after /api/generate returns,
       # so Render's ~100 min HTTP request timeout does not apply to the job

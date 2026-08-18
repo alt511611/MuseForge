@@ -10,6 +10,50 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
+def _configure_logging() -> None:
+    """Give the application's own loggers somewhere to write.
+
+    Nothing in this project ever configured logging. uvicorn configures its
+    OWN loggers ("uvicorn", "uvicorn.access") and leaves the root logger
+    alone, so every module logger here -- pipelines.idea2video, tools.*,
+    agents.* -- fell through to logging.lastResort, which is WARNING-only and
+    prints a bare message with no timestamp, level or logger name.
+
+    The effect: 42 logger.info() calls, written over the life of this project
+    specifically so a delivered job could be explained afterwards, were
+    discarded in production. Found the direct way -- an operator went looking
+    for "Second budget for job: ... across 3 scenes" to explain a 60-second
+    render of a 3-scene script, and it was not there. It had never been there.
+    Neither had the line naming which stage declined lip sync.
+
+    Level is env-controlled because the useful setting differs by situation:
+    INFO answers "what did this job actually do", DEBUG is too noisy to leave
+    on, and an operator who wants the old quiet can set WARNING.
+    """
+    level_name = (os.environ.get("MUSEFORGE_LOG_LEVEL") or "INFO").strip().upper()
+    level = getattr(logging, level_name, logging.INFO)
+    root = logging.getLogger()
+    # Only when nothing else has: a host that installs its own handler (or a
+    # second import of this module) must not get every line twice.
+    if not root.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
+        root.addHandler(handler)
+    root.setLevel(level)
+    # Third-party libraries at INFO are a wall of noise that buries the lines
+    # this exists to surface -- httpx logs every request, moviepy every frame
+    # write. They keep their warnings.
+    for noisy in ("httpx", "httpcore", "moviepy", "PIL", "urllib3"):
+        logging.getLogger(noisy).setLevel(max(level, logging.WARNING))
+
+
+_configure_logging()
+
 logger = logging.getLogger(__name__)
 
 import httpx
