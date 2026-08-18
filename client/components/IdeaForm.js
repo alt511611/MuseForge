@@ -303,6 +303,10 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
               name: c.name,
               static_features: c.static_features,
               portrait_url: c.portrait_url,
+              // Sent back so a returning character speaks with the voice
+              // they were first cast with. Empty for entries saved before
+              // the library stored one, which simply re-cast as before.
+              voice_id: c.voice_id || "",
             }))
         : [];
     onSubmit({

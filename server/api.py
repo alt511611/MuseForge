@@ -275,6 +275,10 @@ class LibraryCharacterIn(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
     static_features: str = Field(..., min_length=1, max_length=2000)
     portrait_url: str = Field(..., min_length=1, max_length=2000)
+    # The voice this character was cast with the first time they spoke.
+    # Optional: entries saved before the column existed simply have none, and
+    # are re-cast from the name hash exactly as they were before.
+    voice_id: str = Field("", max_length=200)
 
 
 class GenerateRequest(BaseModel):
@@ -326,6 +330,9 @@ class CharacterCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
     static_features: str = Field(..., min_length=1, max_length=2000)
     portrait_url: str = Field(..., min_length=1, max_length=2000)
+    # Saved from the finished drama's `character_voices`, so a character
+    # lifted out of episode one keeps the voice episode one gave them.
+    voice_id: str = Field("", max_length=200)
 
 
 class GenerateResponse(BaseModel):
@@ -840,6 +847,7 @@ async def generate(
                 "name": c.name.strip(),
                 "static_features": c.static_features.strip(),
                 "portrait_url": c.portrait_url.strip(),
+                "voice_id": (c.voice_id or "").strip(),
             }
             for c in req.library_characters
             if c.name.strip() and c.static_features.strip() and c.portrait_url.strip()
@@ -1443,22 +1451,43 @@ async def _library_insert(user_id: str, payload: dict) -> Dict[str, Any]:
             "name": payload["name"],
             "static_features": payload["static_features"],
             "portrait_url": payload["portrait_url"],
+            "voice_id": payload.get("voice_id", ""),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         _character_library_mem[user_id].insert(0, row)
         return row
+    body = {
+        "user_id": user_id,
+        "name": payload["name"],
+        "static_features": payload["static_features"],
+        "portrait_url": payload["portrait_url"],
+    }
+    voice_id = str(payload.get("voice_id") or "").strip()
+    if voice_id:
+        body["voice_id"] = voice_id
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.post(
                 f"{SUPABASE_URL}/rest/v1/character_library",
                 headers=_sb_headers(),
-                json={
-                    "user_id": user_id,
-                    "name": payload["name"],
-                    "static_features": payload["static_features"],
-                    "portrait_url": payload["portrait_url"],
-                },
+                json=body,
             )
+            if resp.status_code >= 400 and "voice_id" in body:
+                # The column is new. A deployment that has not replayed the
+                # migration yet must still be able to save a character --
+                # losing the voice lock costs continuity in a later episode,
+                # while failing the insert loses the character entirely.
+                logger.warning(
+                    "character_library insert rejected with voice_id, retrying "
+                    "without it (has the migration been applied?): %s",
+                    resp.text[:300],
+                )
+                body.pop("voice_id")
+                resp = await client.post(
+                    f"{SUPABASE_URL}/rest/v1/character_library",
+                    headers=_sb_headers(),
+                    json=body,
+                )
             if resp.status_code >= 400:
                 logger.error("character_library insert failed: %s", resp.text[:300])
                 raise HTTPException(status_code=502, detail="Failed to save character")
@@ -1512,6 +1541,7 @@ async def create_character(
             "name": req.name.strip(),
             "static_features": req.static_features.strip(),
             "portrait_url": req.portrait_url.strip(),
+            "voice_id": (req.voice_id or "").strip(),
         },
     )
     return row

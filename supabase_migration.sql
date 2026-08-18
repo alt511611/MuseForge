@@ -260,6 +260,18 @@ create table if not exists public.character_library (
   created_at timestamptz not null default now()
 );
 
+-- The voice a character was cast with the first time they spoke. Casting is a
+-- hash of the character's NAME, which sounds stable across episodes and is not:
+-- the assignment walks past a voice another character already holds, so the
+-- voice a name lands on depends on who else is in the cast. Add one character
+-- to episode two and the returning lead is bumped to the next free voice --
+-- same locked face, different person speaking. The only thing that survives a
+-- change of cast is a decision written down, so it is written down here.
+-- Nullable/defaulted: rows saved before this column existed re-cast from the
+-- name hash exactly as they did before.
+alter table public.character_library
+  add column if not exists voice_id text not null default '';
+
 alter table public.character_library enable row level security;
 
 create policy "users manage own characters"

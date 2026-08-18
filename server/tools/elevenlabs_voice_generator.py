@@ -136,6 +136,31 @@ class ElevenLabsVoiceGenerator:
         self._character_voices[key] = voice_id
         return voice_id
 
+    def lock_voices(self, voices: Dict[str, str]) -> None:
+        """Pin named characters to voices decided by an earlier episode.
+
+        Casting is a deterministic hash of the character's name, which sounds
+        like it is already stable across episodes -- and is not. ``_assign``
+        walks past a voice another character has already taken, so the voice a
+        name lands on depends on WHO ELSE is in the cast and in what order they
+        were cast. Add one character to episode two and the returning lead can
+        be bumped to the next free voice: same face, same wardrobe, same locked
+        portrait, different person speaking.
+
+        Nothing derived can fix that, because the collision is real -- two
+        characters cannot share a voice inside one drama. The only thing that
+        survives a change of cast is a decision that was written down, so a
+        library character carries its voice with it and this is where that
+        decision is read back in.
+
+        Called BEFORE cast_characters, which skips any name already cast.
+        """
+        for name, voice_id in (voices or {}).items():
+            key = str(name or "").strip().casefold()
+            voice = str(voice_id or "").strip()
+            if key and voice:
+                self._character_voices[key] = voice
+
     def cast_characters(self, characters: Iterable[Any]) -> Dict[str, str]:
         """Assign every named character a gender-matched voice up front."""
         for char in characters or []:

@@ -3777,11 +3777,24 @@ class Idea2VideoPipeline:
             if dialogue_requested
             else None
         )
+        character_voices: Dict[str, str] = {}
         if voice_gen is not None:
+            # A returning character's voice, decided when they were first cast
+            # and stored on the library entry. Applied BEFORE the ensemble is
+            # cast, because casting skips a name that already has a voice --
+            # see VoiceGenerator.lock_voices for why the hash alone does not
+            # survive a change of cast.
+            locked_voices = {
+                str(lib.get("name") or ""): str(lib.get("voice_id") or "")
+                for lib in (library_characters or [])
+                if str(lib.get("voice_id") or "").strip()
+            }
+            if locked_voices and hasattr(voice_gen, "lock_voices"):
+                voice_gen.lock_voices(locked_voices)
             # Cast the whole ensemble up front, gender-matched to each
             # character's description -- otherwise the per-line hash fallback
             # can voice a mother with a male voice.
-            voice_gen.cast_characters(characters)
+            character_voices = voice_gen.cast_characters(characters) or {}
         total_scenes = max(1, len(script.scenes))
 
         # Kick off background music as soon as the mood is known (it needs
@@ -4266,6 +4279,16 @@ class Idea2VideoPipeline:
             "characters": [c.model_dump() for c in characters],
             "portraits": portraits,
             "location_plate": location_plate,
+            # Who ended up speaking with which voice, keyed by the character's
+            # real name. Written out so a character SAVED to the library after
+            # this drama carries the voice this drama gave them: without it the
+            # first episode's casting is thrown away and episode two re-derives
+            # it from a different ensemble (see VoiceGenerator.lock_voices).
+            "character_voices": {
+                c.name: character_voices[c.name.casefold()]
+                for c in characters
+                if c.name.casefold() in character_voices
+            },
             "lipsynced_scenes": lipsynced_scenes,
             # Everything regenerate_scene() needs to re-render ONE scene the
             # same way it was rendered the first time. Underscore-prefixed
