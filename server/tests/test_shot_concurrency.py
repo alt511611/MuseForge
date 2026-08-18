@@ -51,6 +51,17 @@ async def test_shots_run_concurrently_not_sequentially(monkeypatch, tmp_path):
     )
     monkeypatch.setattr("pipelines.script2video.download_video", fake_download_video)
 
+    # Every shot is now trimmed to its budgeted length (the provider does not
+    # reliably honour the duration it is asked for -- see the trim in
+    # _process_shot). That probes the file, and the "clip" here is four bytes
+    # of the word "fake", so the probe is ffprobe failing slowly on garbage.
+    # Stubbed because this test is about concurrency and ordering: leaving it
+    # in means the wall-clock assertion below is partly timing ffprobe.
+    async def fake_trim_to_duration(path, out_path, seconds, from_head=True):
+        return path
+
+    monkeypatch.setattr("pipelines.script2video.trim_to_duration", fake_trim_to_duration)
+
     async def fake_concatenate_videos(paths, out_path):
         with open(out_path, "wb") as f:
             f.write(b"fake concatenated")
