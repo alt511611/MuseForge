@@ -157,8 +157,14 @@ services:
       # Foley: a generated sound bed per scene, prompted from the storyboard's
       # own audio note. $0.01 a scene -- the cheapest thing this product can
       # buy, and the layer that most separates a drama from a slideshow.
+      #
+      # ON. Left off, a job with music disabled ships a master that is mostly
+      # DIGITAL SILENCE -- measured on a delivered drama: 12 audible seconds
+      # in 60, the rest absolute zero -- and the speech in it reads as pasted
+      # over the picture because there is no place underneath it. A cent a
+      # scene against a credit that sells for dollars; set to "" to revert.
       - key: MUSEFORGE_FOLEY
-        value: ""
+        value: "1"
       - key: MUAPI_SFX_MODEL
         value: ""
 

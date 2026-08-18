@@ -116,6 +116,9 @@ class ElevenLabsVoiceGenerator:
         self.working_dir = working_dir or tempfile.gettempdir()
         self.timeout = timeout
         self._character_voices: Dict[str, str] = {}
+        # The gender each character was cast on, kept so verify_cast can
+        # re-pick INSIDE the right pool when an id turns out to be unusable.
+        self._character_gender: Dict[str, str] = {}
 
     # --- casting (identical rules to the MuAPI path) ---------------------
 
@@ -183,7 +186,21 @@ class ElevenLabsVoiceGenerator:
             )
             if pool is None:
                 continue  # hash fallback assigns on the character's first line
+            self._character_gender[key] = gender
             self._assign(key, pool)
+        # Written down at INFO because a wrong voice is invisible from the
+        # code and obvious from the film: a delivered drama whose only
+        # character is described "woman in her late thirties" came back with a
+        # measured 120 Hz voice, and nothing anywhere said which id was asked
+        # for. Now it does.
+        logger.info(
+            "Cast: %s",
+            ", ".join(
+                f"{name}={self._character_voices[name]}"
+                for name in sorted(self._character_voices)
+            )
+            or "(nobody)",
+        )
         return dict(self._character_voices)
 
     def voice_id_for_character(self, character: str) -> str:
@@ -253,6 +270,79 @@ class ElevenLabsVoiceGenerator:
 
     def _headers(self) -> Dict[str, str]:
         return {"xi-api-key": self.api_key, "Content-Type": "application/json"}
+
+    async def verify_cast(self) -> Dict[str, str]:
+        """Check the cast against what this ACCOUNT can actually speak with.
+
+        list_voices has existed since this module was written -- "a wrong id is
+        a question with an answer instead of a drama that ships silent" -- and
+        nothing ever called it. So an id the account cannot use was discovered
+        the way every voice bug in this product has been discovered: by
+        watching the finished film.
+
+        What that costs is not silence, which would at least be obvious. The
+        endpoint takes a voice_id per line and answers with audio either way,
+        so an unusable id is heard as SOMEONE ELSE -- and the first thing a
+        viewer notices is that the woman on screen has a man's voice.
+
+        Fail-open in the direction of shipping: if the account cannot be
+        asked, the cast stands as it is. A character whose voice is
+        unavailable is re-cast inside their own gender pool, from ids the
+        account actually holds.
+        """
+        if not self.api_key or self.demo or not self._character_voices:
+            return dict(self._character_voices)
+        try:
+            available = await self.list_voices()
+        except Exception as exc:
+            logger.warning(
+                "Could not ask ElevenLabs which voices this account holds, "
+                "casting as-is: %s",
+                self._describe(exc),
+            )
+            return dict(self._character_voices)
+
+        usable = {v["voice_id"] for v in available}
+        names = {v["voice_id"]: v.get("name", "") for v in available}
+        if not usable:
+            return dict(self._character_voices)
+
+        for key, voice_id in list(self._character_voices.items()):
+            if voice_id in usable:
+                continue
+            gender = self._character_gender.get(key, "")
+            pool = (
+                self.FEMALE_VOICE_IDS
+                if gender == "female"
+                else self.MALE_VOICE_IDS if gender == "male" else self.SYSTEM_VOICE_IDS
+            )
+            taken = set(self._character_voices.values())
+            replacement = next(
+                (v for v in pool if v in usable and v not in taken),
+                next((v for v in pool if v in usable), ""),
+            )
+            if not replacement:
+                logger.error(
+                    "Voice %s for %r is not available to this account and no "
+                    "%s voice is either — the line will be spoken by whatever "
+                    "the provider substitutes.",
+                    voice_id,
+                    key,
+                    gender or "listed",
+                )
+                continue
+            logger.error(
+                "Voice %s for %r is not available to this account; re-cast to "
+                "%s (%s). Check ELEVENLABS_%sVOICE_IDS.",
+                voice_id,
+                key,
+                replacement,
+                names.get(replacement, "?"),
+                (gender.upper() + "_") if gender else "",
+            )
+            self._character_voices[key] = replacement
+
+        return dict(self._character_voices)
 
     async def list_voices(self) -> List[Dict[str, str]]:
         """What this ACCOUNT may actually use, asked rather than assumed.
