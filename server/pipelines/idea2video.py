@@ -4073,6 +4073,23 @@ class Idea2VideoPipeline:
                     if reason and reason not in dialogue_failure_reasons:
                         dialogue_failure_reasons.append(reason)
             if dialogue_requested:
+                # DIALOGUE_CLAUSE allows ONE deliberately silent scene, because
+                # a held look is an instrument and banning it made every beat
+                # get discharged through speech. Two or more is not an
+                # instrument, it is the writer running out of lines on a run
+                # the user paid the dialogue surcharge for -- and it is
+                # invisible from the finished video, which simply looks like
+                # scenes where nobody bothered to speak.
+                silent_scenes = sum(
+                    1 for scene in script.scenes if not _scene_dialogue(scene)
+                )
+                if silent_scenes > 1:
+                    warnings.append(
+                        f"{silent_scenes} of {len(script.scenes)} scenes were "
+                        "written without dialogue, so they play silent. One "
+                        "silent scene is a deliberate choice; this many is the "
+                        "script coming back thinner than it should have."
+                    )
                 if not dialogue_tasks:
                     # The script came back with no spoken lines at all, so
                     # there was never anything to voice. The screenwriter is
