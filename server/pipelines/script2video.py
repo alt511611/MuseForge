@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import re
 import shutil
 import tempfile
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -377,6 +378,49 @@ def on_screen_name_matches(shot_text: str, characters) -> list:
             matches.append((seen[0], character))
     matches.sort(key=lambda pair: pair[0])
     return matches
+
+
+#: Words that only appear in a shot description because a PERSON is in the
+#: frame. Pronouns, the generic nouns a storyboard reaches for when it forgets
+#: the name, and the body parts an insert shot is built on -- a hand placing a
+#: letter is a shot of the character whose hand it is.
+#:
+#: Deliberately generic and identity-free: this decides whether the frame needs
+#: a FACE reference at all, never which face. "Bookseller" and every other
+#: role noun are left out on purpose, because a cast whose roles overlap would
+#: make this a (bad) identity guess instead of a presence test.
+_PERSON_CUES = (
+    r"\bshe\b", r"\bher\b", r"\bhers\b", r"\bhe\b", r"\bhim\b", r"\bhis\b",
+    r"\bthey\b", r"\bthem\b", r"\btheir\b", r"\bherself\b", r"\bhimself\b",
+    r"\bwoman\b", r"\bwomen\b", r"\bman\b", r"\bmen\b", r"\bgirl\b",
+    r"\bboy\b", r"\bperson\b", r"\bpeople\b", r"\bfigure\b", r"\bsomeone\b",
+    r"\bface\b", r"\beyes\b", r"\bmouth\b", r"\bhand\b", r"\bhands\b",
+    r"\bfingers\b", r"\bshoulder\b", r"\bshoulders\b", r"\bsilhouette\b",
+)
+
+_PERSON_CUE_RE = re.compile("|".join(_PERSON_CUES))
+
+
+def shot_shows_a_person(shot_text: str) -> bool:
+    """Whether this shot has a human being in it, name or no name.
+
+    The identity anchor is chosen by NAME (on_screen_name_matches), and when
+    no name is found the caller falls back to the locked, deliberately EMPTY
+    location plate -- the right reference for an establishing shot, an insert
+    or an object, which is what a nameless shot was assumed to be.
+
+    It is not what a nameless shot usually is. A storyboard that writes "the
+    old bookseller walks the alley at dusk" names nobody, so the frame was
+    drawn from an empty street with no face to match and the model invented
+    one. Measured on a delivered drama: of eight shots, the five staged
+    outdoors each took the plate and each came back with a different actor --
+    the protagonist appeared as a blonde woman in her forties, twice as a
+    stranger in her twenties, and once as an old man.
+
+    So: a shot that shows a person must anchor to a person. This answers only
+    whether one is there; the caller decides who.
+    """
+    return bool(_PERSON_CUE_RE.search(shot_text or ""))
 
 
 def build_cast_closure_clause(characters) -> str:
@@ -2034,6 +2078,27 @@ class Script2VideoPipeline:
             setting_location, setting_time_of_day, setting_era
         )
 
+        # Who this SCENE is about, decided once from the scene's own text by
+        # the same rule the shots use: whoever it names first. Used only as
+        # the anchor for a shot that shows a person but names nobody -- the
+        # scene named them even if the shot forgot to, and matching the wrong
+        # cast member is a smaller error than matching an empty street (see
+        # shot_shows_a_person).
+        scene_visible_chars = [c for c in characters if c.is_visible]
+        scene_subject_matches = on_screen_name_matches(
+            f"{script} {scene_dialogue}".lower(), scene_visible_chars
+        )
+        if scene_subject_matches:
+            scene_subject = scene_subject_matches[0][1]
+        elif len(scene_visible_chars) == 1:
+            # Nobody named anywhere, but there is only one person in this
+            # scene -- there is nothing to get wrong.
+            scene_subject = scene_visible_chars[0]
+        else:
+            # Several candidates and no evidence: no guess is better than a
+            # coin toss between faces, so the plate keeps the fallback.
+            scene_subject = None
+
         async def _process_shot(i: int, shot) -> None:
             nonlocal completed_count
             async with semaphore:
@@ -2059,10 +2124,28 @@ class Script2VideoPipeline:
                     if named_matches:
                         named_matches.sort(key=lambda pair: pair[0])
                         matched_char = named_matches[0][1]
+                    elif scene_subject is not None and shot_shows_a_person(shot_text):
+                        # Named nobody, but there is plainly a person in it --
+                        # "the old bookseller walks the alley", "her hand on
+                        # the door". Falling through to the plate here is what
+                        # let the model draw a new stranger at every outdoor
+                        # cut, because the plate is shot deliberately empty and
+                        # gives the frame no face to hold. Anchor to whoever
+                        # the SCENE is about instead.
+                        matched_char = scene_subject
+                        logger.info(
+                            "Scene %s shot %s names no character but shows one; "
+                            "anchoring to the scene's subject %r instead of the "
+                            "empty location plate.",
+                            scene_idx + 1,
+                            i,
+                            scene_subject.name,
+                        )
                     elif location_plate_url:
-                        # No character name appears in this shot's text at all
-                        # -- an establishing shot, an insert, an object. The
-                        # old fallback handed it visible_chars[0]'s PORTRAIT,
+                        # No character name AND no person in the text at all --
+                        # an establishing shot, an insert, an object, which is
+                        # what this branch always meant to catch. The
+                        # fallback before it handed it visible_chars[0]'s PORTRAIT,
                         # which is the wrong anchor twice over: it pushes a
                         # face into a shot the storyboard deliberately wrote
                         # without one, and it leaves the room itself
@@ -2370,7 +2453,22 @@ class Script2VideoPipeline:
                         50 + int(completed_count / len(shots) * 40),
                     )
 
-        await asyncio.gather(*[_process_shot(i, shot) for i, shot in enumerate(shots)])
+        shot_tasks = [
+            asyncio.create_task(_process_shot(i, shot)) for i, shot in enumerate(shots)
+        ]
+        try:
+            await asyncio.gather(*shot_tasks)
+        except BaseException:
+            # gather() propagates the first failure but does NOT stop the
+            # siblings: left alone they keep polling the video endpoint behind
+            # a job that has already failed, and that endpoint bills per
+            # generation whether or not anyone is still waiting for the result.
+            # Same shape as the scene-level gather in idea2video, which had
+            # this and this did not.
+            for task in shot_tasks:
+                task.cancel()
+            await asyncio.gather(*shot_tasks, return_exceptions=True)
+            raise
 
         shot_meta = [m for m in shot_meta if m is not None]
         shot_videos = [v for v in shot_videos if v is not None]
@@ -2383,10 +2481,23 @@ class Script2VideoPipeline:
             )
             return {"path": None, "url": primary_url, "shots": shot_meta}
 
+        if not shot_videos:
+            # Belt-and-braces. Every failure inside _process_shot raises, so
+            # reaching here means a shot completed without producing a file --
+            # and the old code carried on with an output_path naming a file
+            # nothing had written. That path is truthy, so idea2video appended
+            # it to the concatenation list and the failure surfaced later as an
+            # unreadable master, with nothing in the log pointing back to the
+            # scene that caused it. Fail here, where the cause is still known.
+            raise RuntimeError(
+                f"Scene {scene_idx + 1} produced no usable shot; refusing to "
+                "assemble a drama around a clip that does not exist."
+            )
+
         output_path = os.path.join(working_dir, "scene_output.mp4")
         if len(shot_videos) == 1:
             output_path = shot_videos[0]
-        elif len(shot_videos) > 1:
+        else:
             await concatenate_videos(shot_videos, output_path)
 
         # Rhythm, out of the generation we already paid for: the scene is

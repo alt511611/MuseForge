@@ -10,6 +10,7 @@ than a new prompt and a new voice list.
 """
 
 import os
+import re
 import sys
 
 import pytest
@@ -89,9 +90,12 @@ def test_the_language_reaches_both_provider_paths():
     import inspect
 
     source = inspect.getsource(ScreenwriterAgent.write_script)
-    assert (
-        "self._system_prompt(language, require_dialogue, narrative_mode)" in source
-    ), "MuAPI path"
+    # Matched on the arguments rather than one exact call spelling: the call
+    # has since gained an argument and been wrapped over several lines, and a
+    # test that breaks on reformatting stops being read.
+    call = re.search(r"self\._system_prompt\(([^)]*)\)", source, re.DOTALL)
+    assert call, "MuAPI path calls _system_prompt"
+    assert "language" in call.group(1), "MuAPI path passes the language"
     assert "language" in inspect.signature(
         ScreenwriterAgent._write_with_claude
     ).parameters

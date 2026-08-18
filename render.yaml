@@ -60,11 +60,21 @@ services:
       # the pricing page and unreachable in the product. Set to "1" to enable.
       - key: MUSEFORGE_DIALOGUE_ENABLED
         value: ""
-      # Lip sync (fal.ai Sync Lipsync). Requires FAL_KEY and dialogue to be on
-      # — with no generated voice there is nothing to sync a mouth to. Off by
-      # default: every synced scene is a paid call on top of generation.
+      # Lip sync. Requires dialogue to be on — with no generated voice there
+      # is nothing to sync a mouth to — and the key its provider needs:
+      # MUAPI_KEY on the default MuAPI backend, FAL_KEY only when
+      # MUSEFORGE_LIPSYNC_PROVIDER=falai (see tools/muapi_lipsync).
+      #
+      # ON in the blueprint. This is a deployment-READINESS flag, not a
+      # spending one: the per-job opt-in still sits behind the Pro toggle and
+      # still charges +1 credit per speaking scene, so nothing here spends
+      # money on its own. Shipped empty, it read as "off" everywhere that
+      # matters — /api/health reported lipsync_available=false, the toggle
+      # never rendered, and a request that asked for lip sync anyway was
+      # dropped in generate(). Delivered dramas came back with the voice laid
+      # over closed, motionless mouths and no way for the user to fix it.
       - key: MUSEFORGE_LIPSYNC_ENABLED
-        value: ""
+        value: "1"
       - key: FAL_KEY
         sync: false
       # Film-look finishing (free — folded into the existing finishing encode).

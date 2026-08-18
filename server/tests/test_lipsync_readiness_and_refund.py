@@ -12,6 +12,7 @@
    on arrival and erased by the next grant or deduction.
 """
 import os
+import re
 import sys
 
 import pytest
@@ -46,6 +47,33 @@ def test_falai_provider_still_requires_the_fal_key(monkeypatch):
 
     monkeypatch.setenv("FAL_KEY", "real-fal-key")
     assert api_mod._lipsync_configured() is True
+
+
+def test_the_blueprint_ships_the_feature_switched_on():
+    """The flag was declared in render.yaml with an empty value, which is the
+    same as absent everywhere it is read: /api/health reported
+    lipsync_available=false, the Pro toggle never rendered, and a request that
+    asked for lip sync anyway was dropped in generate(). Delivered dramas came
+    back with the voice laid over closed, motionless mouths.
+
+    Readiness is not spending. The per-job opt-in still sits behind the Pro
+    toggle and still charges +1 credit per speaking scene, so an operator who
+    wants the old behaviour turns the flag off; nobody is billed by this line.
+    """
+    path = os.path.join(os.path.dirname(__file__), "..", "..", "render.yaml")
+    with open(path, encoding="utf-8") as f:
+        blueprint = f.read()
+
+    declared = re.search(
+        r"- key: MUSEFORGE_LIPSYNC_ENABLED\s*\n\s*value: \"([^\"]*)\"", blueprint
+    )
+    assert declared, "the blueprint must declare the flag at all"
+    from tools.muapi_lipsync import TRUTHY
+
+    assert declared.group(1).strip().lower() in TRUTHY, (
+        "declared but empty reads as OFF, which is how the feature shipped "
+        "unreachable in its own default configuration"
+    )
 
 
 def test_the_feature_flag_is_still_the_master_switch(monkeypatch):

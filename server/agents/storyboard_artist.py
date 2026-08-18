@@ -141,6 +141,15 @@ When the director's notes name THE TURN, that is the moment — film it, not the
 business around it. Honour the given staging (positions, hands, the object the scene
 turns on) instead of inventing different blocking.
 
+NAME EVERY PERSON IN FRAME. Refer to anyone visible in "visual_desc" by their given
+NAME, in the first clause that mentions them — "Margit walks the alley", never "the
+old bookseller walks the alley" or "she walks the alley". The name is not a style
+choice: the render step picks each character's locked reference portrait by finding
+their name in this text, so a person described only by role or pronoun gets NO face
+to match and the model invents a stranger — a different actor at every cut. Use the
+name first, then describe; pronouns are fine once the name has been given in the
+same shot.
+
 DO NOT FILM THE FUTURE. The notes tell you what has ALREADY happened in earlier scenes
 and what has NOT happened yet. Your shot shows the world exactly as it stands at THIS
 point in the story: never show a later scene's event, its aftermath or its changed state
