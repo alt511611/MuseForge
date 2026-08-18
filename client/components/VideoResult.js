@@ -53,6 +53,11 @@ function SaveCharacterButton({ character }) {
           name: character.name,
           static_features: character.static_features || character.name,
           portrait_url: character.portrait_url,
+          // The voice this drama cast them with. Saved alongside the face
+          // because casting is derived from the whole ensemble, so the next
+          // episode's cast would otherwise re-derive a different one -- same
+          // locked portrait, different person speaking.
+          voice_id: character.voice_id || "",
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -756,6 +761,7 @@ export default function VideoResult({ job, jobId }) {
                                 name,
                                 static_features: char.static_features || char.description || name,
                                 portrait_url: url,
+                                voice_id: (result?.character_voices || {})[name] || "",
                               }}
                             />
                           )}

@@ -254,14 +254,33 @@ in English exactly as specified; only the prose changes."""
     #: dialogue on for: an all-silent script produces no voice tracks, no
     #: captions and — with music off — a master with no audio stream at all,
     #: which reads as the feature being broken rather than as a choice.
+    #:
+    #: That danger is a silent FILM, though, and this clause used to ban the
+    #: silent SCENE to prevent it -- which costs a real dramatic instrument to
+    #: buy a technical guarantee. A held look with no line in it is a choice a
+    #: director makes; forbidding it outright means every beat is discharged
+    #: through speech, which is the flattest way to play a scene.
+    #:
+    #: So: one scene may be silent, the rest must speak. The audio stream, the
+    #: captions and the voice tracks all survive on the scenes that do speak,
+    #: and the all-silent script the ban existed for is still banned -- and
+    #: still caught downstream, where a script with no lines at all raises a
+    #: warning on the finished job rather than shipping as if nothing happened.
     DIALOGUE_CLAUSE = """
 
-SPOKEN DRAMA. This script WILL be voiced by actors, so it cannot be a silent film:
-EVERY scene needs at least one line in its "dialogue" list, and an empty dialogue
-list is not acceptable in any scene. Keep lines short, speakable and few (one to
-three per scene) — this is film dialogue over a picture, not a radio play. The
-climax's stated event still has to be SEEN, not merely narrated: never replace the
-event with a character describing it.
+SPOKEN DRAMA. This script WILL be voiced by actors, so it cannot be a silent film.
+Every scene needs at least one line in its "dialogue" list, with ONE exception:
+a single scene may have an empty dialogue list when silence is the dramatic point
+of that scene — a look held instead of an answer, a door closed on a sentence
+nobody finishes. Use it at most once in the whole drama, only where the silence is
+doing the work speech would otherwise do, and say so in that scene's "subtext" so
+the choice is legible. Never leave two scenes silent, and never leave a scene
+silent because you could not think of a line.
+
+Keep lines short, speakable and few (one to three per scene) — this is film
+dialogue over a picture, not a radio play. The climax's stated event still has to
+be SEEN, not merely narrated: never replace the event with a character describing
+it.
 
 A LINE IS NOT THE EVENT. Giving a character "The power's gone" does not make the
 lights go out — it makes someone say so while the lamps stay on, which is what a

@@ -106,6 +106,26 @@ class MuAPILipsync:
                     )
                     return None
 
+            # The voice track is not always a URL. The ElevenLabs backend
+            # returns audio BYTES and writes them into the job directory, so
+            # `audio_url` carries a LOCAL PATH on that provider -- which the
+            # mixer opens happily and this endpoint cannot fetch at all. Sent
+            # as-is it fails every time, fails open, and lip sync silently
+            # never happens on any deployment using that voice provider.
+            if not str(audio_url).startswith(("http://", "https://")):
+                from tools.muapi_uploader import upload_local_file
+
+                if not os.path.isfile(audio_url):
+                    return None
+                uploaded_audio = await upload_local_file(audio_url, self.api_key)
+                if not uploaded_audio:
+                    logger.warning(
+                        "Dialogue audio could not be uploaded for lip sync, "
+                        "keeping the unsynced take"
+                    )
+                    return None
+                audio_url = uploaded_audio
+
             return await self.client.generate(
                 ENDPOINT,
                 {"video_url": video_url, "audio_url": audio_url},

@@ -109,7 +109,15 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
   const [musicEnabled, setMusicEnabled] = useState(false);
   const [dialogueEnabled, setDialogueEnabled] = useState(false);
   const [dialogueAvailable, setDialogueAvailable] = useState(false);
-  const [requireScriptApproval, setRequireScriptApproval] = useState(false);
+  // ON by default. The script step is the only place the user's own intention
+  // enters the film -- everything after it is the pipeline executing a brief it
+  // has already committed to. Defaulted off, the product's normal path was a
+  // one-line idea going straight to a finished master, which is the workflow
+  // that reliably produces something that looks expensive and means nothing.
+  //
+  // It costs a click, not money: credits are charged on approval, not on
+  // submit, so the default also stops a misread brief from spending anything.
+  const [requireScriptApproval, setRequireScriptApproval] = useState(true);
   const [libraryCharacters, setLibraryCharacters] = useState([]);
   const [selectedLibraryIds, setSelectedLibraryIds] = useState([]);
 
@@ -295,6 +303,10 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
               name: c.name,
               static_features: c.static_features,
               portrait_url: c.portrait_url,
+              // Sent back so a returning character speaks with the voice
+              // they were first cast with. Empty for entries saved before
+              // the library stored one, which simply re-cast as before.
+              voice_id: c.voice_id || "",
             }))
         : [];
     onSubmit({

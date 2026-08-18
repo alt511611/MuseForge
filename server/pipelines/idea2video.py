@@ -16,6 +16,7 @@ from interfaces.film_look import build_film_look_filters
 from interfaces import micro_drama
 from interfaces.language import DEFAULT_LANGUAGE
 from interfaces.second_budget import billable_seconds, distribute_budget
+from interfaces.shot_plan import REACTION as REACTION_ROLE
 from interfaces.shot_plan import plan_shot_scales
 from interfaces.transitions import plan_transitions
 from interfaces.visual_style import resolve as resolve_visual_style
@@ -185,6 +186,100 @@ def _scene_field(scene: Any, field: str) -> str:
 def _scene_emotion(scene: Any) -> str:
     """The scene's emotional beat, when the script carries one."""
     return _scene_field(scene, "emotion")
+
+
+#: Below this a tail is not a cutaway, it is a rounding error, and splitting a
+#: clip to protect it costs more than it saves.
+MIN_REACTION_TAIL_SECONDS = 0.6
+
+
+def _reaction_tail_seconds(shots: Optional[List[Dict[str, Any]]]) -> float:
+    """How many seconds at the END of a scene clip belong to the cutaway.
+
+    A scene that bought a second angle is delivered as master-then-reaction,
+    concatenated into one clip (see interfaces/shot_plan). The lip-sync pass
+    drives a mouth across whatever clip it is given and cannot see the cut in
+    the middle, so it used to be handed the whole thing -- and the product's
+    answer was to refuse the second angle whenever lip sync was on.
+
+    That answer cost the wrong thing. A reaction shot is the OTHER character
+    listening; there is no mouth in it to drive. Only the master needs syncing,
+    so the tail is measured here, held back from the sync, and concatenated
+    again afterwards untouched.
+
+    Returns 0.0 when the scene has no cutaway, which is the overwhelming
+    majority of scenes and the path that must stay byte-for-byte unchanged.
+    """
+    tail = 0.0
+    for shot in reversed(shots or []):
+        if str(shot.get("role") or "").strip().lower() != REACTION_ROLE:
+            break
+        seconds = float(
+            shot.get("deliver_seconds") or shot.get("duration_seconds") or 0.0
+        )
+        if seconds <= 0:
+            return 0.0
+        tail += seconds
+    return tail if tail >= MIN_REACTION_TAIL_SECONDS else 0.0
+
+
+async def _split_off_tail(
+    source_path: str, head_path: str, tail_path: str, tail_seconds: float
+) -> Tuple[str, Optional[str]]:
+    """Cut the last ``tail_seconds`` off a clip, returning ``(head, tail)``.
+
+    Returns ``(source_path, None)`` if the split cannot be made — too short to
+    leave a head worth syncing, or ffmpeg trouble. The caller then falls back
+    to the previous behaviour rather than losing the scene, because every
+    failure here is recoverable and none of them is worth a dropped shot.
+    """
+    duration = _probe_video_duration(source_path)
+    head_seconds = duration - tail_seconds
+    if duration <= 0 or head_seconds < MIN_TRIMMED_SECONDS:
+        return source_path, None
+
+    try:
+        head = await trim_clip(source_path, head_path, 0.0, tail_seconds)
+        tail = await trim_clip(source_path, tail_path, head_seconds, 0.0)
+    except Exception as exc:
+        logger.warning("Could not split a scene from its reaction shot: %s", exc)
+        return source_path, None
+
+    # trim_clip fails open by returning its source, which here would mean
+    # "head" and "tail" are both the whole clip -- concatenating those would
+    # play the scene twice.
+    if head == source_path or tail == source_path:
+        return source_path, None
+    return head, tail
+
+
+def _record_take(
+    scene: Dict[str, Any], take: int, clip_url: Optional[str], clip_path: Optional[str]
+) -> None:
+    """Remember this take on the scene, so a later one can be undone.
+
+    A retake is a roll of the dice the customer paid for, and the previous roll
+    may well have been the better one -- the reason people re-roll at all is
+    that a shot is 90% right and fails in its last second. Without a record of
+    what came before, "re-shoot" is a one-way door: the only way back to take 1
+    is to buy a take 4 and hope.
+
+    Kept on the scene record rather than in a side table because that is what
+    survives the Supabase round trip a job row already does, and a history the
+    results page cannot read after a restart is not a history.
+    """
+    history = scene.setdefault("takes", [])
+    entry = {
+        "take": int(take),
+        "clip_url": clip_url or "",
+        "clip_path": clip_path or "",
+    }
+    for existing in history:
+        if int(existing.get("take", 0)) == int(take):
+            existing.update(entry)
+            return
+    history.append(entry)
+    history.sort(key=lambda t: int(t.get("take", 0)))
 
 
 def _scene_tension(scene: Any) -> int:
@@ -2336,12 +2431,22 @@ class Idea2VideoPipeline:
         is_cancelled: Optional[Callable[[], bool]] = None,
         only_scenes: Optional[set] = None,
         requested: bool = True,
+        reaction_tails: Optional[Dict[int, float]] = None,
     ) -> List[int]:
         """Replace each speaking scene's clip with a lip-synced one, in place.
 
         Mutates ``scene_paths`` (the list concatenation reads from) and
         ``dialogue_tracks`` (the list the audio mixer reads from), and returns
         the scene indices that were successfully synced.
+
+        ``reaction_tails`` maps a scene to the seconds at the END of its clip
+        that belong to a cutaway. Those seconds are held back from the sync and
+        concatenated again afterwards: the sync model cannot see the cut in the
+        middle of a two-angle scene, and there is no mouth in a reaction shot
+        to drive anyway. Without it the product's answer was to refuse the
+        second angle whenever lip sync was on -- so turning lip sync on flattened
+        every peak scene to a single framing, which is the pair of features
+        users ask for together.
 
         Fail-open per scene, not per drama: if scene 2 cannot be synced, scenes
         1 and 3 still are, and scene 2 simply keeps its original clip with its
@@ -2386,8 +2491,27 @@ class Idea2VideoPipeline:
                 f"Syncing lips to dialogue ({position + 1}/{len(audio_by_scene)})",
                 88,
             )
+            # A scene that bought a second angle is master-then-reaction in one
+            # file. Sync the master, keep the cutaway out of it, put them back
+            # together -- see _reaction_tail_seconds.
+            source_path = scene_paths[scene_index]
+            tail_seconds = float((reaction_tails or {}).get(scene_index, 0.0) or 0.0)
+            sync_source = source_path
+            tail_path: Optional[str] = None
+            if tail_seconds > 0:
+                sync_source, tail_path = await _split_off_tail(
+                    source_path,
+                    os.path.join(working_dir, f"scene_{scene_index}_master.mp4"),
+                    os.path.join(working_dir, f"scene_{scene_index}_reaction.mp4"),
+                    tail_seconds,
+                )
+                if tail_path is None:
+                    # The split did not work, so the only safe request is the
+                    # old one: sync the whole clip, cut and all.
+                    sync_source = source_path
+
             synced_url = await lipsync.sync(
-                scene_paths[scene_index], audio_url, is_cancelled=is_cancelled
+                sync_source, audio_url, is_cancelled=is_cancelled
             )
             if not synced_url:
                 continue
@@ -2402,7 +2526,7 @@ class Idea2VideoPipeline:
                     exc,
                 )
                 continue
-            if not _keeps_its_length(scene_paths[scene_index], local_path):
+            if not _keeps_its_length(sync_source, local_path):
                 # Sync Labs' own default trims the video down to the length of
                 # the audio, which would let a short line silently shorten a
                 # scene and break the fixed per-credit second budget the whole
@@ -2417,6 +2541,28 @@ class Idea2VideoPipeline:
                     scene_index,
                 )
                 continue
+
+            if tail_path is not None:
+                rejoined = os.path.join(
+                    working_dir, f"scene_{scene_index}_lipsync_cut.mp4"
+                )
+                try:
+                    await concatenate_videos([local_path, tail_path], rejoined)
+                except Exception as exc:
+                    # The master synced but the cutaway could not be put back.
+                    # Shipping the master alone would silently shorten the
+                    # scene, which is the one thing the length guard above
+                    # exists to prevent -- so the whole scene keeps its
+                    # unsynced take instead.
+                    logger.warning(
+                        "Scene %s could not be re-joined to its reaction shot "
+                        "after lip sync, keeping the unsynced take: %s",
+                        scene_index,
+                        exc,
+                    )
+                    continue
+                local_path = rejoined
+
             scene_paths[scene_index] = local_path
             synced.append(scene_index)
 
@@ -2458,8 +2604,17 @@ class Idea2VideoPipeline:
             if not local_path or not os.path.isfile(local_path):
                 continue
             scene["clip_path"] = local_path
+            take = int(scene.get("take", 1) or 1)
             try:
-                stored = await upload_video(local_path, f"{job_id}_scene_{scene['index']}")
+                # Keyed by TAKE. The key used to be the scene alone, so every
+                # retake overwrote the archive of the take it replaced: the
+                # local file survived in its own take directory, but the only
+                # copy that outlives the working dir did not. A user who
+                # re-shot a scene and preferred the first version had nothing
+                # to go back to, and the clip they paid for was gone.
+                stored = await upload_video(
+                    local_path, f"{job_id}_scene_{scene['index']}_take{take}"
+                )
             except Exception as exc:
                 logger.warning(
                     "Scene %s clip could not be archived (regeneration will be "
@@ -2470,6 +2625,7 @@ class Idea2VideoPipeline:
                 continue
             if stored and stored.startswith("http"):
                 scene["clip_url"] = stored
+            _record_take(scene, take, scene.get("clip_url"), local_path)
 
     def _characters_from_script(self, script: DramaScript) -> List[CharacterInScene]:
         return [
@@ -2730,6 +2886,13 @@ class Idea2VideoPipeline:
                 progress=progress,
                 is_cancelled=is_cancelled,
                 only_scenes=resync,
+                reaction_tails={
+                    int(scene["clip_index"]): _reaction_tail_seconds(
+                        scene.get("shots")
+                    )
+                    for scene in scenes
+                    if scene.get("clip_index") is not None
+                },
             )
 
         # A retake keeps the cut's order, so the foley beds are still keyed to
@@ -3021,6 +3184,89 @@ class Idea2VideoPipeline:
             location_plate_override=location_override,
             script_override=script_data,
         )
+
+    async def restore_scene_take(
+        self,
+        previous_result: Dict[str, Any],
+        scene_index: int,
+        take: int,
+        working_dir: str,
+        progress_callback: Optional[Callable] = None,
+        is_cancelled: Optional[Callable[[], bool]] = None,
+    ) -> Dict[str, Any]:
+        """Put an earlier take of one scene back into the cut.
+
+        Re-shooting is a roll of the dice, and the previous roll is often the
+        better one -- a shot fails in its last second, not its first, so the
+        take being replaced was usually 90% right. Without this, "re-shoot" is
+        a one-way door: the only route back to take 1 is to buy a take 4 and
+        hope. The clips already exist and were already paid for, so nothing
+        here calls a generation model and nothing here costs credits.
+
+        Implemented on top of apply_timeline_edit rather than beside it: the
+        picture, the dialogue re-keying, the cold open and the master publish
+        are the same problem a re-cut already solves, and a second assembly
+        path is how the cold open went missing from two of them last time.
+        The CURRENT cut is reused, so restoring a take inside a drama the user
+        has already reordered or trimmed does not quietly undo that edit.
+        """
+        scenes = list(previous_result.get("scenes") or [])
+        scene = next(
+            (s for s in scenes if int(s.get("index", -1)) == int(scene_index)), None
+        )
+        if scene is None:
+            raise SceneRegenerationUnavailable(
+                f"Scene {int(scene_index) + 1} is not part of this video."
+            )
+
+        history = scene.get("takes") or []
+        wanted = next(
+            (t for t in history if int(t.get("take", 0)) == int(take)), None
+        )
+        if wanted is None:
+            available = ", ".join(str(t.get("take")) for t in history) or "none"
+            raise SceneRegenerationUnavailable(
+                f"Take {take} of scene {int(scene_index) + 1} was not kept "
+                f"(available: {available})."
+            )
+
+        clip_url = str(wanted.get("clip_url") or "").strip()
+        clip_path = str(wanted.get("clip_path") or "").strip()
+        if not clip_url and not (clip_path and os.path.isfile(clip_path)):
+            raise SceneRegenerationUnavailable(
+                f"The clip for take {take} of scene {int(scene_index) + 1} is "
+                "no longer stored, so it cannot be restored."
+            )
+
+        # Record where the CURRENT take's clip lives before overwriting the
+        # pointers, or restoring take 1 would strand take 3 with no way back.
+        _record_take(
+            scene,
+            int(scene.get("take", 1) or 1),
+            scene.get("clip_url"),
+            scene.get("clip_path"),
+        )
+        scene["clip_url"] = clip_url
+        scene["clip_path"] = clip_path
+        scene["take"] = int(take)
+
+        timeline = previous_result.get("timeline") or [
+            {"scene_index": int(s["index"]), "trim_start": 0.0, "trim_end": 0.0}
+            for s in sorted(
+                (s for s in scenes if s.get("clip_index") is not None),
+                key=lambda s: int(s["clip_index"]),
+            )
+        ]
+
+        result = await self.apply_timeline_edit(
+            previous_result={**previous_result, "scenes": scenes},
+            timeline=timeline,
+            working_dir=working_dir,
+            progress_callback=progress_callback,
+            is_cancelled=is_cancelled,
+        )
+        result["scenes"] = scenes
+        return result
 
     async def apply_timeline_edit(
         self,
@@ -3777,11 +4023,24 @@ class Idea2VideoPipeline:
             if dialogue_requested
             else None
         )
+        character_voices: Dict[str, str] = {}
         if voice_gen is not None:
+            # A returning character's voice, decided when they were first cast
+            # and stored on the library entry. Applied BEFORE the ensemble is
+            # cast, because casting skips a name that already has a voice --
+            # see VoiceGenerator.lock_voices for why the hash alone does not
+            # survive a change of cast.
+            locked_voices = {
+                str(lib.get("name") or ""): str(lib.get("voice_id") or "")
+                for lib in (library_characters or [])
+                if str(lib.get("voice_id") or "").strip()
+            }
+            if locked_voices and hasattr(voice_gen, "lock_voices"):
+                voice_gen.lock_voices(locked_voices)
             # Cast the whole ensemble up front, gender-matched to each
             # character's description -- otherwise the per-line hash fallback
             # can voice a mother with a male voice.
-            voice_gen.cast_characters(characters)
+            character_voices = voice_gen.cast_characters(characters) or {}
         total_scenes = max(1, len(script.scenes))
 
         # Kick off background music as soon as the mood is known (it needs
@@ -4073,6 +4332,23 @@ class Idea2VideoPipeline:
                     if reason and reason not in dialogue_failure_reasons:
                         dialogue_failure_reasons.append(reason)
             if dialogue_requested:
+                # DIALOGUE_CLAUSE allows ONE deliberately silent scene, because
+                # a held look is an instrument and banning it made every beat
+                # get discharged through speech. Two or more is not an
+                # instrument, it is the writer running out of lines on a run
+                # the user paid the dialogue surcharge for -- and it is
+                # invisible from the finished video, which simply looks like
+                # scenes where nobody bothered to speak.
+                silent_scenes = sum(
+                    1 for scene in script.scenes if not _scene_dialogue(scene)
+                )
+                if silent_scenes > 1:
+                    warnings.append(
+                        f"{silent_scenes} of {len(script.scenes)} scenes were "
+                        "written without dialogue, so they play silent. One "
+                        "silent scene is a deliberate choice; this many is the "
+                        "script coming back thinner than it should have."
+                    )
                 if not dialogue_tasks:
                     # The script came back with no spoken lines at all, so
                     # there was never anything to voice. The screenwriter is
@@ -4128,6 +4404,16 @@ class Idea2VideoPipeline:
                 progress=progress,
                 is_cancelled=is_cancelled,
                 requested=lipsync_enabled,
+                # Keyed by position in the concatenation, which is what
+                # _lipsync_scenes indexes scene_paths by -- not by scene index,
+                # which differs the moment a scene produces no clip.
+                reaction_tails={
+                    int(scene["clip_index"]): _reaction_tail_seconds(
+                        scene.get("shots")
+                    )
+                    for scene in scene_results
+                    if scene.get("clip_index") is not None
+                },
             )
 
             # Archive each finished scene clip individually, not just the
@@ -4249,6 +4535,16 @@ class Idea2VideoPipeline:
             "characters": [c.model_dump() for c in characters],
             "portraits": portraits,
             "location_plate": location_plate,
+            # Who ended up speaking with which voice, keyed by the character's
+            # real name. Written out so a character SAVED to the library after
+            # this drama carries the voice this drama gave them: without it the
+            # first episode's casting is thrown away and episode two re-derives
+            # it from a different ensemble (see VoiceGenerator.lock_voices).
+            "character_voices": {
+                c.name: character_voices[c.name.casefold()]
+                for c in characters
+                if c.name.casefold() in character_voices
+            },
             "lipsynced_scenes": lipsynced_scenes,
             # Everything regenerate_scene() needs to re-render ONE scene the
             # same way it was rendered the first time. Underscore-prefixed

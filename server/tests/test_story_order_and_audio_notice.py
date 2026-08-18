@@ -116,21 +116,23 @@ def test_the_screenwriter_is_told_the_brief_s_event_is_the_climax():
 # --- 3. a voiced run may not be written as a silent film --------------------
 
 
-def test_a_voiced_run_forbids_empty_dialogue():
+def test_a_voiced_run_demands_dialogue():
+    """Keyed on the section, not on one sentence of it: the rule inside has
+    since been bounded (one scene may be silent -- see
+    test_silence_is_a_choice), and this test is about WHICH runs get the rule
+    at all."""
     agent = ScreenwriterAgent()
 
-    assert "EVERY scene needs at least one line" in agent._system_prompt(
-        "en", require_dialogue=True
-    )
+    assert "SPOKEN DRAMA" in agent._system_prompt("en", require_dialogue=True)
     # Unvoiced runs keep the base prompt, where silence is a valid choice.
-    assert "EVERY scene needs at least one line" not in agent._system_prompt("en")
+    assert "SPOKEN DRAMA" not in agent._system_prompt("en")
 
 
 def test_the_language_clause_and_the_dialogue_clause_coexist():
     prompt = ScreenwriterAgent()._system_prompt("tr", require_dialogue=True)
 
     assert "Turkish" in prompt
-    assert "EVERY scene needs at least one line" in prompt
+    assert "SPOKEN DRAMA" in prompt
 
 
 @pytest.mark.asyncio

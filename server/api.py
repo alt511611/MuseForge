@@ -42,6 +42,7 @@ from jobs import (
     run_generation_job,
     run_global_edit_job,
     run_regenerate_scene_job,
+    run_restore_take_job,
     run_timeline_edit_job,
 )
 
@@ -275,6 +276,10 @@ class LibraryCharacterIn(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
     static_features: str = Field(..., min_length=1, max_length=2000)
     portrait_url: str = Field(..., min_length=1, max_length=2000)
+    # The voice this character was cast with the first time they spoke.
+    # Optional: entries saved before the column existed simply have none, and
+    # are re-cast from the name hash exactly as they were before.
+    voice_id: str = Field("", max_length=200)
 
 
 class GenerateRequest(BaseModel):
@@ -326,6 +331,9 @@ class CharacterCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
     static_features: str = Field(..., min_length=1, max_length=2000)
     portrait_url: str = Field(..., min_length=1, max_length=2000)
+    # Saved from the finished drama's `character_voices`, so a character
+    # lifted out of episode one keeps the voice episode one gave them.
+    voice_id: str = Field("", max_length=200)
 
 
 class GenerateResponse(BaseModel):
@@ -840,6 +848,7 @@ async def generate(
                 "name": c.name.strip(),
                 "static_features": c.static_features.strip(),
                 "portrait_url": c.portrait_url.strip(),
+                "voice_id": (c.voice_id or "").strip(),
             }
             for c in req.library_characters
             if c.name.strip() and c.static_features.strip() and c.portrait_url.strip()
@@ -1299,6 +1308,66 @@ async def global_edit(
     }
 
 
+@app.post("/api/jobs/{job_id}/scenes/{scene_index}/takes/{take}/restore")
+async def restore_scene_take(
+    job_id: str,
+    scene_index: int,
+    take: int,
+    background_tasks: BackgroundTasks,
+    current_user: Optional[AuthUser] = Depends(get_optional_user),
+):
+    """Put an earlier take of one scene back into the cut. Free.
+
+    A retake is a roll of the dice, and the roll being replaced was usually
+    90% right -- shots fail in their last second. Without this, "re-shoot" is
+    a one-way door and the only way back to take 1 is to buy a take 4. Every
+    clip involved already exists and was already paid for, so like the re-cut
+    this takes no credits.
+    """
+    job = await job_store.get_or_restore(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.user_id and (not current_user or job.user_id != current_user.user_id):
+        if not (current_user and current_user.is_admin):
+            raise HTTPException(status_code=403, detail="Access denied")
+
+    if job.status != JobStatus.COMPLETED or not job.result:
+        raise HTTPException(status_code=400, detail="Job is not completed")
+
+    scenes = (job.result or {}).get("scenes") or []
+    scene = next(
+        (s for s in scenes if int(s.get("index", -1)) == scene_index), None
+    )
+    if scene is None:
+        raise HTTPException(
+            status_code=404, detail=f"Scene {scene_index + 1} is not part of this video."
+        )
+
+    takes = scene.get("takes") or []
+    if not any(int(t.get("take", 0)) == take for t in takes):
+        # Answered here rather than in the background job so the UI gets a
+        # real status code instead of a job that starts and immediately fails.
+        raise HTTPException(
+            status_code=404,
+            detail=f"Take {take} of scene {scene_index + 1} was not kept.",
+        )
+    if int(scene.get("take", 1) or 1) == take:
+        raise HTTPException(
+            status_code=400, detail=f"Take {take} is already the one in the cut."
+        )
+
+    api_key = os.environ.get("MUAPI_KEY", "")
+    background_tasks.add_task(run_restore_take_job, job, api_key, scene_index, take)
+    return {
+        "job_id": job.id,
+        "scene_index": scene_index,
+        "take": take,
+        "credits_charged": 0,
+        "status": JobStatus.RUNNING.value,
+    }
+
+
 @app.post("/api/jobs/{job_id}/timeline")
 async def timeline_edit(
     job_id: str,
@@ -1443,22 +1512,43 @@ async def _library_insert(user_id: str, payload: dict) -> Dict[str, Any]:
             "name": payload["name"],
             "static_features": payload["static_features"],
             "portrait_url": payload["portrait_url"],
+            "voice_id": payload.get("voice_id", ""),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         _character_library_mem[user_id].insert(0, row)
         return row
+    body = {
+        "user_id": user_id,
+        "name": payload["name"],
+        "static_features": payload["static_features"],
+        "portrait_url": payload["portrait_url"],
+    }
+    voice_id = str(payload.get("voice_id") or "").strip()
+    if voice_id:
+        body["voice_id"] = voice_id
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.post(
                 f"{SUPABASE_URL}/rest/v1/character_library",
                 headers=_sb_headers(),
-                json={
-                    "user_id": user_id,
-                    "name": payload["name"],
-                    "static_features": payload["static_features"],
-                    "portrait_url": payload["portrait_url"],
-                },
+                json=body,
             )
+            if resp.status_code >= 400 and "voice_id" in body:
+                # The column is new. A deployment that has not replayed the
+                # migration yet must still be able to save a character --
+                # losing the voice lock costs continuity in a later episode,
+                # while failing the insert loses the character entirely.
+                logger.warning(
+                    "character_library insert rejected with voice_id, retrying "
+                    "without it (has the migration been applied?): %s",
+                    resp.text[:300],
+                )
+                body.pop("voice_id")
+                resp = await client.post(
+                    f"{SUPABASE_URL}/rest/v1/character_library",
+                    headers=_sb_headers(),
+                    json=body,
+                )
             if resp.status_code >= 400:
                 logger.error("character_library insert failed: %s", resp.text[:300])
                 raise HTTPException(status_code=502, detail="Failed to save character")
@@ -1512,6 +1602,7 @@ async def create_character(
             "name": req.name.strip(),
             "static_features": req.static_features.strip(),
             "portrait_url": req.portrait_url.strip(),
+            "voice_id": (req.voice_id or "").strip(),
         },
     )
     return row
