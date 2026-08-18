@@ -830,7 +830,22 @@ def build_audio_mix_graph(
                 f":normalize=0:dropout_transition=0[speechraw]"
             )
         speech_bus = "speech"
-        chains.append("[speechraw]asplit=2[speech][sc]")
+        if music_index is not None:
+            chains.append("[speechraw]asplit=2[speech][sc]")
+        else:
+            # No music means nothing consumes [sc], and ffmpeg refuses a
+            # filtergraph with a dangling output:
+            #
+            #   Filter 'asplit' has output 0 (sc) unconnected
+            #   Error binding filtergraph inputs/outputs: Invalid argument
+            #
+            # It split unconditionally, so EVERY job with dialogue and no
+            # music -- which is most of them, music being a paid Creator/Pro
+            # extra -- failed the whole mix (exit 234) and fell back to
+            # moviepy. That fallback is where the foley was being lost and
+            # where forty minutes of post-processing were going: the ffmpeg
+            # path was never once taken on a job like that.
+            chains.append("[speechraw]acopy[speech]")
 
     if music_index is not None:
         chains.append(f"[{music_index}:a]volume={MUSIC_LEVEL}[musicraw]")

@@ -605,6 +605,20 @@ into a single scene rather than adding one."""
         if not scenes or any((s.world_change or "").strip() for s in scenes):
             return
         clause = cls._world_event_clause(script.user_brief)
+        source = "brief"
+        if not clause:
+            # The brief did not state it -- but the SCRIPT may have, in the
+            # one place a voiced drama makes easiest and the picture never
+            # reads: a line of dialogue. Delivered example, three scenes, no
+            # world_change anywhere, the climax spoken as "Denny -- Denny, see
+            # this? The grid just--" and rendered under every streetlight,
+            # container lamp and lit doorway in the yard. The event of the
+            # film was audible and invisible.
+            #
+            # Same word list and the same refusal to guess as the brief path:
+            # this reads what the writer already wrote, into the field that
+            # exists to carry it.
+            clause, source = cls._script_event_clause(scenes), "script"
         if not clause:
             return
         target = next(
@@ -613,11 +627,38 @@ into a single scene rather than adding one."""
         )
         target.world_change = clause
         logger.info(
-            "No scene declared a world_change; restored the brief's own event "
+            "No scene declared a world_change; restored the %s's own event "
             "onto the %s scene: %r",
+            source,
             (target.dramatic_function or "last").strip() or "last",
             clause,
         )
+
+    @classmethod
+    def _script_event_clause(cls, scenes) -> str:
+        """The drama's own stated change of world, read from what it says.
+
+        Looks at each scene's action and its spoken lines. Deliberately the
+        same shape as _world_event_clause: exactly one matching clause across
+        the whole script, or nothing -- two matches mean the drama describes
+        more than one change and choosing between them is a judgement a word
+        list has no business making.
+        """
+        found = []
+        for scene in scenes:
+            texts = [str(getattr(scene, "action", "") or "")]
+            for line in getattr(scene, "dialogue", None) or []:
+                spoken = (
+                    line.get("line") if isinstance(line, dict)
+                    else getattr(line, "line", "")
+                )
+                if spoken:
+                    texts.append(str(spoken))
+            for text in texts:
+                clause = cls._world_event_clause(text)
+                if clause and clause not in found:
+                    found.append(clause)
+        return found[0] if len(found) == 1 else ""
 
     @classmethod
     def _world_event_clause(cls, brief: str) -> str:

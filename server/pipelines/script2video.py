@@ -2436,7 +2436,22 @@ class Script2VideoPipeline:
                     # seconds whatever it was asked for. Both are trimmed here,
                     # before the scene is assembled, so the scene's total is
                     # exactly the budget the credit bought.
+                    #
+                    # `deliver_seconds` is only set when the two numbers
+                    # DIFFER, and 0 used to mean "ship whatever came back" --
+                    # which trusts the provider to honour the length it was
+                    # asked for. It does not. Measured on a delivered job:
+                    # scenes budgeted 8 / 10 / 12 seconds came back as
+                    # 16.08 / 20.08 / 24.08, exactly double each, and shipped
+                    # untouched because every one of them was a single-angle
+                    # scene. A 3-scene drama costed at 30 seconds ran 60.
+                    #
+                    # So the budget is the ceiling either way. trim_to_duration
+                    # returns the source untouched when the clip is already at
+                    # or under it, so a provider that behaves costs nothing.
                     deliver = float(getattr(shot, "deliver_seconds", 0.0) or 0.0)
+                    if deliver <= 0:
+                        deliver = float(getattr(shot, "duration_seconds", 0.0) or 0.0)
                     if deliver > 0:
                         local_path = await trim_to_duration(
                             local_path,

@@ -163,9 +163,16 @@ def _sb_row_to_dict(row: dict) -> dict:
         "demo": row.get("demo", False),
         "music_enabled": row.get("music_enabled", False),
         "dialogue_enabled": row.get("dialogue_enabled", False),
-        # A scene only appears here when its mouth was actually driven by the
-        # voice track, so a non-empty list is proof the run had lip sync on.
-        "lipsync_enabled": bool(result.get("lipsynced_scenes")),
+        # Intent first, evidence second. `_lipsync_enabled` is written when a
+        # job parks for script approval -- before anything is rendered, which
+        # is precisely when `lipsynced_scenes` cannot exist yet. Falling
+        # straight through to the evidence resumed those jobs with lip sync
+        # off. A scene only appears in `lipsynced_scenes` when its mouth was
+        # actually driven, so it stays the right answer for a finished job
+        # made before the intent was recorded.
+        "lipsync_enabled": bool(
+            result.get("_lipsync_enabled", result.get("lipsynced_scenes"))
+        ),
         "plan": row.get("plan", "free"),
         "user_id": row.get("user_id"),
         "user_email": row.get("user_email"),
@@ -586,7 +593,15 @@ class JobStore:
             # Not columns on the jobs table -- recovered from the result for
             # the same reason _sb_row_to_dict recovers them.
             language=(result or {}).get("language") or DEFAULT_LANGUAGE,
-            lipsync_enabled=bool((result or {}).get("lipsynced_scenes")),
+            # Intent first, evidence second -- see _sb_row_to_dict. This is the
+            # path that actually RESUMES a job, so reading the evidence here
+            # was what dropped lip sync from every approved script that had
+            # been evicted while it waited for its human.
+            lipsync_enabled=bool(
+                (result or {}).get(
+                    "_lipsync_enabled", (result or {}).get("lipsynced_scenes")
+                )
+            ),
             demo=bool(row.get("demo", False)),
             user_id=row.get("user_id"),
             user_email=row.get("user_email"),
@@ -1055,6 +1070,19 @@ async def run_generation_job(job: Job, api_key: str):
                 job.result = {
                     **(job.result or {}),
                     "script": script_dict,
+                    # The job is about to stop and wait for a human, which is
+                    # the one point in its life where it can be evicted from
+                    # memory and restored from the row. `lipsync_enabled` is
+                    # not a column, and the row reader infers it from
+                    # `lipsynced_scenes` -- evidence a run ALREADY had lip
+                    # sync, which is exactly what a job that has not rendered
+                    # yet cannot have. So a restored job resumed with lip sync
+                    # silently off, and the drama came back with the voice laid
+                    # over closed mouths on a run the user had paid the
+                    # per-scene surcharge for.
+                    #
+                    # Recorded as INTENT here, where it is still known.
+                    "_lipsync_enabled": bool(job.lipsync_enabled),
                 }
                 job.status = JobStatus.AWAITING_SCRIPT_APPROVAL
                 await job_store.persist(job)
