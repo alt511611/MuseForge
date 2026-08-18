@@ -42,6 +42,13 @@ services:
         value: "https://your-project.vercel.app"
       - key: MUSEFORGE_JOBS_DIR
         value: /tmp/museforge_jobs
+      # INFO is what makes a delivered job explainable after the fact: the
+      # second budget it was costed at, which stage declined lip sync, how
+      # many scenes got foley. Nothing configured logging before, so those
+      # lines went to logging.lastResort and were dropped at WARNING. Set
+      # WARNING here for the old quiet, DEBUG only while chasing something.
+      - key: MUSEFORGE_LOG_LEVEL
+        value: "INFO"
       # Long Pro jobs (up to 24 sequential scenes) need generous timeouts.
       # Generation runs as a FastAPI BackgroundTask after /api/generate returns,
       # so Render's ~100 min HTTP request timeout does not apply to the job
@@ -150,8 +157,14 @@ services:
       # Foley: a generated sound bed per scene, prompted from the storyboard's
       # own audio note. $0.01 a scene -- the cheapest thing this product can
       # buy, and the layer that most separates a drama from a slideshow.
+      #
+      # ON. Left off, a job with music disabled ships a master that is mostly
+      # DIGITAL SILENCE -- measured on a delivered drama: 12 audible seconds
+      # in 60, the rest absolute zero -- and the speech in it reads as pasted
+      # over the picture because there is no place underneath it. A cent a
+      # scene against a credit that sells for dollars; set to "" to revert.
       - key: MUSEFORGE_FOLEY
-        value: ""
+        value: "1"
       - key: MUAPI_SFX_MODEL
         value: ""
 

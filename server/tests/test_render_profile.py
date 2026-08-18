@@ -77,10 +77,18 @@ async def test_profile_names_the_worst_stage(monkeypatch, caplog):
     with caplog.at_level(logging.INFO):
         store.log_stage_profile(job)
 
-    assert "render profile" in caplog.text
+    # Read the profile RECORD, not the whole capture: every stage emitted
+    # above also logs at INFO, and since the app configures logging those
+    # lines are now captured too -- searching caplog.text found "screenwriting"
+    # in an emit line rather than in the profile this test is about.
+    profile = next(
+        (r.getMessage() for r in caplog.records if "render profile" in r.getMessage()),
+        None,
+    )
+    assert profile is not None, caplog.text
     # Worst offender first, with its share of the run.
-    assert caplog.text.index("video") < caplog.text.index("screenwriting")
-    assert "95%" in caplog.text
+    assert profile.index("video") < profile.index("screenwriting")
+    assert "95%" in profile
 
 
 def test_profile_is_silent_for_a_job_that_never_ran(caplog):

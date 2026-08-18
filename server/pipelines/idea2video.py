@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -15,7 +16,11 @@ from interfaces.character import CharacterInScene, DramaScript
 from interfaces.film_look import build_film_look_filters
 from interfaces import micro_drama
 from interfaces.language import DEFAULT_LANGUAGE
-from interfaces.second_budget import billable_seconds, distribute_budget
+from interfaces.second_budget import (
+    billable_seconds,
+    distribute_budget,
+    total_budget_seconds,
+)
 from interfaces.shot_plan import REACTION as REACTION_ROLE
 from interfaces.shot_plan import plan_shot_scales
 from interfaces.transitions import plan_transitions
@@ -1833,6 +1838,138 @@ def build_caption_style(width: int, height: int) -> str:
 MASTER_DURATION_TOLERANCE = 0.25
 
 
+#: How far the delivered runtime may drift from the budget before it is worth
+#: saying so. Generous on purpose: the provider rounds to whole seconds, the
+#: cold open adds a second or two, and transitions overlap -- none of which is
+#: a fault. A film that is half again as long as it was costed is.
+BUDGET_DRIFT_TOLERANCE = 0.35
+
+
+#: A film may hold a beat without it being a fault. Past this share of the
+#: runtime it is not a beat, it is a missing soundtrack.
+MAX_SILENT_SHARE = 0.5
+
+
+def check_master_is_not_mostly_silent(final_path: Optional[str]) -> Optional[str]:
+    """Report a master whose audio is mostly nothing at all.
+
+    Every audio layer here is independently optional -- music is a plan
+    feature, foley is behind MUSEFORGE_FOLEY, dialogue is a Pro toggle -- and
+    each one is correct to be off on its own. Nothing ever looked at the sum.
+    With music off and foley off, a drama's soundtrack is a few seconds of
+    speech and then DIGITAL silence: not quiet room tone, zero samples.
+
+    Measured on a delivered drama: 12 audible seconds out of 60, the other 43
+    absolute zero, and the reason the speech in it sounded pasted on rather
+    than spoken in a place. Every stage had behaved exactly as configured, so
+    nothing anywhere had a reason to mention it.
+
+    Reads the FINISHED master through ffmpeg rather than the layers that went
+    in: the question is what the viewer hears, and a track that was generated
+    but mixed to nothing has to read the same as one that was never asked for.
+
+    Returns a sentence for the job's warnings, or None.
+    """
+    if not final_path or not os.path.isfile(final_path):
+        return None
+
+    rate = 8000
+    command = [
+        resolve_ffmpeg_binary(), "-v", "error", "-i", final_path,
+        "-vn", "-ac", "1", "-ar", str(rate), "-f", "s16le", "-",
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, timeout=120)
+    except Exception as exc:
+        logger.warning("Could not measure how much of the master is silent: %s", exc)
+        return None
+    raw = result.stdout or b""
+    if len(raw) < rate:  # under a second of audio, or no audio stream at all
+        return None
+
+    import numpy as np
+
+    samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    window = rate // 10  # 0.1s
+    blocks = np.abs(
+        samples[: len(samples) // window * window].reshape(-1, window)
+    ).max(axis=1)
+    if len(blocks) == 0:
+        return None
+    # -60 dBFS. Below this nothing is audible on any playback a viewer owns,
+    # which is the question being asked -- true digital zero and a codec's
+    # noise floor are the same silence to an ear.
+    silent_share = float((blocks < 1e-3).sum()) / len(blocks)
+    if silent_share <= MAX_SILENT_SHARE:
+        return None
+
+    duration = len(samples) / rate
+    logger.warning(
+        "Master is %.0f%% silence (%.1fs of %.1fs). Check MUSEFORGE_FOLEY and "
+        "whether music was enabled for this job.",
+        silent_share * 100,
+        silent_share * duration,
+        duration,
+    )
+    return (
+        f"About {silent_share * 100:.0f}% of this video has no sound at all — "
+        "with music and sound effects both off, only the spoken lines are "
+        "audible and the rest plays in silence."
+    )
+
+
+def check_budget_was_honoured(
+    actual_seconds: Optional[float], num_scenes: int
+) -> Optional[str]:
+    """Compare the delivered runtime against the budget the job was costed at.
+
+    Nothing did this. distribute_budget decides a fixed total BEFORE any
+    provider call, precisely so the cost of a job is known at charge time --
+    and then the number is logged and never looked at again. check_master_
+    duration is not this check: it compares the master against the sum of its
+    own scene clips, so if every clip came back longer than it was asked for,
+    both sides of that comparison are wrong together and it stays silent.
+
+    Which is what a delivered drama looks like: three scenes, a 30-second
+    budget, and a 60-second master that nothing in the pipeline found
+    surprising. Over-delivery is not free -- it is the per-scene pricing model
+    and the tension-weighted pacing plan both quietly not applying.
+
+    Returns a sentence for the job's warnings, or None when the runtime is
+    what it should be. Reports rather than repairs: trimming a finished master
+    to a budget would cut a shot mid-motion, and the honest fix is upstream.
+    """
+    if not actual_seconds or actual_seconds <= 0 or num_scenes <= 0:
+        return None
+    expected = total_budget_seconds(num_scenes)
+    if expected <= 0:
+        return None
+    drift = (actual_seconds - expected) / expected
+    if abs(drift) <= BUDGET_DRIFT_TOLERANCE:
+        return None
+    logger.error(
+        "Runtime does not match the budget: %.1fs delivered against %.1fs "
+        "budgeted for %d scene(s) (%+.0f%%). The per-scene second budget is "
+        "what the job was costed at, so this is the pricing model and the "
+        "pacing plan both not applying.",
+        actual_seconds,
+        expected,
+        num_scenes,
+        drift * 100,
+    )
+    longer = actual_seconds > expected
+    return (
+        f"This video runs {actual_seconds:.0f} seconds against the "
+        f"{expected:.0f} seconds its {num_scenes} scene(s) were planned for — "
+        + (
+            "longer than planned, so the pacing the scenes were written to "
+            "does not apply."
+            if longer
+            else "shorter than planned, so part of what was paid for is missing."
+        )
+    )
+
+
 def check_master_duration(final_path: str, scene_paths: Optional[List[str]]) -> bool:
     """Log loudly when the finished master is not the length of its scenes.
 
@@ -2454,7 +2591,32 @@ class Idea2VideoPipeline:
         """
         # `requested` is the per-job opt-in (the user paid for it);
         # is_lipsync_enabled() is the deployment flag. Both must hold.
-        if self.demo or not requested or not is_lipsync_enabled() or not dialogue_tracks:
+        #
+        # Four different reasons used to share one silent `return []`. An
+        # operator who had switched the deployment flag on and still got closed
+        # mouths had nothing anywhere -- no log line, no warning on the job --
+        # to tell them which of the four it was, and the video looks identical
+        # in every case. Say which.
+        if self.demo:
+            return []
+        if not requested:
+            logger.info(
+                "Lip sync was not requested on this job (the per-job opt-in is "
+                "off, or /api/generate dropped it because dialogue or the Pro "
+                "plan was missing) — mouths will not be driven."
+            )
+            return []
+        if not is_lipsync_enabled():
+            logger.info(
+                "Lip sync was requested but MUSEFORGE_LIPSYNC_ENABLED is not "
+                "set on this deployment — mouths will not be driven."
+            )
+            return []
+        if not dialogue_tracks:
+            logger.info(
+                "Lip sync was requested but this drama has no dialogue tracks, "
+                "so there is no speech to drive a mouth from."
+            )
             return []
 
         lipsync = make_lipsync(demo=self.demo)
@@ -4041,6 +4203,18 @@ class Idea2VideoPipeline:
             # character's description -- otherwise the per-line hash fallback
             # can voice a mother with a male voice.
             character_voices = voice_gen.cast_characters(characters) or {}
+            # Then ask the provider whether it can actually speak with those
+            # voices. An id the account does not hold is not answered with
+            # silence -- the endpoint substitutes and the drama ships with the
+            # wrong person talking, which is only ever noticed by watching it.
+            # Fail-open: an account that cannot be asked casts as before.
+            if hasattr(voice_gen, "verify_cast"):
+                try:
+                    character_voices = (
+                        await voice_gen.verify_cast() or character_voices
+                    )
+                except Exception as exc:
+                    logger.warning("Could not verify the cast: %s", exc)
         total_scenes = max(1, len(script.scenes))
 
         # Kick off background music as soon as the mood is known (it needs
@@ -4416,6 +4590,19 @@ class Idea2VideoPipeline:
                 },
             )
 
+            # The user switched lip sync on and paid a credit per speaking
+            # scene for it. When none of those scenes came back synced, the
+            # video is indistinguishable from one that never asked -- closed
+            # mouths and a voice over the top -- so the job has to say so
+            # rather than let them wonder whether the feature exists.
+            if lipsync_enabled and dialogue_requested and not lipsynced_scenes:
+                warnings.append(
+                    "Lip sync did not run on any scene, so the voices play "
+                    "over the picture instead of driving the mouths. The "
+                    "server log line beginning \"Lip sync\" says which stage "
+                    "declined it."
+                )
+
             # Archive each finished scene clip individually, not just the
             # concatenated master. Regenerating scene 3 later has to splice it
             # back in beside scenes 1, 2 and 4 -- and the working dir is wiped
@@ -4492,6 +4679,30 @@ class Idea2VideoPipeline:
                         actual_duration_seconds = _clip.duration
                 except Exception as exc:
                     logger.warning("Could not measure final video duration: %s", exc)
+
+            # The budget was fixed before any provider call so the job's cost
+            # was known at charge time. Until now nothing ever compared it to
+            # what actually shipped -- see check_budget_was_honoured.
+            budget_notice = check_budget_was_honoured(
+                actual_duration_seconds, len(script.scenes)
+            )
+            if budget_notice:
+                warnings.append(budget_notice)
+
+            # Every audio layer is independently optional, and each one is
+            # correct to be off on its own. Nothing ever looked at the sum:
+            # music off, foley off and a script with a few short lines gives a
+            # master that is mostly DIGITAL SILENCE, not room tone. Measured on
+            # a delivered drama -- 12 audible seconds in 60, the other 43 of
+            # them absolute zero -- and the speech that remained sounded pasted
+            # on because there was no scene underneath it to sit in. Reported,
+            # not repaired: the fix is a layer the operator has to switch on
+            # and pay for, and inventing ambience here would be a decision this
+            # code is not entitled to make.
+            silence_notice = check_master_is_not_mostly_silent(final_path)
+            if silence_notice:
+                warnings.append(silence_notice)
+
             # Persist final video to Supabase Storage (signed URL) when available.
             if final_path and os.path.isfile(final_path):
                 from tools.supabase_storage import upload_video
