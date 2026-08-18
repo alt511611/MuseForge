@@ -272,6 +272,28 @@ names what the camera sees become different, the "action" shows it happening, an
 the dialogue is what someone says WHILE it happens — a reaction, an order, a
 half-finished sentence. Never a report of it, and never the only place it exists."""
 
+    #: Appended LAST-but-one, for the same reason the micro-drama clause goes
+    #: last: it contradicts the base prompt's "Build 3-5 scenes" and a model
+    #: weighs a late override against what came before instead of averaging
+    #: the two.
+    #:
+    #: The scene count was only ever a line in the USER message ("Scenes: 3"),
+    #: which the base prompt's own range then argued with — and nothing
+    #: downstream checked the answer. A three-scene job came back with five
+    #: scenes and rendered a 60-second film, while /api/estimate had quoted
+    #: and charged for three. That is the length the user chose, the runtime
+    #: they paid for and the per-scene credit maths all disagreeing at once,
+    #: so the count is stated as a hard constraint here and enforced after
+    #: the fact in _hold_to_scene_count.
+    SCENE_COUNT_CLAUSE = """
+
+SCENE COUNT IS FIXED. This drama has EXACTLY {count} scene{plural} — not
+{minus_one}, not {plus_one}. The number is the length the user chose and paid
+for, so it overrides the 3-5 range above and any instinct that the story needs
+more room. Build the whole dramatic shape (including its climax) inside those
+{count} scene{plural}: if the story feels bigger, compress it — merge beats
+into a single scene rather than adding one."""
+
     #: Token budget for a director-level script. Shared by BOTH provider
     #: paths: the MuAPI route is tried FIRST, so raising it only on the
     #: Anthropic fallback (as an earlier change did) leaves the primary path
@@ -297,8 +319,9 @@ half-finished sentence. Never a report of it, and never the only place it exists
         language: str = DEFAULT_LANGUAGE,
         require_dialogue: bool = False,
         narrative_mode: str = "",
+        num_scenes: int = 0,
     ) -> str:
-        """The system prompt for this drama's language and audio mode.
+        """The system prompt for this drama's language, audio mode and length.
 
         English adds nothing to the language clause — the prompt is already
         written in it, and a redundant "write in English" clause only spends
@@ -309,6 +332,13 @@ half-finished sentence. Never a report of it, and never the only place it exists
             prompt += self.LANGUAGE_CLAUSE.format(language=name_of(language))
         if require_dialogue:
             prompt += self.DIALOGUE_CLAUSE
+        if num_scenes > 0:
+            prompt += self.SCENE_COUNT_CLAUSE.format(
+                count=num_scenes,
+                plural="" if num_scenes == 1 else "s",
+                minus_one=num_scenes - 1,
+                plus_one=num_scenes + 1,
+            )
         # LAST, deliberately: it contradicts the base prompt's dramatic curve
         # and its demand for a resolution, and a model weighs a late override
         # against what came before instead of blending the two into a shape
@@ -363,12 +393,14 @@ half-finished sentence. Never a report of it, and never the only place it exists
         if self.muapi_key and is_muapi_llm_enabled():
             try:
                 content = await complete_via_muapi(
-                    self._system_prompt(language, require_dialogue, narrative_mode),
+                    self._system_prompt(
+                        language, require_dialogue, narrative_mode, num_scenes
+                    ),
                     prompt,
                     max_tokens=self.MAX_SCRIPT_TOKENS,
                 )
                 return self._with_brief(
-                    DramaScript(**self._parse_json(content)), idea
+                    DramaScript(**self._parse_json(content)), idea, num_scenes
                 )
             except Exception as exc:
                 # Include a snippet of the RAW MuAPI response so failures
@@ -410,7 +442,9 @@ half-finished sentence. Never a report of it, and never the only place it exists
         )
 
     @classmethod
-    def _with_brief(cls, script: DramaScript, idea: str) -> DramaScript:
+    def _with_brief(
+        cls, script: DramaScript, idea: str, num_scenes: int = 0
+    ) -> DramaScript:
         """Attach the user's verbatim prompt, then hold the script to it.
 
         Both provider paths come through here, so the guarantees below apply
@@ -418,8 +452,95 @@ half-finished sentence. Never a report of it, and never the only place it exists
         """
         script.user_brief = (idea or "").strip()
         cls._apply_brief_gender(script)
+        # BEFORE _apply_brief_event, so the event is restored onto a scene
+        # that is still in the film. Run the other way round, a script whose
+        # extra scenes are cut could lose the restored world_change with them.
+        cls._hold_to_scene_count(script, num_scenes)
         cls._apply_brief_event(script)
         return script
+
+    #: Scenes that carry the drama's shape and must survive a trim. A cut that
+    #: takes the climax does not shorten the film, it removes the reason it
+    #: exists.
+    _LOAD_BEARING_FUNCTIONS = {"climax", "resolution"}
+
+    @classmethod
+    def _hold_to_scene_count(cls, script: DramaScript, num_scenes: int) -> None:
+        """Cut a script back to the number of scenes the user asked for.
+
+        The count reaches the model as a prompt line and, since
+        SCENE_COUNT_CLAUSE, as an explicit constraint — but a prompt
+        instruction is not a guarantee, and this one is load-bearing in a way
+        the others are not. /api/estimate quotes and charges per scene, the
+        runtime budget is per scene, and the plan ceiling is per scene: a
+        three-scene job that renders five is billed for three, runs 60 seconds
+        instead of ~36, and spends two scenes' worth of generation the user
+        never bought. Observed exactly that way on a delivered drama.
+
+        Only ever TRIMS. A script that came back SHORT is left alone and
+        logged: padding it means inventing drama, which is the screenwriter's
+        job and not a repair's, and a short film is at worst less than the
+        user paid for rather than an unbilled overrun.
+
+        Which scenes go: the lowest-tension ones first, skipping the climax,
+        the resolution and any scene that declares a ``world_change`` — those
+        three are what the rest of the pipeline reads to build the story's
+        shape and its one sanctioned lighting break. If protecting them would
+        leave more scenes than asked for, the protection yields (the count is
+        the promise) and the lowest-tension scene goes regardless.
+        """
+        scenes = list(script.scenes or [])
+        if num_scenes <= 0 or len(scenes) <= num_scenes:
+            if 0 < len(scenes) < num_scenes:
+                logger.warning(
+                    "Screenwriter returned %s scenes for a %s-scene job; "
+                    "keeping the short script rather than inventing beats.",
+                    len(scenes),
+                    num_scenes,
+                )
+            return
+
+        def _tension(scene) -> int:
+            return int(getattr(scene, "tension", 0) or 0)
+
+        def _protected(scene) -> bool:
+            function = (getattr(scene, "dramatic_function", "") or "").strip().lower()
+            if function in cls._LOAD_BEARING_FUNCTIONS:
+                return True
+            return bool((getattr(scene, "world_change", "") or "").strip())
+
+        dropped = 0
+        while len(scenes) > num_scenes:
+            candidates = [s for s in scenes if not _protected(s)]
+            # Everything left is load-bearing and there are still too many of
+            # them: the count wins, because it is the thing the user chose and
+            # was charged for.
+            if not candidates:
+                candidates = scenes
+            victim = min(candidates, key=_tension)
+            scenes.remove(victim)
+            dropped += 1
+
+        logger.warning(
+            "Screenwriter returned %s scenes for a %s-scene job; dropped the "
+            "%s lowest-tension non-climax scene(s) so the film matches the "
+            "length that was quoted and charged for.",
+            len(script.scenes or []),
+            num_scenes,
+            dropped,
+        )
+        # Scaled rather than recomputed from a per-scene constant: the writer's
+        # own estimate carries its pacing, and only the number of scenes it was
+        # spread over has changed. Left as it was, it would keep quoting the
+        # length of the script that was just cut.
+        original_count = len(script.scenes or []) or 1
+        script.estimated_duration_seconds = max(
+            1,
+            round(
+                int(script.estimated_duration_seconds or 0) * len(scenes) / original_count
+            ),
+        )
+        script.scenes = scenes
 
     #: Unmistakable, world-SCALE changes of state, matched against the brief.
     #: Deliberately short and blunt: this list decides whether a scene gets to
@@ -589,7 +710,9 @@ half-finished sentence. Never a report of it, and never the only place it exists
             async with client.messages.stream(
                 model="claude-sonnet-5",
                 max_tokens=self.MAX_SCRIPT_TOKENS,
-                system=self._system_prompt(language, require_dialogue, narrative_mode),
+                system=self._system_prompt(
+                    language, require_dialogue, narrative_mode, num_scenes
+                ),
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:
                 message = await stream.get_final_message()
@@ -645,7 +768,7 @@ half-finished sentence. Never a report of it, and never the only place it exists
         text = next((b.text for b in message.content if b.type == "text"), "")
         try:
             data = self._parse_json(text)
-            return self._with_brief(DramaScript(**data), idea)
+            return self._with_brief(DramaScript(**data), idea, num_scenes)
         except Exception as exc:
             # Include what came back: "No JSON found in response" on its own
             # gives an operator nothing to act on.
