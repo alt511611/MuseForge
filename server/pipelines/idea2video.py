@@ -187,6 +187,35 @@ def _scene_emotion(scene: Any) -> str:
     return _scene_field(scene, "emotion")
 
 
+def _record_take(
+    scene: Dict[str, Any], take: int, clip_url: Optional[str], clip_path: Optional[str]
+) -> None:
+    """Remember this take on the scene, so a later one can be undone.
+
+    A retake is a roll of the dice the customer paid for, and the previous roll
+    may well have been the better one -- the reason people re-roll at all is
+    that a shot is 90% right and fails in its last second. Without a record of
+    what came before, "re-shoot" is a one-way door: the only way back to take 1
+    is to buy a take 4 and hope.
+
+    Kept on the scene record rather than in a side table because that is what
+    survives the Supabase round trip a job row already does, and a history the
+    results page cannot read after a restart is not a history.
+    """
+    history = scene.setdefault("takes", [])
+    entry = {
+        "take": int(take),
+        "clip_url": clip_url or "",
+        "clip_path": clip_path or "",
+    }
+    for existing in history:
+        if int(existing.get("take", 0)) == int(take):
+            existing.update(entry)
+            return
+    history.append(entry)
+    history.sort(key=lambda t: int(t.get("take", 0)))
+
+
 def _scene_tension(scene: Any) -> int:
     """Dramatic tension 1-10, or 0 when the script does not carry one."""
     raw = _scene_field(scene, "tension").strip()
@@ -2458,8 +2487,17 @@ class Idea2VideoPipeline:
             if not local_path or not os.path.isfile(local_path):
                 continue
             scene["clip_path"] = local_path
+            take = int(scene.get("take", 1) or 1)
             try:
-                stored = await upload_video(local_path, f"{job_id}_scene_{scene['index']}")
+                # Keyed by TAKE. The key used to be the scene alone, so every
+                # retake overwrote the archive of the take it replaced: the
+                # local file survived in its own take directory, but the only
+                # copy that outlives the working dir did not. A user who
+                # re-shot a scene and preferred the first version had nothing
+                # to go back to, and the clip they paid for was gone.
+                stored = await upload_video(
+                    local_path, f"{job_id}_scene_{scene['index']}_take{take}"
+                )
             except Exception as exc:
                 logger.warning(
                     "Scene %s clip could not be archived (regeneration will be "
@@ -2470,6 +2508,7 @@ class Idea2VideoPipeline:
                 continue
             if stored and stored.startswith("http"):
                 scene["clip_url"] = stored
+            _record_take(scene, take, scene.get("clip_url"), local_path)
 
     def _characters_from_script(self, script: DramaScript) -> List[CharacterInScene]:
         return [
@@ -3021,6 +3060,89 @@ class Idea2VideoPipeline:
             location_plate_override=location_override,
             script_override=script_data,
         )
+
+    async def restore_scene_take(
+        self,
+        previous_result: Dict[str, Any],
+        scene_index: int,
+        take: int,
+        working_dir: str,
+        progress_callback: Optional[Callable] = None,
+        is_cancelled: Optional[Callable[[], bool]] = None,
+    ) -> Dict[str, Any]:
+        """Put an earlier take of one scene back into the cut.
+
+        Re-shooting is a roll of the dice, and the previous roll is often the
+        better one -- a shot fails in its last second, not its first, so the
+        take being replaced was usually 90% right. Without this, "re-shoot" is
+        a one-way door: the only route back to take 1 is to buy a take 4 and
+        hope. The clips already exist and were already paid for, so nothing
+        here calls a generation model and nothing here costs credits.
+
+        Implemented on top of apply_timeline_edit rather than beside it: the
+        picture, the dialogue re-keying, the cold open and the master publish
+        are the same problem a re-cut already solves, and a second assembly
+        path is how the cold open went missing from two of them last time.
+        The CURRENT cut is reused, so restoring a take inside a drama the user
+        has already reordered or trimmed does not quietly undo that edit.
+        """
+        scenes = list(previous_result.get("scenes") or [])
+        scene = next(
+            (s for s in scenes if int(s.get("index", -1)) == int(scene_index)), None
+        )
+        if scene is None:
+            raise SceneRegenerationUnavailable(
+                f"Scene {int(scene_index) + 1} is not part of this video."
+            )
+
+        history = scene.get("takes") or []
+        wanted = next(
+            (t for t in history if int(t.get("take", 0)) == int(take)), None
+        )
+        if wanted is None:
+            available = ", ".join(str(t.get("take")) for t in history) or "none"
+            raise SceneRegenerationUnavailable(
+                f"Take {take} of scene {int(scene_index) + 1} was not kept "
+                f"(available: {available})."
+            )
+
+        clip_url = str(wanted.get("clip_url") or "").strip()
+        clip_path = str(wanted.get("clip_path") or "").strip()
+        if not clip_url and not (clip_path and os.path.isfile(clip_path)):
+            raise SceneRegenerationUnavailable(
+                f"The clip for take {take} of scene {int(scene_index) + 1} is "
+                "no longer stored, so it cannot be restored."
+            )
+
+        # Record where the CURRENT take's clip lives before overwriting the
+        # pointers, or restoring take 1 would strand take 3 with no way back.
+        _record_take(
+            scene,
+            int(scene.get("take", 1) or 1),
+            scene.get("clip_url"),
+            scene.get("clip_path"),
+        )
+        scene["clip_url"] = clip_url
+        scene["clip_path"] = clip_path
+        scene["take"] = int(take)
+
+        timeline = previous_result.get("timeline") or [
+            {"scene_index": int(s["index"]), "trim_start": 0.0, "trim_end": 0.0}
+            for s in sorted(
+                (s for s in scenes if s.get("clip_index") is not None),
+                key=lambda s: int(s["clip_index"]),
+            )
+        ]
+
+        result = await self.apply_timeline_edit(
+            previous_result={**previous_result, "scenes": scenes},
+            timeline=timeline,
+            working_dir=working_dir,
+            progress_callback=progress_callback,
+            is_cancelled=is_cancelled,
+        )
+        result["scenes"] = scenes
+        return result
 
     async def apply_timeline_edit(
         self,
