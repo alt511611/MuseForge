@@ -111,6 +111,43 @@ async def test_flux_pulid_internal_runtime_failure_falls_back_to_flux_dev():
 
 
 @pytest.mark.asyncio
+async def test_rejected_reference_falls_back_without_the_reference():
+    """A refused portrait costs character lock, never the whole job.
+
+    Production 400: "input image does not contain the object described in the
+    prompt". Deterministic -- so the fallback has to DROP the reference, or it
+    carries the same refusal to the fallback endpoint.
+    """
+    from tools.muapi_client import MuAPIError
+    from tools.muapi_image_generator import MuAPIImageGenerator
+
+    generator = MuAPIImageGenerator(api_key="test-key", demo=False)
+    generator.client.generate = AsyncMock(
+        side_effect=[
+            MuAPIError(
+                "MuAPI request failed after 1 attempt(s): HTTP 400: input "
+                "image does not contain the object described in the prompt "
+                "(on /api/v1/predictions/4342ef6c/result)"
+            ),
+            "https://cdn.example/unlocked-frame.png",
+        ]
+    )
+
+    result = await generator.generate_image_with_reference(
+        prompt="Maya walks along the pier",
+        reference_url="https://cdn.example/maya-portrait.png",
+        aspect_ratio="16:9",
+    )
+
+    assert result == "https://cdn.example/unlocked-frame.png"
+    assert generator.client.generate.await_count == 2
+    _, fallback_call = generator.client.generate.await_args_list
+    assert fallback_call.args[0] == generator.LEGACY_SIZE_ENDPOINT
+    assert "image" not in fallback_call.args[1]
+    assert fallback_call.args[1]["size"] == _expected_size("16:9")
+
+
+@pytest.mark.asyncio
 async def test_non_schema_flux_pulid_error_is_not_hidden():
     from tools.muapi_client import MuAPIError
     from tools.muapi_image_generator import MuAPIImageGenerator
