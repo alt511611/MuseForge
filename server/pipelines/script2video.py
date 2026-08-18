@@ -2453,7 +2453,22 @@ class Script2VideoPipeline:
                         50 + int(completed_count / len(shots) * 40),
                     )
 
-        await asyncio.gather(*[_process_shot(i, shot) for i, shot in enumerate(shots)])
+        shot_tasks = [
+            asyncio.create_task(_process_shot(i, shot)) for i, shot in enumerate(shots)
+        ]
+        try:
+            await asyncio.gather(*shot_tasks)
+        except BaseException:
+            # gather() propagates the first failure but does NOT stop the
+            # siblings: left alone they keep polling the video endpoint behind
+            # a job that has already failed, and that endpoint bills per
+            # generation whether or not anyone is still waiting for the result.
+            # Same shape as the scene-level gather in idea2video, which had
+            # this and this did not.
+            for task in shot_tasks:
+                task.cancel()
+            await asyncio.gather(*shot_tasks, return_exceptions=True)
+            raise
 
         shot_meta = [m for m in shot_meta if m is not None]
         shot_videos = [v for v in shot_videos if v is not None]
@@ -2466,10 +2481,23 @@ class Script2VideoPipeline:
             )
             return {"path": None, "url": primary_url, "shots": shot_meta}
 
+        if not shot_videos:
+            # Belt-and-braces. Every failure inside _process_shot raises, so
+            # reaching here means a shot completed without producing a file --
+            # and the old code carried on with an output_path naming a file
+            # nothing had written. That path is truthy, so idea2video appended
+            # it to the concatenation list and the failure surfaced later as an
+            # unreadable master, with nothing in the log pointing back to the
+            # scene that caused it. Fail here, where the cause is still known.
+            raise RuntimeError(
+                f"Scene {scene_idx + 1} produced no usable shot; refusing to "
+                "assemble a drama around a clip that does not exist."
+            )
+
         output_path = os.path.join(working_dir, "scene_output.mp4")
         if len(shot_videos) == 1:
             output_path = shot_videos[0]
-        elif len(shot_videos) > 1:
+        else:
             await concatenate_videos(shot_videos, output_path)
 
         # Rhythm, out of the generation we already paid for: the scene is
