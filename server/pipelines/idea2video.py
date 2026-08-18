@@ -16,6 +16,7 @@ from interfaces.film_look import build_film_look_filters
 from interfaces import micro_drama
 from interfaces.language import DEFAULT_LANGUAGE
 from interfaces.second_budget import billable_seconds, distribute_budget
+from interfaces.shot_plan import REACTION as REACTION_ROLE
 from interfaces.shot_plan import plan_shot_scales
 from interfaces.transitions import plan_transitions
 from interfaces.visual_style import resolve as resolve_visual_style
@@ -185,6 +186,71 @@ def _scene_field(scene: Any, field: str) -> str:
 def _scene_emotion(scene: Any) -> str:
     """The scene's emotional beat, when the script carries one."""
     return _scene_field(scene, "emotion")
+
+
+#: Below this a tail is not a cutaway, it is a rounding error, and splitting a
+#: clip to protect it costs more than it saves.
+MIN_REACTION_TAIL_SECONDS = 0.6
+
+
+def _reaction_tail_seconds(shots: Optional[List[Dict[str, Any]]]) -> float:
+    """How many seconds at the END of a scene clip belong to the cutaway.
+
+    A scene that bought a second angle is delivered as master-then-reaction,
+    concatenated into one clip (see interfaces/shot_plan). The lip-sync pass
+    drives a mouth across whatever clip it is given and cannot see the cut in
+    the middle, so it used to be handed the whole thing -- and the product's
+    answer was to refuse the second angle whenever lip sync was on.
+
+    That answer cost the wrong thing. A reaction shot is the OTHER character
+    listening; there is no mouth in it to drive. Only the master needs syncing,
+    so the tail is measured here, held back from the sync, and concatenated
+    again afterwards untouched.
+
+    Returns 0.0 when the scene has no cutaway, which is the overwhelming
+    majority of scenes and the path that must stay byte-for-byte unchanged.
+    """
+    tail = 0.0
+    for shot in reversed(shots or []):
+        if str(shot.get("role") or "").strip().lower() != REACTION_ROLE:
+            break
+        seconds = float(
+            shot.get("deliver_seconds") or shot.get("duration_seconds") or 0.0
+        )
+        if seconds <= 0:
+            return 0.0
+        tail += seconds
+    return tail if tail >= MIN_REACTION_TAIL_SECONDS else 0.0
+
+
+async def _split_off_tail(
+    source_path: str, head_path: str, tail_path: str, tail_seconds: float
+) -> Tuple[str, Optional[str]]:
+    """Cut the last ``tail_seconds`` off a clip, returning ``(head, tail)``.
+
+    Returns ``(source_path, None)`` if the split cannot be made — too short to
+    leave a head worth syncing, or ffmpeg trouble. The caller then falls back
+    to the previous behaviour rather than losing the scene, because every
+    failure here is recoverable and none of them is worth a dropped shot.
+    """
+    duration = _probe_video_duration(source_path)
+    head_seconds = duration - tail_seconds
+    if duration <= 0 or head_seconds < MIN_TRIMMED_SECONDS:
+        return source_path, None
+
+    try:
+        head = await trim_clip(source_path, head_path, 0.0, tail_seconds)
+        tail = await trim_clip(source_path, tail_path, head_seconds, 0.0)
+    except Exception as exc:
+        logger.warning("Could not split a scene from its reaction shot: %s", exc)
+        return source_path, None
+
+    # trim_clip fails open by returning its source, which here would mean
+    # "head" and "tail" are both the whole clip -- concatenating those would
+    # play the scene twice.
+    if head == source_path or tail == source_path:
+        return source_path, None
+    return head, tail
 
 
 def _record_take(
@@ -2365,12 +2431,22 @@ class Idea2VideoPipeline:
         is_cancelled: Optional[Callable[[], bool]] = None,
         only_scenes: Optional[set] = None,
         requested: bool = True,
+        reaction_tails: Optional[Dict[int, float]] = None,
     ) -> List[int]:
         """Replace each speaking scene's clip with a lip-synced one, in place.
 
         Mutates ``scene_paths`` (the list concatenation reads from) and
         ``dialogue_tracks`` (the list the audio mixer reads from), and returns
         the scene indices that were successfully synced.
+
+        ``reaction_tails`` maps a scene to the seconds at the END of its clip
+        that belong to a cutaway. Those seconds are held back from the sync and
+        concatenated again afterwards: the sync model cannot see the cut in the
+        middle of a two-angle scene, and there is no mouth in a reaction shot
+        to drive anyway. Without it the product's answer was to refuse the
+        second angle whenever lip sync was on -- so turning lip sync on flattened
+        every peak scene to a single framing, which is the pair of features
+        users ask for together.
 
         Fail-open per scene, not per drama: if scene 2 cannot be synced, scenes
         1 and 3 still are, and scene 2 simply keeps its original clip with its
@@ -2415,8 +2491,27 @@ class Idea2VideoPipeline:
                 f"Syncing lips to dialogue ({position + 1}/{len(audio_by_scene)})",
                 88,
             )
+            # A scene that bought a second angle is master-then-reaction in one
+            # file. Sync the master, keep the cutaway out of it, put them back
+            # together -- see _reaction_tail_seconds.
+            source_path = scene_paths[scene_index]
+            tail_seconds = float((reaction_tails or {}).get(scene_index, 0.0) or 0.0)
+            sync_source = source_path
+            tail_path: Optional[str] = None
+            if tail_seconds > 0:
+                sync_source, tail_path = await _split_off_tail(
+                    source_path,
+                    os.path.join(working_dir, f"scene_{scene_index}_master.mp4"),
+                    os.path.join(working_dir, f"scene_{scene_index}_reaction.mp4"),
+                    tail_seconds,
+                )
+                if tail_path is None:
+                    # The split did not work, so the only safe request is the
+                    # old one: sync the whole clip, cut and all.
+                    sync_source = source_path
+
             synced_url = await lipsync.sync(
-                scene_paths[scene_index], audio_url, is_cancelled=is_cancelled
+                sync_source, audio_url, is_cancelled=is_cancelled
             )
             if not synced_url:
                 continue
@@ -2431,7 +2526,7 @@ class Idea2VideoPipeline:
                     exc,
                 )
                 continue
-            if not _keeps_its_length(scene_paths[scene_index], local_path):
+            if not _keeps_its_length(sync_source, local_path):
                 # Sync Labs' own default trims the video down to the length of
                 # the audio, which would let a short line silently shorten a
                 # scene and break the fixed per-credit second budget the whole
@@ -2446,6 +2541,28 @@ class Idea2VideoPipeline:
                     scene_index,
                 )
                 continue
+
+            if tail_path is not None:
+                rejoined = os.path.join(
+                    working_dir, f"scene_{scene_index}_lipsync_cut.mp4"
+                )
+                try:
+                    await concatenate_videos([local_path, tail_path], rejoined)
+                except Exception as exc:
+                    # The master synced but the cutaway could not be put back.
+                    # Shipping the master alone would silently shorten the
+                    # scene, which is the one thing the length guard above
+                    # exists to prevent -- so the whole scene keeps its
+                    # unsynced take instead.
+                    logger.warning(
+                        "Scene %s could not be re-joined to its reaction shot "
+                        "after lip sync, keeping the unsynced take: %s",
+                        scene_index,
+                        exc,
+                    )
+                    continue
+                local_path = rejoined
+
             scene_paths[scene_index] = local_path
             synced.append(scene_index)
 
@@ -2769,6 +2886,13 @@ class Idea2VideoPipeline:
                 progress=progress,
                 is_cancelled=is_cancelled,
                 only_scenes=resync,
+                reaction_tails={
+                    int(scene["clip_index"]): _reaction_tail_seconds(
+                        scene.get("shots")
+                    )
+                    for scene in scenes
+                    if scene.get("clip_index") is not None
+                },
             )
 
         # A retake keeps the cut's order, so the foley beds are still keyed to
@@ -4280,6 +4404,16 @@ class Idea2VideoPipeline:
                 progress=progress,
                 is_cancelled=is_cancelled,
                 requested=lipsync_enabled,
+                # Keyed by position in the concatenation, which is what
+                # _lipsync_scenes indexes scene_paths by -- not by scene index,
+                # which differs the moment a scene produces no clip.
+                reaction_tails={
+                    int(scene["clip_index"]): _reaction_tail_seconds(
+                        scene.get("shots")
+                    )
+                    for scene in scene_results
+                    if scene.get("clip_index") is not None
+                },
             )
 
             # Archive each finished scene clip individually, not just the

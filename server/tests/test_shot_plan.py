@@ -83,11 +83,20 @@ def test_only_peak_scenes_get_one(reactions_on):
     ]
 
 
-def test_lipsync_scenes_keep_a_single_take(reactions_on):
-    """The lip-sync pass drives a mouth across the whole scene clip and cannot
-    see a cut inside it. A desynced mouth is worse than a missing angle."""
+def test_lipsync_scenes_still_get_their_second_angle(reactions_on):
+    """This used to return a single take: the sync pass cannot see a cut inside
+    the clip it is given, so the angle was refused whenever sync was on.
+
+    That refused the wrong half. A reaction shot is the other character
+    LISTENING -- there is no mouth in it to drive -- so the cutaway is now held
+    back from the sync and rejoined afterwards
+    (idea2video._reaction_tail_seconds), and both features are available at
+    once instead of being a choice between two things users ask for together.
+    """
     plan = plan_scene_shots(10.0, tension=10, lipsync_enabled=True)
-    assert [p.role for p in plan] == [MASTER]
+    assert [p.role for p in plan] == [MASTER, REACTION]
+    # The flag is still accepted, so no caller has to change.
+    assert plan == plan_scene_shots(10.0, tension=10)
 
 
 def test_a_scene_too_short_for_two_beats_keeps_one(reactions_on):

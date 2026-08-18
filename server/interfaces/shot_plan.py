@@ -120,15 +120,26 @@ def plan_scene_shots(
 
     Returns a single master for the overwhelming majority of scenes. The
     second angle is spent where it is worth its price -- the scene the drama
-    is actually about -- and withheld in three cases:
+    is actually about -- and withheld in two cases:
 
     * the feature is off, or the scene is not a peak (tension below
       REACTION_TENSION);
-    * the scene is too short to hold two beats;
-    * LIP SYNC is on for this scene. The lip-sync pass drives a mouth across
-      the whole scene clip, and a clip containing a cut asks it to carry a
-      performance over an edit it cannot see. A desynced mouth is a worse
-      defect than a missing angle, so the angle is what gives.
+    * the scene is too short to hold two beats.
+
+    LIP SYNC used to be a third case. The sync pass drives a mouth across the
+    clip it is given and cannot see a cut in the middle of one, so a two-angle
+    scene was refused the second angle outright whenever sync was on -- which
+    flattened every peak scene to a single framing on exactly the runs that
+    care most about performance, and made "lip sync" and "reaction shots" a
+    choice between two things users ask for together.
+
+    The refusal was aimed at the wrong half of the cut. A reaction shot is the
+    other character LISTENING; there is no mouth in it to drive. So the tail is
+    now held back from the sync and rejoined afterwards
+    (idea2video._reaction_tail_seconds), and ``lipsync_enabled`` no longer
+    decides whether the angle exists. It is still accepted, so callers do not
+    have to change and an operator can restore the old behaviour by pinning
+    MUSEFORGE_REACTION_SHOTS off.
     """
     try:
         seconds = float(scene_seconds or 0.0)
@@ -138,7 +149,7 @@ def plan_scene_shots(
     master_only = [PlannedShot(role=MASTER, generate_seconds=seconds)]
     if seconds <= 0:
         return master_only
-    if not is_reaction_enabled() or lipsync_enabled:
+    if not is_reaction_enabled():
         return master_only
 
     try:
