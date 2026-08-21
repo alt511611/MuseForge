@@ -258,6 +258,76 @@ async def _split_off_tail(
     return head, tail
 
 
+async def _restore_trimmed_length(
+    source_path: str,
+    synced_path: str,
+    remainder_path: str,
+    output_path: str,
+) -> Optional[str]:
+    """Put back the seconds a sync provider trimmed off the end of a take.
+
+    MuAPI's Sync Labs endpoint exposes no ``sync_mode``, and the provider's
+    default returns a clip as long as the AUDIO. A line is shorter than its
+    scene in nearly every scene ever written, so on the default backend the
+    clip always comes back short -- and the length guard that protects the
+    runtime then threw away every sync the job had paid for.
+
+    What comes back is the head of the take with its mouth driven; the seconds
+    it is missing are the take's own tail, which we still have and which has
+    nothing to sync anyway (the line has stopped). Cutting them off the
+    original and joining them behind the synced head gives a scene of exactly
+    the length it was costed at, with the mouth driven for as long as there is
+    speech to drive it.
+
+    Returns None when the join cannot be made or does not come out at the
+    right length, which leaves the caller with the behaviour it had: keep the
+    unsynced take.
+    """
+    original = _clip_duration(source_path)
+    synced = _clip_duration(synced_path)
+    if original is None or synced is None:
+        return None
+    # A clip that is not a short head of the source is not the trim this
+    # repairs -- it is a provider returning something else entirely, and
+    # guessing at it would deliver a scene assembled out of the wrong footage.
+    if synced < MIN_TRIMMED_SECONDS or synced >= original:
+        return None
+    if original - synced < MIN_TRIMMED_SECONDS:
+        return None
+
+    remainder = await trim_clip(source_path, remainder_path, synced, 0.0)
+    # trim_clip fails open by returning its source, which here would be the
+    # whole take: joining that behind the synced head plays the scene twice.
+    if remainder == source_path:
+        return None
+
+    try:
+        await concatenate_videos([synced_path, remainder], output_path)
+    except Exception as exc:
+        logger.warning(
+            "Could not rejoin a lip-synced take to the rest of its scene: %s",
+            exc,
+        )
+        return None
+
+    if not _keeps_its_length(source_path, output_path):
+        logger.warning(
+            "Rejoining a lip-synced take did not restore its length; keeping "
+            "the unsynced original."
+        )
+        return None
+
+    logger.info(
+        "Lip-synced clip came back %.2fs against a %.2fs take (the provider "
+        "trims to the line); the remaining %.2fs of the take was rejoined "
+        "behind it.",
+        synced,
+        original,
+        original - synced,
+    )
+    return output_path
+
+
 def _record_take(
     scene: Dict[str, Any], take: int, clip_url: Optional[str], clip_path: Optional[str]
 ) -> None:
@@ -2704,20 +2774,37 @@ class Idea2VideoPipeline:
                 )
                 continue
             if not _keeps_its_length(sync_source, local_path):
-                # Sync Labs' own default trims the video down to the length of
-                # the audio, which would let a short line silently shorten a
-                # scene and break the fixed per-credit second budget the whole
-                # costing model rests on. The fal backend pins sync_mode to
-                # stop that; MuAPI's endpoint exposes no such knob, so the
-                # guarantee is enforced here instead -- a clip that came back
-                # short is discarded and the unsynced take kept.
-                logger.warning(
-                    "Lip-synced clip for scene %s came back shorter than the "
-                    "take it replaces — keeping the original so the runtime "
-                    "the customer paid for is preserved.",
-                    scene_index,
+                # Sync Labs' own default (cut_off) trims the video down to the
+                # length of the audio, which would let a short line silently
+                # shorten a scene and break the fixed per-credit second budget
+                # the whole costing model rests on. The fal backend pins
+                # sync_mode to stop that; MuAPI's endpoint exposes no such knob.
+                #
+                # Discarding the clip protected the runtime and cost the
+                # feature: a line is shorter than its scene in nearly every
+                # scene ever written, so on the default backend this rejected
+                # the sync essentially every time. Measured on a delivered job
+                # -- three scenes, three syncs bought and paid for (633s of
+                # render), three rejections, not one mouth driven.
+                #
+                # The seconds that came back missing are the END of the take,
+                # and the take still has them. Put them back.
+                restored = await _restore_trimmed_length(
+                    sync_source,
+                    local_path,
+                    os.path.join(working_dir, f"scene_{scene_index}_after_line.mp4"),
+                    os.path.join(working_dir, f"scene_{scene_index}_lipsync_full.mp4"),
                 )
-                continue
+                if restored is None:
+                    logger.warning(
+                        "Lip-synced clip for scene %s came back shorter than "
+                        "the take it replaces and could not be restored to "
+                        "length — keeping the original so the runtime the "
+                        "customer paid for is preserved.",
+                        scene_index,
+                    )
+                    continue
+                local_path = restored
 
             if tail_path is not None:
                 rejoined = os.path.join(
@@ -2743,11 +2830,27 @@ class Idea2VideoPipeline:
             scene_paths[scene_index] = local_path
             synced.append(scene_index)
 
-        # Hand the speech over to the picture: drop the audio the mixer would
-        # otherwise overlay, keep every row so subtitles are unaffected.
+        # The speech stays in the MIX. Handing it over to the picture is the
+        # obvious move -- the synced clip carries the line in its own audio
+        # track -- and nothing downstream can deliver it: every tier of
+        # concatenate_videos drops audio on purpose (`-an`, `audio=False`,
+        # `a=0`, so a generated clip's incidental audio cannot reach the
+        # master), and mix_audio_layers maps `0:v` alone. Verified by joining
+        # two clips that both had sound and probing the result: video only.
+        #
+        # So dropping the row from the mix did not stop the line playing
+        # twice. It stopped it playing at all -- a scene with a moving mouth,
+        # a subtitle, and silence where the dialogue should be. The mouth is
+        # driven from the same file the mixer lays down at the same anchor, so
+        # picture and voice are reading one clock, which is what makes the
+        # sync worth buying in the first place.
+        #
+        # synced_audio_url is still written: it is what a regenerated scene's
+        # re-sync reads, and jobs stored by the older behaviour have their
+        # voice under that name and nowhere else.
         for track in dialogue_tracks:
             if int(track.get("scene_index", -1)) in synced:
-                audio_url = track.pop("audio_url", None)
+                audio_url = track.get("audio_url")
                 if audio_url:
                     track["synced_audio_url"] = audio_url
                 track["lipsynced"] = True
