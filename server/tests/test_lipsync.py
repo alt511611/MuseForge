@@ -2,11 +2,16 @@
 
 The two things that must not regress:
 
-1. A scene whose lips were synced must NOT also have that same speech mixed
-   over it by add_background_music — the audio is baked into the clip, so
-   overlaying it again plays every line twice, slightly out of phase.
-2. Subtitles must survive: the caption text stays on the track even though the
-   audio is handed to the picture.
+1. A scene whose lips were synced must still have its speech MIXED. The clip
+   comes back with the line baked into its own audio track, and this file used
+   to assert that the mixer therefore skipped the row — on the theory that
+   overlaying it again would play every line twice. Nothing downstream can
+   deliver that baked audio: every tier of concatenate_videos drops audio on
+   purpose, and mix_audio_layers maps the master's video stream alone. So the
+   row being skipped did not stop the line playing twice, it stopped it
+   playing at all.
+2. Subtitles must survive: the caption text stays on the track, as does the
+   voice the mouth was driven from.
 """
 import os
 import sys
@@ -75,7 +80,7 @@ async def _run(monkeypatch, tmp_path, sync_results, enabled=True, demo=False):
 
 
 @pytest.mark.asyncio
-async def test_synced_scene_audio_is_not_mixed_a_second_time(monkeypatch, tmp_path):
+async def test_a_synced_scene_still_has_its_speech_mixed(monkeypatch, tmp_path):
     synced, scene_paths, tracks, sync_calls = await _run(
         monkeypatch, tmp_path, {0: "https://cdn/s0_synced.mp4", 2: "https://cdn/s2_synced.mp4"}
     )
@@ -88,11 +93,18 @@ async def test_synced_scene_audio_is_not_mixed_a_second_time(monkeypatch, tmp_pa
     assert scene_paths[2].endswith("scene_2_lipsync.mp4")
     assert scene_paths[1].endswith("scene_1.mp4"), "A silent scene must be left alone"
 
-    # The mixer skips rows without audio_url — that is how double speech is avoided.
-    assert all("audio_url" not in t for t in tracks if t["scene_index"] in (0, 2))
-    assert all(t.get("lipsynced") for t in tracks if t["scene_index"] in (0, 2))
+    # The mixer reads audio_url and nothing else. Assembly cannot carry the
+    # clip's own audio to the master, so a row without it is a scene that
+    # ships silent behind a mouth that is moving.
+    voiced = [t for t in tracks if t["scene_index"] in (0, 2) and t.get("synced_audio_url")]
+    assert len(voiced) == 2
+    assert all(t.get("audio_url") for t in voiced), (
+        "the synced scene's line was dropped from the mix and nothing else "
+        "delivers it"
+    )
+    assert all(t.get("lipsynced") for t in voiced)
 
-    # ...but the words survive for the subtitle burn-in.
+    # ...and the words survive for the subtitle burn-in.
     assert [t["line"] for t in tracks] == ["Bu kokuyu unutma.", "Unutmam.", "Söz."]
 
 

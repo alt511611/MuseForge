@@ -10,7 +10,7 @@ from interfaces import acting
 from interfaces.camera import get_director_style
 from interfaces.character import CharacterInScene
 from interfaces.shot import StoryboardShot
-from interfaces.shot_plan import plan_scene_shots
+from interfaces.shot_plan import plan_scene_shots, split_scene_seconds
 from interfaces.visual_style import resolve as resolve_visual_style
 from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
 
@@ -448,12 +448,24 @@ Respond ONLY with valid JSON array containing a single shot object:
         is the whole point; honouring it exactly is what makes the promise
         "N credits buys M seconds" true.
 
+        The budget belongs to the SCENE, and a scene may be more than one shot
+        (MUSEFORGE_SHOTS_PER_SCENE). Setting each shot to it delivered the
+        budget once per shot: measured on a delivered job with coverage of 2,
+        scenes budgeted 8 / 10 / 12 seconds ran 16.08 / 20.08 / 24.08 and the
+        drama billed for 30 seconds ran 60. So the budget is DIVIDED here --
+        which is what coverage_clause already asks the model for in the prompt
+        ("their duration_seconds must SUM to the scene's length"), and what
+        this method used to overwrite the moment it answered.
+
         Without a budget (legacy callers, single-scene tests) this keeps the
         previous cap-only behaviour.
         """
         if budget and budget > 0:
-            for shot in shots:
-                shot.duration_seconds = float(budget)
+            shares = split_scene_seconds(
+                budget, [shot.duration_seconds for shot in shots]
+            )
+            for shot, share in zip(shots, shares):
+                shot.duration_seconds = float(share)
             return shots
         cap = cls.duration_cap(is_finale, tension)
         for shot in shots:
@@ -557,7 +569,7 @@ Respond ONLY with valid JSON array containing a single shot object:
         cls._note_scale_drift(shots, scene_shot_scale)
         shots = cls._clamp_durations(shots, is_finale, tension, budget)
         return cls._apply_shot_plan(
-            shots, scene_emotion, tension, characters or [], lipsync_enabled
+            shots, scene_emotion, tension, characters or [], lipsync_enabled, budget
         )
 
     @classmethod
@@ -593,6 +605,7 @@ Respond ONLY with valid JSON array containing a single shot object:
         tension: int,
         characters: List[CharacterInScene],
         lipsync_enabled: bool = False,
+        budget: float = 0.0,
     ) -> List[StoryboardShot]:
         """Give a peak scene a second angle, and set generate/deliver lengths.
 
@@ -608,8 +621,14 @@ Respond ONLY with valid JSON array containing a single shot object:
         if not shots:
             return shots
         master = shots[0]
+        # The plan is the SCENE's, so it is made from the scene's budget --
+        # which is no longer the same number as the master's own length once
+        # coverage has divided that budget between several shots. Falling back
+        # to the master's length keeps every budget-less caller (legacy paths,
+        # single-scene tests) on exactly the arithmetic it had before.
         plan = plan_scene_shots(
-            float(getattr(master, "duration_seconds", 0.0) or 0.0),
+            float(budget or 0.0)
+            or float(getattr(master, "duration_seconds", 0.0) or 0.0),
             tension=tension,
             lipsync_enabled=lipsync_enabled,
         )
@@ -618,6 +637,11 @@ Respond ONLY with valid JSON array containing a single shot object:
         if len(plan) < 2:
             return shots
 
+        # The cutaway replaces whatever coverage the designer proposed, so the
+        # master carries the whole scene again and is generated for it -- the
+        # share _clamp_durations gave it was a share of a cut that no longer
+        # happens there.
+        master.duration_seconds = plan[0].generate_seconds
         reaction = cls._build_reaction_shot(master, scene_emotion, characters)
         reaction.duration_seconds = plan[1].generate_seconds
         reaction.deliver_seconds = plan[1].deliver_seconds
