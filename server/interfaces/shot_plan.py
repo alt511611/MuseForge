@@ -259,3 +259,119 @@ def delivered_seconds(plan: List[PlannedShot]) -> float:
         shot.deliver_seconds if shot.deliver_seconds > 0 else shot.generate_seconds
         for shot in plan
     )
+
+
+#: A coverage shot shorter than this is a flash frame, not a shot. Only
+#: enforced when the scene can afford it for every shot (a 6-second scene
+#: covered in four is asking for something this cannot give it).
+MIN_COVERAGE_SECONDS = 2.0
+
+
+def split_scene_seconds(
+    scene_seconds: float, proposed: Sequence[Any]
+) -> List[float]:
+    """Divide one scene's second budget between the shots that cover it.
+
+    ``proposed`` is each shot's own duration as the storyboard designed it,
+    used only for its PROPORTIONS -- an establishing wide the designer gave 3
+    seconds and a close it gave 7 keep that ratio inside whatever the budget
+    turns out to be.
+
+    Coverage (MUSEFORGE_SHOTS_PER_SCENE above 1) is the one place where a
+    scene is more than one shot without going through plan_scene_shots, and
+    the budget was being applied per SHOT rather than per scene: every shot
+    was set to the scene's full length, so a scene covered in two ran twice as
+    long as it was costed at. Measured on a delivered job (3 scenes, 30-second
+    budget, coverage of 2):
+
+        scene_0/scene_output.mp4   16.08s   budgeted  8
+        scene_1/scene_output.mp4   20.08s   budgeted 10
+        scene_2/scene_output.mp4   24.08s   budgeted 12
+
+    The prompt already told the model to divide the scene between its shots
+    (agents.storyboard_artist.coverage_clause: "Their duration_seconds must
+    SUM to the scene's length"), and _clamp_durations then overwrote the
+    answer with the whole budget. This is that instruction, in code, where it
+    binds.
+
+    Whole seconds, because the pipeline sends the video endpoint an INTEGER
+    duration and trims the returned clip to the same number: a fractional
+    share would be requested truncated and delivered short. The shares sum to
+    the budget exactly.
+    """
+    count = len(proposed)
+    try:
+        total = int(round(float(scene_seconds or 0.0)))
+    except (TypeError, ValueError):
+        total = 0
+
+    # One shot carries the whole scene, which is the overwhelming majority of
+    # them and the path that must stay exactly as it was.
+    if count <= 1:
+        return [float(total)] * count
+    if total <= 0:
+        return [_seconds(p) for p in proposed]
+    if total < count:
+        # Unreachable with the real constants (MIN_SCENE_SECONDS is 6 and
+        # coverage caps at 4), and not worth returning a zero-length shot over.
+        return [total / float(count)] * count
+
+    weights = [_seconds(p) for p in proposed]
+    if sum(weights) <= 0:
+        weights = [1.0] * count  # the designer said nothing; split it evenly
+
+    weight_sum = sum(weights)
+    shares = [total * w / weight_sum for w in weights]
+    floor = MIN_COVERAGE_SECONDS if total >= count * MIN_COVERAGE_SECONDS else 1.0
+    return _whole_seconds(_lift_to_floor(shares, floor), total)
+
+
+def _seconds(value: Any) -> float:
+    try:
+        return max(0.0, float(value or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _lift_to_floor(shares: List[float], floor: float) -> List[float]:
+    """Raise every share to ``floor``, paid for by the shares above it.
+
+    The total is preserved: the caller only calls this when the floor is
+    affordable for every share, so what the short ones need is always less
+    than what the long ones can give.
+    """
+    deficits = {i: floor - s for i, s in enumerate(shares) if s < floor}
+    if not deficits:
+        return shares
+    room = {i: s - floor for i, s in enumerate(shares) if s > floor}
+    available = sum(room.values())
+    owed = sum(deficits.values())
+    if available <= 0:
+        return shares
+    paid = min(owed, available)
+    for i, spare in room.items():
+        shares[i] -= paid * spare / available
+    for i, short_by in deficits.items():
+        shares[i] += paid * short_by / owed
+    return shares
+
+
+def _whole_seconds(shares: List[float], total: int) -> List[float]:
+    """Round to whole seconds without losing (or inventing) any.
+
+    Largest-remainder assignment, same as second_budget._to_whole_seconds and
+    for the same reason: the truncated seconds are film the customer paid for,
+    and dropping one from each of three shots is three seconds gone from a
+    thirty-second drama.
+    """
+    whole = [int(s) for s in shares]
+    shortfall = total - sum(whole)
+    order = sorted(
+        range(len(shares)), key=lambda i: shares[i] - whole[i], reverse=True
+    )
+    for i in order:
+        if shortfall <= 0:
+            break
+        whole[i] += 1
+        shortfall -= 1
+    return [float(w) for w in whole]

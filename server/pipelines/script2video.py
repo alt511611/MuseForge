@@ -1843,7 +1843,15 @@ class Script2VideoPipeline:
         the trim used, so the hit lands on the join rather than near it.
         """
         duration = _probe_duration(scene_path)
+        # Read exactly as the trim reads it (see _process_shot): deliver_seconds
+        # is only set where the generated and delivered lengths differ, so a
+        # coverage shot -- which is delivered whole, at its share of the scene's
+        # budget -- carries its length in duration_seconds alone. Reading only
+        # the first field put the cut position at 0 on every coverage scene,
+        # which is "no cut here" and skipped the pass entirely.
         cut_at = float(getattr(shots[0], "deliver_seconds", 0.0) or 0.0)
+        if cut_at <= 0:
+            cut_at = float(getattr(shots[0], "duration_seconds", 0.0) or 0.0)
         beats = plan_impacts(cut_at or None, tension=scene_tension, duration=duration)
         if not beats:
             return scene_path
