@@ -375,3 +375,85 @@ def _whole_seconds(shares: List[float], total: int) -> List[float]:
         whole[i] += 1
         shortfall -= 1
     return [float(w) for w in whole]
+
+
+#: Words per second used to decide, before a frame is rendered, whether a shot
+#: OPENS after the scene's dialogue has already stopped.
+#:
+#: Deliberately slower than the ~2.5 the caption layout guesses with
+#: (idea2video._estimate_line_duration_seconds), because the two errors do not
+#: cost the same thing. Guess too slow and an angle that is in fact silent
+#: keeps the speaking direction -- today's behaviour, no worse. Guess too fast
+#: and a shot the line is still playing under is directed to keep its mouth
+#: shut, which is the closed-mouth delivery the mouth clause in
+#: build_frame_prompt exists to prevent. Measured across the three lines of a
+#: delivered job: 1.73, 2.2 and 3.4 words per second.
+SLOWEST_SPEECH_WORDS_PER_SECOND = 1.5
+
+#: And then a second of air on top, so a line that outruns even the slow floor
+#: still lands inside a shot that was directed for it.
+POST_LINE_MARGIN_SECONDS = 1.0
+
+
+def screen_seconds(shot: Any) -> float:
+    """How long ONE shot is on screen, read the way the trim reads it.
+
+    ``deliver_seconds`` is only set where the generated and delivered lengths
+    differ, so a coverage angle -- delivered whole, at its share of the
+    scene's budget -- carries its length in ``duration_seconds`` alone. Same
+    rule as script2video._apply_impact, which learned it the hard way.
+
+    Distinct from `delivered_seconds` above, which totals a whole PLAN of
+    PlannedShots and reads `generate_seconds` as its fallback. This one reads
+    a storyboarded shot, whose fallback field is a different name.
+    """
+    for field in ("deliver_seconds", "duration_seconds"):
+        try:
+            value = float(getattr(shot, field, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if value > 0:
+            return value
+    return 0.0
+
+
+def shots_the_line_reaches(
+    shots: Sequence[Any], scene_dialogue: str
+) -> List[bool]:
+    """Which of a scene's angles are still under the dialogue when they open.
+
+    A scene's speech is laid down from the scene's own start
+    (idea2video.plan_scene_speech_anchors), and the picture is cut into angles
+    that divide the same budget (split_scene_seconds). So an angle that opens
+    after the last word has been said has no dialogue in it -- and directing
+    it as though it did is how a delivered drama ended up with ten seconds of
+    its protagonist mouthing a speech in total silence at the climax: a
+    12-second scene, a 1.46-second line, and a second 6-second angle generated
+    from the same "the speaking character's mouth is fully visible, their lips
+    will be animated" direction as the first.
+
+    Nothing here fires for a single-angle scene, which is the default and the
+    overwhelming majority: one angle opens at zero, and zero is under every
+    line there has ever been.
+    """
+    count = len(shots or [])
+    if count <= 1:
+        return [True] * count
+
+    words = len((scene_dialogue or "").split())
+    if not words:
+        # No dialogue at all. Nothing to be after; the caller's own
+        # has_dialogue flag already covers this case.
+        return [True] * count
+
+    line_ends = words / SLOWEST_SPEECH_WORDS_PER_SECOND + POST_LINE_MARGIN_SECONDS
+    reached: List[bool] = []
+    opens_at = 0.0
+    for shot in shots:
+        # A reaction cutaway is the other character LISTENING (see
+        # plan_scene_shots); there is no mouth in it to drive whatever the
+        # clock says.
+        role = str(getattr(shot, "role", "") or "").strip().lower()
+        reached.append(role != REACTION and opens_at < line_ends)
+        opens_at += screen_seconds(shot)
+    return reached

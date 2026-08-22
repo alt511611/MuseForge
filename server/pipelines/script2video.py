@@ -29,6 +29,7 @@ from tools.muapi_image_generator import MuAPIImageGenerator
 from tools.muapi_video_generator import MuAPIVideoGenerator
 from tools.muapi_client import MuAPICancelled
 from interfaces.shot_plan import REACTION as REACTION_ROLE
+from interfaces.shot_plan import shots_the_line_reaches
 from tools.video_model_router import REACTION as REACTION_PROFILE
 from tools.video_model_router import classify_shot
 
@@ -767,7 +768,9 @@ def build_frame_prompt(
     ])
 
 
-def build_motion_prompt(shot, matched_char=None, world_state: str = "") -> str:
+def build_motion_prompt(
+    shot, matched_char=None, world_state: str = "", speaking: bool = True
+) -> str:
     """Build the prompt sent to the video (image-to-video) model.
 
     Previously this was ``shot.motion_desc`` alone, which starved the
@@ -783,6 +786,14 @@ def build_motion_prompt(shot, matched_char=None, world_state: str = "") -> str:
     could be correctly dark and the five seconds animated out of it had no
     idea the lights were meant to be off -- and "a lit night harbour" is a far
     stronger prior in a video model than anything the still can imply.
+
+    ``speaking`` is False for an angle that opens after the scene's last word
+    (interfaces/shot_plan.shots_the_line_reaches). It has to be SAID: the
+    storyboard artist designs every angle of a dialogue scene knowing the
+    words, so the motion description it writes for the second one is still a
+    person talking -- and an image-to-video model handed a face and a line of
+    action will animate a mouth whether or not any sound will ever be laid
+    under it.
     """
     parts = []
     camera = (getattr(shot, "camera_movement", "") or "").strip().rstrip(".")
@@ -819,6 +830,16 @@ def build_motion_prompt(shot, matched_char=None, world_state: str = "") -> str:
         )
     name = (getattr(matched_char, "name", "") or "").strip() if matched_char else ""
     subject = name or "each character"
+    if not speaking:
+        # Stated as what the shot IS rather than as a prohibition: "does not
+        # speak" is a negation, and this model has no negative prompt to put
+        # one in (see the note on Kling's parameters below). A closed mouth
+        # and a held breath are things to perform.
+        parts.append(
+            f"{subject} has finished speaking and says nothing at all in this "
+            f"shot: the mouth stays closed, the jaw still, the breath held. "
+            f"Everything this shot plays is in the eyes and the body."
+        )
     parts.append(
         f"Keep {subject}'s facial identity EXACTLY as in the source image "
         f"throughout the shot — the same face in the last frame as in the "
@@ -2150,6 +2171,12 @@ class Script2VideoPipeline:
             lipsync_enabled=lipsync_enabled,
         )
 
+        # Which angles the words actually reach. A dialogue scene used to hand
+        # the SAME "this character is speaking" direction to every angle it
+        # bought, including the ones that open after the last word -- see
+        # shots_the_line_reaches for what that delivered.
+        line_reaches = shots_the_line_reaches(shots, scene_dialogue)
+
         shot_videos: List[Optional[str]] = [None] * len(shots)
         shot_meta: List[Optional[Dict[str, Any]]] = [None] * len(shots)
         completed_count = 0
@@ -2295,13 +2322,19 @@ class Script2VideoPipeline:
                         world_state or ""
                     ).strip()
 
+                    # Per SHOT, not per scene: an angle the line never
+                    # reaches is not a dialogue frame, and asking it to
+                    # present a mouth to camera for a sync pass that will
+                    # never touch it is how the silence gets performed.
+                    shot_has_dialogue = has_dialogue and line_reaches[i]
+
                     frame_prompt = build_frame_prompt(
                         style,
                         shot,
                         setting_location=setting_location,
                         setting_time_of_day=setting_time_of_day,
                         setting_era=setting_era,
-                        has_dialogue=has_dialogue,
+                        has_dialogue=shot_has_dialogue,
                         lipsync_enabled=lipsync_enabled,
                         characters=characters,
                         matched_char=matched_char,
@@ -2349,10 +2382,13 @@ class Script2VideoPipeline:
                         # dynamic-reference chaining.
                         frame_url = reference_url
                         shot.frame_url = frame_url
-                        video_prompt = (
-                            f"{frame_prompt} "
-                            f"{build_motion_prompt(shot, matched_char, world_state=change_state)}"
+                        motion_prompt = build_motion_prompt(
+                            shot,
+                            matched_char,
+                            world_state=change_state,
+                            speaking=shot_has_dialogue,
                         )
+                        video_prompt = f"{frame_prompt} {motion_prompt}"
                     else:
                         # Frame generation + optional QA happen BEFORE video
                         # animation (the expensive, slow step) so a rejected
@@ -2412,7 +2448,10 @@ class Script2VideoPipeline:
                                         exc,
                                     )
                         video_prompt = build_motion_prompt(
-                            shot, matched_char, world_state=change_state
+                            shot,
+                            matched_char,
+                            world_state=change_state,
+                            speaking=shot_has_dialogue,
                         )
 
                         # The acted PEAK, rendered as a real end frame so the
@@ -2457,7 +2496,7 @@ class Script2VideoPipeline:
                             visual_desc=getattr(shot, "visual_desc", "") or "",
                             camera_movement=getattr(shot, "camera_movement", "") or "",
                             shot_type=getattr(shot, "shot_type", "") or "",
-                            has_dialogue=has_dialogue,
+                            has_dialogue=shot_has_dialogue,
                             scene_tension=scene_tension,
                             has_character=matched_char is not None,
                         )
