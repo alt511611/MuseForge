@@ -2213,12 +2213,29 @@ async def burn_subtitles(
     # provider measured its words. Not a fallback chain out of caution: these
     # are two different house styles, and the plain one is right for a 16:9
     # drama in the same way the kinetic one is right for a vertical feed.
+    #
+    # Which is why the flag alone cannot be the whole decision. It is set per
+    # DEPLOYMENT and the shape of the picture is set per JOB, so a deployment
+    # serving both got word-by-word captions -- three words at a time, in
+    # accent yellow, sized and placed for a phone held at arm's length -- burnt
+    # onto a 1920x1080 cinematic master. Delivered, and the single most
+    # recognisably un-cinematic thing in the frame. The style follows the
+    # picture it is being written onto.
     if is_word_captions_enabled():
-        kinetic = await _burn_kinetic_captions(
-            video_path, output_path, dialogue_tracks, scene_paths
-        )
-        if kinetic:
-            return kinetic
+        width, height = _probe_video_size(video_path)
+        if width and height and width > height:
+            logger.info(
+                "Word captions are enabled, but this master is %dx%d — "
+                "landscape gets the broadcast caption style, not the feed one.",
+                width,
+                height,
+            )
+        else:
+            kinetic = await _burn_kinetic_captions(
+                video_path, output_path, dialogue_tracks, scene_paths
+            )
+            if kinetic:
+                return kinetic
 
     srt_path = None
     try:
