@@ -20,6 +20,7 @@ the master and the cutaway — which is exactly where an editor would put it.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from typing import List, Optional
@@ -52,6 +53,10 @@ SHAKE_PIXELS = 9
 #: blue separation, which is what a physical lens does under stress and what
 #: every action film adds back digitally.
 ABERRATION_PIXELS = 2
+
+#: How many frames carry it. Longer than the flash on purpose -- the flash is
+#: the hit and the aberration is the lens still recovering from it.
+ABERRATION_FRAMES = 2
 
 #: The picture is cropped by this fraction before shaking so the frame has
 #: somewhere to move without exposing black edges, then scaled back.
@@ -171,9 +176,7 @@ def build_impact_filters(
         filters.append("setsar=1")
 
     flash_windows = [
-        f"between(t,{b.at_seconds:.3f},{b.at_seconds + frame * FLASH_FRAMES:.3f})"
-        for b in beats
-        if b.flash
+        _frame_window(b.at_seconds, FLASH_FRAMES, fps) for b in beats if b.flash
     ]
     if flash_windows:
         filters.append(
@@ -181,7 +184,7 @@ def build_impact_filters(
         )
 
     aberration_windows = [
-        f"between(t,{b.at_seconds:.3f},{b.at_seconds + frame * 2:.3f})"
+        _frame_window(b.at_seconds, ABERRATION_FRAMES, fps)
         for b in beats
         if b.aberration
     ]
@@ -192,6 +195,41 @@ def build_impact_filters(
         )
 
     return filters
+
+
+def _frame_window(at_seconds: float, frames: int, fps: float) -> str:
+    """An ffmpeg ``between`` covering EXACTLY ``frames`` frames from ``at``.
+
+    ``between`` is inclusive at both ends, and the window used to end on the
+    timestamp of the frame after the last one it wanted -- so a one-frame
+    flash lit two. Measured on a delivered drama, the two frames either side
+    of its impact:
+
+        23.925s  YAVG  54.1
+        23.967s  YAVG 230.0   <- flash
+        24.008s  YAVG 231.6   <- flash again
+        24.050s  YAVG  77.3
+
+    83 milliseconds of white, which is the exact duration FLASH_FRAMES was
+    set to 1 to avoid: long enough that the eye stops reading it as a flash
+    and starts reading it as a dropped frame.
+
+    So the beat is snapped to a real frame, and then both bounds are placed
+    half a frame AWAY from one -- the window opens in the gap before the
+    frame it wants and closes in the gap after the last one it wants. No
+    bound ever sits on a timestamp it has to compare equal to, which is what
+    made the old window depend on which way `%.3f` happened to round:
+    6.0416667 printed as "6.042", and an inclusive bound swallowed the frame
+    at 6.0416667 along with the one at 6.0.
+    """
+    step = 1.0 / max(1.0, float(fps))
+    # round() before ceil() so a beat already ON a frame -- the common case,
+    # since a coverage share is whole seconds -- is not pushed to the next
+    # one by floating-point dust.
+    snapped = math.ceil(round(float(at_seconds) / step, 6)) * step
+    start = snapped - 0.5 * step
+    end = snapped + (max(1, int(frames)) - 0.5) * step
+    return f"between(t,{start:.4f},{end:.4f})"
 
 
 def _even(value: float) -> int:
