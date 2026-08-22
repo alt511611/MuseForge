@@ -7,7 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from agents.screenwriter import ScreenwriterAgent, ScriptGenerationFailed
 from interfaces import ass_captions
@@ -567,14 +567,27 @@ def _music_style_hint(script: DramaScript) -> str:
     return (", ".join(parts) + ".") if parts else ""
 
 
-def _format_scene_dialogue(dialogue: List[Any]) -> str:
+def _format_scene_dialogue(
+    dialogue: List[Any], off_screen: Optional[Set[str]] = None
+) -> str:
     """Render dialogue lines as "Name: line" text for the storyboard artist.
 
     The storyboard step previously saw ONLY the scene's action line, so the
     words that carry the scene's emotional turn were invisible to the agent
     choosing which moment to draw — a direct cause of shots that felt
     unrelated to the story.
+
+    ``off_screen`` names the speakers the film only HEARS (see
+    _heard_but_never_seen). Marking them in the cast list alone is not enough:
+    that list is what the designer is given to DESCRIBE, so a voice removed
+    from it simply vanishes -- and the designer, reading a scene where the
+    name plainly speaks, is free to stage a person nobody described. Said in
+    the dialogue itself, where the name actually appears, it becomes what it
+    is: a voice. The marker is screenwriting's own (O.S.), which is also one
+    the frame step reads (script2video._OFF_SCREEN_MARKERS), so a designer who
+    carries it through into a shot description is still understood.
     """
+    heard = {name for name in (off_screen or set())}
     lines = []
     for entry in dialogue or []:
         if isinstance(entry, dict):
@@ -585,7 +598,15 @@ def _format_scene_dialogue(dialogue: List[Any]) -> str:
             line = str(getattr(entry, "line", "") or "").strip()
         if not line:
             continue
-        lines.append(f"{character}: {line}" if character else line)
+        if character and character.casefold() in heard:
+            lines.append(
+                f"{character} (O.S. — a voice only, heard over comms and never "
+                f"in frame; do not stage them): {line}"
+            )
+        elif character:
+            lines.append(f"{character}: {line}")
+        else:
+            lines.append(line)
     return "\n".join(lines)
 
 
@@ -2548,6 +2569,57 @@ async def trim_clip(
         return source_path
 
 
+def _heard_but_never_seen(script: DramaScript, cast: List[CharacterInScene]) -> set:
+    """Casefolded names of characters the film only ever HEARS.
+
+    A drama can put someone in every scene's dialogue and never once in front
+    of the camera -- a controller on the radio, a voice on an intercom -- and
+    ``is_visible`` is the field that says so. Nothing ever set it: every
+    character came back visible, so a voice on a handset was given a generated
+    portrait nobody sees, a place in the closed-cast clause ("X, Y appear in
+    this story"), and one end of the 180-degree axis that tells every frame
+    which way the other person is facing. Delivered against a brief with ONE
+    dock worker in it: a second character spoke through all three scenes,
+    appeared in none, and held a screen-direction lock over a film he was not
+    in.
+
+    Seen is read from the ACTION lines with the same rule that picks each
+    shot's reference portrait (script2video.on_screen_name_matches), so the
+    cast-level answer and the frame-level one cannot disagree -- and so
+    "Tomas's voice crackles over the radio" counts as heard, not seen.
+
+    Deliberately narrow, because the cost is asymmetric. Wrongly marking a
+    character invisible takes away their portrait and their identity lock, and
+    a shot that then shows them renders a stranger; wrongly leaving one
+    visible costs a portrait and a name in a clause. So this only fires on the
+    case it can actually prove: a character who SPEAKS, is named in no action
+    line anywhere, and whose absence still leaves somebody on screen.
+    """
+    from pipelines.script2video import on_screen_name_matches
+
+    on_screen = set()
+    speaks = set()
+    for scene in getattr(script, "scenes", None) or []:
+        action = _scene_action(scene)
+        if action:
+            for _, character in on_screen_name_matches(action.lower(), cast):
+                on_screen.add(character.name.casefold())
+        for line in _scene_dialogue(scene):
+            who = (
+                line.get("character") if isinstance(line, dict)
+                else getattr(line, "character", "")
+            )
+            if who:
+                speaks.add(str(who).strip().casefold())
+
+    # Nobody was named in any action line: the script is written without them,
+    # not around one absent voice. Marking the whole cast invisible would
+    # leave every frame with no identity lock at all.
+    if not on_screen:
+        return set()
+    return {name for name in speaks if name not in on_screen}
+
+
 class Idea2VideoPipeline:
     def __init__(self, api_key: str, demo: bool = False):
         self.api_key = api_key
@@ -2988,7 +3060,7 @@ class Idea2VideoPipeline:
             _record_take(scene, take, scene.get("clip_url"), local_path)
 
     def _characters_from_script(self, script: DramaScript) -> List[CharacterInScene]:
-        return [
+        cast = [
             CharacterInScene(
                 idx=i,
                 name=c.name,
@@ -2999,6 +3071,10 @@ class Idea2VideoPipeline:
             )
             for i, c in enumerate(script.characters)
         ]
+        for character in cast:
+            if character.name.casefold() in _heard_but_never_seen(script, cast):
+                character.is_visible = False
+        return cast
 
     async def _rerender_scenes(
         self,
@@ -3158,7 +3234,12 @@ class Idea2VideoPipeline:
                     has_dialogue=bool(_scene_dialogue(scene_script)),
                     lipsync_enabled=bool(previous_result.get("lipsynced_scenes")),
                     scene_emotion=_scene_emotion(scene_script),
-                    scene_dialogue=_format_scene_dialogue(_scene_dialogue(scene_script)),
+                    scene_dialogue=_format_scene_dialogue(
+                        _scene_dialogue(scene_script),
+                        off_screen={
+                            c.name.casefold() for c in characters if not c.is_visible
+                        },
+                    ),
                     scene_direction=_format_scene_direction(scene_script),
                     # A retake replaces one scene inside a cut that already
                     # exists, so it needs the same story-state fence the first
@@ -4582,7 +4663,12 @@ class Idea2VideoPipeline:
                     # Always pass the words themselves to the storyboard step,
                     # independent of whether VOICE generation is enabled --
                     # dialogue is what tells the artist which moment matters.
-                    scene_dialogue=_format_scene_dialogue(scene_dialogue_lines),
+                    scene_dialogue=_format_scene_dialogue(
+                        scene_dialogue_lines,
+                        off_screen={
+                            c.name.casefold() for c in characters if not c.is_visible
+                        },
+                    ),
                     scene_direction=_format_scene_direction(scene),
                     # Where this scene sits in the story. Without it every
                     # scene is designed as if it were the only one, and the
