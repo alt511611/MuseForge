@@ -624,7 +624,9 @@ def is_finishing_enabled() -> bool:
     )
 
 
-async def finalize_master(video_path: str, output_path: str) -> str:
+async def finalize_master(
+    video_path: str, output_path: str, caption_filter: str = ""
+) -> str:
     """One finishing encode: fade in from black, fade out to black, and --
     when the video carries audio -- matching audio fades plus EBU R128
     loudness normalization to -14 LUFS (the delivery loudness streaming
@@ -632,8 +634,16 @@ async def finalize_master(video_path: str, output_path: str) -> str:
     quiet or hot next to everything else the viewer watches).
 
     Single pass so it costs ONE encode at the shared CRF-18 profile, not one
-    per effect. Fails open: any error ships the un-finished video rather
-    than failing the job, matching the rest of the assembly chain.
+    per effect. ``caption_filter`` (see build_caption_filter) joins that pass
+    for the same reason: the caption burn is another full re-encode of the
+    same picture, measured at 237 seconds against this pass's 325 on a
+    60-second master, and the two produce one file between them.
+
+    Fails open: any error ships the un-finished video rather than failing the
+    job, matching the rest of the assembly chain -- EXCEPT when captions were
+    folded in, where failing open would drop the captions as well as the
+    fades. That case returns ``video_path`` unchanged, which tells the caller
+    to fall back to burning them in a pass of their own.
     """
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
@@ -642,6 +652,16 @@ async def finalize_master(video_path: str, output_path: str) -> str:
             with open(video_path, "rb") as src, open(output_path, "wb") as dst:
                 dst.write(src.read())
         return output_path
+
+    def _decline() -> str:
+        """What to hand back when this pass is not going to run at all.
+
+        Without captions that is the input, copied through, exactly as before.
+        With them it has to be the input ITSELF -- the caller reads that as
+        "the merge did not happen" and burns them in a pass of their own,
+        rather than shipping a master that quietly lost them.
+        """
+        return video_path if caption_filter else _copy_through()
 
     try:
         from moviepy import VideoFileClip
@@ -652,11 +672,11 @@ async def finalize_master(video_path: str, output_path: str) -> str:
             width, height = (clip.size or (0, 0))
     except Exception as exc:
         logger.warning("Finishing pass could not probe video, skipping: %s", exc)
-        return _copy_through()
+        return _decline()
 
     # Too short to fade meaningfully -- don't eat the whole clip with fades.
     if duration < (FADE_IN_SECONDS + FADE_OUT_SECONDS) * 2:
-        return _copy_through()
+        return _decline()
 
     fade_out_start = max(0.0, duration - FADE_OUT_SECONDS)
     # Film-look filters ride along in THIS encode. Cadence, grain and matte
@@ -665,8 +685,15 @@ async def finalize_master(video_path: str, output_path: str) -> str:
     # of four. Order matters: resample and matte before grain, so the noise is
     # generated at the delivered frame rate and is not itself resampled.
     look_filters, look_args = build_film_look_filters(width, height)
+    # Captions go AFTER the look and BEFORE the fades, and both halves of that
+    # matter. After the matte, or a scope crop would cut the line off the
+    # bottom of the frame; after the grain, so the text stays crisp instead of
+    # being dissolved into it. Before the fades, or a caption sits at full
+    # brightness over a picture fading to black, which is the one caption
+    # error a viewer reads instantly as broken.
     vf = ",".join(
         look_filters
+        + ([caption_filter] if caption_filter else [])
         + [
             f"fade=t=in:st=0:d={FADE_IN_SECONDS}",
             f"fade=t=out:st={fade_out_start:.3f}:d={FADE_OUT_SECONDS}",
@@ -725,6 +752,16 @@ async def finalize_master(video_path: str, output_path: str) -> str:
         )
     except Exception as exc:
         logger.warning("Finishing pass unavailable, shipping un-finished video: %s", exc)
+    if caption_filter:
+        # The captions were riding on this encode. Copying through here would
+        # ship a master with neither them nor the fades, so hand the caller
+        # back its own input: it burns them separately, exactly as it did
+        # before the two passes were folded together.
+        try:
+            os.unlink(output_path)
+        except OSError:
+            pass
+        return video_path
     try:
         os.unlink(output_path)
     except OSError:
@@ -2110,78 +2147,100 @@ def _escape_subtitles_filter_path(path: str) -> str:
     return escaped
 
 
-async def _burn_kinetic_captions(
+def _write_caption_file(document: str, suffix: str, prefix: str, directory: str) -> str:
+    """Write a caption document beside the master and return its path."""
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=suffix,
+        prefix=prefix,
+        dir=directory or ".",
+        delete=False,
+        encoding="utf-8",
+    ) as handle:
+        handle.write(document)
+        return handle.name
+
+
+def _kinetic_caption_filter(
     video_path: str,
-    output_path: str,
     dialogue_tracks: List[Dict[str, Any]],
     scene_paths: Optional[List[str]] = None,
-) -> Optional[str]:
-    """Burn word-by-word captions, or return None to leave it to the SRT path.
+) -> Tuple[str, Optional[str]]:
+    """Word-by-word captions as an ffmpeg filter, or ("", None) to decline.
 
-    None is returned for every ordinary reason not to do this -- no measured
-    word timings in any track, an ffmpeg that cannot render ASS, a failed
-    encode -- so the caller simply carries on and burns the plain captions it
-    always has.
+    Declined for every ordinary reason there is not to do this: the master is
+    landscape (this is a vertical-feed house style, see interfaces/
+    ass_captions), or no track carries measured word timings, which is every
+    voice provider except the direct ElevenLabs path.
     """
     width, height = _probe_video_size(video_path)
+    if width and height and width > height:
+        logger.info(
+            "Word captions are enabled, but this master is %dx%d — "
+            "landscape gets the broadcast caption style, not the feed one.",
+            width,
+            height,
+        )
+        return "", None
     document = build_kinetic_ass(
         dialogue_tracks, scene_paths=scene_paths, width=width or 1080, height=height or 1920
     )
     if not document.strip():
-        return None
+        return "", None
+    path = _write_caption_file(
+        document, ".ass", "museforge_kinetic_", os.path.dirname(video_path)
+    )
+    return f"ass={_escape_subtitles_filter_path(path)}", path
 
-    ass_path = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            suffix=".ass",
-            prefix="museforge_kinetic_",
-            dir=os.path.dirname(output_path) or ".",
-            delete=False,
-            encoding="utf-8",
-        ) as handle:
-            ass_path = handle.name
-            handle.write(document)
 
-        process = await asyncio.create_subprocess_exec(
-            resolve_ffmpeg_binary(),
-            "-y",
-            "-i",
-            video_path,
-            "-vf",
-            f"ass={_escape_subtitles_filter_path(ass_path)}",
-            *video_encode_args(),
-            # The mix is already made and must survive being written over.
-            "-c:a",
-            "copy",
-            output_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await process.communicate()
-        if process.returncode == 0 and os.path.isfile(output_path):
-            return output_path
-        logger.warning(
-            "Kinetic caption burn failed (exit=%s), falling back to plain "
-            "captions: %s",
-            process.returncode,
-            stderr.decode("utf-8", errors="replace")[-800:],
-        )
-    except Exception as exc:
-        logger.warning(
-            "Kinetic captions unavailable, falling back to plain captions: %s", exc
-        )
-    finally:
-        if ass_path:
-            try:
-                os.unlink(ass_path)
-            except OSError:
-                pass
-    try:
-        os.unlink(output_path)
-    except OSError:
-        pass
-    return None
+def _broadcast_caption_filter(
+    video_path: str,
+    dialogue_tracks: List[Dict[str, Any]],
+    scene_paths: Optional[List[str]] = None,
+) -> Tuple[str, Optional[str]]:
+    """Broadcast-style captions as an ffmpeg filter, or ("", None).
+
+    White primary text, black outline, BorderStyle=3 = opaque box behind the
+    text for readability on busy backgrounds. Every size is measured off this
+    video's own frame -- see build_caption_style.
+    """
+    body = build_srt_from_dialogue_tracks(list(dialogue_tracks), scene_paths=scene_paths)
+    if not body.strip():
+        return "", None
+    path = _write_caption_file(
+        body, ".srt", "museforge_subs_", os.path.dirname(video_path)
+    )
+    force_style = build_caption_style(*_probe_video_size(video_path))
+    return (
+        f"subtitles={_escape_subtitles_filter_path(path)}:force_style='{force_style}'",
+        path,
+    )
+
+
+def build_caption_filter(
+    video_path: str,
+    dialogue_tracks: Optional[List[Dict[str, Any]]] = None,
+    scene_paths: Optional[List[str]] = None,
+) -> Tuple[str, Optional[str]]:
+    """The -vf fragment that burns this drama's captions, and the file it reads.
+
+    Separated from the encode that applies it so the SAME fragment can ride
+    along in the finishing pass instead of paying for a re-encode of its own:
+    on a 60-second delivered master the caption burn cost 237 seconds and the
+    finishing pass 325, for two full passes over the same picture.
+
+    The caller owns the returned path and must delete it after the encode.
+    ("", None) means there is nothing to burn.
+    """
+    if not dialogue_tracks:
+        return "", None
+    # Two house styles, not a fallback chain: the plain one is right for a
+    # 16:9 drama in the same way the kinetic one is right for a vertical feed.
+    if is_word_captions_enabled():
+        kinetic, path = _kinetic_caption_filter(video_path, dialogue_tracks, scene_paths)
+        if kinetic:
+            return kinetic, path
+    return _broadcast_caption_filter(video_path, dialogue_tracks, scene_paths)
 
 
 async def burn_subtitles(
@@ -2190,11 +2249,12 @@ async def burn_subtitles(
     dialogue_tracks: list,
     scene_paths: Optional[List[str]] = None,
 ) -> str:
-    """Burn dialogue captions into ``video_path`` via ffmpeg's subtitles filter.
+    """Burn dialogue captions into ``video_path`` in a pass of their own.
 
-    Builds a temporary .srt from ``dialogue_tracks`` (white text + black outline
-    / box for readability). Fails open: on any error the original video is
-    copied through unchanged — same pattern as watermark / color grade.
+    Used when the finishing pass is off; when it is on, the same filter rides
+    along in that encode instead (see build_caption_filter). Fails open: on any
+    error the original video is copied through unchanged — same pattern as
+    watermark / colour grade.
     """
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
@@ -2206,69 +2266,16 @@ async def burn_subtitles(
                 dst.write(data)
         return output_path
 
-    if not dialogue_tracks:
-        return _copy_through()
-
-    # Kinetic captions first, when the deployment asked for them AND the voice
-    # provider measured its words. Not a fallback chain out of caution: these
-    # are two different house styles, and the plain one is right for a 16:9
-    # drama in the same way the kinetic one is right for a vertical feed.
-    #
-    # Which is why the flag alone cannot be the whole decision. It is set per
-    # DEPLOYMENT and the shape of the picture is set per JOB, so a deployment
-    # serving both got word-by-word captions -- three words at a time, in
-    # accent yellow, sized and placed for a phone held at arm's length -- burnt
-    # onto a 1920x1080 cinematic master. Delivered, and the single most
-    # recognisably un-cinematic thing in the frame. The style follows the
-    # picture it is being written onto.
-    if is_word_captions_enabled():
-        width, height = _probe_video_size(video_path)
-        if width and height and width > height:
-            logger.info(
-                "Word captions are enabled, but this master is %dx%d — "
-                "landscape gets the broadcast caption style, not the feed one.",
-                width,
-                height,
-            )
-        else:
-            kinetic = await _burn_kinetic_captions(
-                video_path, output_path, dialogue_tracks, scene_paths
-            )
-            if kinetic:
-                return kinetic
-
-    srt_path = None
+    caption_path = None
     try:
-        srt_body = build_srt_from_dialogue_tracks(
-            list(dialogue_tracks), scene_paths=scene_paths
+        vf, caption_path = build_caption_filter(
+            video_path, dialogue_tracks, scene_paths
         )
-        if not srt_body.strip():
+        if not vf:
             return _copy_through()
 
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            suffix=".srt",
-            prefix="museforge_subs_",
-            dir=os.path.dirname(output_path) or ".",
-            delete=False,
-            encoding="utf-8",
-        ) as srt_file:
-            srt_path = srt_file.name
-            srt_file.write(srt_body)
-
-        ffmpeg_binary = resolve_ffmpeg_binary()
-
-        # White primary text, black outline, BorderStyle=3 = opaque box behind
-        # text for readability on busy backgrounds. Every size is measured off
-        # this video's own frame -- see build_caption_style.
-        force_style = build_caption_style(*_probe_video_size(video_path))
-        vf = (
-            f"subtitles={_escape_subtitles_filter_path(srt_path)}"
-            f":force_style='{force_style}'"
-        )
-
         process = await asyncio.create_subprocess_exec(
-            ffmpeg_binary,
+            resolve_ffmpeg_binary(),
             "-y",
             "-i",
             video_path,
@@ -2291,15 +2298,10 @@ async def burn_subtitles(
         )
     except Exception as exc:
         logger.warning("Subtitle burn unavailable, shipping without captions: %s", exc)
-        try:
-            os.unlink(output_path)
-        except OSError:
-            pass
-        return _copy_through()
     finally:
-        if srt_path:
+        if caption_path:
             try:
-                os.unlink(srt_path)
+                os.unlink(caption_path)
             except OSError:
                 pass
 
@@ -4131,30 +4133,79 @@ class Idea2VideoPipeline:
         else:
             await add_background_music(graded_path, with_music_path, music_url)
 
-        # Burn captions only when dialogue tracks are actually present —
-        # no extra ffmpeg work when dialogue is off / empty.
+        # Captions and the finishing pass are two full re-encodes of the same
+        # picture, back to back -- measured on a 60-second delivered master at
+        # 237s and 325s, nine and a half minutes of a thirty-three minute job
+        # spent writing the same frames twice, and a generation loss for it.
+        # When both are running they are folded into ONE encode: the caption
+        # filter is built here and handed to the finishing pass.
+        #
+        # The fallback is the reason this is safe. Both stages fail open on
+        # their own, and merging them would otherwise mean a failure that used
+        # to cost captions now costs the fades, the film look and the delivery
+        # loudness as well -- so a finishing pass that could not run with them
+        # hands back its own input, and the two passes run separately exactly
+        # as they always did.
         video_for_final = with_music_path
-        if dialogue_tracks:
-            _check_cancel()
-            if progress_callback:
-                await progress_callback("subtitles", "Burning captions", 95)
-            subtitled_path = os.path.join(working_dir, "drama_subtitled.mp4")
-            await burn_subtitles(
-                with_music_path,
-                subtitled_path,
-                dialogue_tracks,
-                scene_paths=scene_paths,
-            )
-            video_for_final = subtitled_path
+        finishing = is_finishing_enabled()
+        caption_filter, caption_file = "", None
+        try:
+            if dialogue_tracks and finishing:
+                caption_filter, caption_file = build_caption_filter(
+                    with_music_path, dialogue_tracks, scene_paths
+                )
 
-        # Master finishing (fades + loudness) BEFORE the watermark so the
-        # watermark stays at constant opacity over the fade to black.
-        if is_finishing_enabled():
-            _check_cancel()
-            if progress_callback:
-                await progress_callback("finishing", "Mastering fades & loudness", 96)
-            finished_path = os.path.join(working_dir, "drama_finished.mp4")
-            video_for_final = await finalize_master(video_for_final, finished_path)
+            if dialogue_tracks and not caption_filter:
+                _check_cancel()
+                if progress_callback:
+                    await progress_callback("subtitles", "Burning captions", 95)
+                subtitled_path = os.path.join(working_dir, "drama_subtitled.mp4")
+                await burn_subtitles(
+                    with_music_path,
+                    subtitled_path,
+                    dialogue_tracks,
+                    scene_paths=scene_paths,
+                )
+                video_for_final = subtitled_path
+
+            # Master finishing (fades + loudness) BEFORE the watermark so the
+            # watermark stays at constant opacity over the fade to black.
+            if finishing:
+                _check_cancel()
+                if progress_callback:
+                    await progress_callback(
+                        "finishing",
+                        "Mastering captions, fades & loudness"
+                        if caption_filter
+                        else "Mastering fades & loudness",
+                        96,
+                    )
+                finished_path = os.path.join(working_dir, "drama_finished.mp4")
+                finished = await finalize_master(
+                    video_for_final, finished_path, caption_filter=caption_filter
+                )
+                if caption_filter and finished == video_for_final:
+                    logger.warning(
+                        "The finishing pass could not carry the captions; "
+                        "burning them on their own and finishing after, as "
+                        "two passes."
+                    )
+                    _check_cancel()
+                    subtitled_path = os.path.join(working_dir, "drama_subtitled.mp4")
+                    await burn_subtitles(
+                        video_for_final,
+                        subtitled_path,
+                        dialogue_tracks,
+                        scene_paths=scene_paths,
+                    )
+                    finished = await finalize_master(subtitled_path, finished_path)
+                video_for_final = finished
+        finally:
+            if caption_file:
+                try:
+                    os.unlink(caption_file)
+                except OSError:
+                    pass
 
         final_path = os.path.join(working_dir, "drama_final.mp4")
         if plan in WATERMARK_PLANS:
