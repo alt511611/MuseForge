@@ -616,6 +616,47 @@ def build_frame_prompt(
             "gaze stays inside the scene — on the other character, or on the "
             "object they are handling — as if the camera were not there. "
         )
+    # WHO THIS SHOT SHOWS, which is not the same list as who the SCENE has.
+    # The identity clause used to restate every character in the scene on
+    # every frame -- in a two-hander shot as singles (the overwhelming shape
+    # of a micro-drama) that is a full description of somebody who is not in
+    # the picture, ~230 characters of a 3,000-character budget, on every frame
+    # of the film. Two costs, and the second is the one that shows:
+    #
+    # * The budget it eats is taken from the end of the ladder below. Measured
+    #   on a delivered job, every dialogue frame lost the film-look note, the
+    #   180-degree rule, the closed-cast clause and the mouth-visibility line
+    #   the lip-sync pass depends on -- the four clauses that die first.
+    # * Describing an absent character to an image model is not neutral. It is
+    #   a face, in detail, in a prompt for a frame they are not in.
+    #
+    # Read the same way the reference portrait is chosen (on_screen_name_matches
+    # over the shot's own text, which discounts a name that is only HEARD), so
+    # the frame's picture and its words agree about who is present. A shot that
+    # names nobody falls back to the scene's cast, which is exactly the old
+    # behaviour and the right answer for an insert or an establishing plate.
+    in_frame = [
+        character
+        for _, character in on_screen_name_matches(
+            f"{shot.visual_desc} {getattr(shot, 'motion_desc', '') or ''}".lower(),
+            characters or [],
+        )
+        # is_visible is the cast-level answer to the same question, and the
+        # clause below filters by it anyway: without this, a shot naming only
+        # a never-seen character would narrow to a list that then describes
+        # NOBODY, and the frame would go out with no appearance lock at all.
+        if getattr(character, "is_visible", True)
+    ]
+    if in_frame and matched_char is not None and matched_char not in in_frame:
+        # The reference portrait's owner is in the frame by construction.
+        in_frame.insert(0, matched_char)
+    # Narrowed ONLY on evidence. A shot that named nobody may still have the
+    # whole scene in it -- the pipeline had to guess its own anchor there (see
+    # scene_subject) -- and guessing a second time, in the direction of
+    # describing FEWER of the people who might be on screen, is how a
+    # character comes back as a stranger.
+    identity_characters = in_frame or characters
+
     # Budget for the identity clause: whatever is left after the shot itself
     # and its framing, minus room for the setting clause. Everything else is
     # optional and trimmed by fit_image_prompt below.
@@ -635,7 +676,7 @@ def build_frame_prompt(
         - 200  # style prefix, shot type and lens line
     )
     identity_clause = build_character_identity_clause(
-        characters, matched_char, limit=max(identity_budget, 200)
+        identity_characters, matched_char, limit=max(identity_budget, 200)
     )
     cast_clause = build_cast_closure_clause(characters)
     direction_clause = build_screen_direction_clause(characters)
