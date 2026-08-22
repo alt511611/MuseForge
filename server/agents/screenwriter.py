@@ -313,7 +313,14 @@ that a silent one cannot, because dialogue offers an easy way to discharge the
 brief without filming it. So on the scene where the event happens: "world_change"
 names what the camera sees become different, the "action" shows it happening, and
 the dialogue is what someone says WHILE it happens — a reaction, an order, a
-half-finished sentence. Never a report of it, and never the only place it exists."""
+half-finished sentence. Never a report of it, and never the only place it exists.
+
+WRITE IT TO BE READ, TOO. Every line is spoken AND burned into the picture as a
+subtitle, from the same string — so spell each word the way it should look on
+screen and let the actor handle the saying of it. No pronunciation respellings, no
+syllable hyphens, no phonetic spacing: write "fourteen-oh-two", never
+"four-teen-oh-two"; "Route 7", never "Route seh-ven". A viewer who can hear the
+line does not need it sounded out, and a viewer reading it sees a typo."""
 
     #: Appended LAST-but-one, for the same reason the micro-drama clause goes
     #: last: it contradicts the base prompt's "Build 3-5 scenes" and a model

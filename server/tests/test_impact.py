@@ -23,6 +23,8 @@ os.environ.setdefault("MUAPI_KEY", "test-key-not-real")
 
 from interfaces import impact  # noqa: E402
 from interfaces.impact import (  # noqa: E402
+    ABERRATION_FRAMES,
+    FLASH_FRAMES,
     IMPACT_TENSION,
     SHAKE_SECONDS,
     build_impact_filters,
@@ -65,12 +67,62 @@ def test_a_shake_that_would_not_fit_is_not_started():
 # --- the filters -------------------------------------------------------
 
 
+def _window(expression: str) -> tuple:
+    """The (start, end) of the single ``between(t,a,b)`` in a filter."""
+    inner = expression.split("between(t,", 1)[1].split(")", 1)[0]
+    start, end = inner.split(",")
+    return float(start), float(end)
+
+
+def _frames_inside(window: tuple, fps: float = 24.0) -> int:
+    """How many real frame timestamps an INCLUSIVE ffmpeg window covers."""
+    start, end = window
+    step = 1.0 / fps
+    return sum(
+        1
+        for n in range(int(round(end * fps)) + 2)
+        if start <= round(n * step, 9) <= end
+    )
+
+
 def test_the_flash_is_one_frame_long():
+    """Named for the intent since the module was written; it was two.
+
+    `between` is inclusive at both ends and the window used to end exactly on
+    the NEXT frame's timestamp, so the delivered drama took 83ms of white --
+    the precise duration FLASH_FRAMES=1 exists to avoid.
+    """
     beats = plan_impacts(4.0, tension=10, duration=10.0)
     filters = build_impact_filters(beats, 1080, 1920, fps=24.0)
     flash = [f for f in filters if f.startswith("eq=")][0]
-    # 4.000 to 4.042: a single frame at 24fps.
-    assert "between(t,4.000,4.042)" in flash
+    assert _frames_inside(_window(flash)) == FLASH_FRAMES == 1
+
+
+def test_the_aberration_is_two_frames_long():
+    beats = plan_impacts(4.0, tension=10, duration=10.0)
+    filters = build_impact_filters(beats, 1080, 1920, fps=24.0)
+    shift = [f for f in filters if f.startswith("rgbashift=")][0]
+    assert _frames_inside(_window(shift)) == ABERRATION_FRAMES == 2
+
+
+@pytest.mark.parametrize("fps", [24.0, 25.0, 30.0])
+def test_the_flash_is_one_frame_at_any_frame_rate(fps):
+    filters = build_impact_filters(
+        plan_impacts(4.0, tension=10, duration=10.0), 1080, 1920, fps=fps
+    )
+    flash = [f for f in filters if f.startswith("eq=")][0]
+    assert _frames_inside(_window(flash), fps) == 1
+
+
+def test_a_cut_between_two_frames_still_lights_exactly_one():
+    """A coverage share is whole seconds today, but nothing guarantees the
+    join lands on a frame boundary -- and a window that falls between two of
+    them lights whichever the rounding favours, or neither."""
+    filters = build_impact_filters(
+        plan_impacts(4.017, tension=10, duration=10.0), 1080, 1920, fps=24.0
+    )
+    flash = [f for f in filters if f.startswith("eq=")][0]
+    assert _frames_inside(_window(flash)) == 1
 
 
 def test_the_shake_decays_and_is_evaluated_per_frame():
@@ -159,10 +211,18 @@ def test_ffmpeg_accepts_the_filter_chain_and_the_flash_is_visible(tmp_path):
     with VideoFileClip(out) as clip:
         assert clip.duration == pytest.approx(6.0, abs=0.2)
         calm = np.asarray(clip.get_frame(1.0)).mean()
-        flashed = np.asarray(clip.get_frame(3.02)).mean()
         after = np.asarray(clip.get_frame(4.5)).mean()
+        # Every frame across the hit, not one sample near it: a window that
+        # is one frame too wide is invisible to a single get_frame and is
+        # exactly what shipped.
+        step = 1.0 / 24.0
+        across = [
+            np.asarray(clip.get_frame(3.0 - 3 * step + n * step)).mean()
+            for n in range(8)
+        ]
 
-    assert flashed > calm + 40, "the impact frame is not brighter"
+    assert max(across) > calm + 40, "the impact frame is not brighter"
+    assert sum(1 for value in across if value > calm + 40) == FLASH_FRAMES
     # ...and it is a FLASH: the picture is back to normal immediately after.
     assert after == pytest.approx(calm, abs=6)
 
