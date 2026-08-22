@@ -4430,8 +4430,18 @@ class Idea2VideoPipeline:
 
         for char in characters:
             lib = lib_by_name.get(char.name)
-            if lib and lib.get("static_features"):
+            if not lib:
+                continue
+            if lib.get("static_features"):
                 char.static_features = str(lib["static_features"])
+            # The face was already being restored and the outfit was not, so a
+            # returning character came back with their own face, their own
+            # voice, and whatever this drama's screenwriter dressed them in --
+            # in a feature whose entire promise is that they are the same
+            # person as last time. The reference portrait cannot carry an
+            # outfit (see CharacterProfile.wardrobe); only this text can.
+            if lib.get("wardrobe"):
+                char.wardrobe = str(lib["wardrobe"])
 
         # If the user uploaded a reference photo under a name that doesn't
         # match any character the screenwriter came up with, add it as its

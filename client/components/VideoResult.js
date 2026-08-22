@@ -58,6 +58,10 @@ function SaveCharacterButton({ character }) {
           // episode's cast would otherwise re-derive a different one -- same
           // locked portrait, different person speaking.
           voice_id: character.voice_id || "",
+          // ...and the outfit. The portrait binds a face and never clothes,
+          // so a character reused without this returns in episode two with
+          // the same face and a wardrobe the next screenwriter invented.
+          wardrobe: character.wardrobe || "",
         }),
       });
       const data = await res.json().catch(() => ({}));

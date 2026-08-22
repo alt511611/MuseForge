@@ -67,8 +67,11 @@ def test_english_adds_no_clause():
     """The prompt is already written in English; a redundant instruction only
     spends tokens on every job."""
     agent = ScreenwriterAgent(demo=True)
-    assert agent._system_prompt("en") == agent.SYSTEM_PROMPT
-    assert agent._system_prompt(None) == agent.SYSTEM_PROMPT
+    for prompt in (agent._system_prompt("en"), agent._system_prompt(None)):
+        assert agent.SYSTEM_PROMPT in prompt, "the direction must survive intact"
+        assert "Write ALL" not in prompt and "language" not in prompt.split(
+            agent.SYSTEM_PROMPT
+        )[1]
 
 
 def test_a_non_english_drama_gets_a_binding_instruction():

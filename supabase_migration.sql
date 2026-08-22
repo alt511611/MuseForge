@@ -272,6 +272,18 @@ create table if not exists public.character_library (
 alter table public.character_library
   add column if not exists voice_id text not null default '';
 
+-- The outfit the character was locked into. The portrait binds a FACE and not
+-- an outfit -- that is why CharacterProfile carries wardrobe as its own field
+-- and why every frame prompt restates it as text -- so a library that stores
+-- the face, the portrait and the voice and forgets the clothes returns a
+-- character in episode two with the same face, the same voice, and whatever
+-- the screenwriter happened to dress them in that morning. Which is the one
+-- thing the library exists to prevent.
+-- Nullable/defaulted for the same reason voice_id is: rows saved before this
+-- column existed keep working, and simply re-dress as they did before.
+alter table public.character_library
+  add column if not exists wardrobe text not null default '';
+
 alter table public.character_library enable row level security;
 
 create policy "users manage own characters"

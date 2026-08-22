@@ -307,6 +307,9 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
               // they were first cast with. Empty for entries saved before
               // the library stored one, which simply re-cast as before.
               voice_id: c.voice_id || "",
+              // Same reason as the voice: the reference portrait cannot carry
+              // an outfit, so it travels as text or it does not travel.
+              wardrobe: c.wardrobe || "",
             }))
         : [];
     onSubmit({
