@@ -10,6 +10,11 @@ from interfaces import gender as gender_of
 from interfaces.character import CharacterProfile, DramaScript, ScriptScene
 from interfaces.language import DEFAULT_LANGUAGE, is_default, name_of
 from interfaces.micro_drama import SCREENWRITER_CLAUSE, is_micro_drama
+from interfaces.second_budget import (
+    MAX_SCENE_SECONDS,
+    MIN_SCENE_SECONDS,
+    SECONDS_PER_CREDIT,
+)
 from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
 
 logger = logging.getLogger(__name__)
@@ -76,6 +81,25 @@ def _repair_json(text: str) -> str:
         index += 1
 
     return "".join(out)
+
+
+def _preset_line(name: str, features: str, wardrobe: Optional[str] = None) -> str:
+    """One preset character, as the screenwriter is told about them.
+
+    WITH the wardrobe. A preset character is one the user has already locked
+    and is reusing, and this block is the only place the writer hears about
+    them -- so listing a face and no clothes is an invitation to invent an
+    outfit, which is then what the frame prompts restate all drama long. The
+    reference portrait cannot correct it: it binds a face and never a costume
+    (see CharacterProfile.wardrobe).
+    """
+    outfit = str(wardrobe or "").strip()
+    if not outfit:
+        return f"- {name}: {features}"
+    return (
+        f"- {name}: {features} | WARDROBE (locked, use verbatim in this "
+        f"character's \"wardrobe\" field and do not restyle it): {outfit}"
+    )
 
 
 class ScriptGenerationFailed(Exception):
@@ -304,6 +328,29 @@ half-finished sentence. Never a report of it, and never the only place it exists
     #: they paid for and the per-scene credit maths all disagreeing at once,
     #: so the count is stated as a hard constraint here and enforced after
     #: the fact in _hold_to_scene_count.
+    #: What a scene IS, in seconds. The screenwriter was told how many scenes
+    #: to write and never how long one lasts, so it wrote paragraphs: a
+    #: delivered script's second scene crosses a flooded aisle, crouches at a
+    #: lever, watches a light pulse with the character's breathing and takes a
+    #: radio call -- four beats for a scene that is filmed as a single ten-
+    #: second shot. The storyboard picks ONE of them and the other three never
+    #: reach the picture, which the user has already read and approved.
+    #:
+    #: The numbers come from interfaces/second_budget so the brief the writer
+    #: is given and the budget the pipeline enforces cannot drift apart.
+    RUNTIME_CLAUSE = """
+
+WRITE TO THE RUNNING TIME. Each scene is about {seconds:.0f} seconds of finished
+film ({minimum:.0f} at the shortest, {maximum:.0f} at the longest), and it is filmed as ONE
+continuous shot from a single generated frame. So a scene is one beat, in one
+place, that a viewer can watch happen in {seconds:.0f} seconds: an action begun and
+completed, or a look that lands. Do NOT write a sequence of consecutive
+actions in one scene -- crossing a yard, then kneeling, then reaching for a
+lever, then answering a radio is four scenes' worth of film, and only the
+first of them will be shot. Keep the "action" to what the camera can hold in
+one take; anything else belongs in another scene or in the story you leave
+out."""
+
     SCENE_COUNT_CLAUSE = """
 
 SCENE COUNT IS FIXED. This drama has EXACTLY {count} scene{plural} — not
@@ -351,6 +398,15 @@ into a single scene rather than adding one."""
             prompt += self.LANGUAGE_CLAUSE.format(language=name_of(language))
         if require_dialogue:
             prompt += self.DIALOGUE_CLAUSE
+        # Always, and before the scene count: a scene's LENGTH is a fixed fact
+        # about the product (interfaces/second_budget), not something the
+        # caller chooses, and it is the constraint the script is most often
+        # written against without knowing.
+        prompt += self.RUNTIME_CLAUSE.format(
+            seconds=SECONDS_PER_CREDIT,
+            minimum=MIN_SCENE_SECONDS,
+            maximum=MAX_SCENE_SECONDS,
+        )
         if num_scenes > 0:
             prompt += self.SCENE_COUNT_CLAUSE.format(
                 count=num_scenes,
@@ -391,7 +447,7 @@ into a single scene rather than adding one."""
                 name = str(c.get("name") or "").strip()
                 features = str(c.get("static_features") or "").strip()
                 if name and features:
-                    lines.append(f"- {name}: {features}")
+                    lines.append(_preset_line(name, features, c.get("wardrobe")))
             if lines:
                 preset_block = (
                     "PRESET CHARACTERS (already exist — use directly, do not redefine):\n"
@@ -836,7 +892,9 @@ into a single scene rather than adding one."""
         preset_block = ""
         if preset_characters:
             lines = [
-                f"- {c.get('name')}: {c.get('static_features')}"
+                _preset_line(
+                    str(c.get("name")), str(c.get("static_features")), c.get("wardrobe")
+                )
                 for c in preset_characters
                 if c.get("name") and c.get("static_features")
             ]

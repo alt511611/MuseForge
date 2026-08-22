@@ -58,11 +58,20 @@ def test_the_prompt_states_the_count_and_overrides_the_range():
 
 
 def test_a_job_with_no_stated_count_is_left_exactly_as_it_was():
-    """Callers that do not care (and every existing test) must see the
-    untouched prompt -- the clause costs tokens on every single job."""
+    """Callers that do not care must not be told a count -- the clause costs
+    tokens on every single job.
+
+    Asserted on the clause rather than on the whole prompt: a scene's LENGTH
+    is a fixed fact about the product and is stated unconditionally (see
+    RUNTIME_CLAUSE), so byte-equality with the base prompt stopped being the
+    thing this is protecting."""
     agent = ScreenwriterAgent(demo=True)
-    assert agent._system_prompt("en") == agent.SYSTEM_PROMPT
-    assert agent._system_prompt("en", num_scenes=0) == agent.SYSTEM_PROMPT
+    for prompt in (
+        agent._system_prompt("en"),
+        agent._system_prompt("en", num_scenes=0),
+    ):
+        assert agent.SYSTEM_PROMPT in prompt
+        assert "SCENE COUNT IS FIXED" not in prompt
 
 
 def test_the_count_reaches_both_provider_paths():
