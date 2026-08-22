@@ -537,6 +537,17 @@ def build_frame_prompt(
                 f"STATE is not: {change_now or change_before}. Render the "
                 f"location in that state -- this is the story's event and it "
                 f"must be plainly visible in the frame, not implied. "
+                # The setting line is the screenwriter's, and a screenwriter
+                # describing a place at night describes how it is lit -- the
+                # delivered job's own locked setting reads "rain-soaked cargo
+                # harbour, stacked shipping containers under sodium
+                # floodlights". Against a brief whose event is the city losing
+                # power, this prompt then asked for the floodlights and for
+                # their failure in the same breath, and the model resolved the
+                # contradiction the way the more concrete noun always wins:
+                # every lamp in the yard stayed on, through all three scenes.
+                f"Any light named in that setting line describes this place "
+                f"BEFORE the change; do not light the frame with it. "
             )
         else:
             setting_clause += (
@@ -2126,6 +2137,15 @@ class Script2VideoPipeline:
         expected_setting = format_expected_setting(
             setting_location, setting_time_of_day, setting_era
         )
+        # QA verifies the frame against the LOCKED setting, and the one scene
+        # allowed to break that lock is the scene the drama exists for. Without
+        # this, a correctly blacked-out harbour is a setting mismatch: the
+        # repair regenerates the frame, aimed by an issue string that says the
+        # place looks wrong, until the lights come back on. The vision check
+        # has to be told what the story did to the place.
+        changed_state = (world_change or "").strip() or (world_state or "").strip()
+        if expected_setting and changed_state:
+            expected_setting += f" -- but in this scene: {changed_state}"
 
         # Who this SCENE is about, decided once from the scene's own text by
         # the same rule the shots use: whoever it names first. Used only as
