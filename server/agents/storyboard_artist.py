@@ -596,16 +596,38 @@ Respond ONLY with valid JSON array containing a single shot object:
         a model that has quietly reintroduced eighteen seconds of one setup,
         and that should show up in a log rather than in a delivered drama.
         """
-        planned = (planned or "").strip().lower()
+        planned = cls._normalised_scale(planned)
         if not planned or not shots:
             return
-        actual = (getattr(shots[0], "shot_type", "") or "").strip().lower()
+        actual = cls._normalised_scale(getattr(shots[0], "shot_type", ""))
         if actual and actual != planned:
             logger.info(
                 "Shot designer chose %r over the planned %r for this scene.",
-                actual,
+                getattr(shots[0], "shot_type", ""),
                 planned,
             )
+
+    #: Words that name the same framing. The plan speaks SCALE_LADDER
+    #: ("medium shot"); a designer writes whatever a designer writes, and
+    #: "medium" is the same framing, not a departure from it. Compared raw,
+    #: the delivered log reported drift on a scene that had none --
+    #:
+    #:     Shot designer chose 'medium' over the planned 'medium shot'
+    #:
+    #: -- which is the worst thing a watchdog can do. This line exists to say
+    #: "the model has quietly reintroduced eighteen seconds of one setup", and
+    #: an operator who has seen it cry wolf once will not read it again.
+    _SCALE_NOISE = ("shot", "angle", "framing", "view")
+
+    @classmethod
+    def _normalised_scale(cls, scale: str) -> str:
+        """A framing reduced to the words that decide it."""
+        words = [
+            word
+            for word in (scale or "").strip().lower().replace("-", " ").split()
+            if word not in cls._SCALE_NOISE
+        ]
+        return " ".join(words)
 
     @classmethod
     def _apply_shot_plan(
