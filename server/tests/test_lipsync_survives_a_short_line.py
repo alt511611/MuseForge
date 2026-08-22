@@ -233,3 +233,109 @@ async def test_the_scene_is_synced_instead_of_discarded(
     assert scene_paths[0].endswith("scene_0_lipsync_full.mp4")
     assert measured[scene_paths[0]] == pytest.approx(12.0)
     assert tracks[0].get("audio_url"), "the line still has to be mixed"
+
+
+# ── and only where the words actually are ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_scene_whose_speech_bridged_in_is_not_synced(
+    measured, editor, tmp_path, monkeypatch
+):
+    """A line that outruns its shot is held over the cut rather than truncated
+    (plan_scene_speech_anchors), and the mixer lays the next scene's voice down
+    at that later anchor. The sync provider cannot be told about it -- it
+    drives the mouth from frame one -- so syncing scene 1 here would put the
+    words in the mouth seconds before they are in the air, which is the
+    dubbing error the feature is bought to remove."""
+    monkeypatch.setenv("MUSEFORGE_LIPSYNC_ENABLED", "1")
+    monkeypatch.setattr(mod, "make_lipsync", lambda demo=False: _TrimmingLipsync())
+    monkeypatch.setattr(mod, "_probe_video_duration", lambda path: DURATIONS.get(path, 0.0))
+
+    async def fake_download(url, path):
+        with open(path, "wb") as f:
+            f.write(b"synced")
+        DURATIONS[path] = 3.0
+        return path
+
+    monkeypatch.setattr(mod, "download_video", fake_download)
+
+    scene_paths = [_clip(tmp_path, "scene_0.mp4", 6.0), _clip(tmp_path, "scene_1.mp4", 8.0)]
+    # Scene 0's line runs four seconds past its own six-second shot, so
+    # scene 1's speech is held back until it finishes.
+    tracks = [
+        {
+            "scene_index": 0,
+            "line": "uzun replik",
+            "audio_url": "https://cdn/s0.mp3",
+            "duration_seconds": 10.0,
+        },
+        {
+            "scene_index": 1,
+            "line": "kısa",
+            "audio_url": "https://cdn/s1.mp3",
+            "duration_seconds": 3.0,
+        },
+    ]
+
+    async def progress(*a, **kw):
+        return None
+
+    pipeline = mod.Idea2VideoPipeline("test-key-not-real")
+    synced = await pipeline._lipsync_scenes(
+        scene_paths=scene_paths,
+        dialogue_tracks=tracks,
+        working_dir=str(tmp_path),
+        progress=progress,
+    )
+
+    assert synced == [0], "scene 1's mouth would have moved before its words"
+    assert scene_paths[1].endswith("scene_1.mp4"), "scene 1 keeps its unsynced take"
+
+
+@pytest.mark.asyncio
+async def test_speech_that_starts_with_its_picture_is_synced_as_normal(
+    measured, editor, tmp_path, monkeypatch
+):
+    """The ordinary case, and the one that must not be lost to the guard: every
+    scene's line fits its own shot, so nothing drifts."""
+    monkeypatch.setenv("MUSEFORGE_LIPSYNC_ENABLED", "1")
+    monkeypatch.setattr(mod, "make_lipsync", lambda demo=False: _TrimmingLipsync())
+    monkeypatch.setattr(mod, "_probe_video_duration", lambda path: DURATIONS.get(path, 0.0))
+
+    async def fake_download(url, path):
+        with open(path, "wb") as f:
+            f.write(b"synced")
+        DURATIONS[path] = 4.0
+        return path
+
+    monkeypatch.setattr(mod, "download_video", fake_download)
+
+    scene_paths = [_clip(tmp_path, "scene_0.mp4", 8.0), _clip(tmp_path, "scene_1.mp4", 8.0)]
+    tracks = [
+        {
+            "scene_index": 0,
+            "line": "bir",
+            "audio_url": "https://cdn/s0.mp3",
+            "duration_seconds": 4.0,
+        },
+        {
+            "scene_index": 1,
+            "line": "iki",
+            "audio_url": "https://cdn/s1.mp3",
+            "duration_seconds": 4.0,
+        },
+    ]
+
+    async def progress(*a, **kw):
+        return None
+
+    pipeline = mod.Idea2VideoPipeline("test-key-not-real")
+    synced = await pipeline._lipsync_scenes(
+        scene_paths=scene_paths,
+        dialogue_tracks=tracks,
+        working_dir=str(tmp_path),
+        progress=progress,
+    )
+
+    assert synced == [0, 1]

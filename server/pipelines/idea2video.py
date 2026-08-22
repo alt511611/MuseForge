@@ -2444,6 +2444,24 @@ MIN_TRIMMED_SECONDS = 0.5
 #: trim-to-audio removes seconds.
 LIPSYNC_LENGTH_TOLERANCE_SECONDS = 0.35
 
+#: How far a scene's speech may start AFTER its picture and still be worth
+#: driving a mouth with.
+#:
+#: The sync provider drives the mouth from the first frame of the clip it is
+#: given, which assumes the line begins where the scene begins. Usually it
+#: does. It stops doing so the moment a previous scene's line overruns its
+#: shot: plan_scene_speech_anchors then holds this scene's speech back so the
+#: two do not talk over each other (an audio bridge, which is ordinary film
+#: grammar), and the mixer lays the voice down at that later anchor -- while
+#: the mouth in the picture has already said the line.
+#:
+#: A mouth moving where there are no words is the dubbing error the whole
+#: feature exists to remove, so a scene whose speech has drifted keeps its
+#: unsynced take. Well above a frame at 24fps and well under the smallest
+#: drift a bridge can produce, so rounding never trips it and a real bridge
+#: always does.
+LIPSYNC_MAX_ANCHOR_DRIFT_SECONDS = 0.25
+
 
 def _clip_duration(path: str) -> Optional[float]:
     """Seconds of video at ``path``, or None if it cannot be measured."""
@@ -2746,10 +2764,53 @@ class Idea2VideoPipeline:
             if 0 <= scene_index < len(scene_paths):
                 audio_by_scene.setdefault(scene_index, audio_url)
 
+        # Where each scene's speech actually lands on the finished timeline.
+        # Read from the same plan the mixer and the captions read, so all three
+        # agree -- and computed from EVERY dialogue track, not just the scenes
+        # being synced, because a bridge is caused by the scene before.
+        scene_lengths = [_probe_video_duration(path) for path in scene_paths]
+        picture_starts: List[float] = []
+        elapsed = 0.0
+        for length in scene_lengths:
+            picture_starts.append(elapsed)
+            elapsed += length
+        speech_anchors = plan_scene_speech_anchors(
+            dialogue_tracks, picture_starts, elapsed
+        )
+
         synced: List[int] = []
         for position, (scene_index, audio_url) in enumerate(sorted(audio_by_scene.items())):
             if is_cancelled and is_cancelled():
                 break
+
+            picture_start = (
+                picture_starts[scene_index]
+                if 0 <= scene_index < len(picture_starts)
+                else 0.0
+            )
+            # Only where the timeline is actually known. A clip that will not
+            # probe contributes a length of 0, which drags every scene after
+            # it back to the same start and would read as a drift that is not
+            # there -- so an unmeasurable timeline fails OPEN and syncs, the
+            # same way the length check does.
+            timeline_known = all(
+                length > 0 for length in scene_lengths[: scene_index + 1]
+            )
+            drift = speech_anchors.get(scene_index, picture_start) - picture_start
+            if timeline_known and drift > LIPSYNC_MAX_ANCHOR_DRIFT_SECONDS:
+                # The line does not start where this clip starts, and the sync
+                # provider has no way to be told that -- it drives the mouth
+                # from frame one. Syncing here would put the words in the
+                # mouth before they are in the air, which is the exact dubbing
+                # error the feature is bought to remove.
+                logger.warning(
+                    "Scene %s speaks %.2fs after its picture starts (the "
+                    "previous scene's line is still running), so its mouth "
+                    "would move before the words — keeping the unsynced take.",
+                    scene_index,
+                    drift,
+                )
+                continue
             await progress(
                 "lipsync",
                 f"Syncing lips to dialogue ({position + 1}/{len(audio_by_scene)})",
