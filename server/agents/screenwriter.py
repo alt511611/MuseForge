@@ -587,13 +587,28 @@ into a single scene rather than adding one."""
     _GOES_OUT = (
         r"(?:dies|die|goes? out|go out|fails?|fail|cuts? out|is cut|goes? down)"
     )
+    #: Going dark, as a writer actually writes it. The delivered script's
+    #: climax reads "every sodium lamp on the harbour and every light across
+    #: the distant city skyline SNAPS TO BLACK" -- the film's whole event, in
+    #: the plainest words available, and "goes dark" was the only shape this
+    #: recognised.
+    _TO_BLACK = (
+        r"(?:go(?:es)?|went|snaps?|snapped|cuts?|drops?|falls?|plunge[sd]?)\s+"
+        r"(?:to|into)?\s*(?:black|dark|darkness)"
+    )
+    #: A flood is WATER arriving. Without that subject the word is ordinary
+    #: weather and ordinary metaphor: the same delivered script has Mara
+    #: crossing "the flooded aisle" and the container's "light floods out
+    #: across the flooded dock" -- three uses, none of them an event, and
+    #: between them enough matches to make the real climax unreadable.
+    _WATER = r"(?:water|seawater|sea|river|tide|waves?|surge|storm ?surge)"
 
     _WORLD_EVENT_FAMILIES = {
         "blackout": (
             # A short gap only: enough for "every lamp ON THE QUAY goes out",
             # not enough to marry a light in one clause to a verb in the next.
             rf"\b{_LIGHT_SOURCE}\b[^.;]{{0,30}}?\b{_GOES_OUT}\b",
-            r"go(?:es)? (?:dark|black)",
+            _TO_BLACK,
             r"black(?:s)? out",
             r"blackout",
             r"elektri(?:k|ği|kler)\w* (?:kesil\w+|gider|gidiyor)",
@@ -601,7 +616,11 @@ into a single scene rather than adding one."""
             r"karanlığa göm\w+",
             r"kararır|kararıyor",
         ),
-        "flood": (r"floods?",),
+        "flood": (
+            rf"\b{_WATER}\b[^.;]{{0,40}}?\bfloods?\b",
+            rf"\bfloods?\b[^.;]{{0,40}}?\b{_WATER}\b",
+            r"\bsu bas\w+",
+        ),
         "explosion": (r"explodes?", r"patlar|patlıyor"),
         "collapse": (r"collapses?", r"çöker|çöküyor"),
     }

@@ -259,3 +259,82 @@ def test_a_brief_with_no_event_still_leaves_a_declared_change_alone():
     assert script.scenes[0].world_change == (
         "the container's blue light spills across the yard"
     )
+
+
+# ── the delivered script, word for word ─────────────────────────────────────
+
+DELIVERED = (
+    "Rain hammers rows of stacked containers under buzzing sodium lights. Mara "
+    "sweeps her flashlight along Bay 14 and stops on one container seeping a "
+    "faint blue-white glow through its seams, a low hum audible over the rain. "
+    "The rest of the harbour and the distant city skyline blaze with electric "
+    "light behind her.",
+    "Mara crosses the flooded aisle, boots splashing, and crouches at the "
+    "container's manual release lever, rain streaming off her hood. The blue "
+    "light pulses brighter with each breath she takes near it, throwing "
+    "shifting light across her wet face. Her radio crackles.",
+    "Mara throws her weight against the lever. The container doors groan open "
+    "and light floods out across the flooded dock—and in the same instant every "
+    "sodium lamp on the harbour and every light across the distant city skyline "
+    "snaps to black, leaving only the container's pulsing glow lighting the "
+    "falling rain and Mara's stunned, upturned face.",
+)
+
+
+def _delivered_script(brief):
+    return _script(
+        [
+            _scene("setup", action=DELIVERED[0]),
+            _scene("rising_action", action=DELIVERED[1]),
+            _scene("climax", action=DELIVERED[2]),
+        ],
+        brief=brief,
+    )
+
+
+def test_snaps_to_black_is_a_blackout():
+    """The delivered script's climax, in the plainest words available for it.
+    "goes dark" was the only shape this recognised, so the film's whole event
+    read as nothing at all."""
+    assert ScreenwriterAgent._event_family(DELIVERED[2]) == "blackout"
+
+
+def test_a_wet_dock_is_not_a_flood():
+    """Three uses of the word in one script -- "the flooded aisle", "light
+    floods out", "the flooded dock" -- and not one of them is an event. They
+    were enough matches to make the real climax unreadable: two hits means the
+    brief describes more than one change, and this defers rather than guess.
+    A flood is water arriving."""
+    assert ScreenwriterAgent._event_family(DELIVERED[1]) == ""
+    assert (
+        ScreenwriterAgent._event_family(
+            "the container doors groan open and light floods out across the "
+            "flooded dock"
+        )
+        == ""
+    )
+    assert (
+        ScreenwriterAgent._event_family("the water floods over the pier edge")
+        == "flood"
+    )
+
+
+def test_the_delivered_script_recovers_its_own_climax():
+    """The user pasting their three scenes as the brief -- which is how this
+    one was written. Before, the two "flood" hits cancelled each other out and
+    nothing was restored; the blackout stayed a line of dialogue."""
+    script = _delivered_script(" ".join(DELIVERED))
+
+    _apply(script)
+
+    assert "snaps to black" in script.scenes[2].world_change
+    assert not script.scenes[0].world_change
+    assert not script.scenes[1].world_change
+
+
+def test_the_one_line_brief_still_lands_on_the_same_scene():
+    script = _delivered_script(BRIEF)
+
+    _apply(script)
+
+    assert "power dies" in script.scenes[2].world_change
