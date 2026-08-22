@@ -567,21 +567,47 @@ into a single scene rather than adding one."""
     #: a miss costs only what the product already does today. Ambiguous verbs
     #: are left out on purpose -- "burns" is as often a candle as a warehouse,
     #: and "stops" is usually a person.
-    _WORLD_EVENT_CUES = (
-        r"power (?:dies|goes out|fails|cuts out|is cut)",
-        r"lights? (?:go out|goes out|die|dies|fail|fails)",
-        r"go(?:es)? (?:dark|black)",
-        r"black(?:s)? out",
-        r"blackout",
-        r"floods?",
-        r"explodes?",
-        r"collapses?",
-        r"elektri(?:k|ği|kler)\w* (?:kesil\w+|gider|gidiyor)",
-        r"ışıklar\w* sön\w+",
-        r"karanlığa göm\w+",
-        r"kararır|kararıyor",
-        r"çöker|çöküyor",
-        r"patlar|patlıyor",
+    #: The event cues, grouped by the CHANGE they describe.
+    #:
+    #: The grouping is what lets "has the film already got the brief's event?"
+    #: be a real question rather than "is the field filled?". A script that
+    #: declares a world_change of its own passes the second test whatever it
+    #: says -- and a writer given a container that hums with light will happily
+    #: declare the container's own glow. The brief's blackout is then never
+    #: restored, the locked lighting is broken for a spill of blue instead, and
+    #: the film's whole reason for existing stays off screen.
+    #: What can stop carrying light, and the verbs for stopping. Composed
+    #: rather than listed one phrasing at a time because the noun is the part
+    #: a writer varies: the brief says "the city's power dies" and the script
+    #: says "every lamp on the quay goes out at once", which is the same event
+    #: and shares not one word of its phrasing.
+    _LIGHT_SOURCE = (
+        r"(?:power|grid|electricity|lights?|lamps?|streetlights?|floodlights?)"
+    )
+    _GOES_OUT = (
+        r"(?:dies|die|goes? out|go out|fails?|fail|cuts? out|is cut|goes? down)"
+    )
+
+    _WORLD_EVENT_FAMILIES = {
+        "blackout": (
+            # A short gap only: enough for "every lamp ON THE QUAY goes out",
+            # not enough to marry a light in one clause to a verb in the next.
+            rf"\b{_LIGHT_SOURCE}\b[^.;]{{0,30}}?\b{_GOES_OUT}\b",
+            r"go(?:es)? (?:dark|black)",
+            r"black(?:s)? out",
+            r"blackout",
+            r"elektri(?:k|ği|kler)\w* (?:kesil\w+|gider|gidiyor)",
+            r"ışıklar\w* sön\w+",
+            r"karanlığa göm\w+",
+            r"kararır|kararıyor",
+        ),
+        "flood": (r"floods?",),
+        "explosion": (r"explodes?", r"patlar|patlıyor"),
+        "collapse": (r"collapses?", r"çöker|çöküyor"),
+    }
+
+    _WORLD_EVENT_CUES = tuple(
+        cue for cues in _WORLD_EVENT_FAMILIES.values() for cue in cues
     )
 
     @classmethod
@@ -597,15 +623,50 @@ into a single scene rather than adding one."""
         script makes easy.
 
         This does not invent an event. It copies the user's own clause into
-        the field that exists to carry it, and only when the writer left that
-        field empty everywhere. A script that named its own change is left
-        alone: the model read the whole brief; this reads a word list.
+        the field that exists to carry it, and only when the film does not
+        already have it: a script that declared the SAME change is left alone,
+        because the model read the whole brief and this reads a word list.
+
+        "The same change", not "any change at all". That was the third way
+        this failed, delivered against a brief reading "...a shipping
+        container that hums with light, and the city's power dies the moment
+        she opens it": the writer declared the container's own blue spill as
+        the world_change -- fair, and visibly rendered -- which was enough to
+        stand this down, and the city's power never went out in any frame of
+        the film. A filled field is not the same fact as a filmed event.
         """
         scenes = [s for s in (script.scenes or []) if hasattr(s, "world_change")]
-        if not scenes or any((s.world_change or "").strip() for s in scenes):
+        if not scenes:
             return
+        declared = [
+            text for s in scenes if (text := (s.world_change or "").strip())
+        ]
+
         clause = cls._world_event_clause(script.user_brief)
         source = "brief"
+        if clause:
+            # The brief named the event, so "did the writer fill the field in?"
+            # is the wrong question -- the right one is whether the film films
+            # THIS event. Delivered against the brief "a shipping container
+            # that hums with light, and the city's power dies the moment she
+            # opens it": the harbour's lamps, floodlights and lit containers
+            # burn through all three scenes, and the only blackout in the film
+            # is a caption reading "city's out!". The one thing that DID break
+            # the locked lighting was the container's own blue spill -- a
+            # world_change the writer was entitled to declare, and one that
+            # silenced the recovery for the change the user actually asked for.
+            #
+            # So the test is by FAMILY: a declared change that describes the
+            # same event leaves the script alone, and anything else does not
+            # count as having filmed it.
+            family = cls._event_family(clause)
+            if any(cls._event_family(text) == family for text in declared):
+                return
+        elif declared:
+            # No event in the brief and the writer named one of their own:
+            # exactly the case this has always left alone. The model read the
+            # whole story; this reads a word list.
+            return
         if not clause:
             # The brief did not state it -- but the SCRIPT may have, in the
             # one place a voiced drama makes easiest and the picture never
@@ -625,14 +686,37 @@ into a single scene rather than adding one."""
             (s for s in scenes if (s.dramatic_function or "").strip().lower() == "climax"),
             scenes[-1],
         )
-        target.world_change = clause
+        # ADDED to whatever the climax already declared, never over it. The
+        # writer's own change is a real thing that happens in their scene (a
+        # hatch swinging open, a container lighting up), and the frame prompt
+        # renders the whole state it is given -- so the honest instruction is
+        # both, in the order the story has them.
+        existing = (target.world_change or "").strip().rstrip(";,. ")
+        target.world_change = f"{existing}; {clause}" if existing else clause
         logger.info(
-            "No scene declared a world_change; restored the %s's own event "
-            "onto the %s scene: %r",
+            "The %s's own event was not in any scene's world_change%s; "
+            "restored it onto the %s scene: %r",
             source,
+            f" (the script declared {declared!r} instead)" if declared else "",
             (target.dramatic_function or "last").strip() or "last",
             clause,
         )
+
+    @classmethod
+    def _event_family(cls, text: str) -> str:
+        """Which world-scale change ``text`` describes, or "" for none.
+
+        Read from the same cue list the extraction uses, so the two answers
+        cannot drift apart. Deliberately NARROW: a phrasing this does not
+        recognise reads as "the event is not in the film", which adds the
+        brief's own clause to the climax -- repetitive at worst. The opposite
+        error, calling an unrelated change a blackout, is what leaves the
+        film's event off screen, and that is the failure this exists for.
+        """
+        for family, cues in cls._WORLD_EVENT_FAMILIES.items():
+            if any(re.search(cue, text or "", re.IGNORECASE) for cue in cues):
+                return family
+        return ""
 
     @classmethod
     def _script_event_clause(cls, scenes) -> str:
