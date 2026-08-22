@@ -378,6 +378,11 @@ class CharacterCreateRequest(BaseModel):
     # Saved from the finished drama's `character_voices`, so a character
     # lifted out of episode one keeps the voice episode one gave them.
     voice_id: str = Field("", max_length=200)
+    # ...and what they were wearing while they did it. The portrait binds a
+    # FACE, never an outfit (see CharacterProfile.wardrobe), so a library that
+    # stores the face and forgets the clothes returns the same person in
+    # episode two dressed by whatever the screenwriter invented that morning.
+    wardrobe: str = Field("", max_length=2000)
 
 
 class GenerateResponse(BaseModel):
@@ -1557,6 +1562,7 @@ async def _library_insert(user_id: str, payload: dict) -> Dict[str, Any]:
             "static_features": payload["static_features"],
             "portrait_url": payload["portrait_url"],
             "voice_id": payload.get("voice_id", ""),
+            "wardrobe": payload.get("wardrobe", ""),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         _character_library_mem[user_id].insert(0, row)
@@ -1567,9 +1573,21 @@ async def _library_insert(user_id: str, payload: dict) -> Dict[str, Any]:
         "static_features": payload["static_features"],
         "portrait_url": payload["portrait_url"],
     }
-    voice_id = str(payload.get("voice_id") or "").strip()
-    if voice_id:
-        body["voice_id"] = voice_id
+    # Columns added after the table shipped. Both are continuity locks rather
+    # than identity, so a deployment that has not replayed the migration must
+    # still be able to save the character: losing the voice or the outfit
+    # costs a later episode its continuity, while failing the insert loses the
+    # character entirely.
+    added_later = [
+        (column, value)
+        for column, value in (
+            ("voice_id", str(payload.get("voice_id") or "").strip()),
+            ("wardrobe", str(payload.get("wardrobe") or "").strip()),
+        )
+        if value
+    ]
+    for column, value in added_later:
+        body[column] = value
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.post(
@@ -1577,17 +1595,15 @@ async def _library_insert(user_id: str, payload: dict) -> Dict[str, Any]:
                 headers=_sb_headers(),
                 json=body,
             )
-            if resp.status_code >= 400 and "voice_id" in body:
-                # The column is new. A deployment that has not replayed the
-                # migration yet must still be able to save a character --
-                # losing the voice lock costs continuity in a later episode,
-                # while failing the insert loses the character entirely.
+            if resp.status_code >= 400 and added_later:
                 logger.warning(
-                    "character_library insert rejected with voice_id, retrying "
-                    "without it (has the migration been applied?): %s",
+                    "character_library insert rejected with %s, retrying "
+                    "without them (has the migration been applied?): %s",
+                    ", ".join(column for column, _ in added_later),
                     resp.text[:300],
                 )
-                body.pop("voice_id")
+                for column, _ in added_later:
+                    body.pop(column, None)
                 resp = await client.post(
                     f"{SUPABASE_URL}/rest/v1/character_library",
                     headers=_sb_headers(),
@@ -1647,6 +1663,7 @@ async def create_character(
             "static_features": req.static_features.strip(),
             "portrait_url": req.portrait_url.strip(),
             "voice_id": (req.voice_id or "").strip(),
+            "wardrobe": (req.wardrobe or "").strip(),
         },
     )
     return row
