@@ -105,6 +105,15 @@ IMAGE_QUALITY_SUFFIX = PHOTOREAL_RENDER
 #: whose one undescribed "Alex" produced a short prompt every time.
 MAX_IMAGE_PROMPT_CHARS = 3000
 
+#: Ranks for `fit_image_prompt`. REQUIRED survives every squeeze; everything
+#: above it is direction the frame is better with and still legible without.
+#: Named rather than spelled as bare integers at the call site, because the
+#: difference between 0 and 6 is the difference between a feature working and
+#: a feature being silently dropped, and that is not something to leave to a
+#: literal.
+REQUIRED = 0
+OPTIONAL_DIRECTION = 6
+
 
 def fit_image_prompt(segments: list, limit: int = MAX_IMAGE_PROMPT_CHARS) -> str:
     """Assemble a prompt that respects the provider's character budget.
@@ -134,13 +143,27 @@ def fit_image_prompt(segments: list, limit: int = MAX_IMAGE_PROMPT_CHARS) -> str
         )
     prompt = "".join(t for _, t in kept)
     if len(prompt) > limit:
-        # Even the required segments are too long: a single enormous
-        # visual_desc. Cut on a word boundary so it doesn't end mid-token.
+        # Even the required segments are too long, which in practice means one
+        # enormous visual_desc rather than eleven slightly long clauses. Cut
+        # THAT one down instead of cutting the assembled prompt's tail: the
+        # tail is where the shortest required clauses sit (shot type, lens,
+        # the lip-sync mouth line), and trimming from the end deletes them
+        # whole to save a few words of a description that has hundreds to
+        # spare. Word boundary either way, so nothing ends mid-token.
+        idx = max(range(len(kept)), key=lambda i: len(kept[i][1]))
+        prio, longest = kept[idx]
+        overflow = len(prompt) - limit
         logger.warning(
             "Frame prompt still over %d chars after dropping every optional "
-            "clause (%d) — truncating.", limit, len(prompt),
+            "clause (%d) — trimming %d chars off its longest segment (%.60s...).",
+            limit, len(prompt), overflow, longest,
         )
-        prompt = prompt[:limit].rsplit(" ", 1)[0]
+        kept[idx] = (prio, longest[: max(0, len(longest) - overflow)].rsplit(" ", 1)[0])
+        prompt = "".join(t for _, t in kept)
+        if len(prompt) > limit:
+            # The longest segment was not the whole overflow. Nothing left to
+            # be clever with.
+            prompt = prompt[:limit].rsplit(" ", 1)[0]
     return prompt
 
 
@@ -576,19 +599,37 @@ def build_frame_prompt(
     # dubbing error. With lip sync on, that same dodge destroys the feature:
     # a mouth in profile or out of frame is a mouth the sync model cannot
     # drive, so the scene is paid for and then silently unsynced.
+    #
+    # RANK, not just wording. Under lip sync this clause is not direction at
+    # all -- it is the precondition of a feature the customer has already been
+    # charged for, and a frame that loses it cannot be repaired by the sync
+    # pass downstream. It was ranked droppable, and on a one-hander it was the
+    # FIRST thing to go: the 180-degree clause it shares rank 6 with is only
+    # emitted for exactly two visible characters
+    # (build_screen_direction_clause), so a solo drama runs out of budget with
+    # nothing above the mouth to sacrifice. The delivered job dropped it from
+    # four of its six frames -- "186 chars of lower-priority direction" -- and
+    # its middle scene plays a five-second line over a closed mouth.
+    #
+    # So the sync form is required and the no-sync form stays optional: losing
+    # the dodge costs one slightly awkward frame, losing this costs the
+    # feature.
     if not has_dialogue:
         dialogue_clause = ""
+        dialogue_rank = OPTIONAL_DIRECTION
     elif lipsync_enabled:
         dialogue_clause = (
             "The speaking character's mouth is fully visible, unobscured and "
             "facing camera -- their lips will be animated to the dialogue. "
             "Do not hide the mouth behind hands, props, hair or profile. "
         )
+        dialogue_rank = REQUIRED
     else:
         dialogue_clause = (
             "For this dialogue shot, the speaking character's mouth should be "
             "naturally obscured, shown in profile, or not be the focal point. "
         )
+        dialogue_rank = OPTIONAL_DIRECTION
     # Emotion is stated explicitly (not left implicit in visual_desc) and
     # paired with a face-visibility requirement: flat, unreadable faces were
     # coming from both a missing expression instruction AND from frames
@@ -711,17 +752,17 @@ def build_frame_prompt(
     # difference between a performance and a photograph; the sentences below
     # it are identical in every film this product has ever made.
     return fit_image_prompt([
-        (0, f"{style} style. "),
+        (REQUIRED, f"{style} style. "),
         (1, setting_clause),
         (3, lighting_clause),
-        (0, identity_clause),
-        (6, direction_clause),
-        (0, f"{shot.visual_desc}. "),
+        (REQUIRED, identity_clause),
+        (OPTIONAL_DIRECTION, direction_clause),
+        (REQUIRED, f"{shot.visual_desc}. "),
         (2, expression_clause),
         (4, face_clause),
         (5, cast_clause),
-        (6, dialogue_clause),
-        (0, f"Shot type: {shot.shot_type}. Lens: {shot.lens}. "),
+        (dialogue_rank, dialogue_clause),
+        (REQUIRED, f"Shot type: {shot.shot_type}. Lens: {shot.lens}. "),
         (7, resolve_visual_style(style).render_note),
     ])
 
