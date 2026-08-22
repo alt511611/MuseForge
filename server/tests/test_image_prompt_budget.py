@@ -298,6 +298,6 @@ def test_a_crowded_two_hander_still_carries_its_acting_and_its_light():
     assert len(prompt) <= 3000
     assert "Facial expression and body language" in prompt
     assert "Lighting continuity" in prompt
-    assert "clearly visible and softly lit" in prompt
+    assert "lit and readable" in prompt
     assert "Mara" in prompt and "Priya" in prompt
     assert "Setting: container terminal quayside" in prompt
