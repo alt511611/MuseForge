@@ -7,7 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from agents.screenwriter import ScreenwriterAgent, ScriptGenerationFailed
 from interfaces import ass_captions
@@ -567,14 +567,27 @@ def _music_style_hint(script: DramaScript) -> str:
     return (", ".join(parts) + ".") if parts else ""
 
 
-def _format_scene_dialogue(dialogue: List[Any]) -> str:
+def _format_scene_dialogue(
+    dialogue: List[Any], off_screen: Optional[Set[str]] = None
+) -> str:
     """Render dialogue lines as "Name: line" text for the storyboard artist.
 
     The storyboard step previously saw ONLY the scene's action line, so the
     words that carry the scene's emotional turn were invisible to the agent
     choosing which moment to draw — a direct cause of shots that felt
     unrelated to the story.
+
+    ``off_screen`` names the speakers the film only HEARS (see
+    _heard_but_never_seen). Marking them in the cast list alone is not enough:
+    that list is what the designer is given to DESCRIBE, so a voice removed
+    from it simply vanishes -- and the designer, reading a scene where the
+    name plainly speaks, is free to stage a person nobody described. Said in
+    the dialogue itself, where the name actually appears, it becomes what it
+    is: a voice. The marker is screenwriting's own (O.S.), which is also one
+    the frame step reads (script2video._OFF_SCREEN_MARKERS), so a designer who
+    carries it through into a shot description is still understood.
     """
+    heard = {name for name in (off_screen or set())}
     lines = []
     for entry in dialogue or []:
         if isinstance(entry, dict):
@@ -585,7 +598,15 @@ def _format_scene_dialogue(dialogue: List[Any]) -> str:
             line = str(getattr(entry, "line", "") or "").strip()
         if not line:
             continue
-        lines.append(f"{character}: {line}" if character else line)
+        if character and character.casefold() in heard:
+            lines.append(
+                f"{character} (O.S. — a voice only, heard over comms and never "
+                f"in frame; do not stage them): {line}"
+            )
+        elif character:
+            lines.append(f"{character}: {line}")
+        else:
+            lines.append(line)
     return "\n".join(lines)
 
 
@@ -624,7 +645,9 @@ def is_finishing_enabled() -> bool:
     )
 
 
-async def finalize_master(video_path: str, output_path: str) -> str:
+async def finalize_master(
+    video_path: str, output_path: str, caption_filter: str = ""
+) -> str:
     """One finishing encode: fade in from black, fade out to black, and --
     when the video carries audio -- matching audio fades plus EBU R128
     loudness normalization to -14 LUFS (the delivery loudness streaming
@@ -632,8 +655,16 @@ async def finalize_master(video_path: str, output_path: str) -> str:
     quiet or hot next to everything else the viewer watches).
 
     Single pass so it costs ONE encode at the shared CRF-18 profile, not one
-    per effect. Fails open: any error ships the un-finished video rather
-    than failing the job, matching the rest of the assembly chain.
+    per effect. ``caption_filter`` (see build_caption_filter) joins that pass
+    for the same reason: the caption burn is another full re-encode of the
+    same picture, measured at 237 seconds against this pass's 325 on a
+    60-second master, and the two produce one file between them.
+
+    Fails open: any error ships the un-finished video rather than failing the
+    job, matching the rest of the assembly chain -- EXCEPT when captions were
+    folded in, where failing open would drop the captions as well as the
+    fades. That case returns ``video_path`` unchanged, which tells the caller
+    to fall back to burning them in a pass of their own.
     """
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
@@ -642,6 +673,16 @@ async def finalize_master(video_path: str, output_path: str) -> str:
             with open(video_path, "rb") as src, open(output_path, "wb") as dst:
                 dst.write(src.read())
         return output_path
+
+    def _decline() -> str:
+        """What to hand back when this pass is not going to run at all.
+
+        Without captions that is the input, copied through, exactly as before.
+        With them it has to be the input ITSELF -- the caller reads that as
+        "the merge did not happen" and burns them in a pass of their own,
+        rather than shipping a master that quietly lost them.
+        """
+        return video_path if caption_filter else _copy_through()
 
     try:
         from moviepy import VideoFileClip
@@ -652,11 +693,11 @@ async def finalize_master(video_path: str, output_path: str) -> str:
             width, height = (clip.size or (0, 0))
     except Exception as exc:
         logger.warning("Finishing pass could not probe video, skipping: %s", exc)
-        return _copy_through()
+        return _decline()
 
     # Too short to fade meaningfully -- don't eat the whole clip with fades.
     if duration < (FADE_IN_SECONDS + FADE_OUT_SECONDS) * 2:
-        return _copy_through()
+        return _decline()
 
     fade_out_start = max(0.0, duration - FADE_OUT_SECONDS)
     # Film-look filters ride along in THIS encode. Cadence, grain and matte
@@ -665,8 +706,15 @@ async def finalize_master(video_path: str, output_path: str) -> str:
     # of four. Order matters: resample and matte before grain, so the noise is
     # generated at the delivered frame rate and is not itself resampled.
     look_filters, look_args = build_film_look_filters(width, height)
+    # Captions go AFTER the look and BEFORE the fades, and both halves of that
+    # matter. After the matte, or a scope crop would cut the line off the
+    # bottom of the frame; after the grain, so the text stays crisp instead of
+    # being dissolved into it. Before the fades, or a caption sits at full
+    # brightness over a picture fading to black, which is the one caption
+    # error a viewer reads instantly as broken.
     vf = ",".join(
         look_filters
+        + ([caption_filter] if caption_filter else [])
         + [
             f"fade=t=in:st=0:d={FADE_IN_SECONDS}",
             f"fade=t=out:st={fade_out_start:.3f}:d={FADE_OUT_SECONDS}",
@@ -725,6 +773,16 @@ async def finalize_master(video_path: str, output_path: str) -> str:
         )
     except Exception as exc:
         logger.warning("Finishing pass unavailable, shipping un-finished video: %s", exc)
+    if caption_filter:
+        # The captions were riding on this encode. Copying through here would
+        # ship a master with neither them nor the fades, so hand the caller
+        # back its own input: it burns them separately, exactly as it did
+        # before the two passes were folded together.
+        try:
+            os.unlink(output_path)
+        except OSError:
+            pass
+        return video_path
     try:
         os.unlink(output_path)
     except OSError:
@@ -2110,78 +2168,100 @@ def _escape_subtitles_filter_path(path: str) -> str:
     return escaped
 
 
-async def _burn_kinetic_captions(
+def _write_caption_file(document: str, suffix: str, prefix: str, directory: str) -> str:
+    """Write a caption document beside the master and return its path."""
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=suffix,
+        prefix=prefix,
+        dir=directory or ".",
+        delete=False,
+        encoding="utf-8",
+    ) as handle:
+        handle.write(document)
+        return handle.name
+
+
+def _kinetic_caption_filter(
     video_path: str,
-    output_path: str,
     dialogue_tracks: List[Dict[str, Any]],
     scene_paths: Optional[List[str]] = None,
-) -> Optional[str]:
-    """Burn word-by-word captions, or return None to leave it to the SRT path.
+) -> Tuple[str, Optional[str]]:
+    """Word-by-word captions as an ffmpeg filter, or ("", None) to decline.
 
-    None is returned for every ordinary reason not to do this -- no measured
-    word timings in any track, an ffmpeg that cannot render ASS, a failed
-    encode -- so the caller simply carries on and burns the plain captions it
-    always has.
+    Declined for every ordinary reason there is not to do this: the master is
+    landscape (this is a vertical-feed house style, see interfaces/
+    ass_captions), or no track carries measured word timings, which is every
+    voice provider except the direct ElevenLabs path.
     """
     width, height = _probe_video_size(video_path)
+    if width and height and width > height:
+        logger.info(
+            "Word captions are enabled, but this master is %dx%d — "
+            "landscape gets the broadcast caption style, not the feed one.",
+            width,
+            height,
+        )
+        return "", None
     document = build_kinetic_ass(
         dialogue_tracks, scene_paths=scene_paths, width=width or 1080, height=height or 1920
     )
     if not document.strip():
-        return None
+        return "", None
+    path = _write_caption_file(
+        document, ".ass", "museforge_kinetic_", os.path.dirname(video_path)
+    )
+    return f"ass={_escape_subtitles_filter_path(path)}", path
 
-    ass_path = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            suffix=".ass",
-            prefix="museforge_kinetic_",
-            dir=os.path.dirname(output_path) or ".",
-            delete=False,
-            encoding="utf-8",
-        ) as handle:
-            ass_path = handle.name
-            handle.write(document)
 
-        process = await asyncio.create_subprocess_exec(
-            resolve_ffmpeg_binary(),
-            "-y",
-            "-i",
-            video_path,
-            "-vf",
-            f"ass={_escape_subtitles_filter_path(ass_path)}",
-            *video_encode_args(),
-            # The mix is already made and must survive being written over.
-            "-c:a",
-            "copy",
-            output_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await process.communicate()
-        if process.returncode == 0 and os.path.isfile(output_path):
-            return output_path
-        logger.warning(
-            "Kinetic caption burn failed (exit=%s), falling back to plain "
-            "captions: %s",
-            process.returncode,
-            stderr.decode("utf-8", errors="replace")[-800:],
-        )
-    except Exception as exc:
-        logger.warning(
-            "Kinetic captions unavailable, falling back to plain captions: %s", exc
-        )
-    finally:
-        if ass_path:
-            try:
-                os.unlink(ass_path)
-            except OSError:
-                pass
-    try:
-        os.unlink(output_path)
-    except OSError:
-        pass
-    return None
+def _broadcast_caption_filter(
+    video_path: str,
+    dialogue_tracks: List[Dict[str, Any]],
+    scene_paths: Optional[List[str]] = None,
+) -> Tuple[str, Optional[str]]:
+    """Broadcast-style captions as an ffmpeg filter, or ("", None).
+
+    White primary text, black outline, BorderStyle=3 = opaque box behind the
+    text for readability on busy backgrounds. Every size is measured off this
+    video's own frame -- see build_caption_style.
+    """
+    body = build_srt_from_dialogue_tracks(list(dialogue_tracks), scene_paths=scene_paths)
+    if not body.strip():
+        return "", None
+    path = _write_caption_file(
+        body, ".srt", "museforge_subs_", os.path.dirname(video_path)
+    )
+    force_style = build_caption_style(*_probe_video_size(video_path))
+    return (
+        f"subtitles={_escape_subtitles_filter_path(path)}:force_style='{force_style}'",
+        path,
+    )
+
+
+def build_caption_filter(
+    video_path: str,
+    dialogue_tracks: Optional[List[Dict[str, Any]]] = None,
+    scene_paths: Optional[List[str]] = None,
+) -> Tuple[str, Optional[str]]:
+    """The -vf fragment that burns this drama's captions, and the file it reads.
+
+    Separated from the encode that applies it so the SAME fragment can ride
+    along in the finishing pass instead of paying for a re-encode of its own:
+    on a 60-second delivered master the caption burn cost 237 seconds and the
+    finishing pass 325, for two full passes over the same picture.
+
+    The caller owns the returned path and must delete it after the encode.
+    ("", None) means there is nothing to burn.
+    """
+    if not dialogue_tracks:
+        return "", None
+    # Two house styles, not a fallback chain: the plain one is right for a
+    # 16:9 drama in the same way the kinetic one is right for a vertical feed.
+    if is_word_captions_enabled():
+        kinetic, path = _kinetic_caption_filter(video_path, dialogue_tracks, scene_paths)
+        if kinetic:
+            return kinetic, path
+    return _broadcast_caption_filter(video_path, dialogue_tracks, scene_paths)
 
 
 async def burn_subtitles(
@@ -2190,11 +2270,12 @@ async def burn_subtitles(
     dialogue_tracks: list,
     scene_paths: Optional[List[str]] = None,
 ) -> str:
-    """Burn dialogue captions into ``video_path`` via ffmpeg's subtitles filter.
+    """Burn dialogue captions into ``video_path`` in a pass of their own.
 
-    Builds a temporary .srt from ``dialogue_tracks`` (white text + black outline
-    / box for readability). Fails open: on any error the original video is
-    copied through unchanged — same pattern as watermark / color grade.
+    Used when the finishing pass is off; when it is on, the same filter rides
+    along in that encode instead (see build_caption_filter). Fails open: on any
+    error the original video is copied through unchanged — same pattern as
+    watermark / colour grade.
     """
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
@@ -2206,52 +2287,16 @@ async def burn_subtitles(
                 dst.write(data)
         return output_path
 
-    if not dialogue_tracks:
-        return _copy_through()
-
-    # Kinetic captions first, when the deployment asked for them AND the voice
-    # provider measured its words. Not a fallback chain out of caution: these
-    # are two different house styles, and the plain one is right for a 16:9
-    # drama in the same way the kinetic one is right for a vertical feed.
-    if is_word_captions_enabled():
-        kinetic = await _burn_kinetic_captions(
-            video_path, output_path, dialogue_tracks, scene_paths
-        )
-        if kinetic:
-            return kinetic
-
-    srt_path = None
+    caption_path = None
     try:
-        srt_body = build_srt_from_dialogue_tracks(
-            list(dialogue_tracks), scene_paths=scene_paths
+        vf, caption_path = build_caption_filter(
+            video_path, dialogue_tracks, scene_paths
         )
-        if not srt_body.strip():
+        if not vf:
             return _copy_through()
 
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            suffix=".srt",
-            prefix="museforge_subs_",
-            dir=os.path.dirname(output_path) or ".",
-            delete=False,
-            encoding="utf-8",
-        ) as srt_file:
-            srt_path = srt_file.name
-            srt_file.write(srt_body)
-
-        ffmpeg_binary = resolve_ffmpeg_binary()
-
-        # White primary text, black outline, BorderStyle=3 = opaque box behind
-        # text for readability on busy backgrounds. Every size is measured off
-        # this video's own frame -- see build_caption_style.
-        force_style = build_caption_style(*_probe_video_size(video_path))
-        vf = (
-            f"subtitles={_escape_subtitles_filter_path(srt_path)}"
-            f":force_style='{force_style}'"
-        )
-
         process = await asyncio.create_subprocess_exec(
-            ffmpeg_binary,
+            resolve_ffmpeg_binary(),
             "-y",
             "-i",
             video_path,
@@ -2274,15 +2319,10 @@ async def burn_subtitles(
         )
     except Exception as exc:
         logger.warning("Subtitle burn unavailable, shipping without captions: %s", exc)
-        try:
-            os.unlink(output_path)
-        except OSError:
-            pass
-        return _copy_through()
     finally:
-        if srt_path:
+        if caption_path:
             try:
-                os.unlink(srt_path)
+                os.unlink(caption_path)
             except OSError:
                 pass
 
@@ -2427,6 +2467,24 @@ MIN_TRIMMED_SECONDS = 0.5
 #: trim-to-audio removes seconds.
 LIPSYNC_LENGTH_TOLERANCE_SECONDS = 0.35
 
+#: How far a scene's speech may start AFTER its picture and still be worth
+#: driving a mouth with.
+#:
+#: The sync provider drives the mouth from the first frame of the clip it is
+#: given, which assumes the line begins where the scene begins. Usually it
+#: does. It stops doing so the moment a previous scene's line overruns its
+#: shot: plan_scene_speech_anchors then holds this scene's speech back so the
+#: two do not talk over each other (an audio bridge, which is ordinary film
+#: grammar), and the mixer lays the voice down at that later anchor -- while
+#: the mouth in the picture has already said the line.
+#:
+#: A mouth moving where there are no words is the dubbing error the whole
+#: feature exists to remove, so a scene whose speech has drifted keeps its
+#: unsynced take. Well above a frame at 24fps and well under the smallest
+#: drift a bridge can produce, so rounding never trips it and a real bridge
+#: always does.
+LIPSYNC_MAX_ANCHOR_DRIFT_SECONDS = 0.25
+
 
 def _clip_duration(path: str) -> Optional[float]:
     """Seconds of video at ``path``, or None if it cannot be measured."""
@@ -2509,6 +2567,57 @@ async def trim_clip(
     except Exception as exc:
         logger.warning("Trim failed for %s, keeping the full clip: %s", source_path, exc)
         return source_path
+
+
+def _heard_but_never_seen(script: DramaScript, cast: List[CharacterInScene]) -> set:
+    """Casefolded names of characters the film only ever HEARS.
+
+    A drama can put someone in every scene's dialogue and never once in front
+    of the camera -- a controller on the radio, a voice on an intercom -- and
+    ``is_visible`` is the field that says so. Nothing ever set it: every
+    character came back visible, so a voice on a handset was given a generated
+    portrait nobody sees, a place in the closed-cast clause ("X, Y appear in
+    this story"), and one end of the 180-degree axis that tells every frame
+    which way the other person is facing. Delivered against a brief with ONE
+    dock worker in it: a second character spoke through all three scenes,
+    appeared in none, and held a screen-direction lock over a film he was not
+    in.
+
+    Seen is read from the ACTION lines with the same rule that picks each
+    shot's reference portrait (script2video.on_screen_name_matches), so the
+    cast-level answer and the frame-level one cannot disagree -- and so
+    "Tomas's voice crackles over the radio" counts as heard, not seen.
+
+    Deliberately narrow, because the cost is asymmetric. Wrongly marking a
+    character invisible takes away their portrait and their identity lock, and
+    a shot that then shows them renders a stranger; wrongly leaving one
+    visible costs a portrait and a name in a clause. So this only fires on the
+    case it can actually prove: a character who SPEAKS, is named in no action
+    line anywhere, and whose absence still leaves somebody on screen.
+    """
+    from pipelines.script2video import on_screen_name_matches
+
+    on_screen = set()
+    speaks = set()
+    for scene in getattr(script, "scenes", None) or []:
+        action = _scene_action(scene)
+        if action:
+            for _, character in on_screen_name_matches(action.lower(), cast):
+                on_screen.add(character.name.casefold())
+        for line in _scene_dialogue(scene):
+            who = (
+                line.get("character") if isinstance(line, dict)
+                else getattr(line, "character", "")
+            )
+            if who:
+                speaks.add(str(who).strip().casefold())
+
+    # Nobody was named in any action line: the script is written without them,
+    # not around one absent voice. Marking the whole cast invisible would
+    # leave every frame with no identity lock at all.
+    if not on_screen:
+        return set()
+    return {name for name in speaks if name not in on_screen}
 
 
 class Idea2VideoPipeline:
@@ -2729,10 +2838,53 @@ class Idea2VideoPipeline:
             if 0 <= scene_index < len(scene_paths):
                 audio_by_scene.setdefault(scene_index, audio_url)
 
+        # Where each scene's speech actually lands on the finished timeline.
+        # Read from the same plan the mixer and the captions read, so all three
+        # agree -- and computed from EVERY dialogue track, not just the scenes
+        # being synced, because a bridge is caused by the scene before.
+        scene_lengths = [_probe_video_duration(path) for path in scene_paths]
+        picture_starts: List[float] = []
+        elapsed = 0.0
+        for length in scene_lengths:
+            picture_starts.append(elapsed)
+            elapsed += length
+        speech_anchors = plan_scene_speech_anchors(
+            dialogue_tracks, picture_starts, elapsed
+        )
+
         synced: List[int] = []
         for position, (scene_index, audio_url) in enumerate(sorted(audio_by_scene.items())):
             if is_cancelled and is_cancelled():
                 break
+
+            picture_start = (
+                picture_starts[scene_index]
+                if 0 <= scene_index < len(picture_starts)
+                else 0.0
+            )
+            # Only where the timeline is actually known. A clip that will not
+            # probe contributes a length of 0, which drags every scene after
+            # it back to the same start and would read as a drift that is not
+            # there -- so an unmeasurable timeline fails OPEN and syncs, the
+            # same way the length check does.
+            timeline_known = all(
+                length > 0 for length in scene_lengths[: scene_index + 1]
+            )
+            drift = speech_anchors.get(scene_index, picture_start) - picture_start
+            if timeline_known and drift > LIPSYNC_MAX_ANCHOR_DRIFT_SECONDS:
+                # The line does not start where this clip starts, and the sync
+                # provider has no way to be told that -- it drives the mouth
+                # from frame one. Syncing here would put the words in the
+                # mouth before they are in the air, which is the exact dubbing
+                # error the feature is bought to remove.
+                logger.warning(
+                    "Scene %s speaks %.2fs after its picture starts (the "
+                    "previous scene's line is still running), so its mouth "
+                    "would move before the words — keeping the unsynced take.",
+                    scene_index,
+                    drift,
+                )
+                continue
             await progress(
                 "lipsync",
                 f"Syncing lips to dialogue ({position + 1}/{len(audio_by_scene)})",
@@ -2908,7 +3060,7 @@ class Idea2VideoPipeline:
             _record_take(scene, take, scene.get("clip_url"), local_path)
 
     def _characters_from_script(self, script: DramaScript) -> List[CharacterInScene]:
-        return [
+        cast = [
             CharacterInScene(
                 idx=i,
                 name=c.name,
@@ -2919,6 +3071,10 @@ class Idea2VideoPipeline:
             )
             for i, c in enumerate(script.characters)
         ]
+        for character in cast:
+            if character.name.casefold() in _heard_but_never_seen(script, cast):
+                character.is_visible = False
+        return cast
 
     async def _rerender_scenes(
         self,
@@ -3078,7 +3234,12 @@ class Idea2VideoPipeline:
                     has_dialogue=bool(_scene_dialogue(scene_script)),
                     lipsync_enabled=bool(previous_result.get("lipsynced_scenes")),
                     scene_emotion=_scene_emotion(scene_script),
-                    scene_dialogue=_format_scene_dialogue(_scene_dialogue(scene_script)),
+                    scene_dialogue=_format_scene_dialogue(
+                        _scene_dialogue(scene_script),
+                        off_screen={
+                            c.name.casefold() for c in characters if not c.is_visible
+                        },
+                    ),
                     scene_direction=_format_scene_direction(scene_script),
                     # A retake replaces one scene inside a cut that already
                     # exists, so it needs the same story-state fence the first
@@ -4053,30 +4214,79 @@ class Idea2VideoPipeline:
         else:
             await add_background_music(graded_path, with_music_path, music_url)
 
-        # Burn captions only when dialogue tracks are actually present —
-        # no extra ffmpeg work when dialogue is off / empty.
+        # Captions and the finishing pass are two full re-encodes of the same
+        # picture, back to back -- measured on a 60-second delivered master at
+        # 237s and 325s, nine and a half minutes of a thirty-three minute job
+        # spent writing the same frames twice, and a generation loss for it.
+        # When both are running they are folded into ONE encode: the caption
+        # filter is built here and handed to the finishing pass.
+        #
+        # The fallback is the reason this is safe. Both stages fail open on
+        # their own, and merging them would otherwise mean a failure that used
+        # to cost captions now costs the fades, the film look and the delivery
+        # loudness as well -- so a finishing pass that could not run with them
+        # hands back its own input, and the two passes run separately exactly
+        # as they always did.
         video_for_final = with_music_path
-        if dialogue_tracks:
-            _check_cancel()
-            if progress_callback:
-                await progress_callback("subtitles", "Burning captions", 95)
-            subtitled_path = os.path.join(working_dir, "drama_subtitled.mp4")
-            await burn_subtitles(
-                with_music_path,
-                subtitled_path,
-                dialogue_tracks,
-                scene_paths=scene_paths,
-            )
-            video_for_final = subtitled_path
+        finishing = is_finishing_enabled()
+        caption_filter, caption_file = "", None
+        try:
+            if dialogue_tracks and finishing:
+                caption_filter, caption_file = build_caption_filter(
+                    with_music_path, dialogue_tracks, scene_paths
+                )
 
-        # Master finishing (fades + loudness) BEFORE the watermark so the
-        # watermark stays at constant opacity over the fade to black.
-        if is_finishing_enabled():
-            _check_cancel()
-            if progress_callback:
-                await progress_callback("finishing", "Mastering fades & loudness", 96)
-            finished_path = os.path.join(working_dir, "drama_finished.mp4")
-            video_for_final = await finalize_master(video_for_final, finished_path)
+            if dialogue_tracks and not caption_filter:
+                _check_cancel()
+                if progress_callback:
+                    await progress_callback("subtitles", "Burning captions", 95)
+                subtitled_path = os.path.join(working_dir, "drama_subtitled.mp4")
+                await burn_subtitles(
+                    with_music_path,
+                    subtitled_path,
+                    dialogue_tracks,
+                    scene_paths=scene_paths,
+                )
+                video_for_final = subtitled_path
+
+            # Master finishing (fades + loudness) BEFORE the watermark so the
+            # watermark stays at constant opacity over the fade to black.
+            if finishing:
+                _check_cancel()
+                if progress_callback:
+                    await progress_callback(
+                        "finishing",
+                        "Mastering captions, fades & loudness"
+                        if caption_filter
+                        else "Mastering fades & loudness",
+                        96,
+                    )
+                finished_path = os.path.join(working_dir, "drama_finished.mp4")
+                finished = await finalize_master(
+                    video_for_final, finished_path, caption_filter=caption_filter
+                )
+                if caption_filter and finished == video_for_final:
+                    logger.warning(
+                        "The finishing pass could not carry the captions; "
+                        "burning them on their own and finishing after, as "
+                        "two passes."
+                    )
+                    _check_cancel()
+                    subtitled_path = os.path.join(working_dir, "drama_subtitled.mp4")
+                    await burn_subtitles(
+                        video_for_final,
+                        subtitled_path,
+                        dialogue_tracks,
+                        scene_paths=scene_paths,
+                    )
+                    finished = await finalize_master(subtitled_path, finished_path)
+                video_for_final = finished
+        finally:
+            if caption_file:
+                try:
+                    os.unlink(caption_file)
+                except OSError:
+                    pass
 
         final_path = os.path.join(working_dir, "drama_final.mp4")
         if plan in WATERMARK_PLANS:
@@ -4453,7 +4663,12 @@ class Idea2VideoPipeline:
                     # Always pass the words themselves to the storyboard step,
                     # independent of whether VOICE generation is enabled --
                     # dialogue is what tells the artist which moment matters.
-                    scene_dialogue=_format_scene_dialogue(scene_dialogue_lines),
+                    scene_dialogue=_format_scene_dialogue(
+                        scene_dialogue_lines,
+                        off_screen={
+                            c.name.casefold() for c in characters if not c.is_visible
+                        },
+                    ),
                     scene_direction=_format_scene_direction(scene),
                     # Where this scene sits in the story. Without it every
                     # scene is designed as if it were the only one, and the

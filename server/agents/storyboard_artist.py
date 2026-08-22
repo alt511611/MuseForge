@@ -150,6 +150,16 @@ to match and the model invents a stranger — a different actor at every cut. Us
 name first, then describe; pronouns are fine once the name has been given in the
 same shot.
 
+THE COSTUME IS CAST, NOT DESIGNED. Each character below is listed with what they
+wear, and that outfit is fixed for the whole drama. Describe them in it or do not
+describe their clothing at all — never restyle a garment, never swap one for
+another, and never add an item nobody is listed as wearing: no hat, cap, hood,
+helmet, mask, goggles, headset, headphones, harness, vest or badge. Anything the
+scene needs them to USE is a prop in their hands, not a new piece of costume. The
+render step locks the outfit by name; a garment invented here arrives in the frame
+prompt as an instruction that contradicts that lock, and the picture follows this
+line rather than the lock.
+
 DO NOT FILM THE FUTURE. The notes tell you what has ALREADY happened in earlier scenes
 and what has NOT happened yet. Your shot shows the world exactly as it stands at THIS
 point in the story: never show a later scene's event, its aftermath or its changed state
@@ -742,8 +752,20 @@ Respond ONLY with valid JSON array containing a single shot object:
         payoff) was added to the MuAPI path alone and was therefore dead on
         the DEFAULT path, since MuAPI's LLM route is opt-in.
         """
+        # WITH the wardrobe. The shot designer used to be given faces and
+        # builds alone, so the one agent that writes the sentence the image
+        # model weights most -- visual_desc, priority 0 in the frame prompt --
+        # was the only one in the pipeline that did not know what the cast has
+        # on. It dressed them itself, and the frame prompt then carried a
+        # description asking for a headset next to a costume lock forbidding
+        # one. Delivered: a yellow rain jacket in the first scene, the same
+        # jacket over a grey hoodie in the second, and over a harness with
+        # headphones in the third, against a lock that named none of it.
         char_desc = ", ".join(
-            f"{c.name}: {c.static_features}" for c in characters if c.is_visible
+            f"{c.name}: {c.static_features}"
+            + (f", wearing {wardrobe}" if (wardrobe := (c.wardrobe or "").strip()) else "")
+            for c in characters
+            if c.is_visible
         )
         return (
             f"{self._format_user_brief_block(user_brief)}"

@@ -241,21 +241,20 @@ _NO_UNNAMED_ITEMS = (
 _REFERENCE_NOTE = (
     "The reference image is {name}: match that face exactly and wear the "
     "exact outfit worn in it, down to colour and material. Take NOTHING else "
-    # The eyeline is stated POSITIVELY and folded into this sentence rather
-    # than added after it, because this block is never dropped and every
-    # character it costs is taken from the scene's own description -- the
-    # budget guard in tests/test_image_prompt_budget holds it under 800.
+    # This says what to do with the REFERENCE, and it used to carry the
+    # eyeline as well -- the whole rule, folded in here because this block is
+    # never dropped. Two delivered dramas later the faces were still looking
+    # down the lens, and the reason is visible in the sentence: read as a
+    # caveat about a portrait, it never says where the eyes go in THIS shot.
+    # The rule is now staging, in face_clause, where a shot's composition is
+    # described. What is left here is the part that really is about the
+    # reference: do not copy its pose.
     #
-    # "Do not copy the portrait's gaze" is a rule about the REFERENCE. It
-    # never says where the eyes go in THIS shot, so a model can obey it to the
-    # letter and still turn them to the lens, which is the strongest prior a
-    # frontal portrait gives it. Measured on a delivered drama: both workers
-    # stopped mid-scene to look dead at the viewer. Naming the target ("on the
-    # other character") also works far better on an image model than naming
-    # the prohibition.
-    "from it — its pose, framing and gaze into the lens belong to a portrait; "
-    "stage this shot from its own description, eyes in the scene, not on the "
-    "camera. "
+    # Every character this block costs is taken from the scene's own
+    # description -- the budget guard in tests/test_image_prompt_budget holds
+    # it under 800 -- so the words that moved are words this frame got back.
+    "from it — its pose and framing belong to a portrait; stage this shot "
+    "from its own description. "
 )
 
 #: What the identity clause costs before a single character is described.
@@ -537,6 +536,17 @@ def build_frame_prompt(
                 f"STATE is not: {change_now or change_before}. Render the "
                 f"location in that state -- this is the story's event and it "
                 f"must be plainly visible in the frame, not implied. "
+                # The setting line is the screenwriter's, and a screenwriter
+                # describing a place at night describes how it is lit -- the
+                # delivered job's own locked setting reads "rain-soaked cargo
+                # harbour, stacked shipping containers under sodium
+                # floodlights". Against a brief whose event is the city losing
+                # power, this prompt then asked for the floodlights and for
+                # their failure in the same breath, and the model resolved the
+                # contradiction the way the more concrete noun always wins:
+                # every lamp in the yard stayed on, through all three scenes.
+                f"Any light named in that setting line describes this place "
+                f"BEFORE the change; do not light the frame with it. "
             )
         else:
             setting_clause += (
@@ -591,31 +601,65 @@ def build_frame_prompt(
         )
     else:
         expression_clause = ""
-    face_clause = (
-        "The character's face is clearly visible and softly lit — not a "
-        "silhouette, not backlit into shadow, not turned away from camera. "
-    )
-    # ...but "visible to camera" is not "staring down the lens", and without
-    # a second sentence the model reads them as the same thing. Every
-    # reference portrait is a frontal headshot with the eyes on the lens, so
-    # the identity anchor pulls the same way: a delivered drama had both
-    # workers stopping mid-scene to look dead at the viewer, which reads as a
-    # poster, not a film. The eyeline has to be aimed at something INSIDE the
-    # story for a shot to be a shot.
+    # Two requirements, and they used to be one sentence pulling both ways:
+    # "not a silhouette, not backlit into shadow, NOT TURNED AWAY FROM CAMERA".
+    # The last of those asks for a frontal face, and a frontal face rendered
+    # from a frontal portrait is a person looking down the lens -- the poster
+    # shot this pipeline keeps delivering. The eyeline rule that was supposed
+    # to hold it back lived in the reference note, where it reads as a caveat
+    # about the PORTRAIT rather than as staging for this shot, and a third
+    # delivered drama came back staring at the viewer anyway.
     #
-    # Said ONCE. _REFERENCE_NOTE already carries it whenever a portrait is
-    # attached ("its pose, framing and gaze into the lens belong to a
-    # portrait"), and that note is priority 0 while this clause is dropped
-    # from most frames -- so repeating it here spent ~180 undroppable
-    # characters saying what had already been said, in the same prompt where
-    # the scene's own acted expression was being cut for space.
-    if matched_char is None or not getattr(matched_char, "name", ""):
-        face_clause += (
-            "The character does NOT look into the lens: no eye contact with "
-            "the camera, no posing for it, no addressing the viewer. Their "
-            "gaze stays inside the scene — on the other character, or on the "
-            "object they are handling — as if the camera were not there. "
+    # So the lighting requirement keeps its own sentence and the eyeline gets
+    # one: stated as staging, on every frame (this clause outranks the
+    # boilerplate below it), and naming what the eyes ARE on, which an image
+    # model follows far better than what they are not.
+    face_clause = (
+        "The face is lit and readable — not a silhouette, not backlit into "
+        "shadow. The eyes stay inside the scene, on the other character or on "
+        "the object in their hands — never on the lens. "
+    )
+    # WHO THIS SHOT SHOWS, which is not the same list as who the SCENE has.
+    # The identity clause used to restate every character in the scene on
+    # every frame -- in a two-hander shot as singles (the overwhelming shape
+    # of a micro-drama) that is a full description of somebody who is not in
+    # the picture, ~230 characters of a 3,000-character budget, on every frame
+    # of the film. Two costs, and the second is the one that shows:
+    #
+    # * The budget it eats is taken from the end of the ladder below. Measured
+    #   on a delivered job, every dialogue frame lost the film-look note, the
+    #   180-degree rule, the closed-cast clause and the mouth-visibility line
+    #   the lip-sync pass depends on -- the four clauses that die first.
+    # * Describing an absent character to an image model is not neutral. It is
+    #   a face, in detail, in a prompt for a frame they are not in.
+    #
+    # Read the same way the reference portrait is chosen (on_screen_name_matches
+    # over the shot's own text, which discounts a name that is only HEARD), so
+    # the frame's picture and its words agree about who is present. A shot that
+    # names nobody falls back to the scene's cast, which is exactly the old
+    # behaviour and the right answer for an insert or an establishing plate.
+    in_frame = [
+        character
+        for _, character in on_screen_name_matches(
+            f"{shot.visual_desc} {getattr(shot, 'motion_desc', '') or ''}".lower(),
+            characters or [],
         )
+        # is_visible is the cast-level answer to the same question, and the
+        # clause below filters by it anyway: without this, a shot naming only
+        # a never-seen character would narrow to a list that then describes
+        # NOBODY, and the frame would go out with no appearance lock at all.
+        if getattr(character, "is_visible", True)
+    ]
+    if in_frame and matched_char is not None and matched_char not in in_frame:
+        # The reference portrait's owner is in the frame by construction.
+        in_frame.insert(0, matched_char)
+    # Narrowed ONLY on evidence. A shot that named nobody may still have the
+    # whole scene in it -- the pipeline had to guess its own anchor there (see
+    # scene_subject) -- and guessing a second time, in the direction of
+    # describing FEWER of the people who might be on screen, is how a
+    # character comes back as a stranger.
+    identity_characters = in_frame or characters
+
     # Budget for the identity clause: whatever is left after the shot itself
     # and its framing, minus room for the setting clause. Everything else is
     # optional and trimmed by fit_image_prompt below.
@@ -635,7 +679,7 @@ def build_frame_prompt(
         - 200  # style prefix, shot type and lens line
     )
     identity_clause = build_character_identity_clause(
-        characters, matched_char, limit=max(identity_budget, 200)
+        identity_characters, matched_char, limit=max(identity_budget, 200)
     )
     cast_clause = build_cast_closure_clause(characters)
     direction_clause = build_screen_direction_clause(characters)
@@ -2085,6 +2129,15 @@ class Script2VideoPipeline:
         expected_setting = format_expected_setting(
             setting_location, setting_time_of_day, setting_era
         )
+        # QA verifies the frame against the LOCKED setting, and the one scene
+        # allowed to break that lock is the scene the drama exists for. Without
+        # this, a correctly blacked-out harbour is a setting mismatch: the
+        # repair regenerates the frame, aimed by an issue string that says the
+        # place looks wrong, until the lights come back on. The vision check
+        # has to be told what the story did to the place.
+        changed_state = (world_change or "").strip() or (world_state or "").strip()
+        if expected_setting and changed_state:
+            expected_setting += f" -- but in this scene: {changed_state}"
 
         # Who this SCENE is about, decided once from the scene's own text by
         # the same rule the shots use: whoever it names first. Used only as

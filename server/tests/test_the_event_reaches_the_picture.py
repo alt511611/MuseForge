@@ -155,3 +155,186 @@ def test_the_brief_still_wins_when_it_states_the_event():
     _apply(script)
 
     assert "power dies" in script.scenes[1].world_change
+
+
+# ── a filled field is not a filmed event ────────────────────────────────────
+
+BRIEF = (
+    "A dock worker on a rain-soaked cargo harbour finds a shipping container "
+    "that hums with light, and the city's power dies the moment she opens it."
+)
+
+
+def test_a_change_of_the_writer_s_own_does_not_stand_in_for_the_brief_s():
+    """Delivered against BRIEF. The writer declared the container's own glow
+    -- a real change, visibly rendered -- which was enough to stand the
+    recovery down, and the city's power never went out in a single frame. The
+    only blackout in the film was a caption reading "city's out!"."""
+    script = _script(
+        [
+            _scene("setup", action="Mara walks the container rows in the rain."),
+            _scene(
+                "rising_action",
+                action="She breaks the seal on Bay 9.",
+                world_change="the container's blue light spills across the wet yard",
+            ),
+            _scene(
+                "climax",
+                action="She staggers back from the open door.",
+                dialogue=[{"character": "Mara", "line": "The whole city's out!"}],
+            ),
+        ],
+        brief=BRIEF,
+    )
+
+    _apply(script)
+
+    assert "power dies" in script.scenes[2].world_change, (
+        "the brief's own event never reached the picture"
+    )
+    # ...and the writer's change is still their scene's, untouched.
+    assert script.scenes[1].world_change == (
+        "the container's blue light spills across the wet yard"
+    )
+
+
+def test_the_same_event_in_the_writer_s_words_is_left_alone():
+    """The noun is the part a writer varies -- "every lamp on the quay goes
+    out" is the brief's blackout, and adding the brief's phrasing next to it
+    would only make the prompt say it twice."""
+    script = _script(
+        [
+            _scene("setup", action="Mara walks."),
+            _scene(
+                "climax",
+                action="She opens it.",
+                world_change="every lamp on the quay goes out at once",
+            ),
+        ],
+        brief=BRIEF,
+    )
+
+    _apply(script)
+
+    assert script.scenes[1].world_change == "every lamp on the quay goes out at once"
+
+
+def test_the_brief_s_event_is_added_to_the_climax_not_over_it():
+    """The writer's change happens in their scene too. The frame prompt
+    renders the whole state it is given, so the honest instruction is both."""
+    script = _script(
+        [
+            _scene(
+                "climax",
+                action="She opens it.",
+                world_change="the hatch swings wide",
+            ),
+        ],
+        brief=BRIEF,
+    )
+
+    _apply(script)
+
+    assert script.scenes[0].world_change == (
+        "the hatch swings wide; the city's power dies the moment she opens it"
+    )
+
+
+def test_a_brief_with_no_event_still_leaves_a_declared_change_alone():
+    """Unchanged: with nothing in the brief to check against, the model's own
+    reading of the story is the only one there is."""
+    script = _script(
+        [
+            _scene(
+                "climax",
+                action="She opens it.",
+                world_change="the container's blue light spills across the yard",
+            ),
+        ],
+        brief="A dock worker opens a humming container.",
+    )
+
+    _apply(script)
+
+    assert script.scenes[0].world_change == (
+        "the container's blue light spills across the yard"
+    )
+
+
+# ── the delivered script, word for word ─────────────────────────────────────
+
+DELIVERED = (
+    "Rain hammers rows of stacked containers under buzzing sodium lights. Mara "
+    "sweeps her flashlight along Bay 14 and stops on one container seeping a "
+    "faint blue-white glow through its seams, a low hum audible over the rain. "
+    "The rest of the harbour and the distant city skyline blaze with electric "
+    "light behind her.",
+    "Mara crosses the flooded aisle, boots splashing, and crouches at the "
+    "container's manual release lever, rain streaming off her hood. The blue "
+    "light pulses brighter with each breath she takes near it, throwing "
+    "shifting light across her wet face. Her radio crackles.",
+    "Mara throws her weight against the lever. The container doors groan open "
+    "and light floods out across the flooded dock—and in the same instant every "
+    "sodium lamp on the harbour and every light across the distant city skyline "
+    "snaps to black, leaving only the container's pulsing glow lighting the "
+    "falling rain and Mara's stunned, upturned face.",
+)
+
+
+def _delivered_script(brief):
+    return _script(
+        [
+            _scene("setup", action=DELIVERED[0]),
+            _scene("rising_action", action=DELIVERED[1]),
+            _scene("climax", action=DELIVERED[2]),
+        ],
+        brief=brief,
+    )
+
+
+def test_snaps_to_black_is_a_blackout():
+    """The delivered script's climax, in the plainest words available for it.
+    "goes dark" was the only shape this recognised, so the film's whole event
+    read as nothing at all."""
+    assert ScreenwriterAgent._event_family(DELIVERED[2]) == "blackout"
+
+
+def test_a_wet_dock_is_not_a_flood():
+    """Three uses of the word in one script -- "the flooded aisle", "light
+    floods out", "the flooded dock" -- and not one of them is an event. They
+    were enough matches to make the real climax unreadable: two hits means the
+    brief describes more than one change, and this defers rather than guess.
+    A flood is water arriving."""
+    assert ScreenwriterAgent._event_family(DELIVERED[1]) == ""
+    assert (
+        ScreenwriterAgent._event_family(
+            "the container doors groan open and light floods out across the "
+            "flooded dock"
+        )
+        == ""
+    )
+    assert (
+        ScreenwriterAgent._event_family("the water floods over the pier edge")
+        == "flood"
+    )
+
+
+def test_the_delivered_script_recovers_its_own_climax():
+    """The user pasting their three scenes as the brief -- which is how this
+    one was written. Before, the two "flood" hits cancelled each other out and
+    nothing was restored; the blackout stayed a line of dialogue."""
+    script = _delivered_script(" ".join(DELIVERED))
+
+    _apply(script)
+
+    assert "snaps to black" in script.scenes[2].world_change
+    assert not script.scenes[0].world_change
+    assert not script.scenes[1].world_change
+
+
+def test_the_one_line_brief_still_lands_on_the_same_scene():
+    script = _delivered_script(BRIEF)
+
+    _apply(script)
+
+    assert "power dies" in script.scenes[2].world_change

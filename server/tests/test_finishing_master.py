@@ -213,7 +213,7 @@ async def test_assembly_runs_finishing_before_watermark(tmp_path, monkeypatch):
         open(output_path, "wb").write(b"music")
         return output_path
 
-    async def _fake_finish(video_path, output_path):
+    async def _fake_finish(video_path, output_path, caption_filter=""):
         calls.append("finishing")
         open(output_path, "wb").write(b"finished")
         return output_path
