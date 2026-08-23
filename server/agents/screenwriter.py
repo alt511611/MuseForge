@@ -220,8 +220,15 @@ buttoned in one shot, zipped in the next and hung open in a third, went matte th
 glossy, grew flap pockets then patch pockets then none, and put the band on her chest,
 then her sleeves, then nowhere. So settle the GARMENT the same way you settled the head,
 each in a phrase and not a paragraph: how it fastens, what pockets it has, what the
-material looks like, and any marking or lettering on it and where. Say what is on their
+material looks like, and any badge or marking on it and where. Say what is on their
 back too, or nothing will be there in one shot and a backpack in the next.
+
+Describe a marking as a SHAPE, never as words to be read — "a blue reflective band across
+the chest", "a square orange patch on the left breast", not "HARBOR OPS stencilled across
+the back". The render cannot spell. Asked for stencilled lettering it delivered HAROB
+across the back of a jacket in a two-second push-in, and FICST LOU on a name patch that is
+on screen in every shot of the drama — and writing is the one thing in a frame a viewer
+tries to read, so a misspelled word costs more than the plain patch it replaced.
 
 PRESET CHARACTERS in the user message already exist: do NOT redefine or rename them.
 Use their exact names and visual descriptions, and weave them into the story. You may
@@ -242,7 +249,7 @@ Respond ONLY with valid JSON matching this schema:
   "characters": [{
     "name": "string",
     "description": "gender and age FIRST, then face and build - no clothing",
-    "wardrobe": "head down: headwear, garment + cut + colour, fastening, pockets, material, markings, anything carried",
+    "wardrobe": "head down: headwear, garment + cut + colour, fastening, pockets, material, markings as SHAPES not words, anything carried",
     "role": "protagonist|antagonist|supporting",
     "want": "external goal", "need": "internal truth", "arc": "how they change"
   }],
