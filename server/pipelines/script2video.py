@@ -246,10 +246,19 @@ _COSTUME_LOCK_REFERENCED = (
 # sentence in the prompt said otherwise. Headwear is called out by name
 # because it sits on the face, so a hat that appears and disappears reads as
 # a different person even when the face is held.
+# Bags joined the list for the same reason headwear is on it, and on the same
+# evidence: a delivered drama put a backpack on its lead for one shot of six
+# and took it off again. A pack changes the SILHOUETTE, which is what a viewer
+# reads a costume by at any distance the face is not legible -- so an
+# unnamed one reads as a different outfit exactly the way an unnamed hat reads
+# as a different person. "Wear NOTHING not named above" already forbade it
+# categorically; the enumeration is what the model actually attends to, and
+# nothing in it was a bag.
 _NO_UNNAMED_ITEMS = (
     "Wear NOTHING not named above — no hat, cap, beanie, helmet, hard hat, "
-    "hood, mask, goggles, glasses, headset, scarf or badge — unless the "
-    "outfit names one, and then in every scene, never removed. "
+    "hood, mask, goggles, glasses, headset, scarf, badge, backpack, bag, "
+    "strap or harness — unless the outfit names one, and then in every "
+    "scene, never removed. "
 )
 # The reference portrait is deliberately generated WEARING the character's
 # wardrobe (see Idea2VideoPipeline._lock_character_portraits) precisely so it

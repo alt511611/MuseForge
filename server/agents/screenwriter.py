@@ -213,6 +213,16 @@ hat, helmet or hood if they wear one, and write "bare-headed" if they do not. Le
 unsaid is how the same worker ends up in a beanie, then a hard hat, then neither: the
 render only holds what the wardrobe named, and invents the rest afresh every scene.
 
+That rule does not stop at the head, and a delivered drama proved it: a dock worker
+described only as "a yellow hooded rain slicker with a reflective blue band across the
+chest" kept her hood in all six shots — the part that was named — while the slicker
+buttoned in one shot, zipped in the next and hung open in a third, went matte then
+glossy, grew flap pockets then patch pockets then none, and put the band on her chest,
+then her sleeves, then nowhere. So settle the GARMENT the same way you settled the head,
+each in a phrase and not a paragraph: how it fastens, what pockets it has, what the
+material looks like, and any marking or lettering on it and where. Say what is on their
+back too, or nothing will be there in one shot and a backpack in the next.
+
 PRESET CHARACTERS in the user message already exist: do NOT redefine or rename them.
 Use their exact names and visual descriptions, and weave them into the story. You may
 add extra supporting characters only if needed.
@@ -232,7 +242,7 @@ Respond ONLY with valid JSON matching this schema:
   "characters": [{
     "name": "string",
     "description": "gender and age FIRST, then face and build - no clothing",
-    "wardrobe": "what they wear",
+    "wardrobe": "head down: headwear, garment + cut + colour, fastening, pockets, material, markings, anything carried",
     "role": "protagonist|antagonist|supporting",
     "want": "external goal", "need": "internal truth", "arc": "how they change"
   }],
