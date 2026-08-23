@@ -15,23 +15,39 @@ differently each time, which is the problem, not the fix.
 """
 
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Optional
 
 
 @dataclass(frozen=True)
 class LightingPlan:
     label: str
-    #: Where the key light comes from. Fixed for the whole drama.
+    #: Where the key light comes from INDOORS. Fixed for the whole drama.
     key_direction: str
     #: Hard/soft, and what is doing the lighting.
     quality: str
     #: Warm/cool cast, in words a diffusion model responds to.
     temperature: str
+    #: Where it comes from when the drama is NOT in a room -- or when nothing
+    #: in the script says it is. None where the answer does not change,
+    #: which is every daylight hour: the key is the sun either way, and it
+    #: does not enter through a window that the sentence has to name.
+    open_key_direction: Optional[str] = None
 
-    def as_clause(self) -> str:
+    def as_clause(self, interior: Optional[bool] = None) -> str:
+        """The clause for this hour, in a room or out of one.
+
+        ``interior`` is True for a room, False for a street, and None when the
+        script did not say. None reads as "not a room" on purpose: the plan
+        only ever has to be RIGHT about where the key comes from, and a
+        sentence that names no window is right in both places, while one that
+        names a window is wrong in half of them.
+        """
+        direction = self.key_direction
+        if interior is not True and self.open_key_direction:
+            direction = self.open_key_direction
         return (
             f"Lighting continuity (identical in every shot of this film): "
-            f"key light {self.key_direction}; {self.quality}; {self.temperature}. "
+            f"key light {direction}; {self.quality}; {self.temperature}. "
             f"Do not change the light's direction, height or colour between "
             f"shots. "
         )
@@ -43,24 +59,28 @@ LIGHTING_PLANS: Dict[str, LightingPlan] = {
     "dawn": LightingPlan(
         label="Dawn",
         key_direction="low from camera left, raking across the room",
+        open_key_direction="low from camera left, raking across the location",
         quality="soft, hazy, long shadows",
         temperature="cool blue ambient with a thin warm rim",
     ),
     "sunrise": LightingPlan(
         label="Sunrise",
         key_direction="low from camera left, raking across the room",
+        open_key_direction="low from camera left, raking across the location",
         quality="soft, hazy, long shadows",
         temperature="cool blue ambient with a thin warm rim",
     ),
     "early morning": LightingPlan(
         label="Early morning",
         key_direction="low from camera left through a window",
+        open_key_direction="low from camera left, the sun itself",
         quality="soft directional daylight, visible shafts, long shadows",
         temperature="pale warm gold against cool shadow",
     ),
     "morning": LightingPlan(
         label="Morning",
         key_direction="from camera left through a window",
+        open_key_direction="from camera left, the sun itself",
         quality="clean directional daylight, medium-length shadows",
         temperature="neutral daylight, faintly warm",
     ),
@@ -109,6 +129,8 @@ LIGHTING_PLANS: Dict[str, LightingPlan] = {
     "evening": LightingPlan(
         label="Evening",
         key_direction="from warm practical lamps inside the room",
+        open_key_direction="from the location's own practical lights -- "
+        "lamps, windows, signs, vehicles",
         quality="soft pools of light, darkness between them",
         temperature="warm tungsten key, deep cool shadow",
     ),
@@ -116,6 +138,8 @@ LIGHTING_PLANS: Dict[str, LightingPlan] = {
         label="Night",
         key_direction="from warm practical lamps inside the room, plus cool "
         "moonlight through the windows",
+        open_key_direction="from the location's own lamps -- street, dock, "
+        "vehicle -- with the night sky as cool fill",
         quality="low key, strong falloff, faces lit from one side only",
         temperature="warm tungsten key against cool blue moonlight",
     ),
@@ -130,6 +154,59 @@ DEFAULT_PLAN = LightingPlan(
     quality="soft directional key with gentle fill on the shadow side",
     temperature="neutral, faintly warm",
 )
+
+
+#: Nouns that put a scene outdoors, and nouns that put it in a room. Neither
+#: list tries to be a gazetteer -- they only have to separate the settings a
+#: micro-drama actually names, and anything they do not recognise falls
+#: through to "not stated", which asserts no window either way.
+_OUTDOOR_WORDS = (
+    "harbour", "harbor", "dock", "quay", "pier", "wharf", "marina",
+    "street", "road", "avenue", "alley", "lane", "highway", "motorway",
+    "yard", "courtyard", "car park", "parking lot", "forecourt",
+    "rooftop", "roof", "terrace", "balcony", "garden", "park", "square",
+    "field", "meadow", "hill", "mountain", "cliff", "valley", "desert",
+    "forest", "woods", "jungle", "beach", "shore", "coast", "riverbank",
+    "river", "canal", "towpath", "lakeside", "seafront", "promenade",
+    "bridge", "runway", "airfield", "platform", "graveyard", "cemetery",
+    "trench", "battlefield", "campsite", "clearing", "outdoors", "outside",
+)
+_INDOOR_WORDS = (
+    "room", "kitchen", "bedroom", "bathroom", "living", "office", "study",
+    "apartment", "flat", "corridor", "hallway", "stairwell", "lobby",
+    "basement", "cellar", "attic", "loft", "garage", "shed", "cabin",
+    "bar", "pub", "cafe", "café", "restaurant", "diner", "kitchenette",
+    "hospital", "ward", "clinic", "surgery", "laboratory", "lab",
+    "warehouse", "workshop", "factory floor", "classroom", "lecture",
+    "courtroom", "cell", "chapel", "church", "temple", "library",
+    "studio", "control room", "cockpit", "carriage", "cabin interior",
+    "shop", "store", "hotel", "indoors", "inside",
+)
+
+
+def is_interior(setting_location: str = "") -> Optional[bool]:
+    """True in a room, False out of one, None when the script did not say.
+
+    Screenwriting answers this in the first three characters of a slug line,
+    so INT./EXT. wins outright where it is present. Where it is not, the
+    location's own nouns decide, and a location naming both ("the yard behind
+    the workshop") is left as None rather than guessed at -- an unstated
+    answer costs a slightly vaguer sentence, and a wrong one puts a window in
+    a harbour.
+    """
+    text = (setting_location or "").strip().lower()
+    if not text:
+        return None
+    head = text.lstrip("( ")
+    if head.startswith("ext.") or head.startswith("ext ") or head.startswith("exterior"):
+        return False
+    if head.startswith("int.") or head.startswith("int ") or head.startswith("interior"):
+        return True
+    outdoor = any(word in text for word in _OUTDOOR_WORDS)
+    indoor = any(word in text for word in _INDOOR_WORDS)
+    if outdoor == indoor:
+        return None
+    return indoor
 
 
 def resolve_lighting(setting_time_of_day: str = "") -> LightingPlan:

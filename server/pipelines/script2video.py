@@ -15,7 +15,7 @@ from interfaces import acting
 from interfaces.camera import get_director_style
 from interfaces.character import CharacterInScene
 from interfaces.color_grade import get_color_grade
-from interfaces.lighting import resolve_lighting
+from interfaces.lighting import is_interior, resolve_lighting
 from interfaces.impact import build_impact_filters, plan_impacts
 from interfaces.pacing import plan_internal_cuts
 from interfaces.visual_style import PHOTOREAL_RENDER
@@ -588,8 +588,17 @@ def build_frame_prompt(
     # story's time of day ("night harbour -> sodium streetlamps"), which is
     # exactly the thing a blackout removes. Keeping it would put the lamps
     # back on in the same prompt that asks for them to be out.
+    # ...and told where the drama is standing. Every plan in that module was
+    # written for a room -- "through a window", "practical lamps inside the
+    # room" -- and the hour alone cannot tell it otherwise. Two delivered
+    # dramas set in a rain-soaked cargo HARBOUR carried 325 characters of
+    # interior lighting on every frame: direction that is wrong, that argues
+    # with the setting clause in the same breath, and that was crowding out
+    # the closed-cast rule at the bottom of the budget.
     lighting_clause = (
-        resolve_lighting(setting_time_of_day).as_clause()
+        resolve_lighting(setting_time_of_day).as_clause(
+            is_interior(setting_location)
+        )
         if parts and not (change_now or change_before)
         else ""
     )
@@ -755,13 +764,21 @@ def build_frame_prompt(
     return fit_image_prompt([
         (REQUIRED, f"{style} style. "),
         (1, setting_clause),
-        (3, lighting_clause),
+        # Above the closed cast, not below it. The ranks were set when the
+        # question was "cast or SETTING", where a stray extra really is the
+        # smaller blemish. Against the LIGHTING lock it is not close: the
+        # delivered job dropped 248 chars of "only Yara appears in this
+        # story" to keep 325 chars of lighting continuity, and a man in a
+        # green jacket is standing at the end of the container row in shot
+        # two. A shot lit slightly differently reads as a lighting change; a
+        # person nobody wrote reads as a different film.
+        (5, lighting_clause),
         (REQUIRED, identity_clause),
         (OPTIONAL_DIRECTION, direction_clause),
         (REQUIRED, f"{shot.visual_desc}. "),
         (2, expression_clause),
         (4, face_clause),
-        (5, cast_clause),
+        (3, cast_clause),
         (dialogue_rank, dialogue_clause),
         (REQUIRED, f"Shot type: {shot.shot_type}. Lens: {shot.lens}. "),
         (7, resolve_visual_style(style).render_note),
