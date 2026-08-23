@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import random
+import re
 from typing import Any, Callable, Dict, List, Optional
 
 import httpx
@@ -82,6 +83,40 @@ _REFERENCE_REJECTION_MARKERS = (
     "no face found",
     "could not detect a face",
 )
+
+
+#: A retryable status the provider QUOTED at us inside a non-retryable one.
+#:
+#: MuAPI proxies its own upstreams, and when one of them times out the failure
+#: does not arrive as that upstream's status -- it arrives as a 400 whose body
+#: names it. Seen on a delivered job, and it cost the scene its lip sync::
+#:
+#:     Lip sync unavailable for this scene, using the unsynced clip: MuAPI
+#:     request failed after 1 attempt(s): HTTP 400: Unexpected status code:
+#:     504 (on /api/v1/predictions/34151906-.../result)
+#:
+#: 504 is already in RETRYABLE_STATUS. The retry gate never saw it, because it
+#: reads `resp.status_code` -- and that was 400, which is exactly the "terminal
+#: client error" the gate exists to stop retrying. So a gateway timeout on a
+#: bare GET of a finished prediction, the most retryable failure there is, was
+#: given one attempt and no more.
+_QUOTED_STATUS = re.compile(r"status\s*code:?\s*(\d{3})", re.IGNORECASE)
+
+
+def quoted_retryable_status(text: str) -> Optional[int]:
+    """The retryable status a provider named in its message, or None.
+
+    Narrow on purpose: only a number introduced as a STATUS CODE counts. A
+    body that merely contains "504" somewhere -- a prediction id, a duration,
+    a byte count -- is not the provider telling us its upstream timed out, and
+    retrying on that reading would put the terminal 400s back into the loop
+    the gate was written to keep them out of.
+    """
+    for match in _QUOTED_STATUS.finditer(text or ""):
+        status = int(match.group(1))
+        if status in RETRYABLE_STATUS:
+            return status
+    return None
 
 
 def is_reference_rejection(exc: Exception) -> bool:
@@ -244,7 +279,19 @@ class MuAPIClient:
                 # transport errors, which carry no response) are worth a retry.
                 status = getattr(getattr(exc, "response", None), "status_code", None)
                 if status is not None and status not in RETRYABLE_STATUS:
-                    break
+                    # ...unless the provider quoted a retryable one at us
+                    # inside it. See quoted_retryable_status.
+                    quoted = quoted_retryable_status(self._provider_message(exc))
+                    if quoted is None:
+                        break
+                    logger.info(
+                        "MuAPI answered %s carrying an upstream %s; retrying "
+                        "(attempt %d/%d).",
+                        status,
+                        quoted,
+                        attempt + 1,
+                        self.max_retries,
+                    )
                 backoff = min(2 ** attempt + random.uniform(0, 0.5), 10.0)
                 await asyncio.sleep(backoff)
         raise MuAPIError(
