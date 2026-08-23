@@ -234,9 +234,9 @@ _COSTUME_LOCK_NAMED = (
     "scene — same garment, cut and colour, never restyled or swapped. "
 )
 _COSTUME_LOCK_REFERENCED = (
-    "Costume is LOCKED: every character wears the EXACT outfit from the "
-    "reference image, in every scene — same garment, cut and colour, never "
-    "restyled or swapped. "
+    "Costume is LOCKED: everyone wears the EXACT outfit from the reference "
+    "image, in every scene — same garment, cut and colour, never restyled or "
+    "swapped. "
 )
 # The costume lock above only forbids CHANGING what was named. Adding
 # something that was never named slips straight past it -- and an
@@ -259,7 +259,28 @@ _NO_UNNAMED_ITEMS = (
     "hood, mask, goggles, glasses, headset, scarf, badge, backpack, bag, "
     "strap or harness — unless the outfit names one, and then in every "
     "scene, never removed. "
+    # Folded in here rather than given a sentence of its own: it is about the
+    # same thing this list is about, and shares a word with it.
+    #
+    # The screenwriter is told to describe a marking as a shape (see its
+    # wardrobe clause), but a saved character carries whatever wardrobe it was
+    # saved with and a brief can name lettering outright -- so this is the
+    # backstop, and it is addressed to the RENDER because the render is what
+    # cannot spell. Asked for stencilled lettering it delivered HAROB across
+    # the back of a jacket, in a two-second push-in whose whole subject is
+    # that word, and FICST LOU on a name patch visible in every shot of the
+    # drama. Writing is the one thing in a frame a viewer stops to read, so a
+    # misspelt word costs more than the plain patch it replaced.
+    #
+    # Kept to five words because the reserve every frame holds back is
+    # capped at 800 characters and this had to fit inside it without
+    # taking a word off any of the rules already there -- each of which
+    # names something a delivered drama actually did. It says "markings"
+    # rather than "badges and markings" because the list it follows has
+    # just said "badge".
+    "Markings are shapes, not words. "
 )
+
 # The reference portrait is deliberately generated WEARING the character's
 # wardrobe (see Idea2VideoPipeline._lock_character_portraits) precisely so it
 # can anchor the costume as well as the face -- and this sentence used to say

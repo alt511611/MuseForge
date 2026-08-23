@@ -55,7 +55,7 @@ def test_the_head_rule_still_stands():
 
 @pytest.mark.parametrize(
     "settled",
-    ["how it fastens", "what pockets", "material", "marking or lettering", "back"],
+    ["how it fastens", "what pockets", "material", "badge or marking", "back"],
 )
 def test_the_garment_is_settled_the_same_way(settled):
     """Each of these is a property that visibly changed shot to shot."""
