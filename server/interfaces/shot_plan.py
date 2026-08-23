@@ -418,7 +418,9 @@ def screen_seconds(shot: Any) -> float:
 
 
 def shots_the_line_reaches(
-    shots: Sequence[Any], scene_dialogue: str
+    shots: Sequence[Any],
+    scene_dialogue: str,
+    line_seconds: Optional[float] = None,
 ) -> List[bool]:
     """Which of a scene's angles are still under the dialogue when they open.
 
@@ -432,6 +434,20 @@ def shots_the_line_reaches(
     from the same "the speaking character's mouth is fully visible, their lips
     will be animated" direction as the first.
 
+    ``line_seconds`` is where the last word falls, measured from this scene's
+    first frame. Pass it whenever the speech has actually been made: the
+    word-count fallback below has to assume the slowest delivery anybody
+    might give the line, and on the second delivered job that assumption was
+    four seconds long. Its scene 2 ran 12 seconds of picture cut 5 + 7,
+    carrying a line the voice provider measured at 4.96s -- the second angle
+    opens 40ms after the last word and is silent from its first frame to its
+    last, and the estimate put the line at nine seconds and kept it talking.
+
+    A measurement needs no margin. The one thing it does not cover is the
+    scene whose speech starts late because the PREVIOUS scene's ran over
+    (plan_scene_speech_anchors), and the caller folds that in before it gets
+    here -- it can, because every line is measured before any of them is cut.
+
     Nothing here fires for a single-angle scene, which is the default and the
     overwhelming majority: one angle opens at zero, and zero is under every
     line there has ever been.
@@ -440,13 +456,17 @@ def shots_the_line_reaches(
     if count <= 1:
         return [True] * count
 
-    words = len((scene_dialogue or "").split())
-    if not words:
-        # No dialogue at all. Nothing to be after; the caller's own
-        # has_dialogue flag already covers this case.
-        return [True] * count
-
-    line_ends = words / SLOWEST_SPEECH_WORDS_PER_SECOND + POST_LINE_MARGIN_SECONDS
+    if line_seconds is not None and float(line_seconds) > 0:
+        line_ends = float(line_seconds)
+    else:
+        words = len((scene_dialogue or "").split())
+        if not words:
+            # No dialogue at all. Nothing to be after; the caller's own
+            # has_dialogue flag already covers this case.
+            return [True] * count
+        line_ends = (
+            words / SLOWEST_SPEECH_WORDS_PER_SECOND + POST_LINE_MARGIN_SECONDS
+        )
     reached: List[bool] = []
     opens_at = 0.0
     for shot in shots:
