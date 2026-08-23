@@ -2115,6 +2115,10 @@ class Script2VideoPipeline:
         last_frame_by_character: Optional[Dict[str, str]] = None,
         scene_emotion: str = "",
         scene_dialogue: str = "",
+        #: Where this scene's last spoken word falls, measured from its first
+        #: frame, when the speech has already been made. None falls back to
+        #: the word-count estimate -- see shots_the_line_reaches.
+        scene_line_seconds: Optional[float] = None,
         scene_direction: str = "",
         scene_tension: int = 0,
         scene_duration: float = 0.0,
@@ -2192,7 +2196,9 @@ class Script2VideoPipeline:
         # the SAME "this character is speaking" direction to every angle it
         # bought, including the ones that open after the last word -- see
         # shots_the_line_reaches for what that delivered.
-        line_reaches = shots_the_line_reaches(shots, scene_dialogue)
+        line_reaches = shots_the_line_reaches(
+            shots, scene_dialogue, line_seconds=scene_line_seconds
+        )
 
         shot_videos: List[Optional[str]] = [None] * len(shots)
         shot_meta: List[Optional[Dict[str, Any]]] = [None] * len(shots)

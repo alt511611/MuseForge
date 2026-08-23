@@ -1583,6 +1583,45 @@ def _scene_speech_lengths(
     return lengths
 
 
+def spoken_seconds(dialogue_tracks: Optional[List[Dict[str, Any]]]) -> Optional[float]:
+    """Where the LAST WORD of these lines falls, from the first one's start.
+
+    Deliberately not _scene_speech_lengths above, which answers a different
+    question and answers it correctly: that one is reserving the room the
+    scene's audio occupies before the next scene's may begin, so it leaves a
+    caption gap hanging off the end. Here the gap is 200ms of silence being
+    counted as speech -- and on the delivered job that is the whole margin,
+    because the cut it decides lands 40ms after the last word.
+
+    Returns None when nothing was actually spoken, which is a silent scene, a
+    caption-only fallback, or a provider that failed. The caller then has no
+    measurement and says so.
+    """
+    end = 0.0
+    cursor = 0.0
+    spoke = False
+    for track in dialogue_tracks or []:
+        if not str(track.get("line") or "").strip():
+            continue
+        if track.get("caption_only"):
+            continue
+        spoke = True
+        # A provider that measured its own speech (ElevenLabs returns
+        # per-line timings inside the scene's audio) has already answered
+        # this, absolutely, and its last line's end IS the last word.
+        if "end_seconds" in track:
+            end = max(end, float(track["end_seconds"]))
+            continue
+        duration = float(track.get("duration_seconds") or 0.0)
+        if duration <= 0:
+            duration = _estimate_line_duration_seconds(str(track.get("line") or ""))
+        cursor += duration
+        end = max(end, cursor)
+        # Between the lines, not after the last of them.
+        cursor += CAPTION_GAP_SECONDS
+    return end if spoke and end > 0 else None
+
+
 def plan_scene_speech_anchors(
     dialogue_tracks: Optional[List[Dict[str, Any]]],
     scene_starts: Sequence[float],
@@ -4575,10 +4614,45 @@ class Idea2VideoPipeline:
 
             music_task = asyncio.create_task(_generate_music())
 
-        # Scene dialogue is generated in the background too: it only feeds
-        # the final audio mix, not the next scene's visual continuity (that
-        # comes from the video's last frame), so there's no need to block
-        # the next scene's rendering on it finishing first.
+        # Scene dialogue is generated in the background too. It used to be
+        # started AFTER every scene had rendered, on the reasoning that it
+        # only feeds the final mix and no scene needs it -- which stopped
+        # being true the moment a shot's direction started depending on where
+        # the line ends (interfaces/shot_plan.shots_the_line_reaches). A shot
+        # cannot be told "you are after the last word" by a pipeline that has
+        # not said the words yet, and the word-count estimate standing in for
+        # the measurement has to assume the slowest delivery anybody might
+        # give the line: on a delivered job it put a 4.96-second line at nine
+        # seconds and kept a silent angle talking.
+        #
+        # So the speech is made first. It needs nothing from the picture --
+        # only the script, which is final by here -- and it is seconds of work
+        # against minutes of video, run concurrently with the render anyway.
+        # Each scene awaits its OWN line and no other, so a slow one never
+        # holds up a scene that is not waiting on it.
+        #
+        # What this does change is when the money goes out: a job that dies in
+        # the render has now already paid for its voices. That is a few cents
+        # against a scene of video, and it buys every shot in the drama a
+        # measured answer instead of a guessed one.
+        speech_tasks: Dict[int, "asyncio.Task"] = {}
+        if voice_gen is not None:
+            for _idx, _scene in enumerate(script.scenes):
+                _lines = _scene_dialogue(_scene)
+                if not _lines:
+                    continue
+                speech_tasks[_idx] = asyncio.create_task(
+                    voice_gen.generate_scene_dialogue(
+                        _lines,
+                        is_cancelled=is_cancelled,
+                        language=language,
+                        # The same beat the face is playing. Without it a
+                        # scene could look like grief and sound like a
+                        # weather report -- the picture was directed and
+                        # the voice was not.
+                        emotion=_scene_emotion(_scene),
+                    )
+                )
         dialogue_tasks: List[tuple] = []
 
         # Drama-wide direction: identical for every scene, so build it once.
@@ -4597,6 +4671,58 @@ class Idea2VideoPipeline:
             billable_seconds(scene_durations),
             len(script.scenes),
         )
+
+        async def _measured_speech_length(
+            task: Optional["asyncio.Task"],
+        ) -> Optional[float]:
+            """How long this scene's speech runs, or None if it was not made.
+
+            Awaiting a task twice is free -- asyncio hands back the same
+            result -- so the mix's own await further down is untouched, and a
+            voice that failed raises there, where the job already knows how to
+            report it, rather than here where it would only cost a shot its
+            direction.
+            """
+            if task is None:
+                return None
+            try:
+                tracks = await task
+            except Exception:
+                return None
+            return spoken_seconds(tracks)
+
+        async def _scene_line_end_seconds(scene_index: int) -> Optional[float]:
+            """Seconds from this scene's first frame to its last spoken word.
+
+            Not simply the length of its speech: a line that outruns its own
+            scene pushes the NEXT scene's speech later
+            (plan_scene_speech_anchors), and a shot told it is after the last
+            word when the last word has not been said yet is the closed-mouth
+            delivery all over again. The same rule is applied here, against
+            the budgeted scene lengths -- which are fixed before any provider
+            call, so this is the same arithmetic the mixer will do later, done
+            early.
+
+            Every task is already in flight, so scene N waits only for the
+            slowest of the first N, and only ever on speech -- seconds of work
+            against minutes of video.
+            """
+            if not speech_tasks:
+                return None
+            floor = 0.0
+            picture = 0.0
+            answer: Optional[float] = None
+            for i in range(scene_index + 1):
+                length = await _measured_speech_length(speech_tasks.get(i))
+                start = max(picture, floor)
+                if i == scene_index and length:
+                    answer = (start - picture) + length
+                if length:
+                    floor = start + length + SPEECH_GAP_SECONDS
+                picture += (
+                    scene_durations[i] if i < len(scene_durations) else 0.0
+                )
+            return answer
 
         # Scene rendering is the whole cost of a job: each scene is a Kling
         # call that takes 1-3+ minutes, and with one shot per scene the
@@ -4679,6 +4805,10 @@ class Idea2VideoPipeline:
                             c.name.casefold() for c in characters if not c.is_visible
                         },
                     ),
+                    # Measured, not counted in words. Decides which angles of
+                    # this scene are still under the line when they open --
+                    # see interfaces/shot_plan.shots_the_line_reaches.
+                    scene_line_seconds=await _scene_line_end_seconds(idx),
                     scene_direction=_format_scene_direction(scene),
                     # Where this scene sits in the story. Without it every
                     # scene is designed as if it were the only one, and the
@@ -4764,19 +4894,12 @@ class Idea2VideoPipeline:
                     assembled_scene_index = len(scene_paths) - 1
 
                 scene_dialogue_lines = _scene_dialogue(scene)
-                if voice_gen is not None and scene_dialogue_lines and assembled_scene_index is not None:
-                    task = asyncio.create_task(
-                        voice_gen.generate_scene_dialogue(
-                            scene_dialogue_lines,
-                            is_cancelled=is_cancelled,
-                            language=language,
-                            # The same beat the face is playing. Without it a
-                            # scene could look like grief and sound like a
-                            # weather report -- the picture was directed and
-                            # the voice was not.
-                            emotion=_scene_emotion(scene),
-                        )
-                    )
+                # Started before the render, not here -- the shots needed to
+                # know where the line ends. This only records WHERE in the
+                # concatenation the finished speech belongs, which is the one
+                # thing that could not be known until the picture was cut.
+                task = speech_tasks.get(idx)
+                if task is not None and scene_dialogue_lines and assembled_scene_index is not None:
                     dialogue_tasks.append(
                         (assembled_scene_index, idx, task, list(scene_dialogue_lines))
                     )
@@ -4955,7 +5078,11 @@ class Idea2VideoPipeline:
         except BaseException:
             if music_task is not None:
                 music_task.cancel()
-            for _, _, task in dialogue_tasks:
+            # speech_tasks, not dialogue_tasks: the latter holds only the
+            # scenes that produced a clip, and on this path most of them have
+            # not. (It also unpacked three values from a four-tuple, so the
+            # cleanup raised inside the handler and buried the real failure.)
+            for task in speech_tasks.values():
                 task.cancel()
             raise
 
