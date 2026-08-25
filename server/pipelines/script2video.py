@@ -115,6 +115,28 @@ MAX_IMAGE_PROMPT_CHARS = 3000
 REQUIRED = 0
 OPTIONAL_DIRECTION = 6
 
+#: What one shot's own description may spend of the frame prompt.
+#:
+#: It is priority REQUIRED, so it is never dropped -- everything else in the
+#: prompt pays for it. Measured on this module's own clauses, for a one-hander
+#: with a settled wardrobe (the identity clause is 1141 characters of that,
+#: and the fixed clauses beside it another 550):
+#:
+#:     visual_desc  330   the film-look note drops, nothing else
+#:     visual_desc  400   ...and the lighting lock
+#:     visual_desc  700   ...and the eyeline rule, and the closed cast
+#:
+#: A delivered job wrote 700-800, and the log shows what it bought: the
+#: eyeline rule -- "the eyes stay inside the scene ... never on the lens" --
+#: dropped from ALL SIX of its frames. Twenty-two of its thirty seconds are
+#: one composition, the character centred and symmetrical and looking down
+#: the barrel of the lens, held like a passport photograph.
+#:
+#: So a description longer than this is cut to it. The first two sentences of
+#: a shot description are the shot; the rest is atmosphere the setting clause
+#: is already carrying, and it is not worth the rules it was costing.
+MAX_VISUAL_DESC_CHARS = 320
+
 
 def fit_image_prompt(segments: list, limit: int = MAX_IMAGE_PROMPT_CHARS) -> str:
     """Assemble a prompt that respects the provider's character budget.
@@ -166,6 +188,31 @@ def fit_image_prompt(segments: list, limit: int = MAX_IMAGE_PROMPT_CHARS) -> str
             # be clever with.
             prompt = prompt[:limit].rsplit(" ", 1)[0]
     return prompt
+
+
+def fit_visual_desc(text: str, limit: int = MAX_VISUAL_DESC_CHARS) -> str:
+    """This shot's description, cut to what the frame can afford.
+
+    Cut at a sentence break where there is one, so the model is handed whole
+    thoughts rather than a severed clause; failing that at a word.
+
+    Never mutates the shot: the untrimmed description is still what the
+    character matcher and the shot classifier read (on_screen_name_matches,
+    classify_shot), and narrowing what THEY see would be a different bug.
+    """
+    desc = (text or "").strip()
+    if len(desc) <= limit:
+        return desc
+    head = desc[:limit]
+    # Only a break NEAR the limit is worth taking: the last full stop might be
+    # halfway up the description, and losing a whole sentence to save eight
+    # characters trades a long shot for half a shot.
+    floor = limit * 3 // 4
+    for stop in (". ", "; ", ", "):
+        cut = head.rfind(stop)
+        if cut >= floor:
+            return head[:cut].rstrip(" ,;.")
+    return head.rsplit(" ", 1)[0].rstrip(" ,;.")
 
 
 def _describe_characters(visible, limit=None) -> list:
@@ -751,9 +798,14 @@ def build_frame_prompt(
     # framing line. Guessing at any of it instead of measuring is what let a
     # crowded scene push the SETTING out of the prompt — the one clause that
     # promises the room does not change between scenes.
+    # Cut to its share before anything is sized against it -- otherwise a
+    # runaway description squeezes the identity clause AND then knocks the
+    # rules off the bottom of the ladder, paying for itself twice.
+    visual_desc = fit_visual_desc(shot.visual_desc)
+
     identity_budget = (
         MAX_IMAGE_PROMPT_CHARS
-        - len(shot.visual_desc)
+        - len(visual_desc)
         - len(setting_clause)
         - len(lighting_clause)
         - IDENTITY_CLAUSE_OVERHEAD
@@ -805,7 +857,7 @@ def build_frame_prompt(
         (5, lighting_clause),
         (REQUIRED, identity_clause),
         (OPTIONAL_DIRECTION, direction_clause),
-        (REQUIRED, f"{shot.visual_desc}. "),
+        (REQUIRED, f"{visual_desc}. "),
         (2, expression_clause),
         (4, face_clause),
         (3, cast_clause),
