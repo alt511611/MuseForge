@@ -86,16 +86,13 @@ class ElevenLabsVoiceGenerator:
     _BRIAN = "nPczCjzI2devNBz1zQrb"
     _CALLUM = "N2lVS1w4EtoT3dr4eOWO"
     _SARAH = "EXAVITQu4vr4xnSDxMaL"
-    _CHARLOTTE = "XB0fDUnXU5powFXDhCwa"
     _LAURA = "FGY2WhTYpPnrIDTdsKH5"
 
     SYSTEM_VOICE_IDS = _voices(
         "ELEVENLABS_VOICE_IDS",
-        (_GEORGE, _SARAH, _BRIAN, _CHARLOTTE, _CALLUM, _LAURA),
+        (_GEORGE, _SARAH, _BRIAN, _CALLUM, _LAURA),
     )
-    FEMALE_VOICE_IDS = _voices(
-        "ELEVENLABS_FEMALE_VOICE_IDS", (_SARAH, _CHARLOTTE, _LAURA)
-    )
+    FEMALE_VOICE_IDS = _voices("ELEVENLABS_FEMALE_VOICE_IDS", (_SARAH, _LAURA))
     MALE_VOICE_IDS = _voices(
         "ELEVENLABS_MALE_VOICE_IDS", (_GEORGE, _BRIAN, _CALLUM)
     )
@@ -322,6 +319,20 @@ class ElevenLabsVoiceGenerator:
                 next((v for v in pool if v in usable), ""),
             )
             if not replacement:
+                # Nothing in the CONFIGURED pool survives. That is not the
+                # account's problem to solve with silence: it holds voices of
+                # its own, and this endpoint has just listed them along with
+                # the gender it has on file for each.
+                #
+                # An id in that tuple is a guess about somebody else's
+                # catalogue, and guesses rot. XB0fDUnXU5powFXDhCwa shipped as
+                # "Charlotte" and is no longer a voice this account -- or, as
+                # far as the library search can tell, anyone -- can use; the
+                # Charlotte in the shared library today is a different voice
+                # with a different id. Every delivered job logged the error
+                # and cast a woman's line on whatever was left.
+                replacement = self._from_the_account(gender, available, taken)
+            if not replacement:
                 logger.error(
                     "Voice %s for %r is not available to this account and no "
                     "%s voice is either — the line will be spoken by whatever "
@@ -344,6 +355,28 @@ class ElevenLabsVoiceGenerator:
 
         return dict(self._character_voices)
 
+    @staticmethod
+    def _from_the_account(gender: str, available: List[Dict[str, str]], taken: set) -> str:
+        """A voice this account actually holds, of the right gender if it says.
+
+        Preferred in that order: an unused voice the account labels with this
+        character's gender, then any unused voice, then a labelled one even if
+        another character already has it. Sharing a voice between two
+        characters is a bad day; a woman speaking in a man's voice is the
+        thing viewers write in about, and no voice at all is worse than both.
+        """
+        matching = [
+            v["voice_id"] for v in available
+            if v["voice_id"] and (not gender or v.get("gender") == gender)
+        ]
+        others = [v["voice_id"] for v in available if v["voice_id"]]
+        return (
+            next((v for v in matching if v not in taken), "")
+            or (matching[0] if matching else "")
+            or next((v for v in others if v not in taken), "")
+            or (others[0] if others else "")
+        )
+
     async def list_voices(self) -> List[Dict[str, str]]:
         """What this ACCOUNT may actually use, asked rather than assumed.
 
@@ -360,7 +393,15 @@ class ElevenLabsVoiceGenerator:
             response.raise_for_status()
             data = response.json()
         return [
-            {"voice_id": v.get("voice_id", ""), "name": v.get("name", "")}
+            {
+                "voice_id": v.get("voice_id", ""),
+                "name": v.get("name", ""),
+                # /v1/voices reports what it knows about each voice in
+                # `labels`, and gender is the one field casting needs. Absent
+                # on some cloned voices, which is why it is read rather than
+                # required -- an unlabelled voice is still a voice.
+                "gender": str((v.get("labels") or {}).get("gender", "")).strip().lower(),
+            }
             for v in (data.get("voices") or [])
             if v.get("voice_id")
         ]
