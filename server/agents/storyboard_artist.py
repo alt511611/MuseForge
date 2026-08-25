@@ -184,6 +184,18 @@ character alone in frame still looks toward where the other one is). Never cross
 the line or mirror the composition between scenes; reversed eyelines make a
 conversation read as two people facing away from each other.
 
+WRITE SHORT. "visual_desc" is two sentences, about 45 words, and
+"expression_desc" is one clause of about 20. This is not a style note: every
+character you spend is taken from the rules that hold the film together. The
+frame prompt has a hard 3,000-character budget, the shot description is the one
+thing in it that can never be dropped, and so everything else pays for it —
+first the film-look note, then the lighting lock, then the rule that keeps the
+cast's eyes off the lens, then the rule that keeps strangers out of the frame.
+A delivered job wrote 700-800 characters a shot and lost the eyeline rule from
+every single frame: twenty-two of its thirty seconds are the same composition,
+the character centred and symmetrical and staring down the barrel of the lens.
+Name the subject, the action and the one detail that matters, and stop.
+
 SHOW THE EMOTION ON THE FACE. The scene's emotional beat is given to you. "expression_desc"
 must state the concrete, visible facial expression AND body language for the character(s)
 in frame (e.g. "eyes brimming with tears, trembling chin, shoulders finally dropping as
