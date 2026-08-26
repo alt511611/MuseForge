@@ -216,7 +216,10 @@ def _has_ffmpeg():
 def test_the_document_renders_without_libass_complaining(tmp_path):
     """A document that parses in this test but not in libass is worthless, so
     the real renderer gets a look at it."""
-    from pipelines.idea2video import resolve_ffmpeg_binary
+    # The caption-capable ffmpeg, for the same reason production uses it
+    # here: an ffmpeg built without libass has no ass filter at all, and
+    # this test is about what libass makes of the document.
+    from pipelines.idea2video import resolve_caption_ffmpeg_binary
 
     document = ass_captions.build_ass(
         ass_captions.chunk_into_cues(
@@ -232,7 +235,7 @@ def test_the_document_renders_without_libass_complaining(tmp_path):
 
     result = subprocess.run(
         [
-            resolve_ffmpeg_binary(), "-y", "-f", "lavfi",
+            resolve_caption_ffmpeg_binary(), "-y", "-f", "lavfi",
             "-i", "color=c=black:s=320x180:r=24:d=2",
             "-vf", f"ass={ass_path}",
             "-pix_fmt", "yuv420p", str(out),

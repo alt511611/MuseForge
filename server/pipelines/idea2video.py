@@ -1,6 +1,7 @@
 """Full idea-to-video orchestration pipeline."""
 
 import asyncio
+import functools
 import logging
 import os
 import re
@@ -633,6 +634,15 @@ FADE_OUT_SECONDS = 0.9
 #: listener can follow.
 DELIVERY_SAMPLE_RATE = 48000
 
+#: Audio bitrate every delivered master carries, in ONE place because the two
+#: encoders that write it do not agree by default. The ffmpeg paths ask for it
+#: explicitly; moviepy's ``write_videofile`` asks for nothing and takes the
+#: encoder's default, which measured 65kbps on a delivered master -- a third of
+#: this, spent on dialogue, over music, under a limiter. Any moviepy pass that
+#: carries audio (the mixer fallback, the watermark, an export, a re-cut) has
+#: to be told, or it quietly re-encodes the finished mix down to that.
+DELIVERY_AUDIO_BITRATE = "192k"
+
 
 def is_finishing_enabled() -> bool:
     """Master finishing pass (fades + loudness normalization). Default ON;
@@ -720,14 +730,11 @@ async def finalize_master(
             f"fade=t=out:st={fade_out_start:.3f}:d={FADE_OUT_SECONDS}",
         ]
     )
-    ffmpeg_binary = os.environ.get("MUSEFORGE_FFMPEG_BINARY") or shutil.which("ffmpeg")
-    if not ffmpeg_binary:
-        try:
-            import imageio_ffmpeg
-
-            ffmpeg_binary = imageio_ffmpeg.get_ffmpeg_exe()
-        except Exception:
-            ffmpeg_binary = "ffmpeg"
+    # Captions riding on this pass make it a caption encode, so it needs an
+    # ffmpeg that can actually render them -- see resolve_caption_ffmpeg_binary.
+    ffmpeg_binary = (
+        resolve_caption_ffmpeg_binary() if caption_filter else resolve_ffmpeg_binary()
+    )
 
     cmd = [ffmpeg_binary, "-y", "-i", video_path, "-vf", vf]
     if has_audio:
@@ -753,7 +760,7 @@ async def finalize_master(
             "-c:a",
             "aac",
             "-b:a",
-            "192k",
+            DELIVERY_AUDIO_BITRATE,
         ]
     cmd += [*look_args, *video_encode_args(), output_path]
 
@@ -802,12 +809,69 @@ def resolve_ffmpeg_binary() -> str:
     binary = os.environ.get("MUSEFORGE_FFMPEG_BINARY") or shutil.which("ffmpeg")
     if binary:
         return binary
+    return _bundled_ffmpeg_binary() or "ffmpeg"
+
+
+def _bundled_ffmpeg_binary() -> str:
+    """moviepy's own ffmpeg, or "" when it is not installed."""
     try:
         import imageio_ffmpeg
 
         return imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:
-        return "ffmpeg"
+        return ""
+
+
+@functools.lru_cache(maxsize=8)
+def ffmpeg_can_burn_captions(binary: str) -> bool:
+    """Whether this ffmpeg build can render subtitles onto a picture.
+
+    ``subtitles`` and ``ass`` are libass filters, and a great many ffmpeg
+    builds ship without libass -- a stock Homebrew ffmpeg is one. Asking is
+    cheap and the answer never changes for a given binary, so it is cached.
+
+    Unreadable answers count as capable: the caller's own fail-open is a
+    better place to find out than a probe that guesses wrong and demotes a
+    perfectly good ffmpeg.
+    """
+    if not binary:
+        return False
+    try:
+        result = subprocess.run(
+            [binary, "-hide_banner", "-filters"],
+            capture_output=True,
+            timeout=20,
+        )
+    except Exception:
+        return True
+    if result.returncode != 0:
+        return True
+    filters = result.stdout.decode("utf-8", errors="replace")
+    return bool(re.search(r"^\s*\S+\s+subtitles\s", filters, re.MULTILINE))
+
+
+def resolve_caption_ffmpeg_binary() -> str:
+    """The ffmpeg for an encode that burns captions.
+
+    Same binary as everything else whenever it can do the job. When it cannot
+    -- an ffmpeg on PATH built without libass -- the caption filter fails to
+    parse, and because every caption path fails OPEN the drama then ships with
+    no captions at all and a warning nobody reads. moviepy's bundled build has
+    libass, so prefer it for this one encode rather than losing the captions.
+    """
+    binary = resolve_ffmpeg_binary()
+    if ffmpeg_can_burn_captions(binary):
+        return binary
+    bundled = _bundled_ffmpeg_binary()
+    if bundled and bundled != binary and ffmpeg_can_burn_captions(bundled):
+        logger.warning(
+            "ffmpeg at %s has no subtitles filter (built without libass); "
+            "burning captions with the bundled build at %s instead.",
+            binary,
+            bundled,
+        )
+        return bundled
+    return binary
 
 
 async def mux_silent_audio(video_path: str, output_path: str) -> bool:
@@ -896,6 +960,19 @@ FOLEY_LEVEL = 0.65
 #: that a dead one costs a fallback rather than a hung job.
 MIX_NETWORK_TIMEOUT_US = 20_000_000
 
+#: Wall-clock ceiling on the mix itself. ``-rw_timeout`` only bounds a stalled
+#: network READ; it does nothing about an ffmpeg that is busy going nowhere,
+#: which a filtergraph is perfectly capable of provoking -- twice, so far, both
+#: in build_audio_mix_graph and neither of them a strange input.
+#: The mix copies the picture and encodes only audio, so it is minutes of work
+#: at the very outside; anything past this is stuck, and falling back to the
+#: moviepy mixer is strictly better than holding a finished job open forever.
+MIX_TIMEOUT_SECONDS = 900
+
+#: How long to spend tidying up after killing a stuck mix before giving up on
+#: that too. The fallback matters; the cleanup does not matter that much.
+MIX_KILL_DRAIN_SECONDS = 5
+
 DUCK_THRESHOLD = 0.045
 DUCK_RATIO = 8
 DUCK_ATTACK_MS = 15
@@ -905,6 +982,20 @@ DUCK_RELEASE_MS = 320
 def _ffmpeg_time_ms(seconds: float) -> int:
     """Milliseconds for adelay, never negative (it silently drops the input)."""
     return max(0, int(round(float(seconds or 0.0) * 1000)))
+
+
+def _delay_prefix(seconds: float) -> str:
+    """``adelay=...,`` for a layer that starts late, "" for one that starts at 0.
+
+    A zero delay is not a delay, and asking for one is not harmless:
+    ``adelay=0:all=1`` makes ffmpeg 9 spin at 100% CPU and never terminate.
+    That is the ordinary case, not an edge one -- the first line of the first
+    scene starts at 0.0, and so does every foley cue for scene 0 -- so on such
+    a host the mix of a normal drama hangs forever at the very end of a paid
+    job. Leaving the filter out entirely is both the fix and less work.
+    """
+    delay_ms = _ffmpeg_time_ms(seconds)
+    return f"adelay={delay_ms}:all=1," if delay_ms else ""
 
 
 def build_audio_mix_graph(
@@ -939,7 +1030,7 @@ def build_audio_mix_graph(
     for position, (index, start) in enumerate(dialogue):
         label = f"d{position}"
         chains.append(
-            f"[{index}:a]adelay={_ffmpeg_time_ms(start)}:all=1,"
+            f"[{index}:a]{_delay_prefix(start)}"
             f"aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
             f"[{label}]"
         )
@@ -991,7 +1082,7 @@ def build_audio_mix_graph(
     for position, (index, start) in enumerate(foley):
         label = f"f{position}"
         chains.append(
-            f"[{index}:a]adelay={_ffmpeg_time_ms(start)}:all=1,"
+            f"[{index}:a]{_delay_prefix(start)}"
             f"volume={FOLEY_LEVEL},"
             f"aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
             f"[{label}]"
@@ -1023,8 +1114,17 @@ def build_audio_mix_graph(
     # early, some editors refuse the file); longer and the master grows a tail
     # of black. alimiter catches the sum of three layers clipping without
     # squashing the dynamics that make the ducking audible.
+    #
+    # whole_dur, and not a bare apad, because a bare one pads FOREVER and
+    # trusts atrim downstream to end it -- which it does not always do. Behind
+    # amix and sidechaincompress, ffmpeg 9 sits in that pad generating and
+    # discarding silence at 100% CPU and never reaches the end of the file:
+    # measured, the same mix finishes in 0.1s once the pad knows where to
+    # stop. Bounding the generator is also just the honest way to say it; the
+    # length was never in question, it is the length of the picture.
+    padded = max(0.1, float(duration))
     chains.append(
-        f"[mixed]apad,atrim=0:{max(0.1, float(duration)):.3f},"
+        f"[mixed]apad=whole_dur={padded:.3f},atrim=0:{padded:.3f},"
         f"alimiter=limit=0.95,"
         f"aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[aout]"
     )
@@ -1146,7 +1246,7 @@ async def mix_audio_layers(
         "-c:a",
         "aac",
         "-b:a",
-        "192k",
+        DELIVERY_AUDIO_BITRATE,
         "-movflags",
         "+faststart",
         output_path,
@@ -1158,7 +1258,39 @@ async def mix_audio_layers(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, stderr = await process.communicate()
+    except Exception as exc:
+        logger.warning("ffmpeg mixer unavailable, falling back to moviepy: %s", exc)
+        return None
+
+    try:
+        _, stderr = await asyncio.wait_for(
+            process.communicate(), timeout=MIX_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "ffmpeg mix did not finish in %ss, killing it and falling back to "
+            "moviepy.",
+            MIX_TIMEOUT_SECONDS,
+        )
+        try:
+            process.kill()
+        except Exception:
+            pass
+        try:
+            # Drain rather than wait(): the cancelled call above left both
+            # pipes open, and a killed process whose transports are never
+            # closed surfaces later as "Event loop is closed" out of the
+            # garbage collector, long after its job has moved on. Bounded,
+            # because a killed process that leaked a child of its own leaves
+            # the pipe held and this would be the second thing to hang.
+            await asyncio.wait_for(process.communicate(), timeout=MIX_KILL_DRAIN_SECONDS)
+        except Exception:
+            pass
+        try:
+            os.unlink(output_path)
+        except OSError:
+            pass
+        return None
     except Exception as exc:
         logger.warning("ffmpeg mixer unavailable, falling back to moviepy: %s", exc)
         return None
@@ -1366,7 +1498,8 @@ async def _mix_with_moviepy(
         final_audio = CompositeAudioClip(layers).with_duration(video.duration)
         final = video.with_audio(final_audio)
         final.write_videofile(
-            output_path, codec="libx264", audio_codec="aac", logger=None,
+            output_path, codec="libx264", audio_codec="aac",
+            audio_bitrate=DELIVERY_AUDIO_BITRATE, logger=None,
             **moviepy_encode_kwargs(),
         )
     except Exception as exc:
@@ -2335,7 +2468,7 @@ async def burn_subtitles(
             return _copy_through()
 
         process = await asyncio.create_subprocess_exec(
-            resolve_ffmpeg_binary(),
+            resolve_caption_ffmpeg_binary(),
             "-y",
             "-i",
             video_path,
@@ -2412,7 +2545,8 @@ async def add_watermark(video_path: str, output_path: str) -> str:
         )
         final = CompositeVideoClip([video, watermark])
         final.write_videofile(
-            output_path, codec="libx264", audio_codec="aac", logger=None,
+            output_path, codec="libx264", audio_codec="aac",
+            audio_bitrate=DELIVERY_AUDIO_BITRATE, logger=None,
             **moviepy_encode_kwargs(),
         )
         video.close()
@@ -2482,6 +2616,7 @@ async def export_alternate_format(
                 output_path,
                 codec="libx264",
                 audio_codec="aac",
+                audio_bitrate=DELIVERY_AUDIO_BITRATE,
                 logger=None,
                 **moviepy_encode_kwargs(),
             )
@@ -2592,6 +2727,7 @@ async def trim_clip(
                 output_path,
                 codec="libx264",
                 audio_codec="aac",
+                audio_bitrate=DELIVERY_AUDIO_BITRATE,
                 logger=None,
                 **moviepy_encode_kwargs(),
             )
