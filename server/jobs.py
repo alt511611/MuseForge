@@ -942,6 +942,39 @@ def _job_refund_amount(job: Job) -> int:
     )
 
 
+async def _refund_undelivered_extras(job: Job, result: Dict[str, Any]) -> None:
+    """Give back the credits for a paid extra the job did not deliver.
+
+    Lip sync is charged per scene, up front, and it fails OPEN -- correctly,
+    because a mouth that could not be driven is not worth failing a rendered
+    film over. What was missing is the other half: job 930f11de-4b0 was billed
+    for lip sync on three scenes, had all three refused by a provider account
+    out of balance, and shipped closed mouths under a voice track. The job
+    already says so in its warnings. It kept the credits anyway.
+
+    Deliberately NOT a job failure. The picture cost real provider money and is
+    exactly what was asked for; throwing it away to make the billing tidy would
+    charge the user more, not less. This bills for what arrived.
+
+    The condition mirrors the lip-sync term of _job_refund_amount exactly, so
+    this can never hand back credits that were never taken.
+    """
+    if job.demo or not job.user_id or not job.lipsync_enabled:
+        return
+    if (result or {}).get("lipsynced_scenes"):
+        return
+    amount = job.num_scenes * LIPSYNC_EXTRA_CREDIT_COST
+    if amount <= 0:
+        return
+    logger.info(
+        "[%s] Lip sync was charged (%d credit(s)) and ran on no scene; "
+        "refunding it.",
+        job.id,
+        amount,
+    )
+    await _sb_refund_credits(job.user_id, amount, job.id)
+
+
 async def run_generation_job(job: Job, api_key: str):
     """Start a job. If require_script_approval, stop after screenwriting."""
     logger.info("run_generation_job ENTERED for job %s", job.id)
@@ -1124,6 +1157,9 @@ async def run_generation_job(job: Job, api_key: str):
                 await job_store.persist(job)
                 return
             job.result = result
+            # Before COMPLETED is persisted, so the balance the user sees when
+            # the job lands is already the corrected one.
+            await _refund_undelivered_extras(job, result)
             job.status = JobStatus.COMPLETED
             # Persist COMPLETED + result (includes signed Storage URL when uploaded)
             await job_store.persist(job)
