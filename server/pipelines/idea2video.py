@@ -39,6 +39,7 @@ from pipelines.script2video import (
     moviepy_encode_kwargs,
     video_encode_args,
 )
+from tools.muapi_client import is_account_locked
 from tools.muapi_lipsync import is_lipsync_enabled, make_lipsync
 from tools.muapi_sfx_generator import MuAPISFXGenerator, is_foley_enabled
 from tools.muapi_voice_generator import MuAPIVoiceGenerator, is_dialogue_enabled
@@ -2809,6 +2810,13 @@ class Idea2VideoPipeline:
     def __init__(self, api_key: str, demo: bool = False):
         self.api_key = api_key
         self.demo = demo
+        #: Set once the provider has refused a paid call because the ACCOUNT
+        #: cannot pay. Job-scoped, because the pipeline is: every optional
+        #: stage after it would be refused the same way, and each one of them
+        #: fails open on its own, so without somewhere to write this down a
+        #: locked account reads as several unrelated shrugs. See
+        #: tools.muapi_client.MuAPIAccountLocked.
+        self.account_locked = False
         self.screenwriter = ScreenwriterAgent(demo=demo)
         self.image_gen = _make_image_generator(api_key, demo=demo)
         self.script2video = Script2VideoPipeline(api_key, demo=demo)
@@ -2995,6 +3003,16 @@ class Idea2VideoPipeline:
             logger.info(
                 "Lip sync was requested but this drama has no dialogue tracks, "
                 "so there is no speech to drive a mouth from."
+            )
+            return []
+        if self.account_locked:
+            # Not a fifth reason mouths stay shut -- the same one, already
+            # answered. Job 930f11de-4b0 spent 16 seconds and three paid
+            # requests here after foley had already been refused three times
+            # for an exhausted balance, and got three identical refusals.
+            logger.warning(
+                "Lip sync skipped: the provider account was already refusing "
+                "paid calls earlier in this job — mouths will not be driven."
             )
             return []
 
@@ -4288,6 +4306,8 @@ class Idea2VideoPipeline:
                     is_cancelled=is_cancelled,
                 )
             except Exception as exc:
+                if is_account_locked(exc):
+                    self.account_locked = True
                 logger.warning(
                     "Foley failed for scene %s, continuing without it: %s",
                     scene.get("index"),
@@ -5318,6 +5338,19 @@ class Idea2VideoPipeline:
             silence_notice = check_master_is_not_mostly_silent(final_path)
             if silence_notice:
                 warnings.append(silence_notice)
+
+            # The one thing the job knows about WHY, said once and plainly.
+            # Every stage that met the locked account handled it correctly and
+            # alone, and the sum of those correct decisions was a silent film
+            # over unsynced mouths delivered as a success. The user cannot fix
+            # a toggle here; somebody has to top the account up.
+            if self.account_locked:
+                warnings.append(
+                    "Some of this video's paid extras — the sound-effect beds "
+                    "and the lip sync — could not be generated because the "
+                    "video provider account ran out of balance partway through "
+                    "this job. The picture and the spoken lines are unaffected."
+                )
 
             # Persist final video to Supabase Storage (signed URL) when available.
             if final_path and os.path.isfile(final_path):

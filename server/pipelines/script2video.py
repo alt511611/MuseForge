@@ -845,7 +845,28 @@ def build_frame_prompt(
     # it are identical in every film this product has ever made.
     return fit_image_prompt([
         (REQUIRED, f"{style} style. "),
-        (1, setting_clause),
+        # RANK, not wording -- the same distinction the mouth clause turned on
+        # above. Ordinarily this clause is continuity: worth keeping, and a
+        # frame is still the right frame without it, so it sits one rung above
+        # the quality suffix and pays for the identity lock when the budget is
+        # tight. Carrying a world_change it is not continuity at all. It is the
+        # event the film was commissioned for -- the one scene allowed to break
+        # the lock, and every scene after it that inherits the broken state --
+        # and a frame that loses it cannot be repaired by any later pass.
+        #
+        # Delivered job 930f11de-4b0, brief "...and the city's power dies the
+        # moment she opens it": the script carried the blackout (the restorer
+        # in _apply_brief_event found nothing to restore, which is how it says
+        # so), and every one of the six frames went over budget -- "dropping
+        # 262 chars of lower-priority direction" on all six. That job survived
+        # with 262 chars to spare. It is priority 1 that stood between this
+        # clause and the drop, and a second described character would have
+        # spent that margin: the identity clause is REQUIRED and this is not,
+        # so a richer cast buys its faces with the story's own climax.
+        (
+            REQUIRED if (change_now or change_before) else 1,
+            setting_clause,
+        ),
         # Above the closed cast, not below it. The ranks were set when the
         # question was "cast or SETTING", where a stray extra really is the
         # smaller blemish. Against the LIGHTING lock it is not close: the

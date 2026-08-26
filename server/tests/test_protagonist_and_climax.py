@@ -232,3 +232,100 @@ def test_an_unchanged_world_leaves_the_motion_prompt_exactly_as_it_was():
 
     assert build_motion_prompt(shot) == build_motion_prompt(shot, world_state="  ")
     assert "already changed" not in build_motion_prompt(shot)
+
+
+# --- the event survives the prompt budget --------------------------------
+
+
+def _segments(**kwargs):
+    """The (priority, text) list build_frame_prompt hands the assembler.
+
+    Captured rather than inferred from the finished string: what changed here
+    is a RANK, and a rank is only visible before the squeeze decides on it.
+    """
+    from pipelines import script2video
+
+    captured = {}
+    real = script2video.fit_image_prompt
+
+    def spy(segments, *args, **kw):
+        captured["segments"] = list(segments)
+        return real(segments, *args, **kw)
+
+    shot = SimpleNamespace(
+        visual_desc="Elena hauls the container door wide",
+        shot_type="wide shot",
+        lens="35mm",
+    )
+    script2video.fit_image_prompt = spy
+    try:
+        script2video.build_frame_prompt(
+            "Sci-Fi",
+            shot,
+            setting_location=(
+                "rain-soaked cargo harbour among stacked shipping containers "
+                "under sodium floodlights"
+            ),
+            setting_time_of_day="night",
+            setting_era="present day",
+            **kwargs,
+        )
+    finally:
+        script2video.fit_image_prompt = real
+    return captured["segments"]
+
+
+def _rank_of(segments, needle):
+    return next(prio for prio, text in segments if needle in (text or ""))
+
+
+def test_the_scene_that_carries_the_event_cannot_be_squeezed_out_of_it():
+    """930f11de-4b0 went over budget on all six of its frames -- "dropping 262
+    chars of lower-priority direction" x6 -- and cleared it with 262 to spare.
+
+    The setting clause is the only thing in the prompt that says the lights go
+    out, and it was ranked droppable: one rung under the identity clause it
+    competes with, so a second described character would have bought its faces
+    with the film's own climax.
+    """
+    from pipelines.script2video import REQUIRED
+
+    change = "every light in the city and on the docks goes out"
+    segments = _segments(world_change=change)
+
+    assert _rank_of(segments, change) == REQUIRED
+
+
+def test_a_scene_after_the_blackout_is_protected_too():
+    """Inherited state is the same event, one scene later."""
+    from pipelines.script2video import REQUIRED
+
+    state = "every light on the docks is out"
+    segments = _segments(world_state=state)
+
+    assert _rank_of(segments, state) == REQUIRED
+
+
+def test_an_ordinary_scene_still_pays_for_its_faces_with_continuity():
+    """Unchanged where nothing is at stake: with no event to protect, the
+    continuity clause is direction, and direction is what a squeeze is for."""
+    from pipelines.script2video import REQUIRED
+
+    segments = _segments()
+
+    rank = _rank_of(segments, "the room itself must not change")
+    assert rank != REQUIRED
+    assert rank > 0
+
+
+def test_the_protected_clause_really_does_survive_a_squeeze():
+    """The rank, spent: under a limit nothing optional can fit, the event is
+    still there and the optional direction is not."""
+    from pipelines.script2video import REQUIRED, fit_image_prompt
+
+    kept = fit_image_prompt(
+        [(REQUIRED, "the lights go out. "), (1, "continuity. ")], limit=25
+    )
+
+    assert "the lights go out" in kept
+    assert "continuity" not in kept

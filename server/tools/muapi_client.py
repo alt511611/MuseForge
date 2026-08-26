@@ -136,8 +136,45 @@ def is_reference_rejection(exc: Exception) -> bool:
     )
 
 
+#: What the provider says when the ACCOUNT is the problem, not the request.
+#: Delivered verbatim on job 930f11de-4b0: "User is locked. Reason: Exhausted
+#: balance. Top up your balance at provider/dashboard/billing."
+_ACCOUNT_LOCKED_MARKERS = (
+    "user is locked",
+    "exhausted balance",
+    "top up your balance",
+    "insufficient balance",
+    "insufficient credit",
+)
+
+
+def is_account_locked(exc: Exception) -> bool:
+    """True when the provider refused because the ACCOUNT cannot pay.
+
+    Distinct from every other 400 for one reason: it is not about this call.
+    A rejected reference image is a fact about one portrait and a bad payload
+    is a fact about one request, so the next call is worth making. An account
+    out of balance is a fact about the JOB, and every paid call after it will
+    be refused the same way.
+    """
+    message = str(exc).lower()
+    return any(marker in message for marker in _ACCOUNT_LOCKED_MARKERS)
+
+
 class MuAPIError(Exception):
     """Raised when a MuAPI request fails in a non-recoverable way."""
+
+
+class MuAPIAccountLocked(MuAPIError):
+    """The provider account cannot pay -- for this call or any that follow.
+
+    Job 930f11de-4b0 met this six times: foley on three scenes and lip sync on
+    three, each refused with "User is locked. Reason: Exhausted balance." Every
+    one of those stages fails open on its own and is right to, so the job
+    delivered a master that was 75% digital silence over unsynced mouths and
+    reported success. Six independent fail-opens cannot see that they are the
+    same failure; a type can.
+    """
 
 
 class MuAPICancelled(MuAPIError):
@@ -294,9 +331,19 @@ class MuAPIClient:
                     )
                 backoff = min(2 ** attempt + random.uniform(0, 0.5), 10.0)
                 await asyncio.sleep(backoff)
-        raise MuAPIError(
-            f"MuAPI request failed after {attempts} attempt(s): "
-            f"{self._describe(last_exc)}"
+        described = self._describe(last_exc)
+        # Same message either way -- what changes is that a caller can now ask
+        # whether the JOB can still buy anything, instead of each stage
+        # discovering the locked account for itself and shrugging.
+        error = MuAPIError if not is_account_locked(last_exc) else MuAPIAccountLocked
+        if error is MuAPIAccountLocked:
+            logger.error(
+                "MuAPI refused because the account cannot pay: %s. Every paid "
+                "call left in this job will be refused the same way.",
+                described,
+            )
+        raise error(
+            f"MuAPI request failed after {attempts} attempt(s): {described}"
         )
 
     @classmethod
