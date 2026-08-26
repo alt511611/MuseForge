@@ -2219,17 +2219,27 @@ def check_master_is_not_mostly_silent(final_path: Optional[str]) -> Optional[str
         return None
 
     duration = len(samples) / rate
+    # What this measured is the master. WHY it is silent is something this
+    # never looked at, and it used to say anyway: "with music and sound
+    # effects both off". Delivered against a job with MUSEFORGE_FOLEY=1 that
+    # asked for foley on all three of its scenes and was refused each time --
+    # "User is locked. Reason: Exhausted balance." -- so the one sentence the
+    # user got about their silent film told them to check a switch that was
+    # already on, and the real cause was six lines further up the log. A layer
+    # that was ordered and did not arrive is not a layer that was off.
     logger.warning(
-        "Master is %.0f%% silence (%.1fs of %.1fs). Check MUSEFORGE_FOLEY and "
-        "whether music was enabled for this job.",
+        "Master is %.0f%% silence (%.1fs of %.1fs). Either the music and "
+        "foley layers were disabled, or they were requested and failed — the "
+        "warnings above this line say which.",
         silent_share * 100,
         silent_share * duration,
         duration,
     )
     return (
         f"About {silent_share * 100:.0f}% of this video has no sound at all — "
-        "with music and sound effects both off, only the spoken lines are "
-        "audible and the rest plays in silence."
+        "only the spoken lines are audible and the rest plays in silence. "
+        "The music and sound-effect layers were either switched off for this "
+        "job or could not be generated for it."
     )
 
 

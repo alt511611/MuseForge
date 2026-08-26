@@ -77,16 +77,41 @@ def test_the_delivered_drama_that_prompted_this_is_reported(tmp_path):
 
     assert notice is not None
     assert "no sound at all" in notice
-    assert "music and sound effects" in notice
+    assert "music and sound-effect layers" in notice
 
 
-def test_it_is_logged_with_the_knobs_to_check(tmp_path, caplog):
+def test_the_notice_does_not_claim_a_cause_it_never_checked(tmp_path):
+    """It measured the master, not the reason.
+
+    It used to report "with music and sound effects both off", and a
+    delivered job with MUSEFORGE_FOLEY=1 -- which asked for foley on all
+    three of its scenes and was refused each time, the provider account
+    being out of balance -- told its user to check a switch that was
+    already on. A layer that was ordered and did not arrive is not a
+    layer that was off.
+    """
     path = _render(tmp_path, "hollow2.mp4", [(0.0, 1.2)])
+
+    notice = check_master_is_not_mostly_silent(path)
+
+    assert notice is not None
+    assert "both off" not in notice
+    # Both readings are offered, neither is asserted.
+    assert "switched off" in notice and "could not be generated" in notice
+
+
+def test_the_log_line_sends_the_operator_to_the_real_answer(tmp_path, caplog):
+    """The cause is in the warnings above it -- a failed layer logs there."""
+    path = _render(tmp_path, "hollow3.mp4", [(0.0, 1.2)])
 
     with caplog.at_level(logging.WARNING):
         check_master_is_not_mostly_silent(path)
 
-    assert any("MUSEFORGE_FOLEY" in r.getMessage() for r in caplog.records)
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("% silence" in m for m in messages)
+    assert any("requested and failed" in m for m in messages)
+    # Not a switch to go and check, which in the delivered job was already on.
+    assert not any("MUSEFORGE_FOLEY" in m for m in messages)
 
 
 def test_a_missing_file_is_not_evidence_of_a_problem():
