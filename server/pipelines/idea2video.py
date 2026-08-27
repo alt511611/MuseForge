@@ -299,6 +299,60 @@ async def _split_off_lead(
     return lead, rest
 
 
+async def _trim_overrun_length(
+    source_path: str, synced_path: str, output_path: str
+) -> Optional[str]:
+    """Cut back a lip-synced clip that came back LONGER than its take.
+
+    The mirror of `_restore_trimmed_length`, for the other direction. That one
+    exists because the provider's default trims the video to the length of the
+    audio; this one exists because it does not always, and the length guard was
+    only ever watching the side the failure had already arrived from.
+
+    Discarding an over-long clip would be the safe answer and it is the
+    fallback, but it throws away a sync that is otherwise correct -- the mouth
+    is driven, the face is right, the clip simply runs on. What it runs on with
+    is the end of the shot, which is the same footage the take already had, so
+    cutting it back to length costs nothing but the seconds that should not
+    have been there.
+
+    Returns None when the trim cannot be made or does not come out at the right
+    length, which leaves the caller with the behaviour it had: keep the take.
+    """
+    original = _clip_duration(source_path)
+    synced = _clip_duration(synced_path)
+    if original is None or synced is None:
+        return None
+    overrun = synced - original
+    # Not the overshoot this repairs. A clip that is not a longer version of
+    # the same take is a provider returning something else entirely, and
+    # trimming it would deliver a scene assembled out of the wrong footage.
+    if overrun <= 0 or original < MIN_TRIMMED_SECONDS:
+        return None
+
+    trimmed = await trim_clip(synced_path, output_path, 0.0, overrun)
+    # trim_clip fails open by returning its source, which here would be the
+    # over-long clip the caller was trying to correct.
+    if trimmed == synced_path:
+        return None
+
+    if not _keeps_its_length(source_path, trimmed):
+        logger.warning(
+            "Trimming a lip-synced take back to length did not land on it; "
+            "keeping the unsynced original."
+        )
+        return None
+
+    logger.info(
+        "Lip-synced clip came back %.2fs against a %.2fs take (the provider "
+        "ran past the end); the extra %.2fs was trimmed off.",
+        synced,
+        original,
+        overrun,
+    )
+    return trimmed
+
+
 async def _restore_trimmed_length(
     source_path: str,
     synced_path: str,
@@ -2796,18 +2850,26 @@ def _clip_duration(path: str) -> Optional[float]:
 
 
 def _keeps_its_length(original_path: str, candidate_path: str) -> bool:
-    """Whether ``candidate_path`` is (near enough) as long as the original.
+    """Whether ``candidate_path`` is (near enough) the same length as the original.
 
     Fails OPEN: when either clip cannot be measured the candidate is accepted,
     because refusing every sync on a probe failure would quietly disable a
     feature the customer paid for. The check exists to catch a provider that
-    trims to the audio, which is unmistakable, not to police rounding.
+    re-times the take, which is unmistakable, not to police rounding.
+
+    Measured in BOTH directions. It was written for one -- the provider's
+    default trims the video to the length of the audio, so short was the shape
+    the failure arrived in -- and a clip that came back LONG walked straight
+    through it. Job 79f46083-41c: an 8.08s take synced to 8.64s, unguarded, and
+    the film delivered 30.8s against a 30s budget with the whole overshoot in
+    that one scene. The per-credit second budget does not care which way a
+    scene drifts, so neither does this.
     """
     original = _clip_duration(original_path)
     candidate = _clip_duration(candidate_path)
     if original is None or candidate is None:
         return True
-    return candidate >= original - LIPSYNC_LENGTH_TOLERANCE_SECONDS
+    return abs(candidate - original) <= LIPSYNC_LENGTH_TOLERANCE_SECONDS
 
 
 async def trim_clip(
@@ -3285,7 +3347,34 @@ class Idea2VideoPipeline:
                         exc,
                     )
                     return None
-                if not _keeps_its_length(sync_source, local_path):
+                # The guard reads both ways now, so the two directions are
+                # answered separately: a short clip has its missing tail put
+                # back, a long one has its extra tail taken off. Handing an
+                # over-long clip to the restore below would find nothing to
+                # restore and drop a sync that was otherwise correct.
+                if (
+                    not _keeps_its_length(sync_source, local_path)
+                    and (_clip_duration(local_path) or 0.0)
+                    > (_clip_duration(sync_source) or 0.0)
+                ):
+                    trimmed = await _trim_overrun_length(
+                        sync_source,
+                        local_path,
+                        os.path.join(
+                            working_dir, f"scene_{scene_index}_lipsync_cut_back.mp4"
+                        ),
+                    )
+                    if trimmed is None:
+                        logger.warning(
+                            "Lip-synced clip for scene %s came back longer than "
+                            "the take it replaces and could not be trimmed back "
+                            "to length — keeping the original so the runtime the "
+                            "customer paid for is preserved.",
+                            scene_index,
+                        )
+                        return None
+                    local_path = trimmed
+                elif not _keeps_its_length(sync_source, local_path):
                     # Sync Labs' own default (cut_off) trims the video down to the
                     # length of the audio, which would let a short line silently
                     # shorten a scene and break the fixed per-credit second budget

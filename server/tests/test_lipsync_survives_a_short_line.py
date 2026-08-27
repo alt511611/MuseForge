@@ -424,3 +424,83 @@ async def test_a_sync_short_by_less_than_a_repairable_slice_is_kept(
     assert scene_paths[0].endswith("scene_0_lipsync.mp4")
     # Nothing was rebuilt: the shortfall was inside tolerance, so no join ran.
     assert editor["joins"] == []
+
+
+# ── and the direction the guard was not watching ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_sync_that_came_back_long_is_trimmed_back_to_the_take(
+    measured, editor, tmp_path, monkeypatch
+):
+    """The provider does not only trim -- sometimes it runs past the end.
+
+    The length guard was written for one direction, because trimming to the
+    audio is the shape the failure had always arrived in, so a clip that came
+    back LONG walked straight through it. Job 79f46083-41c: an 8.08s take came
+    back synced at 8.64s, unguarded, and the film delivered 30.8s against a 30s
+    budget with the whole overshoot in that one scene. The sync itself was
+    fine, so the scene is cut back rather than discarded."""
+    monkeypatch.setenv("MUSEFORGE_LIPSYNC_ENABLED", "1")
+
+    class _OverrunningLipsync:
+        def available(self):
+            return True
+
+        async def sync(self, video, audio_url, is_cancelled=None):
+            return "https://cdn/overrun.mp4"
+
+    monkeypatch.setattr(mod, "make_lipsync", lambda demo=False: _OverrunningLipsync())
+    monkeypatch.setattr(mod, "_probe_video_duration", lambda path: DURATIONS.get(path, 0.0))
+
+    async def fake_download(url, path):
+        with open(path, "wb") as f:
+            f.write(b"synced")
+        DURATIONS[path] = 8.64  # against an 8.08s take
+        return path
+
+    monkeypatch.setattr(mod, "download_video", fake_download)
+
+    scene_paths = [_clip(tmp_path, "scene_0.mp4", 8.08)]
+    tracks = [
+        {
+            "scene_index": 0,
+            "line": "replik",
+            "audio_url": "https://cdn/s0.mp3",
+            "duration_seconds": 8.0,
+        }
+    ]
+
+    async def progress(*a, **kw):
+        return None
+
+    pipeline = mod.Idea2VideoPipeline("test-key-not-real")
+    synced = await pipeline._lipsync_scenes(
+        scene_paths=scene_paths,
+        dialogue_tracks=tracks,
+        working_dir=str(tmp_path),
+        progress=progress,
+    )
+
+    assert synced == [0], "an over-long sync was discarded instead of trimmed"
+    # Cut from the TAIL, by exactly the overshoot.
+    trims = [(src, start, end) for src, start, end in editor["trims"] if end > 0]
+    assert trims, "nothing was trimmed off the end"
+    assert abs(trims[-1][2] - 0.56) < 0.01, trims
+    # And the scene ends up the length it was costed at.
+    assert abs(DURATIONS[scene_paths[0]] - 8.08) < 0.05
+
+
+def test_the_length_guard_reads_both_ways(measured, tmp_path):
+    """Short and long are the same defect to a per-second budget."""
+    take = str(tmp_path / "take.mp4")
+    DURATIONS[take] = 10.0
+    for name, seconds, ok in (
+        ("exact", 10.0, True),
+        ("rounding", 10.2, True),
+        ("short", 9.0, False),
+        ("long", 11.0, False),
+    ):
+        candidate = str(tmp_path / f"{name}.mp4")
+        DURATIONS[candidate] = seconds
+        assert mod._keeps_its_length(take, candidate) is ok, name
