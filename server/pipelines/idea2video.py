@@ -31,6 +31,7 @@ from pipelines.script2video import (
     Script2VideoPipeline,
     _make_image_generator,
     apply_color_grade,
+    build_delivery_filters,
     concatenate_videos,
     concatenate_videos_with_transitions,
     download_video,
@@ -657,7 +658,11 @@ def is_finishing_enabled() -> bool:
 
 
 async def finalize_master(
-    video_path: str, output_path: str, caption_filter: str = ""
+    video_path: str,
+    output_path: str,
+    caption_filter: str = "",
+    grade_filter: str = "",
+    delivered_size: Optional[Tuple[int, int]] = None,
 ) -> str:
     """One finishing encode: fade in from black, fade out to black, and --
     when the video carries audio -- matching audio fades plus EBU R128
@@ -666,16 +671,22 @@ async def finalize_master(
     quiet or hot next to everything else the viewer watches).
 
     Single pass so it costs ONE encode at the shared CRF-18 profile, not one
-    per effect. ``caption_filter`` (see build_caption_filter) joins that pass
-    for the same reason: the caption burn is another full re-encode of the
-    same picture, measured at 237 seconds against this pass's 325 on a
-    60-second master, and the two produce one file between them.
+    per effect. ``caption_filter`` (see build_caption_filter) and
+    ``grade_filter`` (see build_delivery_filters: the delivery geometry and
+    the director style's colour grade) join that pass for the same reason --
+    each is another full re-encode of the same picture, the caption burn
+    measured at 237 seconds against this pass's 325 on a 60-second master --
+    and the three produce one file between them.
+
+    ``delivered_size`` is the frame the picture will have AFTER the grade
+    chain has conformed it, which is what the film look has to be measured
+    against; without it the size is probed off the input.
 
     Fails open: any error ships the un-finished video rather than failing the
-    job, matching the rest of the assembly chain -- EXCEPT when captions were
-    folded in, where failing open would drop the captions as well as the
-    fades. That case returns ``video_path`` unchanged, which tells the caller
-    to fall back to burning them in a pass of their own.
+    job, matching the rest of the assembly chain -- EXCEPT when captions or
+    the grade were folded in, where failing open would drop those as well as
+    the fades. That case returns ``video_path`` unchanged, which tells the
+    caller to fall back to passes of their own.
     """
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
@@ -688,12 +699,13 @@ async def finalize_master(
     def _decline() -> str:
         """What to hand back when this pass is not going to run at all.
 
-        Without captions that is the input, copied through, exactly as before.
-        With them it has to be the input ITSELF -- the caller reads that as
-        "the merge did not happen" and burns them in a pass of their own,
-        rather than shipping a master that quietly lost them.
+        With nothing riding along that is the input, copied through, exactly
+        as before. With a caption or grade filter on board it has to be the
+        input ITSELF -- the caller reads that as "the merge did not happen"
+        and runs those passes of their own, rather than shipping a master that
+        quietly lost its captions or its grade.
         """
-        return video_path if caption_filter else _copy_through()
+        return video_path if (caption_filter or grade_filter) else _copy_through()
 
     try:
         from moviepy import VideoFileClip
@@ -711,6 +723,12 @@ async def finalize_master(
         return _decline()
 
     fade_out_start = max(0.0, duration - FADE_OUT_SECONDS)
+    # The grade goes FIRST, and its geometry conform with it: everything after
+    # it in this chain is composed onto the delivered frame -- a matte sized to
+    # the source would be cut by a conform that followed it, and a caption
+    # drawn before the scale would be resampled with the picture.
+    if delivered_size and all(delivered_size):
+        width, height = delivered_size
     # Film-look filters ride along in THIS encode. Cadence, grain and matte
     # each want a full re-encode of their own; folding them into the pass that
     # already re-encodes for the fades keeps it at one generation loss instead
@@ -724,7 +742,8 @@ async def finalize_master(
     # brightness over a picture fading to black, which is the one caption
     # error a viewer reads instantly as broken.
     vf = ",".join(
-        look_filters
+        ([grade_filter] if grade_filter else [])
+        + look_filters
         + ([caption_filter] if caption_filter else [])
         + [
             f"fade=t=in:st=0:d={FADE_IN_SECONDS}",
@@ -781,11 +800,11 @@ async def finalize_master(
         )
     except Exception as exc:
         logger.warning("Finishing pass unavailable, shipping un-finished video: %s", exc)
-    if caption_filter:
-        # The captions were riding on this encode. Copying through here would
-        # ship a master with neither them nor the fades, so hand the caller
-        # back its own input: it burns them separately, exactly as it did
-        # before the two passes were folded together.
+    if caption_filter or grade_filter:
+        # The captions and/or the grade were riding on this encode. Copying
+        # through here would ship a master with neither them nor the fades, so
+        # hand the caller back its own input: it runs them separately, exactly
+        # as it did before the passes were folded together.
         try:
             os.unlink(output_path)
         except OSError:
@@ -2369,6 +2388,7 @@ def _kinetic_caption_filter(
     video_path: str,
     dialogue_tracks: List[Dict[str, Any]],
     scene_paths: Optional[List[str]] = None,
+    size: Optional[Tuple[int, int]] = None,
 ) -> Tuple[str, Optional[str]]:
     """Word-by-word captions as an ffmpeg filter, or ("", None) to decline.
 
@@ -2377,7 +2397,7 @@ def _kinetic_caption_filter(
     ass_captions), or no track carries measured word timings, which is every
     voice provider except the direct ElevenLabs path.
     """
-    width, height = _probe_video_size(video_path)
+    width, height = size or _probe_video_size(video_path)
     if width and height and width > height:
         logger.info(
             "Word captions are enabled, but this master is %dx%d — "
@@ -2401,6 +2421,7 @@ def _broadcast_caption_filter(
     video_path: str,
     dialogue_tracks: List[Dict[str, Any]],
     scene_paths: Optional[List[str]] = None,
+    size: Optional[Tuple[int, int]] = None,
 ) -> Tuple[str, Optional[str]]:
     """Broadcast-style captions as an ffmpeg filter, or ("", None).
 
@@ -2414,7 +2435,7 @@ def _broadcast_caption_filter(
     path = _write_caption_file(
         body, ".srt", "museforge_subs_", os.path.dirname(video_path)
     )
-    force_style = build_caption_style(*_probe_video_size(video_path))
+    force_style = build_caption_style(*(size or _probe_video_size(video_path)))
     return (
         f"subtitles={_escape_subtitles_filter_path(path)}:force_style='{force_style}'",
         path,
@@ -2425,6 +2446,7 @@ def build_caption_filter(
     video_path: str,
     dialogue_tracks: Optional[List[Dict[str, Any]]] = None,
     scene_paths: Optional[List[str]] = None,
+    size: Optional[Tuple[int, int]] = None,
 ) -> Tuple[str, Optional[str]]:
     """The -vf fragment that burns this drama's captions, and the file it reads.
 
@@ -2432,6 +2454,12 @@ def build_caption_filter(
     along in the finishing pass instead of paying for a re-encode of its own:
     on a 60-second delivered master the caption burn cost 237 seconds and the
     finishing pass 325, for two full passes over the same picture.
+
+    ``size`` is the frame the captions will actually be drawn on, which is
+    not always the frame this file has: when the delivery conform rides in the
+    same encode, the picture is scaled BEFORE the captions are burned, and a
+    style measured off the un-conformed master would size the text for a frame
+    that no longer exists. Omitted, the size is probed off ``video_path``.
 
     The caller owns the returned path and must delete it after the encode.
     ("", None) means there is nothing to burn.
@@ -2441,10 +2469,12 @@ def build_caption_filter(
     # Two house styles, not a fallback chain: the plain one is right for a
     # 16:9 drama in the same way the kinetic one is right for a vertical feed.
     if is_word_captions_enabled():
-        kinetic, path = _kinetic_caption_filter(video_path, dialogue_tracks, scene_paths)
+        kinetic, path = _kinetic_caption_filter(
+            video_path, dialogue_tracks, scene_paths, size
+        )
         if kinetic:
             return kinetic, path
-    return _broadcast_caption_filter(video_path, dialogue_tracks, scene_paths)
+    return _broadcast_caption_filter(video_path, dialogue_tracks, scene_paths, size)
 
 
 async def burn_subtitles(
@@ -4340,9 +4370,10 @@ class Idea2VideoPipeline:
         aspect_ratio: str = "16:9",
         sfx_tracks: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
-        """Concatenate all scene videos, color-grade, add background music,
-        burn dialogue captions (when tracks present), then watermark
-        (Free plan only) — exactly once per drama.
+        """Concatenate all scene videos, add background music, then master
+        the result — colour grade, delivery conform, film look, captions,
+        fades and loudness in ONE encode — and watermark it (Free plan only),
+        exactly once per drama.
 
         Cancel is checked BEFORE each step starts (concat / grade / music /
         subtitles / watermark). Once an ffmpeg/moviepy render has begun we
@@ -4381,16 +4412,35 @@ class Idea2VideoPipeline:
         if progress_callback:
             await progress_callback("grade", "Applying color grade", 89)
 
-        graded_path = os.path.join(working_dir, "drama_graded.mp4")
-        # The grade encode also conforms the master to the ordered aspect
-        # ratio (no-op when the clips already carry it, which is the normal
-        # case since every frame was generated at that ratio).
-        await apply_color_grade(
-            concatenated_path,
-            graded_path,
-            director_style=director_style,
-            aspect_ratio=aspect_ratio,
-        )
+        # The grade (and the delivery conform that rides with it) is another
+        # full re-encode of the master, and the finishing pass at the end of
+        # this chain re-encodes the same frames again a few seconds later --
+        # with the audio mix between them copying the picture through
+        # untouched. So when there IS a finishing pass, the grade travels as a
+        # filter and is applied there: one encode instead of two, and one
+        # generation loss instead of two. With finishing off it runs here, in
+        # the pass it has always had.
+        finishing = is_finishing_enabled()
+        grade_filter, delivered_size = "", None
+        graded_path = concatenated_path
+        if finishing:
+            filters, delivered_size = build_delivery_filters(
+                *_probe_video_size(concatenated_path),
+                director_style=director_style,
+                aspect_ratio=aspect_ratio,
+            )
+            grade_filter = ",".join(filters)
+        if not grade_filter:
+            graded_path = os.path.join(working_dir, "drama_graded.mp4")
+            # The grade encode also conforms the master to the ordered aspect
+            # ratio (no-op when the clips already carry it, which is the normal
+            # case since every frame was generated at that ratio).
+            await apply_color_grade(
+                concatenated_path,
+                graded_path,
+                director_style=director_style,
+                aspect_ratio=aspect_ratio,
+            )
 
         # Before music mix
         _check_cancel()
@@ -4433,12 +4483,14 @@ class Idea2VideoPipeline:
         # hands back its own input, and the two passes run separately exactly
         # as they always did.
         video_for_final = with_music_path
-        finishing = is_finishing_enabled()
         caption_filter, caption_file = "", None
         try:
             if dialogue_tracks and finishing:
+                # Sized against the DELIVERED frame: when the conform rides in
+                # the same encode, the picture is scaled before these are drawn
+                # on it.
                 caption_filter, caption_file = build_caption_filter(
-                    with_music_path, dialogue_tracks, scene_paths
+                    with_music_path, dialogue_tracks, scene_paths, delivered_size
                 )
 
             if dialogue_tracks and not caption_filter:
@@ -4467,24 +4519,44 @@ class Idea2VideoPipeline:
                         96,
                     )
                 finished_path = os.path.join(working_dir, "drama_finished.mp4")
+                merge_input = video_for_final
                 finished = await finalize_master(
-                    video_for_final, finished_path, caption_filter=caption_filter
+                    merge_input,
+                    finished_path,
+                    caption_filter=caption_filter,
+                    grade_filter=grade_filter,
+                    delivered_size=delivered_size,
                 )
-                if caption_filter and finished == video_for_final:
+                if (caption_filter or grade_filter) and finished == merge_input:
                     logger.warning(
-                        "The finishing pass could not carry the captions; "
-                        "burning them on their own and finishing after, as "
-                        "two passes."
+                        "The finishing pass could not carry the grade/captions; "
+                        "running them on their own and finishing after, as "
+                        "separate passes."
                     )
+                    # Same order they would have had inside the merged chain:
+                    # grade (and conform) first, captions onto the delivered
+                    # frame, fades last.
+                    if grade_filter:
+                        _check_cancel()
+                        graded_path = os.path.join(working_dir, "drama_graded.mp4")
+                        video_for_final = await apply_color_grade(
+                            video_for_final,
+                            graded_path,
+                            director_style=director_style,
+                            aspect_ratio=aspect_ratio,
+                        )
+                    if caption_filter:
+                        _check_cancel()
+                        subtitled_path = os.path.join(working_dir, "drama_subtitled.mp4")
+                        await burn_subtitles(
+                            video_for_final,
+                            subtitled_path,
+                            dialogue_tracks,
+                            scene_paths=scene_paths,
+                        )
+                        video_for_final = subtitled_path
                     _check_cancel()
-                    subtitled_path = os.path.join(working_dir, "drama_subtitled.mp4")
-                    await burn_subtitles(
-                        video_for_final,
-                        subtitled_path,
-                        dialogue_tracks,
-                        scene_paths=scene_paths,
-                    )
-                    finished = await finalize_master(subtitled_path, finished_path)
+                    finished = await finalize_master(video_for_final, finished_path)
                 video_for_final = finished
         finally:
             if caption_file:

@@ -1893,14 +1893,67 @@ def build_grade_filter_chain(grade) -> str:
     )
 
 
+def build_delivery_filters(
+    source_width: int,
+    source_height: int,
+    director_style: str = "cinematic_balanced",
+    aspect_ratio: Optional[str] = None,
+) -> Tuple[List[str], Tuple[int, int]]:
+    """What turns a concatenated master into a DELIVERED one, as filter
+    fragments: conform the geometry, then apply the director style's grade.
+    Also returns the dimensions the picture will have once they have run.
+
+    Handed back rather than applied, for the same reason the film look is (see
+    interfaces/film_look): the finishing pass already re-encodes every frame,
+    so a grade folded into that encode is free, where a pass of its own is a
+    full re-encode of the master and a generation loss on top of it.
+    apply_color_grade() is what runs these when there is no such pass to ride.
+
+    The delivered dimensions come back with them because what follows in the
+    chain is measured off the delivered frame, not the source one -- the scope
+    matte and the caption sizes both.
+    """
+    filters: List[str] = []
+    width, height = source_width, source_height
+    if aspect_ratio:
+        geometry = build_geometry_filters(source_width, source_height, aspect_ratio)
+        if geometry:
+            dimensions = resolve_output_dimensions(
+                source_width, source_height, aspect_ratio
+            )
+            if dimensions:
+                width, height = dimensions
+            logger.info(
+                "Conforming %sx%s master to %s delivery geometry (%s)",
+                source_width,
+                source_height,
+                aspect_ratio,
+                geometry[0],
+            )
+            filters += geometry
+    grade = get_color_grade(get_director_style(director_style).color_grade)
+    logger.info(
+        "Color grading with %r (%s) for director style %r",
+        grade.label,
+        grade.filter_chain,
+        director_style,
+    )
+    filters.append(build_grade_filter_chain(grade))
+    return filters, (width, height)
+
+
 async def apply_color_grade(
     video_path: str,
     output_path: str,
     director_style: str = "cinematic_balanced",
     aspect_ratio: Optional[str] = None,
 ) -> str:
-    """Color-grade the drama according to its DIRECTOR STYLE -- pure ffmpeg,
-    no extra API calls or cost.
+    """Color-grade the drama according to its DIRECTOR STYLE in a pass of its
+    own -- pure ffmpeg, no extra API calls or cost.
+
+    Used when the finishing pass is off, or when it could not carry the grade;
+    when it can, the same filters ride along in that encode instead of paying
+    for this one (see build_delivery_filters).
 
     Each DirectorStyle names a grade (DirectorStyle.color_grade); that name
     resolves to a ColorGrade preset with its own filter chain and strength.
@@ -1923,31 +1976,17 @@ async def apply_color_grade(
                 dst.write(data)
         return output_path
 
-    grade = get_color_grade(get_director_style(director_style).color_grade)
-    filter_chain = build_grade_filter_chain(grade)
-    logger.info(
-        "Color grading with %r (%s) for director style %r",
-        grade.label,
-        grade.filter_chain,
-        director_style,
-    )
-
-    # Conform the delivered geometry in the SAME encode as the grade -- the
-    # master is graded exactly once, so folding the scale/crop in here costs
+    # Conform the delivered geometry in the SAME encode as the grade -- this
+    # pass re-encodes the master anyway, so folding the scale/crop in costs
     # nothing extra and guarantees the job ships in the ratio it was ordered
     # in even if a provider handed back a differently-shaped clip.
-    if aspect_ratio:
-        source_width, source_height = _probe_dimensions(video_path)
-        geometry = build_geometry_filters(source_width, source_height, aspect_ratio)
-        if geometry:
-            logger.info(
-                "Conforming %sx%s master to %s delivery geometry (%s)",
-                source_width,
-                source_height,
-                aspect_ratio,
-                geometry[0],
-            )
-            filter_chain = ",".join(geometry + [filter_chain])
+    source_width, source_height = (
+        _probe_dimensions(video_path) if aspect_ratio else (0, 0)
+    )
+    filters, _delivered = build_delivery_filters(
+        source_width, source_height, director_style, aspect_ratio
+    )
+    filter_chain = ",".join(filters)
 
     ffmpeg_binary = os.environ.get("MUSEFORGE_FFMPEG_BINARY") or shutil.which("ffmpeg")
     if not ffmpeg_binary:
