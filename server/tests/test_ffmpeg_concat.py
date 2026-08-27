@@ -125,3 +125,86 @@ async def test_failed_ffmpeg_concat_uses_moviepy_chain(tmp_path, monkeypatch):
     assert methods == ["chain"]
     assert os.path.isfile(output)
     assert abs(_duration_seconds(output) - 1.2) < 0.25
+
+
+def _ffmpeg_for_tests():
+    from pipelines.script2video import _ffmpeg_binary
+
+    return _ffmpeg_binary()
+
+
+def _make_clip_with_timescale(tmp_path, name, timescale, duration=0.5):
+    """A clip written with an explicit container timescale.
+
+    The pipeline produces these without asking for them: a clip that came back
+    from a provider and a clip `trim_clip` re-encoded locally do not agree
+    about their timebase, and the concat demuxer writes the join against the
+    first one's.
+    """
+    path = str(tmp_path / name)
+    subprocess.run(
+        [
+            _ffmpeg_for_tests(), "-y", "-v", "error",
+            "-f", "lavfi",
+            "-i", f"testsrc=size=160x90:rate=24:duration={duration}",
+            "-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p",
+            "-video_track_timescale", str(timescale),
+            "-an", path,
+        ],
+        check=True,
+    )
+    return path
+
+
+@pytest.mark.asyncio
+async def test_disagreeing_timebases_are_repaired_by_a_packet_copy(
+    tmp_path, monkeypatch
+):
+    """Clips with different timebases must be joined by a copy, not a re-encode.
+
+    The concat demuxer copies packets without re-timing them and writes them
+    against the FIRST input's timebase, so mismatched inputs come out at a
+    length that does not describe them -- these two join as 137s of "1s", and
+    the delivered job that prompted this got 5.46s out of 10.04s. Both of the
+    tiers under the fast path decode every frame, which on a lip-sync rejoin
+    spends a generation of quality on footage that was never damaged. A
+    stream-copy remux to a shared timescale repairs the join without decoding,
+    so neither re-encode tier may run.
+    """
+    import moviepy
+
+    import pipelines.script2video as script2video
+
+    head = _make_clip_with_timescale(tmp_path, "head.mp4", 600)
+    tail = _make_clip_with_timescale(tmp_path, "tail.mp4", 90000)
+    output = str(tmp_path / "rejoined.mp4")
+
+    # Counted rather than raised: tier 2 swallows exceptions and falls to
+    # tier 3, so a raising guard would be silently absorbed and pass.
+    reencodes = {"moviepy": 0, "filter": 0}
+
+    real_filter = script2video._concat_by_filter
+    real_moviepy = moviepy.concatenate_videoclips
+
+    async def _counting_filter(*args, **kwargs):
+        reencodes["filter"] += 1
+        return await real_filter(*args, **kwargs)
+
+    def _counting_moviepy(*args, **kwargs):
+        reencodes["moviepy"] += 1
+        return real_moviepy(*args, **kwargs)
+
+    monkeypatch.setattr(script2video, "_concat_by_filter", _counting_filter)
+    monkeypatch.setattr(moviepy, "concatenate_videoclips", _counting_moviepy)
+
+    result = await script2video.concatenate_videos([head, tail], output)
+
+    assert result == output
+    assert os.path.isfile(output)
+    # Both halves are present and the timeline describes them.
+    assert abs(_duration_seconds(output) - 1.0) < 0.05
+    # Nothing decoded a frame to get there.
+    assert reencodes == {"moviepy": 0, "filter": 0}
+    # The normalisation temporaries are cleaned up behind it.
+    leftovers = [n for n in os.listdir(str(tmp_path)) if n.startswith("museforge_tb_")]
+    assert leftovers == []

@@ -261,6 +261,44 @@ async def _split_off_tail(
     return head, tail
 
 
+async def _split_off_lead(
+    source_path: str, lead_path: str, rest_path: str, lead_seconds: float
+) -> Tuple[Optional[str], str]:
+    """Cut the first ``lead_seconds`` off a clip, returning ``(lead, rest)``.
+
+    The mirror of `_split_off_tail`, for the other end and a different reason:
+    the tail split holds a cutaway back because there is no mouth in it, this
+    one holds back the seconds BEFORE the line starts, because the sync
+    provider drives the mouth from frame one of whatever it is handed. Give it
+    a clip whose speech begins two seconds in and it moves the mouth for those
+    two seconds of silence -- the dubbing error the feature exists to remove.
+
+    Returns ``(None, source_path)`` when the split cannot be made, which leaves
+    the caller with a whole clip and the decision it had before.
+    """
+    duration = _probe_video_duration(source_path)
+    rest_seconds = duration - lead_seconds
+    if (
+        duration <= 0
+        or lead_seconds < MIN_TRIMMED_SECONDS
+        or rest_seconds < MIN_TRIMMED_SECONDS
+    ):
+        return None, source_path
+
+    try:
+        lead = await trim_clip(source_path, lead_path, 0.0, rest_seconds)
+        rest = await trim_clip(source_path, rest_path, lead_seconds, 0.0)
+    except Exception as exc:
+        logger.warning("Could not split a scene from its silent opening: %s", exc)
+        return None, source_path
+
+    # trim_clip fails open by returning its source, which here would make both
+    # halves the whole clip -- rejoining those would play the scene twice.
+    if lead == source_path or rest == source_path:
+        return None, source_path
+    return lead, rest
+
+
 async def _restore_trimmed_length(
     source_path: str,
     synced_path: str,
@@ -376,6 +414,31 @@ def _scene_tension(scene: Any) -> int:
 #: wall-clock time. Capped to keep a burst of simultaneous requests off the
 #: provider (and to bound peak memory during download/assembly).
 DEFAULT_SCENE_CONCURRENCY = 3
+
+
+#: How many scenes may be lip-synced at once.
+#:
+#: Every one of these is a wait on the provider rather than work on this box,
+#: so the ceiling is the provider's tolerance, not the CPU. Three is the same
+#: default the scene renderer uses and matches the scene count of a typical
+#: short; a deployment that gets rate-limited turns it down without a release.
+DEFAULT_LIPSYNC_CONCURRENCY = 3
+
+
+def _lipsync_concurrency(total_scenes: int) -> int:
+    """Resolve how many scenes to lip-sync in parallel."""
+    raw = os.environ.get("MUSEFORGE_LIPSYNC_CONCURRENCY", "").strip()
+    configured = DEFAULT_LIPSYNC_CONCURRENCY
+    if raw:
+        try:
+            configured = int(raw)
+        except ValueError:
+            logger.warning(
+                "Invalid MUSEFORGE_LIPSYNC_CONCURRENCY=%r, using %s",
+                raw,
+                DEFAULT_LIPSYNC_CONCURRENCY,
+            )
+    return max(1, min(configured, max(1, total_scenes)))
 
 
 def _scene_concurrency(total_scenes: int) -> int:
@@ -2680,7 +2743,24 @@ MIN_TRIMMED_SECONDS = 0.5
 #: How much shorter a lip-synced clip may be than the take it replaces before
 #: it is rejected. Re-encoding moves the last frame around by a hair; a real
 #: trim-to-audio removes seconds.
-LIPSYNC_LENGTH_TOLERANCE_SECONDS = 0.35
+#:
+#: Derived from MIN_TRIMMED_SECONDS rather than chosen, because the two of them
+#: together decide whether a short clip has ANY outcome. Rejecting is answered
+#: by `_restore_trimmed_length`, which cuts the missing seconds off the take and
+#: joins them back on -- and it cannot produce a slice thinner than
+#: MIN_TRIMMED_SECONDS, because `trim_clip` will not cut one.
+#:
+#: So a tolerance below that minimum opens a dead band: at 0.35 a clip that came
+#: back between 0.35s and 0.5s short was too short to accept and too short to
+#: repair, and the sync was discarded whole. It is not a corner case -- the
+#: first bridged scene run through the new head split landed at 0.45s and lost
+#: a sync that had already been paid for and had worked.
+#:
+#: Holding them equal closes it by construction: anything the repair cannot
+#: reach is, by definition, small enough to accept. The cost is bounded at
+#: MIN_TRIMMED_SECONDS of runtime on a scene -- half a second, twelve frames at
+#: 24fps -- against losing the mouth for that scene entirely.
+LIPSYNC_LENGTH_TOLERANCE_SECONDS = MIN_TRIMMED_SECONDS
 
 #: How far a scene's speech may start AFTER its picture and still be worth
 #: driving a mouth with.
@@ -3086,134 +3166,231 @@ class Idea2VideoPipeline:
         )
 
         synced: List[int] = []
-        for position, (scene_index, audio_url) in enumerate(sorted(audio_by_scene.items())):
+        ordered = sorted(audio_by_scene.items())
+        # Scenes wait on a provider, not on this box: the old sequential loop
+        # spent the SUM of the waits where it could have spent the longest one.
+        # Measured on a delivered job, 384s + 322s + 367s came to 1074.7s of
+        # lip sync inside a 1847s film -- 58% of the runtime, nearly all of it
+        # idle. Running them together also decouples the per-scene timeout from
+        # the wall clock, which is what lets that cap be generous enough to
+        # stop losing a scene to it.
+        semaphore = asyncio.Semaphore(_lipsync_concurrency(len(ordered)))
+        completed = 0
+
+        async def _sync_one(
+            scene_index: int, audio_url: str
+        ) -> Optional[Tuple[int, str]]:
+            """Sync one scene, or return None to keep its unsynced take.
+
+            Fail-open per scene is the contract being preserved here: every
+            path that used to `continue` returns None instead, so one scene's
+            loss still leaves the others driven.
+            """
+            nonlocal completed
             if is_cancelled and is_cancelled():
-                break
+                return None
+            async with semaphore:
+                if is_cancelled and is_cancelled():
+                    return None
 
-            picture_start = (
-                picture_starts[scene_index]
-                if 0 <= scene_index < len(picture_starts)
-                else 0.0
-            )
-            # Only where the timeline is actually known. A clip that will not
-            # probe contributes a length of 0, which drags every scene after
-            # it back to the same start and would read as a drift that is not
-            # there -- so an unmeasurable timeline fails OPEN and syncs, the
-            # same way the length check does.
-            timeline_known = all(
-                length > 0 for length in scene_lengths[: scene_index + 1]
-            )
-            drift = speech_anchors.get(scene_index, picture_start) - picture_start
-            if timeline_known and drift > LIPSYNC_MAX_ANCHOR_DRIFT_SECONDS:
-                # The line does not start where this clip starts, and the sync
-                # provider has no way to be told that -- it drives the mouth
-                # from frame one. Syncing here would put the words in the
-                # mouth before they are in the air, which is the exact dubbing
-                # error the feature is bought to remove.
-                logger.warning(
-                    "Scene %s speaks %.2fs after its picture starts (the "
-                    "previous scene's line is still running), so its mouth "
-                    "would move before the words — keeping the unsynced take.",
-                    scene_index,
-                    drift,
+                picture_start = (
+                    picture_starts[scene_index]
+                    if 0 <= scene_index < len(picture_starts)
+                    else 0.0
                 )
-                continue
-            await progress(
-                "lipsync",
-                f"Syncing lips to dialogue ({position + 1}/{len(audio_by_scene)})",
-                88,
-            )
-            # A scene that bought a second angle is master-then-reaction in one
-            # file. Sync the master, keep the cutaway out of it, put them back
-            # together -- see _reaction_tail_seconds.
-            source_path = scene_paths[scene_index]
-            tail_seconds = float((reaction_tails or {}).get(scene_index, 0.0) or 0.0)
-            sync_source = source_path
-            tail_path: Optional[str] = None
-            if tail_seconds > 0:
-                sync_source, tail_path = await _split_off_tail(
-                    source_path,
-                    os.path.join(working_dir, f"scene_{scene_index}_master.mp4"),
-                    os.path.join(working_dir, f"scene_{scene_index}_reaction.mp4"),
-                    tail_seconds,
+                # Only where the timeline is actually known. A clip that will not
+                # probe contributes a length of 0, which drags every scene after
+                # it back to the same start and would read as a drift that is not
+                # there -- so an unmeasurable timeline fails OPEN and syncs, the
+                # same way the length check does.
+                timeline_known = all(
+                    length > 0 for length in scene_lengths[: scene_index + 1]
                 )
-                if tail_path is None:
-                    # The split did not work, so the only safe request is the
-                    # old one: sync the whole clip, cut and all.
-                    sync_source = source_path
-
-            synced_url = await lipsync.sync(
-                sync_source, audio_url, is_cancelled=is_cancelled
-            )
-            if not synced_url:
-                continue
-            local_path = os.path.join(working_dir, f"scene_{scene_index}_lipsync.mp4")
-            try:
-                await download_video(synced_url, local_path)
-            except Exception as exc:
-                logger.warning(
-                    "Lip-synced clip for scene %s could not be downloaded, "
-                    "keeping the original: %s",
-                    scene_index,
-                    exc,
-                )
-                continue
-            if not _keeps_its_length(sync_source, local_path):
-                # Sync Labs' own default (cut_off) trims the video down to the
-                # length of the audio, which would let a short line silently
-                # shorten a scene and break the fixed per-credit second budget
-                # the whole costing model rests on. The fal backend pins
-                # sync_mode to stop that; MuAPI's endpoint exposes no such knob.
-                #
-                # Discarding the clip protected the runtime and cost the
-                # feature: a line is shorter than its scene in nearly every
-                # scene ever written, so on the default backend this rejected
-                # the sync essentially every time. Measured on a delivered job
-                # -- three scenes, three syncs bought and paid for (633s of
-                # render), three rejections, not one mouth driven.
-                #
-                # The seconds that came back missing are the END of the take,
-                # and the take still has them. Put them back.
-                restored = await _restore_trimmed_length(
-                    sync_source,
-                    local_path,
-                    os.path.join(working_dir, f"scene_{scene_index}_after_line.mp4"),
-                    os.path.join(working_dir, f"scene_{scene_index}_lipsync_full.mp4"),
-                )
-                if restored is None:
-                    logger.warning(
-                        "Lip-synced clip for scene %s came back shorter than "
-                        "the take it replaces and could not be restored to "
-                        "length — keeping the original so the runtime the "
-                        "customer paid for is preserved.",
-                        scene_index,
+                drift = speech_anchors.get(scene_index, picture_start) - picture_start
+                # A scene that bought a second angle is master-then-reaction in one
+                # file. Sync the master, keep the cutaway out of it, put them back
+                # together -- see _reaction_tail_seconds.
+                source_path = scene_paths[scene_index]
+                tail_seconds = float((reaction_tails or {}).get(scene_index, 0.0) or 0.0)
+                sync_source = source_path
+                tail_path: Optional[str] = None
+                if tail_seconds > 0:
+                    sync_source, tail_path = await _split_off_tail(
+                        source_path,
+                        os.path.join(working_dir, f"scene_{scene_index}_master.mp4"),
+                        os.path.join(working_dir, f"scene_{scene_index}_reaction.mp4"),
+                        tail_seconds,
                     )
-                    continue
-                local_path = restored
+                    if tail_path is None:
+                        # The split did not work, so the only safe request is the
+                        # old one: sync the whole clip, cut and all.
+                        sync_source = source_path
 
-            if tail_path is not None:
-                rejoined = os.path.join(
-                    working_dir, f"scene_{scene_index}_lipsync_cut.mp4"
+                # The line does not always start where the clip does. When the
+                # scene before overruns, plan_scene_speech_anchors holds this
+                # scene's speech back so the two do not talk over each other,
+                # and the mixer lays the voice down at that later anchor --
+                # while the provider, which drives the mouth from frame one of
+                # whatever it is handed, would have said the line already.
+                #
+                # This used to be answered by refusing to sync the scene at
+                # all. That is the safe answer and it is still the fallback,
+                # but it spends the whole feature to avoid a fixable offset:
+                # the seconds before the line are just picture with nobody
+                # speaking over them. Hold them back the same way the cutaway
+                # is held back, sync the part that actually has words, and put
+                # the opening in front of it again.
+                lead_path: Optional[str] = None
+                if timeline_known and drift > LIPSYNC_MAX_ANCHOR_DRIFT_SECONDS:
+                    lead_path, sync_source = await _split_off_lead(
+                        sync_source,
+                        os.path.join(working_dir, f"scene_{scene_index}_lead.mp4"),
+                        os.path.join(working_dir, f"scene_{scene_index}_speaking.mp4"),
+                        drift,
+                    )
+                    if lead_path is None:
+                        # Too short to split, or the trim failed. Back to the
+                        # answer that was correct before this existed: a mouth
+                        # moving where there are no words is worse than a mouth
+                        # that never moves.
+                        logger.warning(
+                            "Scene %s speaks %.2fs after its picture starts and "
+                            "its opening could not be held back, so its mouth "
+                            "would move before the words — keeping the unsynced "
+                            "take.",
+                            scene_index,
+                            drift,
+                        )
+                        return None
+                    logger.info(
+                        "Scene %s speaks %.2fs after its picture starts; syncing "
+                        "only the speaking part and rejoining the silent opening.",
+                        scene_index,
+                        drift,
+                    )
+
+                synced_url = await lipsync.sync(
+                    sync_source, audio_url, is_cancelled=is_cancelled
                 )
+                if not synced_url:
+                    return None
+                local_path = os.path.join(working_dir, f"scene_{scene_index}_lipsync.mp4")
                 try:
-                    await concatenate_videos([local_path, tail_path], rejoined)
+                    await download_video(synced_url, local_path)
                 except Exception as exc:
-                    # The master synced but the cutaway could not be put back.
-                    # Shipping the master alone would silently shorten the
-                    # scene, which is the one thing the length guard above
-                    # exists to prevent -- so the whole scene keeps its
-                    # unsynced take instead.
                     logger.warning(
-                        "Scene %s could not be re-joined to its reaction shot "
-                        "after lip sync, keeping the unsynced take: %s",
+                        "Lip-synced clip for scene %s could not be downloaded, "
+                        "keeping the original: %s",
                         scene_index,
                         exc,
                     )
-                    continue
-                local_path = rejoined
+                    return None
+                if not _keeps_its_length(sync_source, local_path):
+                    # Sync Labs' own default (cut_off) trims the video down to the
+                    # length of the audio, which would let a short line silently
+                    # shorten a scene and break the fixed per-credit second budget
+                    # the whole costing model rests on. The fal backend pins
+                    # sync_mode to stop that; MuAPI's endpoint exposes no such knob.
+                    #
+                    # Discarding the clip protected the runtime and cost the
+                    # feature: a line is shorter than its scene in nearly every
+                    # scene ever written, so on the default backend this rejected
+                    # the sync essentially every time. Measured on a delivered job
+                    # -- three scenes, three syncs bought and paid for (633s of
+                    # render), three rejections, not one mouth driven.
+                    #
+                    # The seconds that came back missing are the END of the take,
+                    # and the take still has them. Put them back.
+                    restored = await _restore_trimmed_length(
+                        sync_source,
+                        local_path,
+                        os.path.join(working_dir, f"scene_{scene_index}_after_line.mp4"),
+                        os.path.join(working_dir, f"scene_{scene_index}_lipsync_full.mp4"),
+                    )
+                    if restored is None:
+                        logger.warning(
+                            "Lip-synced clip for scene %s came back shorter than "
+                            "the take it replaces and could not be restored to "
+                            "length — keeping the original so the runtime the "
+                            "customer paid for is preserved.",
+                            scene_index,
+                        )
+                        return None
+                    local_path = restored
 
+                # Put back whatever was held out of the sync, in picture order:
+                # the silent opening in front, the cutaway behind. Either may be
+                # absent; a scene with both is a three-piece join.
+                pieces = (
+                    ([lead_path] if lead_path is not None else [])
+                    + [local_path]
+                    + ([tail_path] if tail_path is not None else [])
+                )
+                if len(pieces) > 1:
+                    rejoined = os.path.join(
+                        working_dir, f"scene_{scene_index}_lipsync_cut.mp4"
+                    )
+                    try:
+                        await concatenate_videos(pieces, rejoined)
+                    except Exception as exc:
+                        # The line synced but the scene could not be made whole.
+                        # Shipping the synced part alone would silently shorten
+                        # the scene, which is the one thing the length guard
+                        # above exists to prevent -- so the whole scene keeps
+                        # its unsynced take instead.
+                        logger.warning(
+                            "Scene %s could not be re-joined after lip sync, "
+                            "keeping the unsynced take: %s",
+                            scene_index,
+                            exc,
+                        )
+                        return None
+                    # concatenate_videos verifies the join against the sum of its
+                    # parts; this verifies the sum against the take it replaces,
+                    # which is what the per-credit second budget is costed on.
+                    if not _keeps_its_length(source_path, rejoined):
+                        logger.warning(
+                            "Scene %s came back %.2fs after being re-joined "
+                            "against a %.2fs take, keeping the unsynced take.",
+                            scene_index,
+                            _clip_duration(rejoined) or 0.0,
+                            _clip_duration(source_path) or 0.0,
+                        )
+                        return None
+                    local_path = rejoined
+
+                completed += 1
+                await progress(
+                    "lipsync",
+                    f"Syncing lips to dialogue ({completed}/{len(ordered)})",
+                    88,
+                )
+                return scene_index, local_path
+
+        results = await asyncio.gather(
+            *(_sync_one(index, url) for index, url in ordered),
+            return_exceptions=True,
+        )
+        for position, result in enumerate(results):
+            if isinstance(result, BaseException):
+                # return_exceptions keeps one scene's crash from taking the
+                # others down with it; that scene keeps its take, exactly as
+                # every other per-scene failure here does.
+                logger.warning(
+                    "Scene %s raised while being lip-synced, keeping the "
+                    "unsynced take: %s",
+                    ordered[position][0],
+                    result,
+                )
+                continue
+            if result is None:
+                continue
+            scene_index, local_path = result
             scene_paths[scene_index] = local_path
             synced.append(scene_index)
+        # Completion order is whatever the provider decided; scene order is
+        # what everything downstream reads.
+        synced.sort()
 
         # The speech stays in the MIX. Handing it over to the picture is the
         # obvious move -- the synced clip carries the line in its own audio

@@ -240,3 +240,81 @@ async def test_deployment_flag_alone_does_not_sync_an_unpaid_job(monkeypatch, tm
     )
     assert synced == [] and sync_calls == []
     assert tracks[0]["audio_url"] == "https://cdn/s0.mp3"
+
+
+@pytest.mark.asyncio
+async def test_scenes_are_synced_concurrently(monkeypatch, tmp_path):
+    """The speaking scenes must wait on the provider together, not in turn.
+
+    Each sync is a poll loop against a remote job, so a sequential loop spends
+    the SUM of the waits: a delivered three-scene job spent 384s + 322s + 367s
+    = 1074.7s of a 1847s film inside this stage, nearly all of it idle. The
+    assertion is on overlap rather than on elapsed time so it does not become a
+    timing flake on a loaded machine.
+    """
+    import asyncio
+
+    monkeypatch.setenv("MUSEFORGE_LIPSYNC_ENABLED", "1")
+    monkeypatch.delenv("MUSEFORGE_LIPSYNC_PROVIDER", raising=False)
+    monkeypatch.setenv("MUAPI_KEY", "fake-muapi-key")
+
+    in_flight = 0
+    peak = 0
+
+    async def fake_sync(self, video_path_or_url, audio_url, is_cancelled=None):
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        try:
+            # Long enough that a sequential loop could not overlap them.
+            await asyncio.sleep(0.05)
+        finally:
+            in_flight -= 1
+        for idx in (0, 2):
+            if f"scene_{idx}" in str(video_path_or_url):
+                return f"https://cdn/s{idx}_synced.mp4"
+        return None
+
+    async def fake_download_video(url, path):
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(b"synced bytes")
+        return path
+
+    monkeypatch.setattr(lipsync_mod.MuAPILipsync, "sync", fake_sync)
+    monkeypatch.setattr(idea2video_mod, "download_video", fake_download_video)
+
+    scene_paths = [str(tmp_path / f"scene_{i}.mp4") for i in range(3)]
+    for path in scene_paths:
+        with open(path, "wb") as f:
+            f.write(b"original bytes")
+
+    async def progress(*a, **kw):
+        return None
+
+    pipeline = idea2video_mod.Idea2VideoPipeline(api_key="test-key-not-real")
+    synced = await pipeline._lipsync_scenes(
+        scene_paths=scene_paths,
+        dialogue_tracks=_tracks(),
+        working_dir=str(tmp_path),
+        progress=progress,
+    )
+
+    assert peak == 2, f"scenes were synced one at a time (peak in-flight {peak})"
+    # Completion order must not leak into what the pipeline reports.
+    assert synced == [0, 2]
+
+
+@pytest.mark.asyncio
+async def test_concurrency_is_configurable(monkeypatch, tmp_path):
+    """A deployment that gets rate-limited can serialise this without a release."""
+    monkeypatch.setenv("MUSEFORGE_LIPSYNC_CONCURRENCY", "1")
+
+    assert idea2video_mod._lipsync_concurrency(3) == 1
+
+    monkeypatch.setenv("MUSEFORGE_LIPSYNC_CONCURRENCY", "not-a-number")
+    assert idea2video_mod._lipsync_concurrency(3) == 3
+
+    monkeypatch.delenv("MUSEFORGE_LIPSYNC_CONCURRENCY", raising=False)
+    # Never more workers than there are scenes to sync.
+    assert idea2video_mod._lipsync_concurrency(1) == 1

@@ -53,7 +53,10 @@ def editor(monkeypatch, tmp_path):
         calls["trims"].append((source, trim_start, trim_end))
         with open(out, "wb") as f:
             f.write(b"remainder")
-        DURATIONS[out] = DURATIONS[source] - trim_start
+        # Both ends, not just the head: `_split_off_lead` cuts a lead by
+        # trimming the REST off the tail, and an arithmetic that ignored
+        # trim_end reported that lead as the length of the whole clip.
+        DURATIONS[out] = DURATIONS[source] - trim_start - trim_end
         return out
 
     async def fake_concat(paths, out):
@@ -239,15 +242,19 @@ async def test_the_scene_is_synced_instead_of_discarded(
 
 
 @pytest.mark.asyncio
-async def test_a_scene_whose_speech_bridged_in_is_not_synced(
+async def test_a_scene_whose_speech_bridged_in_syncs_only_its_speaking_part(
     measured, editor, tmp_path, monkeypatch
 ):
     """A line that outruns its shot is held over the cut rather than truncated
     (plan_scene_speech_anchors), and the mixer lays the next scene's voice down
-    at that later anchor. The sync provider cannot be told about it -- it
-    drives the mouth from frame one -- so syncing scene 1 here would put the
-    words in the mouth seconds before they are in the air, which is the
-    dubbing error the feature is bought to remove."""
+    at that later anchor. The provider cannot be told about it -- it drives the
+    mouth from frame one -- so handing it the whole clip would move the mouth
+    seconds before the words are in the air.
+
+    This used to be answered by refusing to sync the scene at all, which is
+    safe and spends the entire feature to avoid a fixable offset. The seconds
+    before the line are picture with nobody speaking over them: hold them back,
+    sync the part that has words, put the opening back in front."""
     monkeypatch.setenv("MUSEFORGE_LIPSYNC_ENABLED", "1")
     monkeypatch.setattr(mod, "make_lipsync", lambda demo=False: _TrimmingLipsync())
     monkeypatch.setattr(mod, "_probe_video_duration", lambda path: DURATIONS.get(path, 0.0))
@@ -255,7 +262,8 @@ async def test_a_scene_whose_speech_bridged_in_is_not_synced(
     async def fake_download(url, path):
         with open(path, "wb") as f:
             f.write(b"synced")
-        DURATIONS[path] = 3.0
+        # The provider trims to the line, as it always does.
+        DURATIONS[path] = 2.0
         return path
 
     monkeypatch.setattr(mod, "download_video", fake_download)
@@ -289,8 +297,21 @@ async def test_a_scene_whose_speech_bridged_in_is_not_synced(
         progress=progress,
     )
 
-    assert synced == [0], "scene 1's mouth would have moved before its words"
-    assert scene_paths[1].endswith("scene_1.mp4"), "scene 1 keeps its unsynced take"
+    assert synced == [0, 1], "the bridged scene's mouth is driven too now"
+
+    # The provider was handed the speaking part, never the silent opening.
+    assert any(
+        "scene_1_speaking" in str(source) for source, _, _ in editor["trims"]
+    ), "the silent opening was not held back"
+
+    # ...and the scene was made whole again, opening first.
+    bridged_join = [join for join in editor["joins"] if any("scene_1" in p for p in join)]
+    assert bridged_join, "the bridged scene was never re-joined"
+    assert "scene_1_lead" in bridged_join[-1][0], (
+        "the silent opening must be rejoined IN FRONT of the synced part"
+    )
+    # The scene keeps the runtime it was costed at.
+    assert abs(DURATIONS[scene_paths[1]] - 8.0) < 0.05
 
 
 @pytest.mark.asyncio
@@ -339,3 +360,67 @@ async def test_speech_that_starts_with_its_picture_is_synced_as_normal(
     )
 
     assert synced == [0, 1]
+
+
+# ── the dead band between "too short to accept" and "too short to repair" ───
+
+
+def test_the_tolerance_never_drops_below_the_smallest_repairable_slice():
+    """The invariant that keeps a short sync from having no outcome at all.
+
+    A clip that comes back short is either accepted or repaired by
+    `_restore_trimmed_length`, and the repair cannot cut a slice thinner than
+    MIN_TRIMMED_SECONDS. If the tolerance sat below that minimum, everything in
+    between was rejected by the guard and refused by the repair, and the sync
+    was thrown away whole. Asserted rather than commented because the two
+    constants are declared apart and either one moving reopens the gap.
+    """
+    assert mod.LIPSYNC_LENGTH_TOLERANCE_SECONDS >= mod.MIN_TRIMMED_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_a_sync_short_by_less_than_a_repairable_slice_is_kept(
+    measured, editor, tmp_path, monkeypatch
+):
+    """A clip 0.45s short is kept, not discarded.
+
+    0.45s used to fall between the 0.35s tolerance and the 0.5s minimum slice:
+    too short to accept, too short to rebuild. The scene lost a sync that had
+    been paid for and had actually worked."""
+    monkeypatch.setenv("MUSEFORGE_LIPSYNC_ENABLED", "1")
+    monkeypatch.setattr(mod, "make_lipsync", lambda demo=False: _TrimmingLipsync())
+    monkeypatch.setattr(mod, "_probe_video_duration", lambda path: DURATIONS.get(path, 0.0))
+
+    async def fake_download(url, path):
+        with open(path, "wb") as f:
+            f.write(b"synced")
+        DURATIONS[path] = 5.55  # 0.45s short of the 6.0s take
+        return path
+
+    monkeypatch.setattr(mod, "download_video", fake_download)
+
+    scene_paths = [_clip(tmp_path, "scene_0.mp4", 6.0)]
+    tracks = [
+        {
+            "scene_index": 0,
+            "line": "replik",
+            "audio_url": "https://cdn/s0.mp3",
+            "duration_seconds": 5.5,
+        }
+    ]
+
+    async def progress(*a, **kw):
+        return None
+
+    pipeline = mod.Idea2VideoPipeline("test-key-not-real")
+    synced = await pipeline._lipsync_scenes(
+        scene_paths=scene_paths,
+        dialogue_tracks=tracks,
+        working_dir=str(tmp_path),
+        progress=progress,
+    )
+
+    assert synced == [0], "a sync short by less than a repairable slice was discarded"
+    assert scene_paths[0].endswith("scene_0_lipsync.mp4")
+    # Nothing was rebuilt: the shortfall was inside tolerance, so no join ran.
+    assert editor["joins"] == []

@@ -43,7 +43,22 @@ TRUTHY = {"1", "true", "yes", "on"}
 ENDPOINT = os.environ.get("MUAPI_LIPSYNC_MODEL", "sync-lipsync")
 
 DEFAULT_POLL_INTERVAL = 3.0
-DEFAULT_MAX_POLLS = 120
+
+#: 3.0s x 240 = 12 minutes before a sync is given up on.
+#:
+#: It was 120 polls, exactly 360s, and that was measurably too tight for this
+#: endpoint: in a delivered three-scene job the two syncs that succeeded came
+#: back at roughly 322s and 367s, and the third hit the cap and was abandoned
+#: -- a paid call that bought nothing and a scene delivered with a closed
+#: mouth. A ceiling that sits inside the provider's ordinary spread is not a
+#: safety net, it is a coin toss.
+#:
+#: Waiting longer used to mean a longer film: the scenes were synced one after
+#: another, so every extra second of patience was an extra second of runtime.
+#: They now run concurrently (idea2video._lipsync_scenes), so the wall clock is
+#: the slowest scene rather than the sum, and the cap can be set by when a
+#: request is genuinely lost instead of by what the runtime could afford.
+DEFAULT_MAX_POLLS = 240
 
 
 def is_lipsync_enabled() -> bool:
