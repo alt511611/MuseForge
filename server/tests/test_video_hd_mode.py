@@ -79,13 +79,43 @@ async def test_native_audio_off_by_default_and_opt_in(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_assembly_discards_native_audio():
-    """The reason native audio defaults off -- concat strips it outright."""
-    import inspect
+async def test_assembly_discards_native_audio(tmp_path):
+    """The reason native audio defaults off -- concat strips it outright.
 
-    from pipelines.script2video import concatenate_videos
+    Asserted on the joined file rather than on the source text of the function
+    that writes it: the ffmpeg invocation has already moved once, into the
+    demuxer helper and its timescale-normalising retry, and a grep for "-an"
+    would have failed that refactor while the behaviour it guards was intact.
+    """
+    import subprocess
 
-    assert '"-an"' in inspect.getsource(concatenate_videos)
+    from pipelines.script2video import _ffmpeg_binary, concatenate_videos
+
+    ffmpeg = _ffmpeg_binary()
+    clips = []
+    for index in range(2):
+        path = str(tmp_path / f"withaudio_{index}.mp4")
+        subprocess.run(
+            [
+                ffmpeg, "-y", "-v", "error",
+                "-f", "lavfi", "-i", "testsrc=size=160x90:rate=24:duration=0.5",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=0.5",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-shortest", path,
+            ],
+            check=True,
+        )
+        clips.append(path)
+
+    output = str(tmp_path / "joined.mp4")
+    await concatenate_videos(clips, output)
+
+    from moviepy import VideoFileClip
+
+    with VideoFileClip(clips[0]) as source:
+        assert source.audio is not None, "fixture should carry audio"
+    with VideoFileClip(output) as joined:
+        assert joined.audio is None
 
 
 @pytest.mark.asyncio

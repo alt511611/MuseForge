@@ -276,14 +276,29 @@ _APPEARANCE_LOCK = (
     "Appearance is FIXED, IDENTICAL in every scene — same face, age, build, "
     "and same hair length, colour and style: "
 )
+# Stated as what the costume IS, not as what may not happen to it. Both of
+# these endpoints are guidance-distilled -- flux-2-pro is FLUX.2, flux-pulid is
+# FLUX.1 -- and neither exposes an unconditional branch for classifier-free
+# guidance, so there is no mechanism for a negation to act through. Black
+# Forest Labs says so outright for FLUX.2 ("does not support negative prompts;
+# focus on describing what you want") and recommends this exact substitution:
+# "no blur" becomes "sharp focus throughout".
+#
+# Only the CATEGORICAL negations are rewritten this way. Where a clause
+# ENUMERATES what to leave out (_NO_UNNAMED_ITEMS below, and the lettering
+# line in visual_style.PHOTOREAL_RENDER) the comment on that clause records
+# the opposite finding from a delivered job -- the categorical sentence was
+# already there and was ignored, and it was the list the model attended to.
+# Vendor guidance does not outrank an observation from a shipped drama, and
+# this pipeline cannot render a frame to break the tie, so those two are left
+# exactly as they are.
 _COSTUME_LOCK_NAMED = (
-    "Costume is LOCKED: each wears only the outfit named above, in every "
-    "scene — same garment, cut and colour, never restyled or swapped. "
+    "Costume is LOCKED: each wears the outfit named above in every "
+    "scene — the same garment, cut and colour throughout. "
 )
 _COSTUME_LOCK_REFERENCED = (
     "Costume is LOCKED: everyone wears the EXACT outfit from the reference "
-    "image, in every scene — same garment, cut and colour, never restyled or "
-    "swapped. "
+    "image in every scene — the same garment, cut and colour throughout. "
 )
 # The costume lock above only forbids CHANGING what was named. Adding
 # something that was never named slips straight past it -- and an
@@ -549,10 +564,10 @@ def build_cast_closure_clause(characters) -> str:
     return (
         f"The cast is closed: {'only ' if len(named) == 1 else ''}"
         + ", ".join(named)
-        + f" appear{'s' if len(named) == 1 else ''} in this story. Add no other "
-        "featured or recognisable person, and never show the same character "
-        "twice in one frame. Background figures only if the shot description "
-        "asks for them, and then distant and unfocused. "
+        + f" appear{'s' if len(named) == 1 else ''} in this story. Every "
+        "featured, recognisable face in the frame is one of them, each "
+        "appearing exactly once. Background figures only if the shot "
+        "description asks for them, and then distant and unfocused. "
     )
 
 
@@ -1065,23 +1080,87 @@ def _ffmpeg_binary() -> str:
         return "ffmpeg"
 
 
-async def concatenate_videos(paths: List[str], out_path: str) -> str:
-    """Concatenate clips with low-memory fallbacks.
+#: Timescale every clip is rewritten to before a retried stream-copy join.
+#: 90000 is the MPEG convention and divides evenly by the frame rates this
+#: pipeline actually produces (24, 25, 30), so normalising costs no accuracy.
+CONCAT_TIMESCALE = 90000
 
-    Fast path uses ffmpeg's concat demuxer and stream-copy, which does not
-    decode frames. If the clips are not codec-compatible, moviepy re-encodes
-    them with ``method="chain"``. Raw byte-copy remains the last-resort,
-    fail-open behavior.
+
+async def _normalise_timebases(
+    paths: List[str], out_path: str
+) -> Tuple[List[str], List[str]]:
+    """Rewrite clips to a shared timescale so packets can still be copied.
+
+    The concat demuxer copies packets without re-timing them and writes the
+    result against the FIRST input's timebase. Inputs whose timebases disagree
+    are therefore written with timestamps that do not describe them, and the
+    damage scales with the ratio: measured on synthetic clips, 10s of footage
+    came out as 15.6s one way round and as 1487s the other. `_concat_is_intact`
+    catches it, but the only tier under it re-encodes, and re-encoding is
+    exactly what the stream-copy path exists to avoid -- on a lip-sync rejoin
+    it spends a generation of quality on a master that was about to be graded.
+
+    A stream-copy remux to a common timescale is the cheap repair: packets are
+    copied, nothing is decoded, and the join that follows is still a copy.
+    Measured on the same synthetic clips, both broken directions come back to
+    10.0s and 9.96s -- inside `CONCAT_DURATION_TOLERANCE`.
+
+    Returns ``(paths_to_join, temporary_files_to_clean_up)``, failing open to
+    the original paths so a remux that does not work leaves the caller with
+    the behaviour it had.
     """
-    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    ffmpeg_binary = _ffmpeg_binary()
+    normalised: List[str] = []
+    temporaries: List[str] = []
+    for index, path in enumerate(paths):
+        rewritten = os.path.join(
+            os.path.dirname(out_path) or ".",
+            f"museforge_tb_{os.getpid()}_{index}_{os.path.basename(path)}",
+        )
+        process = await asyncio.create_subprocess_exec(
+            ffmpeg_binary,
+            "-y",
+            "-i",
+            path,
+            "-c",
+            "copy",
+            "-an",
+            "-video_track_timescale",
+            str(CONCAT_TIMESCALE),
+            rewritten,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode != 0 or not os.path.isfile(rewritten):
+            logger.warning(
+                "Could not rewrite %s to a common timescale (exit=%s); "
+                "falling through to the re-encode: %s",
+                path,
+                process.returncode,
+                stderr.decode("utf-8", errors="replace")[-400:],
+            )
+            for temporary in temporaries:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+            return paths, []
+        normalised.append(rewritten)
+        temporaries.append(rewritten)
 
-    # What the master has to come out as, measured before anything is written.
-    # Every tier below is checked against it: a join that loses or invents
-    # footage must not be returned as a success just because ffmpeg exited 0.
-    expected_duration = sum(_probe_duration(path) for path in paths)
+    return normalised, temporaries
 
-    # 1) Native concat demuxer: near-zero memory because packets are copied
-    # without decoding/re-encoding. This requires matching codecs/streams.
+
+async def _concat_by_demuxer(
+    paths: List[str], out_path: str, expected_duration: float
+) -> bool:
+    """One concat-demuxer stream-copy attempt. True when the output is intact.
+
+    Split out so the join can be retried on timescale-normalised copies of the
+    same clips without duplicating the list-file handling, and so a retry that
+    also fails still lands on the re-encode tier below.
+    """
     concat_list_path = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -1098,10 +1177,8 @@ async def concatenate_videos(paths: List[str], out_path: str) -> str:
                 escaped = os.path.abspath(path).replace("'", "'\\''")
                 concat_file.write(f"file '{escaped}'\n")
 
-        ffmpeg_binary = _ffmpeg_binary()
-
         process = await asyncio.create_subprocess_exec(
-            ffmpeg_binary,
+            _ffmpeg_binary(),
             "-y",
             "-f",
             "concat",
@@ -1119,27 +1196,76 @@ async def concatenate_videos(paths: List[str], out_path: str) -> str:
         _, stderr = await process.communicate()
         if process.returncode == 0 and os.path.isfile(out_path):
             if _concat_is_intact(out_path, expected_duration):
-                return out_path
+                return True
             logger.warning(
                 "ffmpeg concat stream-copy reported success but produced "
-                "%.2fs from %.2fs of clips; re-encoding instead.",
+                "%.2fs from %.2fs of clips.",
                 _probe_duration(out_path),
                 expected_duration,
             )
         else:
             logger.warning(
-                "ffmpeg concat stream-copy failed (exit=%s), using moviepy chain: %s",
+                "ffmpeg concat stream-copy failed (exit=%s): %s",
                 process.returncode,
                 stderr.decode("utf-8", errors="replace")[-1000:],
             )
     except Exception as exc:
-        logger.warning("ffmpeg concat unavailable, using moviepy chain: %s", exc)
+        logger.warning("ffmpeg concat unavailable: %s", exc)
     finally:
         if concat_list_path:
             try:
                 os.unlink(concat_list_path)
             except OSError:
                 pass
+    return False
+
+
+async def concatenate_videos(paths: List[str], out_path: str) -> str:
+    """Concatenate clips with low-memory fallbacks.
+
+    Fast path uses ffmpeg's concat demuxer and stream-copy, which does not
+    decode frames. If the clips are not codec-compatible, moviepy re-encodes
+    them with ``method="chain"``. Raw byte-copy remains the last-resort,
+    fail-open behavior.
+    """
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+
+    # What the master has to come out as, measured before anything is written.
+    # Every tier below is checked against it: a join that loses or invents
+    # footage must not be returned as a success just because ffmpeg exited 0.
+    expected_duration = sum(_probe_duration(path) for path in paths)
+
+    # 1) Native concat demuxer: near-zero memory because packets are copied
+    # without decoding/re-encoding. This requires matching codecs/streams.
+    if await _concat_by_demuxer(paths, out_path, expected_duration):
+        return out_path
+
+    # 1b) The usual reason a copy comes out the wrong length is disagreeing
+    # timebases, and that is repairable without decoding anything: rewrite the
+    # clips to a shared timescale -- still a packet copy -- and join the copies.
+    # Only jobs that already failed the intact check pay for this, and what it
+    # saves them is a full re-encode of footage that was fine.
+    normalised_paths, normalised_temporaries = await _normalise_timebases(
+        paths, out_path
+    )
+    try:
+        if normalised_temporaries and await _concat_by_demuxer(
+            normalised_paths, out_path, expected_duration
+        ):
+            logger.info(
+                "Concat stream-copy succeeded after rewriting %d clip(s) to a "
+                "shared timescale; no re-encode was needed.",
+                len(normalised_temporaries),
+            )
+            return out_path
+    finally:
+        for temporary in normalised_temporaries:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+    logger.warning("Falling back to a re-encode for %s.", out_path)
 
     # Remove a partial ffmpeg output before either fallback writes it.
     try:

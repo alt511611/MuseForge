@@ -72,7 +72,11 @@ def test_it_did_not_cost_a_word_of_any_rule_already_there():
         "IDENTICAL in every scene",     # face drift
         "hard hat",                     # a worker in a beanie, then a hard hat
         "backpack",                     # a pack in one shot of six
-        "restyled or swapped",          # three outfits in a three-scene drama
+        # The costume lock is now stated positively -- these endpoints are
+        # guidance-distilled and have no branch for a negation to act through
+        # -- so the rule is checked by what it asserts, not by "never
+        # restyled or swapped".
+        "same garment, cut and colour",  # three outfits in a three-scene drama
     ):
         assert kept in clause, kept
 

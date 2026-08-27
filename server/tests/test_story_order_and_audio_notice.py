@@ -246,8 +246,10 @@ def test_the_cast_is_closed_to_the_named_characters():
     assert "Maya" in clause
     assert "Voice" not in clause
     assert "Blank" not in clause
-    # The delivered drama put the protagonist on screen twice at once.
-    assert "never show the same character twice in one frame" in clause
+    # The delivered drama put the protagonist on screen twice at once. Stated
+    # positively now (each face appears exactly once) because a distilled FLUX
+    # endpoint has no mechanism for "never" to act through.
+    assert "each appearing exactly once" in clause
 
 
 def test_an_undescribed_cast_produces_no_roll_call():
