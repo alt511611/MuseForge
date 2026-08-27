@@ -100,8 +100,15 @@ async def test_apply_color_grade_fails_open_on_bad_input(tmp_path):
 
 @pytest.mark.asyncio
 async def test_color_grade_inserted_between_concat_and_music(tmp_path, monkeypatch):
-    """_assemble_final_drama must color-grade the concatenated video BEFORE
-    handing it to the music-mixing step."""
+    """With no finishing pass to ride, the grade keeps the pass it has always
+    had: _assemble_final_drama grades the concatenated video BEFORE handing it
+    to the music-mixing step.
+
+    (With finishing on -- the default -- the same filters travel into that
+    encode instead of paying for this one; see
+    test_grade_rides_the_finishing_pass.py.)
+    """
+    monkeypatch.setenv("MUSEFORGE_FINISHING", "0")
     from pipelines.idea2video import Idea2VideoPipeline
 
     calls = []

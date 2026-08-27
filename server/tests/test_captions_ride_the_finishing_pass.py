@@ -53,7 +53,7 @@ def assembly(monkeypatch, tmp_path):
         open(output_path, "wb").write(b"burned")
         return output_path
 
-    def _caption_filter(video_path, tracks=None, scene_paths=None):
+    def _caption_filter(video_path, tracks=None, scene_paths=None, size=None):
         if not tracks:
             return "", None
         path = os.path.join(str(tmp_path), "captions.srt")
@@ -70,7 +70,9 @@ def assembly(monkeypatch, tmp_path):
 
 
 def _finish(calls, *, carries_captions=True):
-    async def _fake(video_path, output_path, caption_filter=""):
+    async def _fake(
+        video_path, output_path, caption_filter="", grade_filter="", delivered_size=None
+    ):
         calls.append(f"finish({'captions' if caption_filter else 'plain'})")
         if caption_filter and not carries_captions:
             # What the real pass does when it cannot run with them: hand back
@@ -92,7 +94,7 @@ async def test_captions_and_finishing_are_one_pass(assembly, monkeypatch):
         ["s0.mp4"], str(tmp_path / "job"), plan="pro", dialogue_tracks=list(TRACKS)
     )
 
-    assert calls == ["concat", "grade", "music", "finish(captions)"], (
+    assert calls == ["concat", "music", "finish(captions)"], (
         "the master was re-encoded twice for two filters"
     )
     assert final.endswith("drama_finished.mp4")
@@ -114,9 +116,11 @@ async def test_a_finishing_pass_that_cannot_carry_them_falls_back_to_two(
 
     assert calls == [
         "concat",
-        "grade",
         "music",
         "finish(captions)",
+        # The grade was riding on that encode too, so the fallback runs it in
+        # the pass it would otherwise have had, before the captions.
+        "grade",
         "burn",
         "finish(plain)",
     ]
@@ -150,7 +154,7 @@ async def test_a_silent_drama_still_just_finishes(assembly, monkeypatch):
         ["s0.mp4"], str(tmp_path / "job"), plan="pro"
     )
 
-    assert calls == ["concat", "grade", "music", "finish(plain)"]
+    assert calls == ["concat", "music", "finish(plain)"]
 
 
 @pytest.mark.asyncio
