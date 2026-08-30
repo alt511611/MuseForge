@@ -246,6 +246,65 @@ def plan_shot_scales(scenes: Sequence[Any]) -> List[str]:
     return scales
 
 
+def coverage_scales(opening: str, count: int) -> List[str]:
+    """The framings ONE scene's angles use, in cut order.
+
+    plan_shot_scales above stops two consecutive SCENES repeating a setup.
+    Nothing stopped two consecutive SHOTS inside one scene from doing it, and
+    on a deployment that buys coverage the scene's single planned scale was
+    handed to the storyboard as "set shot_type to exactly this" -- while the
+    system prompt, in the same call, asked for shots that differ
+    (storyboard_artist.coverage_clause). Two binding instructions, opposite
+    answers, and the one marked BINDING wins.
+
+    Delivered job 82e03154-12c: three scenes, two angles each, and all six
+    frames are the same frontal medium of the same woman. Its climax cuts from
+    her standing in a corridor to her standing in a corridor -- "one shot with
+    a join in it", which is the fault coverage_clause names and the plan then
+    mandated.
+
+    So the plan keeps deciding what the scene OPENS on, which is the part that
+    has to be decided across the whole drama, and the angles after it step
+    along SCALE_LADDER from there. Tighter first, because that is what the
+    coverage instruction already describes -- a wide that establishes, then
+    the framing the beat plays in -- and back down the ladder at its tight
+    end, where there is nowhere further in to go.
+
+    What this does NOT do is re-open the between-scene question. A scene can
+    still END on the size the next one OPENS with, because plan_shot_scales
+    compares openings and cannot see how far coverage walked from them. That
+    is a weaker fault and it is left alone on purpose: inside a scene the
+    place, the light and the staging are identical, so size is the only thing
+    a cut can change and repeating it really is one shot with a join in it;
+    across a scene cut everything else has already changed, and a matched size
+    there is a match cut.
+
+    Returns [] for a scale the ladder does not name, which leaves the caller
+    with the single-scale wording it had before.
+    """
+    try:
+        wanted = int(count)
+    except (TypeError, ValueError):
+        wanted = 0
+    scale = (opening or "").strip().lower()
+    if wanted <= 0 or scale not in SCALE_LADDER:
+        return []
+
+    index = SCALE_LADDER.index(scale)
+    scales = [SCALE_LADDER[index]]
+    step = 1
+    while len(scales) < wanted:
+        nxt = index + step
+        if not 0 <= nxt < len(SCALE_LADDER):
+            step = -step
+            nxt = index + step
+        if not 0 <= nxt < len(SCALE_LADDER):
+            break  # a ladder shorter than the coverage asked for
+        index = nxt
+        scales.append(SCALE_LADDER[index])
+    return scales
+
+
 def _scene_attr(scene: Any, field: str) -> str:
     if isinstance(scene, dict):
         return str(scene.get(field) or "")
