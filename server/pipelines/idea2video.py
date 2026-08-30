@@ -299,6 +299,123 @@ async def _split_off_lead(
     return lead, rest
 
 
+def _off_screen_speech_spans(
+    tracks: Sequence[Dict[str, Any]], off_screen: Set[str]
+) -> Tuple[List[Tuple[float, float]], bool]:
+    """Where a scene's dialogue is spoken by a mouth the film never shows.
+
+    The voice generator speaks a whole scene in ONE request and returns ONE
+    combined file, carried on the scene's first track (see
+    elevenlabs_voice_generator.generate_scene_dialogue). That is the file the
+    lip-sync provider is handed, and it drives the on-screen face from every
+    word in it -- including the words belonging to a character the film only
+    HEARS. Delivered job 82e03154-12c, brief "a dock worker ... finds a
+    shipping container": its opening scene is Reyna reporting the container
+    and the harbour dispatcher answering over the radio, and from t=4.9 to
+    t=7.7 Reyna's mouth says the dispatcher's half too, on screen, under a
+    subtitle naming him.
+
+    ``off_screen`` is the set _heard_but_never_seen already computes and the
+    portrait step already honours -- the dispatcher got no portrait in that
+    same job. Only this step never asked.
+
+    Returns ``(spans, syncable)``. ``spans`` are the stretches to silence in
+    the guide track, in seconds from the start of the scene's own audio file:
+    the clock ``start_seconds``/``end_seconds`` are measured on. ``syncable``
+    is False only when the scene has no visible speaker at all, which is the
+    one case worth declining rather than paying a call to produce a mouth
+    that should stay shut.
+
+    Fails open deliberately. An off-screen line with no measured timing cannot
+    be silenced accurately, and an inaccurate cut would take a syllable off the
+    mouth that IS on screen -- the very fault this removes. Such a scene
+    returns no spans and syncs exactly as it did before this existed, which is
+    also what the MuAPI voice backend does, its per-line timings being
+    estimates rather than the provider's own alignment.
+    """
+    spans: List[Tuple[float, float]] = []
+    visible_speech = False
+    for track in tracks:
+        character = str(track.get("character") or "").strip().casefold()
+        if character and character in off_screen:
+            if "start_seconds" not in track or "end_seconds" not in track:
+                return [], True
+            start = float(track["start_seconds"])
+            end = float(track["end_seconds"])
+            if end > start:
+                spans.append((start, end))
+            continue
+        if str(track.get("line") or "").strip():
+            visible_speech = True
+
+    if not spans:
+        return [], True
+    if not visible_speech:
+        return spans, False
+
+    merged: List[Tuple[float, float]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged, True
+
+
+async def _mute_spans(
+    source: str, dest: str, spans: Sequence[Tuple[float, float]]
+) -> Optional[str]:
+    """Copy an audio file with ``spans`` silenced in place, same length.
+
+    Same length is the whole point. This copy is a GUIDE: the provider drives
+    the mouth from it and bakes it into the clip it returns, but every tier of
+    concatenate_videos drops that audio on purpose and the mixer lays the
+    ORIGINAL track down at the same anchor instead (see _lipsync_scenes). So
+    silencing a stretch here costs nothing audible -- the dispatcher is still
+    heard, on the radio, over a closed mouth -- while the duration staying
+    identical is what keeps the drift maths, the reaction-tail split and the
+    length guard reading the clock they already read.
+
+    Returns None when the copy could not be written, leaving the caller with
+    the original file and the behaviour it had before.
+    """
+    if not spans:
+        return None
+    chain = ",".join(
+        f"volume=enable='between(t,{start:.3f},{end:.3f})':volume=0"
+        for start, end in spans
+    )
+    try:
+        process = await asyncio.create_subprocess_exec(
+            resolve_ffmpeg_binary(),
+            "-y",
+            "-v",
+            "error",
+            "-i",
+            source,
+            "-af",
+            chain,
+            "-c:a",
+            "libmp3lame",
+            "-q:a",
+            "2",
+            dest,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode == 0 and os.path.getsize(dest) > 0:
+            return dest
+        logger.warning(
+            "Could not silence the off-screen voice for lip sync (ffmpeg %s): %s",
+            process.returncode,
+            (stderr or b"").decode("utf-8", "replace")[-300:],
+        )
+    except Exception as exc:
+        logger.warning("Could not silence the off-screen voice for lip sync: %s", exc)
+    return None
+
+
 async def _trim_overrun_length(
     source_path: str, synced_path: str, output_path: str
 ) -> Optional[str]:
@@ -3128,6 +3245,7 @@ class Idea2VideoPipeline:
         only_scenes: Optional[set] = None,
         requested: bool = True,
         reaction_tails: Optional[Dict[int, float]] = None,
+        off_screen: Optional[Set[str]] = None,
     ) -> List[int]:
         """Replace each speaking scene's clip with a lip-synced one, in place.
 
@@ -3143,6 +3261,12 @@ class Idea2VideoPipeline:
         second angle whenever lip sync was on -- so turning lip sync on flattened
         every peak scene to a single framing, which is the pair of features
         users ask for together.
+
+        ``off_screen`` names the speakers the film only hears, the same set
+        _heard_but_never_seen computes for the portrait and storyboard steps.
+        A scene's audio is one combined file covering every speaker in it, so
+        without this the on-screen face is driven through the radio voice's
+        lines as well as its own -- see _off_screen_speech_spans.
 
         Fail-open per scene, not per drama: if scene 2 cannot be synced, scenes
         1 and 3 still are, and scene 2 simply keeps its original clip with its
@@ -3239,6 +3363,24 @@ class Idea2VideoPipeline:
         semaphore = asyncio.Semaphore(_lipsync_concurrency(len(ordered)))
         completed = 0
 
+        # Say the stage has STARTED, not just that a scene of it has finished.
+        # The only other emit here fires on completion, so until the first
+        # provider replied this pass was silent -- and silence is not neutral:
+        # _record_stage_timing charges elapsed time to whichever stage spoke
+        # last, which is the scene loop's `video`. Delivered job 82e03154-12c
+        # reported "video 603s (61%) ... lipsync 91s (9%)" for a run whose
+        # 350.5s `video` stage contained no video generation at all -- it was
+        # this wait. A profile that names the wrong stage is worse than none,
+        # because it is what the next perf change is aimed by. The client is
+        # owed the same sentence: it sat on "Generating video" for six minutes
+        # with nothing moving.
+        if ordered:
+            await progress(
+                "lipsync",
+                f"Syncing lips to dialogue (0/{len(ordered)})",
+                88,
+            )
+
         async def _sync_one(
             scene_index: int, audio_url: str
         ) -> Optional[Tuple[int, str]]:
@@ -3331,8 +3473,62 @@ class Idea2VideoPipeline:
                         drift,
                     )
 
+                # The provider drives the mouth from every word in the file it
+                # is handed, and this scene's file holds the whole scene --
+                # every speaker in it, seen or not. Hand it a copy with the
+                # unseen ones silenced; the mixer still lays the original down,
+                # so nothing goes missing from the soundtrack.
+                guide_url = audio_url
+                if off_screen:
+                    spans, syncable = _off_screen_speech_spans(
+                        lines_by_scene.get(scene_index, ()), off_screen
+                    )
+                    if not syncable:
+                        logger.info(
+                            "Scene %s is spoken entirely by a voice the film "
+                            "never shows, so there is no mouth to drive; "
+                            "keeping the unsynced take.",
+                            scene_index,
+                        )
+                        return None
+                    # No span means nothing to silence: a scene nobody answers
+                    # in, or one whose off-screen line went untimed. Either way
+                    # it must make the request it made before this existed --
+                    # same file, no guide, no ffmpeg -- so the branch is closed
+                    # here rather than left to _mute_spans to decline.
+                    muted = (
+                        await _mute_spans(
+                            audio_url,
+                            os.path.join(
+                                working_dir, f"scene_{scene_index}_sync_guide.mp3"
+                            ),
+                            spans,
+                        )
+                        if spans
+                        else None
+                    )
+                    if muted:
+                        guide_url = muted
+                        logger.info(
+                            "Scene %s: %.2fs of off-screen voice silenced in "
+                            "the lip-sync guide, so the mouth on screen only "
+                            "says its own %d line(s).",
+                            scene_index,
+                            sum(end - start for start, end in spans),
+                            # Counted off the lines, not the spans: adjacent
+                            # off-screen lines merge into one span.
+                            sum(
+                                1
+                                for t in lines_by_scene.get(scene_index, ())
+                                if str(t.get("character") or "")
+                                .strip()
+                                .casefold()
+                                not in off_screen
+                            ),
+                        )
+
                 synced_url = await lipsync.sync(
-                    sync_source, audio_url, is_cancelled=is_cancelled
+                    sync_source, guide_url, is_cancelled=is_cancelled
                 )
                 if not synced_url:
                     return None
@@ -3826,6 +4022,9 @@ class Idea2VideoPipeline:
                 progress=progress,
                 is_cancelled=is_cancelled,
                 only_scenes=resync,
+                off_screen={
+                    c.name.casefold() for c in characters if not c.is_visible
+                },
                 reaction_tails={
                     int(scene["clip_index"]): _reaction_tail_seconds(
                         scene.get("shots")
@@ -5548,6 +5747,9 @@ class Idea2VideoPipeline:
                 progress=progress,
                 is_cancelled=is_cancelled,
                 requested=lipsync_enabled,
+                off_screen={
+                    c.name.casefold() for c in characters if not c.is_visible
+                },
                 # Keyed by position in the concatenation, which is what
                 # _lipsync_scenes indexes scene_paths by -- not by scene index,
                 # which differs the moment a scene produces no clip.
