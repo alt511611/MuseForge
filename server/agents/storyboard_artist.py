@@ -10,7 +10,11 @@ from interfaces import acting
 from interfaces.camera import get_director_style
 from interfaces.character import CharacterInScene
 from interfaces.shot import StoryboardShot
-from interfaces.shot_plan import plan_scene_shots, split_scene_seconds
+from interfaces.shot_plan import (
+    coverage_scales,
+    plan_scene_shots,
+    split_scene_seconds,
+)
 from interfaces.visual_style import resolve as resolve_visual_style
 from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
 
@@ -608,10 +612,30 @@ Respond ONLY with valid JSON array containing a single shot object:
         a model that has quietly reintroduced eighteen seconds of one setup,
         and that should show up in a log rather than in a delivered drama.
         """
-        planned = cls._normalised_scale(planned)
-        if not planned or not shots:
+        if not shots:
             return
-        actual = cls._normalised_scale(getattr(shots[0], "shot_type", ""))
+
+        # A scene covered in several angles that all came back the same size
+        # is the fault this whole ladder exists to prevent, arrived at from
+        # inside the scene instead of between scenes -- and it was invisible
+        # here, because this only ever read shots[0]. It cannot be read off
+        # the plan either: every shot matching the planned OPENING scale is
+        # exactly the collapse, not compliance with it. So it is counted.
+        sizes = [cls._normalised_scale(getattr(s, "shot_type", "")) for s in shots]
+        distinct = {size for size in sizes if size}
+        if len(shots) > 1 and len(distinct) == 1:
+            logger.warning(
+                "Shot designer covered this scene in %d angles and made them "
+                "all %r: two angles at one size are one shot with a join in "
+                "it.",
+                len(shots),
+                getattr(shots[0], "shot_type", ""),
+            )
+
+        planned = cls._normalised_scale(planned)
+        if not planned:
+            return
+        actual = sizes[0]
         if actual and actual != planned:
             logger.info(
                 "Shot designer chose %r over the planned %r for this scene.",
@@ -847,17 +871,44 @@ Respond ONLY with valid JSON array containing a single shot object:
 
     @staticmethod
     def _format_scale_line(scene_shot_scale: str = "") -> str:
-        """The framing this scene must use, decided across the whole drama.
+        """The framing this scene OPENS on, decided across the whole drama.
 
         Binding, and it outranks this prompt's own "match shot scale to the
         beat" guidance for one reason that guidance cannot see: scenes are
         designed independently and in parallel, so nothing else in the system
         knows what the PREVIOUS scene looked like. Repetition is only visible
         from outside a scene (see interfaces/shot_plan.plan_shot_scales).
+
+        On a deployment that buys coverage it said more than that, and said it
+        wrong: "Set shot_type to exactly this" applied to EVERY shot in the
+        scene, while coverage_clause -- in the system prompt of the same call
+        -- asked for shots that differ from each other. The two clauses
+        contradicted, and this one carried the word BINDING. Delivered job
+        82e03154-12c came back three scenes x two angles = six frontal mediums
+        of one woman, its climax cutting from her standing to her standing.
+
+        So the scene's planned scale now binds the OPENING angle, and the rest
+        step along the ladder from it (shot_plan.coverage_scales). The two
+        instructions say the same thing again.
         """
         scale = (scene_shot_scale or "").strip()
         if not scale:
             return ""
+        scales = coverage_scales(scale, shots_per_scene())
+        if len(scales) > 1:
+            listed = "; ".join(
+                f'shot {i + 1}: "{name}"' for i, name in enumerate(scales)
+            )
+            return (
+                f"FRAMING FOR THIS SCENE — BINDING. The scene OPENS on "
+                f"{scales[0]}, chosen across the whole drama so that no two "
+                f"consecutive scenes repeat the same setup. Its angles then "
+                f"step along the scale instead of repeating it — {listed}. "
+                f'Set each shot\'s "shot_type" to exactly the value listed for '
+                f"it and compose for it: two angles at the same size are one "
+                f"shot with a join in it, which is the same fault as two "
+                f"scenes at the same size, one cut further in.\n"
+            )
         return (
             f"FRAMING FOR THIS SCENE — BINDING: {scale}. This was chosen "
             f"across the whole drama so that no two consecutive scenes repeat "
