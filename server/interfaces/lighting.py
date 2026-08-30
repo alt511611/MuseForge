@@ -45,11 +45,16 @@ class LightingPlan:
         direction = self.key_direction
         if interior is not True and self.open_key_direction:
             direction = self.open_key_direction
+        # Tight on purpose: this is one of the first clauses the frame prompt
+        # drops when it runs out of budget, and it is the one whose loss is
+        # most visible -- a shot lit differently reads as a different film.
+        # Delivered job 21e3d767-bce lost it from every frame and changes its
+        # key light four times in thirty seconds. Both instructions survive
+        # (identical in every shot; do not move it); the prose does not.
         return (
-            f"Lighting continuity (identical in every shot of this film): "
+            f"Lighting continuity, identical in every shot: "
             f"key light {direction}; {self.quality}; {self.temperature}. "
-            f"Do not change the light's direction, height or colour between "
-            f"shots. "
+            f"Do not change its direction, height or colour. "
         )
 
 
