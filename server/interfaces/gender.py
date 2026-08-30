@@ -58,6 +58,42 @@ def infer(text: Optional[str]) -> str:
     return ""
 
 
+def infer_brief(text: Optional[str]) -> str:
+    """Whose story it is, or ``""`` when the brief speaks of more than one.
+
+    ``infer`` above answers "earliest match wins", which is right for a
+    DESCRIPTION: one person, led by their defining noun. A brief is not one
+    person. It introduces a cast, and the first gendered word in it belongs to
+    whoever the sentence reaches first — which is not always the protagonist.
+
+    Delivered job 754796ce-c04, brief "A card dealer in a basement game
+    realises THE MAN across the table is copying HER own tell": the dealer is
+    the protagonist and she is "her", the man across the table is the
+    antagonist, and ``infer`` returns male because his noun arrives first.
+    _apply_brief_gender would then have written "man, ..." into a female
+    protagonist's description — the fault that function exists to repair,
+    applied backwards. It survived only because the writer had gendered her
+    already, which is the one case that function declines to touch.
+
+    So a brief that names both declines instead. That is exactly what its
+    caller already does with a brief that names neither, and it is the
+    conservative half of the asymmetry the caller states: guessing wrong is
+    worse than not guessing.
+
+    Deliberately NOT used for descriptions. "A woman whose brother died" names
+    two genders and one person, and voice casting still has to answer for her.
+    """
+    seen = set()
+    for word in _WORD.findall((text or "").casefold()):
+        if word in _FEMALE:
+            seen.add(FEMALE)
+        elif word in _MALE:
+            seen.add(MALE)
+        if len(seen) > 1:
+            return ""
+    return next(iter(seen), "")
+
+
 def noun(gender: str) -> str:
     """The English noun to write into a character description."""
     return {FEMALE: "woman", MALE: "man"}.get(gender, "")

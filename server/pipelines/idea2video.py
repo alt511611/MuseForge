@@ -15,6 +15,7 @@ from interfaces import ass_captions
 from interfaces import subtitles
 from interfaces.character import CharacterInScene, DramaScript
 from interfaces.film_look import build_film_look_filters
+from interfaces import gender as gender_of
 from interfaces import micro_drama
 from interfaces.language import DEFAULT_LANGUAGE
 from interfaces.second_budget import (
@@ -3151,8 +3152,30 @@ class Idea2VideoPipeline:
 
         async def _portrait(char) -> tuple:
             wardrobe = (getattr(char, "wardrobe", "") or "").strip()
+            # The same reading the CASTING step already made, said where the
+            # picture can see it. interfaces/gender exists so that "a word
+            # that counts as female for a voice counts as female for a face",
+            # and only the voice half ever called it: the portrait was handed
+            # the raw description and left to infer the rest.
+            #
+            # A description carries its gender in one word, and that word is
+            # often a possessive halfway down it ("dealer, fifties, sharp-eyed,
+            # HER hands never still"). That is enough for the marker table and
+            # not enough for an image model reading a genre. Delivered job
+            # 754796ce-c04, brief "A card dealer ... copying her own tell": the
+            # dealer was cast with a female voice and drawn, in every frame of
+            # the film, as an elderly man.
+            #
+            # Read off the SAME string cast_characters reads, so the two
+            # cannot answer differently -- including when the word list is
+            # wrong. A face and a voice that disagree is the worst of the
+            # three outcomes; agreeing is the contract.
+            subject = gender_of.noun(
+                gender_of.infer(f"{char.name} {char.static_features}")
+            )
             prompt = (
-                f"Character portrait, {style} style. "
+                f"Character portrait{f' of a {subject}' if subject else ''}, "
+                f"{style} style. "
                 f"{char.static_features}. {char.dynamic_features}. "
                 # The locked portrait is the costume reference too -- generating
                 # it without wardrobe leaves every scene to invent an outfit.
