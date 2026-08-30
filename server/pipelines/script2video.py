@@ -434,6 +434,40 @@ _OFF_SCREEN_MARKERS = (
     "crackles", "over the line",
 )
 
+#: The subset of those that names a DEVICE, or the screenplay convention for
+#: one -- a thing that carries a voice into a scene without a body.
+#:
+#: The set above is read in a 30-character window after a NAME, where "Priya's
+#: voice" settles it on its own. This one is read across a whole script, where
+#: it does not: "his voice drops", "the speaker leans in" and "the fire
+#: crackles" are all somebody in the room. Only words that cannot describe a
+#: present person survive into this.
+#:
+#: Under-matching is the safe direction here and over-matching is not — see
+#: idea2video._heard_but_never_seen, whose answer this gates. A missed device
+#: costs a portrait nobody sees; a false one hides a character who is on
+#: screen.
+OFF_SCREEN_DEVICE_MARKERS = (
+    "radio", "intercom", "comms", "headset", "earpiece", "walkie",
+    "handset", "phone", "loudspeaker", "tannoy", "over the line",
+    "voiceover", "voice-over", "v.o.", "o.s.", "offscreen", "off-screen",
+    "off screen", "unseen",
+)
+
+#: Whole words only, with a plural allowed: "radios" is a radio and
+#: "radiator" is not.
+_DEVICE_RE = re.compile(
+    "|".join(
+        rf"(?<![a-z]){re.escape(marker)}s?(?![a-z])"
+        for marker in OFF_SCREEN_DEVICE_MARKERS
+    )
+)
+
+
+def mentions_an_off_screen_device(text: str) -> bool:
+    """Whether this text stages a voice that arrives without a body."""
+    return bool(_DEVICE_RE.search((text or "").casefold()))
+
 #: How far AFTER a name to look for one of those markers -- room for
 #: "Priya's voice crackles over the radio" and "Priya, on the intercom".
 #:

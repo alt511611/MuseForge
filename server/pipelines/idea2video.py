@@ -15,6 +15,7 @@ from interfaces import ass_captions
 from interfaces import subtitles
 from interfaces.character import CharacterInScene, DramaScript
 from interfaces.film_look import build_film_look_filters
+from interfaces import gender as gender_of
 from interfaces import micro_drama
 from interfaces.language import DEFAULT_LANGUAGE
 from interfaces.second_budget import (
@@ -3066,11 +3067,42 @@ def _heard_but_never_seen(script: DramaScript, cast: List[CharacterInScene]) -> 
     Deliberately narrow, because the cost is asymmetric. Wrongly marking a
     character invisible takes away their portrait and their identity lock, and
     a shot that then shows them renders a stranger; wrongly leaving one
-    visible costs a portrait and a name in a clause. So this only fires on the
-    case it can actually prove: a character who SPEAKS, is named in no action
-    line anywhere, and whose absence still leaves somebody on screen.
+    visible costs a portrait and a name in a clause.
+
+    "Named in no action line" was not the proof it was taken for. It is an
+    argument from missing evidence, and it fails on the writing habit that a
+    generic name invites: a writer names "The Stranger" once in the cast and
+    then calls him "the man across the table" for the rest of the script. The
+    less personal the name, the likelier the character is a scene partner AND
+    the likelier their name never appears again -- so the rule was wrongest
+    exactly where it was most expensive.
+
+    Delivered job 754796ce-c04, brief "A card dealer in a basement game
+    realises the man across the table is copying her own tell": the man across
+    the table was marked never-seen. He sits opposite her in two scenes of
+    three. Because he had no portrait, every figure in every frame was drawn
+    from the one portrait that existed, and the film is two versions of the
+    same face at one table; the closed-cast clause meanwhile told the image
+    model that only the dealer appears in this story.
+
+    So the absence now has to be corroborated: something in the script must
+    actually stage a voice arriving without a body -- a radio, an intercom, a
+    handset, an (O.S.). That is the same reading script2video already makes
+    beside a name, applied where there is no name to stand beside. The
+    delivered harbour drama says "Her radio crackles" and keeps its off-screen
+    controller; the card room says nothing of the kind and keeps its second
+    player.
+
+    Strictly narrower than what it replaces -- a condition added, none
+    removed -- so it can only ever return a subset of the old answer. Every
+    character it now spares is one the old rule could have hidden while the
+    camera was pointing at them, and the cost of sparing one wrongly is the
+    cheap error above.
     """
-    from pipelines.script2video import on_screen_name_matches
+    from pipelines.script2video import (
+        mentions_an_off_screen_device,
+        on_screen_name_matches,
+    )
 
     on_screen = set()
     speaks = set()
@@ -3092,7 +3124,27 @@ def _heard_but_never_seen(script: DramaScript, cast: List[CharacterInScene]) -> 
     # leave every frame with no identity lock at all.
     if not on_screen:
         return set()
-    return {name for name in speaks if name not in on_screen}
+
+    unseen = {name for name in speaks if name not in on_screen}
+    if not unseen:
+        return set()
+
+    if not any(
+        mentions_an_off_screen_device(_scene_action(scene))
+        for scene in getattr(script, "scenes", None) or []
+    ):
+        # Said out loud, because the alternative is silence about a decision
+        # that changes who has a face. A drama that really does hide a voice
+        # and forgets to stage the radio lands here, and the cost is a portrait
+        # for someone nobody sees -- visible in this line rather than nowhere.
+        logger.info(
+            "%s speak(s) but are named in no action line; nothing in the "
+            "script stages a voice without a body (no radio, intercom, "
+            "handset or O.S.), so they are kept visible.",
+            ", ".join(sorted(unseen)),
+        )
+        return set()
+    return unseen
 
 
 class Idea2VideoPipeline:
@@ -3151,8 +3203,30 @@ class Idea2VideoPipeline:
 
         async def _portrait(char) -> tuple:
             wardrobe = (getattr(char, "wardrobe", "") or "").strip()
+            # The same reading the CASTING step already made, said where the
+            # picture can see it. interfaces/gender exists so that "a word
+            # that counts as female for a voice counts as female for a face",
+            # and only the voice half ever called it: the portrait was handed
+            # the raw description and left to infer the rest.
+            #
+            # A description carries its gender in one word, and that word is
+            # often a possessive halfway down it ("dealer, fifties, sharp-eyed,
+            # HER hands never still"). That is enough for the marker table and
+            # not enough for an image model reading a genre. Delivered job
+            # 754796ce-c04, brief "A card dealer ... copying her own tell": the
+            # dealer was cast with a female voice and drawn, in every frame of
+            # the film, as an elderly man.
+            #
+            # Read off the SAME string cast_characters reads, so the two
+            # cannot answer differently -- including when the word list is
+            # wrong. A face and a voice that disagree is the worst of the
+            # three outcomes; agreeing is the contract.
+            subject = gender_of.noun(
+                gender_of.infer(f"{char.name} {char.static_features}")
+            )
             prompt = (
-                f"Character portrait, {style} style. "
+                f"Character portrait{f' of a {subject}' if subject else ''}, "
+                f"{style} style. "
                 f"{char.static_features}. {char.dynamic_features}. "
                 # The locked portrait is the costume reference too -- generating
                 # it without wardrobe leaves every scene to invent an outfit.

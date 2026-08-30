@@ -878,8 +878,14 @@ into a single scene rather than adding one."""
         character the model already gendered is left exactly as written, even
         if it disagrees with this reading of the brief -- the model saw the
         whole brief; this sees a word list.
+
+        "Unambiguous" is read by gender_of.infer_brief, not by infer: a brief
+        introduces a CAST, and the first gendered word in one belongs to
+        whoever the sentence reaches first. On "...realises the man across the
+        table is copying her own tell" that is the antagonist, and filling the
+        protagonist's description from it would have made a woman a man.
         """
-        wanted = gender_of.infer(script.user_brief)
+        wanted = gender_of.infer_brief(script.user_brief)
         if not wanted:
             return
         noun = gender_of.noun(wanted)
