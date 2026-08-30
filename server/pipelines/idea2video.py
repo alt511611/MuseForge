@@ -3337,6 +3337,16 @@ class Idea2VideoPipeline:
             if 0 <= scene_index < len(scene_paths):
                 audio_by_scene.setdefault(scene_index, audio_url)
 
+        # Every LINE of each scene, in order, which is what says who is
+        # speaking during which stretch of that one combined file. The loop
+        # above cannot collect this: it keys off the single track carrying the
+        # audio, and the speakers that matter here are on the tracks it skips.
+        lines_by_scene: Dict[int, List[Dict[str, Any]]] = {}
+        for track in dialogue_tracks:
+            scene_index = int(track.get("scene_index", -1))
+            if scene_index in audio_by_scene:
+                lines_by_scene.setdefault(scene_index, []).append(track)
+
         # Where each scene's speech actually lands on the finished timeline.
         # Read from the same plan the mixer and the captions read, so all three
         # agree -- and computed from EVERY dialogue track, not just the scenes
