@@ -137,6 +137,12 @@ OPTIONAL_DIRECTION = 6
 #: is already carrying, and it is not worth the rules it was costing.
 MAX_VISUAL_DESC_CHARS = 320
 
+#: The floor that cap may be reduced to when a scene carries more rules than
+#: the one-hander it was measured on. "The first two sentences of a shot
+#: description are the shot" -- this is those two sentences, and a shot is not
+#: allowed to spend the film's spatial continuity on its third.
+MIN_VISUAL_DESC_CHARS = 200
+
 
 def fit_image_prompt(segments: list, limit: int = MAX_IMAGE_PROMPT_CHARS) -> str:
     """Assemble a prompt that respects the provider's character budget.
@@ -625,12 +631,18 @@ def build_screen_direction_clause(characters) -> str:
     if len(visible) != 2:
         return ""
     left, right = visible[0].name, visible[1].name
+    # Written tight on purpose. This clause is emitted ONLY for a two-hander,
+    # which is also the only case where the frame prompt runs out of budget --
+    # so the rule for two people is the rule that two people push over the
+    # edge, and it is ranked low enough to be among the first to go. Delivered
+    # job 21e3d767-bce lost it from every frame and its two players swap sides
+    # across three of the film's four two-shots. Every instruction that was
+    # here is still here; the prose around them is not. See fit_image_prompt.
     return (
-        f"Screen direction (LOCKED for the entire story, 180-degree rule): "
+        f"180-degree rule, LOCKED for the whole film: "
         f"{left} is on frame-left facing screen-right; {right} is on "
-        f"frame-right facing screen-left. Keep this orientation even when "
-        f"only one of them is in frame — they look toward the other's side. "
-        f"Never mirror or flip the composition. "
+        f"frame-right facing screen-left. True in singles too — each looks "
+        f"toward the other's side. Never mirror the composition. "
     )
 
 
@@ -850,13 +862,38 @@ def build_frame_prompt(
     # Cut to its share before anything is sized against it -- otherwise a
     # runaway description squeezes the identity clause AND then knocks the
     # rules off the bottom of the ladder, paying for itself twice.
-    visual_desc = fit_visual_desc(shot.visual_desc)
+    # Sized BEFORE the identity clause, like the setting and the lighting, and
+    # for the same reason -- it was the one lock missing from that list. It is
+    # emitted only for a two-hander, so it appears exactly when the prompt is
+    # most crowded, and the identity clause was being sized as though it were
+    # not there: the axis then fell off the bottom of the ladder instead, all
+    # of it, to recover the last few characters. Delivered job 21e3d767-bce
+    # lost it from every frame and its two players swap sides across three of
+    # the film's four two-shots.
+    direction_clause = build_screen_direction_clause(characters)
+
+    # MAX_VISUAL_DESC_CHARS was measured "for a one-hander", and its own note
+    # settles who pays when the frame runs out of room: the description is cut
+    # to its share, because "it is not worth the rules it was costing". A
+    # two-hander carries a rule a one-hander does not -- the 180-degree axis --
+    # so the share is smaller by exactly that clause, floored at the two
+    # sentences that same note calls the shot itself.
+    #
+    # Applied here rather than by re-ranking, because the ladder below already
+    # records what the cheaper losses are and this is not a case for reversing
+    # it: the delivered failure was the axis and the light going while the
+    # description kept all 320 of its characters.
+    visual_desc = fit_visual_desc(
+        shot.visual_desc,
+        limit=max(MIN_VISUAL_DESC_CHARS, MAX_VISUAL_DESC_CHARS - len(direction_clause)),
+    )
 
     identity_budget = (
         MAX_IMAGE_PROMPT_CHARS
         - len(visual_desc)
         - len(setting_clause)
         - len(lighting_clause)
+        - len(direction_clause)
         - IDENTITY_CLAUSE_OVERHEAD
         - 200  # style prefix, shot type and lens line
     )
@@ -864,7 +901,6 @@ def build_frame_prompt(
         identity_characters, matched_char, limit=max(identity_budget, 200)
     )
     cast_clause = build_cast_closure_clause(characters)
-    direction_clause = build_screen_direction_clause(characters)
     # (priority, text) in READING order. Priority 0 is required: the style,
     # the shot itself, its framing, and the character lock -- without the
     # first there is no frame, without the last the frame renders a stranger,
