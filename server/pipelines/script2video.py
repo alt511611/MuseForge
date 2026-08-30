@@ -1457,6 +1457,35 @@ DEFAULT_VIDEO_PRESET = "medium"
 VIDEO_PIX_FMT = "yuv420p"
 
 
+#: Encoder threads per re-encode.
+#:
+#: x264 sizes its own thread pool from the MACHINE's core count, and a
+#: container is not the machine. On a many-core host it starts roughly 1.5x
+#: ncpu frame threads and holds a reference frame set per thread, while the
+#: container's CPU quota buys none of that parallelism back -- so the memory
+#: an encode needs is set by whatever host the container happens to land on,
+#: and the speed it gets is not. That is invisible from the code and it is the
+#: difference between a render that finishes and one that does not.
+#:
+#: Measured, one 12s 1904x1088 encode at -preset medium -crf 18, 10 cores:
+#:
+#:     threads      peak RSS    wall
+#:     (unset)        799 MB    1.47s
+#:     4              576 MB    2.38s
+#:     2              535 MB    3.95s
+#:     1              495 MB    7.03s
+#:
+#: Delivered job 1434617e-1c7 died on a 2GB instance -- "Ran out of memory
+#: (used over 2GB)" -- inside the lip-sync pass, where several of these run at
+#: once. Two unbounded encodes do not fit in that box; two bounded ones do,
+#: with room for the interpreter around them.
+#:
+#: The wall-clock column is the cost on a machine with ten cores to spare. On
+#: a CPU-limited container there is much less to give up, because the threads
+#: were queueing for one quota rather than running.
+DEFAULT_VIDEO_THREADS = "2"
+
+
 def video_encode_args() -> List[str]:
     """ffmpeg output args shared by every re-encode in the pipeline.
 
@@ -1470,6 +1499,8 @@ def video_encode_args() -> List[str]:
         os.environ.get("MUSEFORGE_VIDEO_CRF", DEFAULT_VIDEO_CRF),
         "-preset",
         os.environ.get("MUSEFORGE_VIDEO_PRESET", DEFAULT_VIDEO_PRESET),
+        "-threads",
+        os.environ.get("MUSEFORGE_VIDEO_THREADS", DEFAULT_VIDEO_THREADS),
         "-pix_fmt",
         VIDEO_PIX_FMT,
         "-movflags",

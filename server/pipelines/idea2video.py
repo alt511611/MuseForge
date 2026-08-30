@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from agents.screenwriter import ScreenwriterAgent, ScriptGenerationFailed
@@ -115,6 +116,48 @@ _WATERMARK_FONT_CANDIDATES = [
     "/System/Library/Fonts/Helvetica.ttc",
     "C:\\Windows\\Fonts\\arialbd.ttf",
 ]
+
+
+#: How many blocking picture re-encodes may run at once, process-wide.
+#:
+#: Not a throughput knob -- a memory ceiling. One 1904x1088 re-encode peaks
+#: around half a gigabyte even with the encoder's threads bounded (see
+#: script2video.DEFAULT_VIDEO_THREADS), and the passes that call these run per
+#: SCENE, concurrently: three scenes lip-syncing means three trims, and the
+#: default executor `run_in_executor(None, ...)` has as many threads as the
+#: machine cares to give it. Nothing anywhere said how many encodes could be
+#: alive at the same time, so the answer was "as many as there are scenes".
+#:
+#: Delivered job 1434617e-1c7, on a 2GB instance: "Ran out of memory (used
+#: over 2GB)" during the lip-sync pass, with the process restarted under it
+#: and the render lost after 362 seconds of work that was already paid for.
+#:
+#: A pool rather than a semaphore because these are BLOCKING calls handed to
+#: an executor: sizing the pool is the bound, it needs no acquire/release
+#: around every call site, and it cannot be bound to the wrong event loop.
+DEFAULT_ENCODE_CONCURRENCY = 2
+
+
+def _encode_concurrency() -> int:
+    raw = os.environ.get("MUSEFORGE_ENCODE_CONCURRENCY", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            logger.warning(
+                "Invalid MUSEFORGE_ENCODE_CONCURRENCY=%r, using %s",
+                raw,
+                DEFAULT_ENCODE_CONCURRENCY,
+            )
+    return DEFAULT_ENCODE_CONCURRENCY
+
+
+#: Every blocking re-encode in this module runs here, and the pool's size is
+#: the ceiling above. Created once, at import, and deliberately never shut
+#: down: the process is the server.
+_ENCODE_POOL = ThreadPoolExecutor(
+    max_workers=_encode_concurrency(), thread_name_prefix="museforge-encode"
+)
 
 
 def _scene_action(scene: Any) -> str:
@@ -2586,8 +2629,50 @@ def check_master_duration(final_path: str, scene_paths: Optional[List[str]]) -> 
     return True
 
 
+#: ffmpeg prints this for every input it opens, before it decodes anything.
+_DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)")
+
+
+def _header_duration(path: str) -> Optional[float]:
+    """Seconds, read out of the container header. Nothing is decoded.
+
+    The duration of a clip is a number in its header, and asking moviepy for
+    it opens a VideoFileClip -- which spawns ffmpeg piping raw rgb24 at the
+    source's full size and pulls a frame through numpy before anyone reads
+    `.duration`. At 1904x1088 that is a multi-megabyte buffer and a decoder,
+    per call, and the pipeline asks constantly: the delivered log of job
+    1434617e-1c7 shows roughly forty of these in one render, several of them
+    for the same file, in a process that then ran out of memory.
+
+    `ffmpeg -i` with no output prints the header and exits non-zero saying it
+    was given nothing to write. That non-zero is the normal path here, which
+    is why the return code is not checked -- only whether the line was found.
+    ffprobe would be the obvious tool and is deliberately not used: imageio
+    bundles ffmpeg alone, so ffprobe is not guaranteed to exist on the box.
+
+    Returns None when the header cannot be read, and the caller falls back to
+    the moviepy reading that this replaces.
+    """
+    try:
+        completed = subprocess.run(
+            [resolve_ffmpeg_binary(), "-i", path],
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return None
+    match = _DURATION_RE.search(completed.stderr or "")
+    if not match:
+        return None
+    hours, minutes, seconds = match.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
 def _probe_video_duration(video_path: str) -> float:
     """Duration in seconds, or 0.0 when it cannot be read."""
+    header = _header_duration(video_path)
+    if header is not None:
+        return header
     try:
         from moviepy import VideoFileClip
 
@@ -2905,7 +2990,8 @@ async def export_alternate_format(
     import asyncio
 
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _crop)
+    return await loop.run_in_executor(_ENCODE_POOL, _crop)
+
 
 
 #: A clip trimmed below this is not a shot any more, it is a glitch. Guards
@@ -2957,6 +3043,9 @@ def _clip_duration(path: str) -> Optional[float]:
     """Seconds of video at ``path``, or None if it cannot be measured."""
     if not path or not os.path.isfile(path):
         return None
+    header = _header_duration(path)
+    if header is not None:
+        return header
     try:
         from moviepy import VideoFileClip
 
@@ -3013,7 +3102,64 @@ async def trim_clip(
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
+    def _trim_in_ffmpeg() -> Optional[str]:
+        """Cut it in one ffmpeg process, with nothing decoded into Python.
+
+        moviepy does this by piping every frame out of one ffmpeg as raw
+        rgb24, through numpy, and into a second ffmpeg -- three processes and
+        a 1904x1088x3 buffer per clip, for an operation that removes seconds
+        from the ends and changes no pixel. On a 2GB instance running several
+        scenes at once that is what there is not room for: delivered job
+        1434617e-1c7 died with "Ran out of memory (used over 2GB)" in the
+        lip-sync pass, where every scene trims.
+
+        ``-ss``/``-t`` are placed AFTER ``-i`` on purpose. Input seeking is
+        faster and lands on a keyframe; the lip-sync rejoin puts this clip
+        back against the take it was cut from and _keeps_its_length measures
+        the result, so a boundary that moves by a keyframe interval is a lost
+        sync. Output seeking decodes to the exact frame, and these clips are
+        seconds long.
+
+        Returns None when ffmpeg cannot do it, and the moviepy path below --
+        which is the behaviour this replaces -- gets its turn.
+        """
+        duration = _probe_video_duration(source_path)
+        if duration <= 0:
+            return None
+        start = min(trim_start, max(0.0, duration - MIN_TRIMMED_SECONDS))
+        end = min(max(start + MIN_TRIMMED_SECONDS, duration - trim_end), duration)
+        if end - start >= duration - 1e-3:
+            return source_path
+        try:
+            completed = subprocess.run(
+                [
+                    resolve_ffmpeg_binary(), "-y", "-v", "error",
+                    "-i", source_path,
+                    "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}",
+                    *video_encode_args(),
+                    "-c:a", "aac", "-b:a", DELIVERY_AUDIO_BITRATE,
+                    output_path,
+                ],
+                capture_output=True,
+            )
+        except Exception as exc:
+            logger.warning("ffmpeg could not trim %s: %s", source_path, exc)
+            return None
+        if completed.returncode == 0 and os.path.getsize(output_path) > 0:
+            return output_path
+        logger.warning(
+            "ffmpeg could not trim %s (exit %s), falling back to moviepy: %s",
+            source_path,
+            completed.returncode,
+            (completed.stderr or b"").decode("utf-8", "replace")[-300:],
+        )
+        return None
+
     def _trim() -> str:
+        trimmed = _trim_in_ffmpeg()
+        if trimmed is not None:
+            return trimmed
+
         from moviepy import VideoFileClip
 
         clip = VideoFileClip(source_path)
@@ -3039,7 +3185,7 @@ async def trim_clip(
 
     loop = asyncio.get_running_loop()
     try:
-        return await loop.run_in_executor(None, _trim)
+        return await loop.run_in_executor(_ENCODE_POOL, _trim)
     except Exception as exc:
         logger.warning("Trim failed for %s, keeping the full clip: %s", source_path, exc)
         return source_path
