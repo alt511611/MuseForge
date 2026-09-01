@@ -888,19 +888,59 @@ def build_frame_prompt(
         limit=max(MIN_VISUAL_DESC_CHARS, MAX_VISUAL_DESC_CHARS - len(direction_clause)),
     )
 
+    cast_clause = build_cast_closure_clause(characters)
+    style_prefix = f"{style} style. "
+    framing_clause = f"Shot type: {shot.shot_type}. Lens: {shot.lens}. "
+    desc_clause = f"{visual_desc}. "
+
+    # Everything that outranks the intended sacrifice, measured. The ladder
+    # below gives up exactly one clause by design -- the film-look note, the
+    # bottom rung -- so every OTHER clause is one the identity lock has to
+    # share the prompt with, and the space left after them is the space it
+    # actually has.
+    #
+    # This list used to stop at the setting, the lighting and the axis, and
+    # cover the rest with a flat 200 "for the style prefix, shot type and lens
+    # line". Both halves of that were wrong on a real two-hander. The literal
+    # cost of those two lines is 50, but the lip-sync mouth clause beside them
+    # is REQUIRED and was never counted (186), and the three clauses ranked
+    # ABOVE the axis -- the expression, the face-visibility rule and the closed
+    # cast -- were not counted either (571). They cannot be traded for it: they
+    # outrank it, so they are still standing when it falls.
+    #
+    # Delivered job 812714ad-1f9, the same basement card game as 21e3d767-bce.
+    # The identity clause was sized as though those 757 characters were not
+    # coming, took 1147 where 1107 was free, and the prompt came out 40 over.
+    # Clauses are dropped whole, so 40 characters cost the entire 229-character
+    # axis AGAIN -- and the frame went to the model 189 characters UNDER the
+    # limit, having thrown away the film's geometry to reclaim space it then
+    # did not use. All six frames of that film, and its two players change
+    # sides between the two angles of every scene in it.
+    #
+    # Guessing at any of this instead of measuring it is the same mistake that
+    # once pushed the setting out of the prompt; there is now nothing left in
+    # the reserve that is not a len().
     identity_budget = (
         MAX_IMAGE_PROMPT_CHARS
-        - len(visual_desc)
+        - len(style_prefix)
         - len(setting_clause)
         - len(lighting_clause)
         - len(direction_clause)
+        - len(desc_clause)
+        - len(expression_clause)
+        - len(face_clause)
+        - len(cast_clause)
+        - len(dialogue_clause)
+        - len(framing_clause)
         - IDENTITY_CLAUSE_OVERHEAD
-        - 200  # style prefix, shot type and lens line
     )
+    # The floor is what stops a very crowded scene from starving the one clause
+    # that keeps a face the same face. Below it the reserve has failed and the
+    # ladder takes over, dropping in its own recorded order -- which is the
+    # right behaviour, and is why this is a floor and not an assertion.
     identity_clause = build_character_identity_clause(
         identity_characters, matched_char, limit=max(identity_budget, 200)
     )
-    cast_clause = build_cast_closure_clause(characters)
     # (priority, text) in READING order. Priority 0 is required: the style,
     # the shot itself, its framing, and the character lock -- without the
     # first there is no frame, without the last the frame renders a stranger,
@@ -929,7 +969,7 @@ def build_frame_prompt(
     # difference between a performance and a photograph; the sentences below
     # it are identical in every film this product has ever made.
     return fit_image_prompt([
-        (REQUIRED, f"{style} style. "),
+        (REQUIRED, style_prefix),
         # RANK, not wording -- the same distinction the mouth clause turned on
         # above. Ordinarily this clause is continuity: worth keeping, and a
         # frame is still the right frame without it, so it sits one rung above
@@ -963,12 +1003,12 @@ def build_frame_prompt(
         (5, lighting_clause),
         (REQUIRED, identity_clause),
         (OPTIONAL_DIRECTION, direction_clause),
-        (REQUIRED, f"{visual_desc}. "),
+        (REQUIRED, desc_clause),
         (2, expression_clause),
         (4, face_clause),
         (3, cast_clause),
         (dialogue_rank, dialogue_clause),
-        (REQUIRED, f"Shot type: {shot.shot_type}. Lens: {shot.lens}. "),
+        (REQUIRED, framing_clause),
         (7, resolve_visual_style(style).render_note),
     ])
 

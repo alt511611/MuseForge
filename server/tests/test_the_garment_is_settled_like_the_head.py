@@ -181,11 +181,8 @@ def test_it_does_not_cost_the_rules_the_last_two_fixes_bought():
     assert "eyes stay inside the scene" in prompt
 
 
-def test_two_settled_wardrobes_still_fit():
-    """The crowded case, and the one that decides whether this is affordable
-    at all: a two-shot, so both are described (a single names only one --
-    see test_the_frame_describes_who_is_in_it), both dressed head down."""
-    reyes = CharacterInScene(
+def _reyes():
+    return CharacterInScene(
         idx=1, name="Reyes",
         static_features=(
             "a man in his fifties, broad build, weathered brown skin, "
@@ -193,8 +190,51 @@ def test_two_settled_wardrobes_still_fit():
         ),
         wardrobe=REYES,
     )
-    prompt = _prompt(_yara(), reyes, visual_desc=TWO_SHOT)
+
+
+def test_a_two_shot_spends_its_settled_wardrobes_on_the_axis():
+    """The crowded case, and the one that decides what a settled wardrobe is
+    worth: a two-shot, so both are described (a single names only one -- see
+    test_the_frame_describes_who_is_in_it), both dressed head down.
+
+    This asked for both wardrobes and got them, and never looked at the
+    price. Measured on the code that passed it, the frame kept 1435
+    characters of identity, dropped the 180-degree axis AND the lighting
+    lock -- and went to the model 278 characters UNDER the limit. Two
+    continuity locks for two garments, and a fifth of the budget spent on
+    neither. Delivered job 812714ad-1f9 is what that reads as: its two
+    players change sides between the two angles of every scene.
+
+    So the frame is now sized against the clauses that outrank the film-look
+    note, and a two-shot is the case where that bites: the axis is emitted
+    only for exactly two visible characters, so it appears precisely when the
+    prompt is fullest. _describe_characters drops wardrobe FIRST when it
+    compacts, which is the cheap loss by construction -- the costume lock
+    ("everyone wears the EXACT outfit from the reference image") is still in
+    the prompt and still covers drift, while nothing whatsoever covers a
+    film whose geometry flips shot to shot.
+
+    What a settled wardrobe buys is the ONE-hander above, where it fits and
+    is kept. What it is not allowed to buy is the film's spatial continuity.
+    """
+    prompt = _prompt(_yara(), _reyes(), visual_desc=TWO_SHOT)
     assert len(prompt) <= MAX_IMAGE_PROMPT_CHARS
-    assert "matte yellow PVC" in prompt
-    assert "dark green oilskin" in prompt
+
+    # The locks the wardrobe was outbidding.
+    assert "180-degree rule" in prompt
+    assert "Lighting continuity" in prompt
     assert "The cast is closed" in prompt
+
+
+def test_and_it_never_spends_a_face_to_pay_for_them():
+    """The line the compaction is not allowed to cross. Wardrobe prose is the
+    covered loss; a face is not covered by anything, and both of them are
+    still described in full alongside the axis the garments paid for."""
+    prompt = _prompt(_yara(), _reyes(), visual_desc=TWO_SHOT)
+
+    for face in (
+        "Yara", "oval face", "long dark hair", "small mole",
+        "Reyes", "weathered brown skin", "greying beard", "tired brown eyes",
+    ):
+        assert face in prompt, face
+    assert "Costume is LOCKED" in prompt, "the drifting garment still has a lock"

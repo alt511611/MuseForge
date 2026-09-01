@@ -110,13 +110,40 @@ def test_polish_is_dropped_before_continuity():
     assert "Shot on 35mm film" not in crowded, "quality suffix should go first"
 
 
+#: A location written the way a screenwriter writes an establishing plate,
+#: rather than the six-word version. It is here to make the frame below
+#: genuinely unaffordable: since the identity clause is sized against every
+#: clause that outranks the film-look note, four characters and a runaway
+#: description no longer overflow at all -- the reserve absorbs them, and a
+#: test that asked for a casualty got none.
+CROWDED_LOCATION = (
+    "a rain-soaked cargo harbour, container stacks eight high under gantry "
+    "cranes, wet asphalt, sodium floodlights on steel masts, a customs shed "
+    "with lit windows, mooring bollards and coiled hawsers along the quay"
+)
+
+
 def test_the_place_outlives_its_lighting_plan():
     """Both are continuity, but they are not worth the same: a scene lit a
     little differently is a blemish, a scene in a different room is a
     different film. They shared a priority once, and the drop fell on
-    whichever read first — which was the place."""
+    whichever read first — which was the place.
+
+    Pinned at the size where the choice is REAL. This once used four
+    characters, which no longer overflows, so the assertion below passed on
+    an ensemble that had nothing to give up: the identity clause is now sized
+    against everything ranked above the film-look note, and it gives its own
+    detail back before the ladder is consulted at all. Eight faces and a
+    described harbour push it to its floor, and the ladder decides again.
+    """
     long_shot = _shot("She cuts the seal " + "under the sodium lamp " * 60)
-    crowded = _frame_prompt([_character(i) for i in range(4)], long_shot)
+    crowded = build_frame_prompt(
+        style="Sci-Fi", shot=long_shot, setting_location=CROWDED_LOCATION,
+        setting_time_of_day="night", setting_era="present day",
+        has_dialogue=True, lipsync_enabled=True,
+        characters=[_character(i) for i in range(8)],
+        matched_char=_character(0),
+    )
 
     assert "Setting:" in crowded
     assert "Lighting continuity" not in crowded
