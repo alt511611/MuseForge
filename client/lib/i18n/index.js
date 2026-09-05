@@ -1,27 +1,29 @@
+// Server-side translation lookup: page metadata, titles, descriptions.
+//
+// SERVER ONLY. It reaches every language through ./dictionary, so importing it
+// from a "use client" module would pull all twenty into the browser bundle --
+// which is the thing the per-locale split exists to stop. Client components get
+// their strings from LanguageProvider's `t`, which reads the ONE dictionary the
+// layout handed it.
+//
+// The `translations` object that used to live here is gone on purpose. It was
+// the only thing a client import needed to touch to undo the split, and a
+// convenience export that costs 95 KB the moment someone reaches for it is not
+// a convenience.
+
 import { LOCALES, LOCALE_CODES, DEFAULT_LOCALE } from "./locales";
-import tA from "./t-a";
-import tB from "./t-b";
-import tC from "./t-c";
-import tD from "./t-d";
-import tExtra from "./t-extra";
-import tPipeline from "./t-pipeline";
-import tSections from "./t-sections";
-import tShowcase from "./t-showcase";
-import tLocation from "./t-location";
+import { getDictionary } from "./dictionary";
 
 export { LOCALES, LOCALE_CODES, DEFAULT_LOCALE };
 
-function mergeLocales(...parts) {
-  const out = {};
-  for (const part of parts) {
-    for (const [loc, dict] of Object.entries(part)) {
-      out[loc] = { ...(out[loc] || {}), ...dict };
-    }
-  }
-  return out;
-}
+/** Cached per locale: generateMetadata calls this several times per page. */
+const cache = new Map();
 
-export const translations = mergeLocales(tA, tB, tC, tD, tExtra, tPipeline, tSections, tShowcase, tLocation);
+function dictionaryFor(locale) {
+  const code = LOCALE_CODES.includes(locale) ? locale : DEFAULT_LOCALE;
+  if (!cache.has(code)) cache.set(code, getDictionary(code));
+  return cache.get(code);
+}
 
 /**
  * Lookup a key in the given locale, falling back to English then the key itself.
@@ -31,8 +33,9 @@ export const translations = mergeLocales(tA, tB, tC, tD, tExtra, tPipeline, tSec
  * @returns {string}
  */
 export function t(locale, key, vars) {
-  const dict = translations[locale] ?? translations[DEFAULT_LOCALE] ?? {};
-  let s = dict[key] ?? translations[DEFAULT_LOCALE]?.[key] ?? key;
+  // The English fallback is already merged into the dictionary; a key that is
+  // missing from both still returns itself, exactly as before.
+  let s = dictionaryFor(locale)[key] ?? key;
   if (vars && typeof s === "string") {
     for (const [k, v] of Object.entries(vars)) {
       s = s.replaceAll(`{${k}}`, String(v));

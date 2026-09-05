@@ -47,10 +47,12 @@ MAX_LINES = 2
 #: Used to decide when a line has to become two CUES rather than two lines.
 MAX_CHARS_PER_SECOND = 17.0
 
-#: A cue shorter than this reads as a flicker even when its words are short;
-#: longer than this and a static caption starts to feel abandoned on screen.
+#: A cue shorter than this reads as a flicker even when its words are short.
+#:
+#: There is no matching ceiling, and there does not need to be one: a cue is
+#: split at MAX_LINE_CHARS * MAX_LINES characters (split_into_cues), so at
+#: MAX_CHARS_PER_SECOND the longest legal cue reads in about five seconds.
 MIN_CUE_SECONDS = 0.85
-MAX_CUE_SECONDS = 7.0
 
 #: Sentence-final punctuation, in the languages this product ships in.
 _SENTENCE_END = tuple(".!?…:;")

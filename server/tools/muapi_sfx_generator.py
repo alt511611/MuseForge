@@ -126,7 +126,23 @@ class MuAPISFXGenerator:
         )
 
 
-def make_sfx_generator(api_key: str, demo: bool = False) -> "MuAPISFXGenerator":
+def make_sfx_generator(api_key: str = "", demo: bool = False):
+    """The configured foley backend.
+
+    MUSEFORGE_SFX_PROVIDER:
+      - "muapi" (default) — this module, billed per generation
+      - "falai" — the same MMAudio v2 model routed through fal.ai, so a
+        deployment that has moved every other stage there does not keep a
+        MuAPI key alive for one cent a scene (tools/falai_sfx_generator)
+
+    Lazy import for the same reason make_lipsync uses one: the default path
+    must never require fal-client to be installed.
+    """
+    provider = (os.environ.get("MUSEFORGE_SFX_PROVIDER", "muapi") or "").strip().lower()
+    if provider == "falai":
+        from tools.falai_sfx_generator import FalAISFXGenerator
+
+        return FalAISFXGenerator(os.environ.get("FAL_KEY", ""), demo=demo)
     return MuAPISFXGenerator(api_key, demo=demo)
 
 

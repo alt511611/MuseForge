@@ -6,6 +6,7 @@ import Navbar from "../../components/Navbar";
 import CookieConsent from "../../components/CookieConsent";
 import { SITE_URL, canonical } from "../../lib/seo";
 import { t } from "../../lib/i18n/index";
+import { getDictionary } from "../../lib/i18n/dictionary";
 import {
   LOCALE_CODES,
   isLocale,
@@ -109,7 +110,10 @@ export default function RootLayout({ children, params: { locale } }) {
     <html lang={locale} dir={textDirection(locale)}>
       <body className="antialiased min-h-screen" style={{ backgroundColor: "var(--mf-stage)" }}>
         <AuthProvider>
-          <LanguageProvider locale={locale}>
+          {/* One language, assembled here on the server. Importing the
+              dictionaries inside the provider (a client component) is what
+              used to ship all twenty to every reader. */}
+          <LanguageProvider locale={locale} dictionary={getDictionary(locale)}>
             <Navbar />
             {children}
             <CookieConsent />

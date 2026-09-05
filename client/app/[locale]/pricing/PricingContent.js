@@ -124,7 +124,13 @@ function IntervalToggle({ interval, onChange }) {
     {
       id: "annual",
       label: tr(t, "pricing_annual", "Yıllık"),
-      badge: `%${ANNUAL_DISCOUNT_PERCENT} ${tr(t, "pricing_off", "indirim")}`,
+      // One key for the whole badge, not a number glued to a translated word:
+      // "%10 indirim" and "10% off" put the sign on opposite sides, so a
+      // template built here can only ever be right in one language.
+      badge: tr(t, "pricing_off_badge", "%{percent} indirim").replace(
+        "{percent}",
+        String(ANNUAL_DISCOUNT_PERCENT)
+      ),
     },
     { id: "monthly", label: tr(t, "pricing_monthly", "Aylık"), badge: null },
   ];
@@ -388,7 +394,10 @@ function PricingContent() {
                   {plan.credits && (
                     <p className="slate-label mt-2 flex items-center gap-1.5" style={{ color: "var(--mf-violet-soft)" }}>
                       <Sparkles size={10} />
-                      {plan.credits} credits / mo
+                      {tr(t, "pricing_credits_per_month", "{credits} kredi / ay").replace(
+                        "{credits}",
+                        String(plan.credits)
+                      )}
                     </p>
                   )}
                   {plan.credits && (

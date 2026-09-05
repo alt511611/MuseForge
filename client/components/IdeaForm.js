@@ -835,8 +835,12 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
         {!demoMode && Array.isArray(estimate?.breakdown) && estimate.breakdown.length > 0 && (
           <ul className="sm:self-end space-y-0.5 text-[11px] leading-relaxed" style={{ color: "var(--mf-ink-3)" }}>
             {estimate.breakdown.map((row) => (
-              <li key={row.label}>
-                {row.label}: {row.credits}
+              // The server sends a translation key and its variables; `label`
+              // is its own rendering, kept for a server that has not been
+              // deployed yet. Reading the label first was how every
+              // non-Turkish customer ended up reading the price in Turkish.
+              <li key={row.key || row.label}>
+                {row.key ? t(row.key, row.vars || {}) : row.label}: {row.credits}
               </li>
             ))}
           </ul>

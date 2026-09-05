@@ -2,11 +2,14 @@ anthropic==0.121.0
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 httpx==0.27.2
+# Not imported today (no Form/UploadFile endpoint); FastAPI needs it the
+# moment one appears, and it is 40 KB.
 python-multipart==0.0.20
 pydantic==2.10.4
 moviepy==2.1.2
+# Transitive (moviepy requires pillow<11,>=9.2); pinned here to keep the
+# resolved version reproducible. Nothing in this codebase imports PIL.
 pillow==10.4.0
 python-dotenv==1.0.1
-supabase==2.10.0
 stripe==11.3.0
 fal-client==1.0.0

@@ -17,6 +17,15 @@ export function isLowCredits(credits, plan) {
   return credits > 0 && credits < allowance * 0.2;
 }
 
+/** True only when the balance is KNOWN to be empty.
+ *
+ * The server answers -1 when it could not read the balance at all
+ * (api._get_user_credits), and that number reaches this function through
+ * /api/credits. Treating it as "<= 0" told a customer with a full account
+ * that they were out of credits every time Supabase hiccuped -- the one
+ * message that makes someone stop using a product they have paid for.
+ * Unknown is not empty: it shows the account as it was.
+ */
 export function isOutOfCredits(credits) {
-  return typeof credits === "number" && credits <= 0;
+  return credits === 0;
 }

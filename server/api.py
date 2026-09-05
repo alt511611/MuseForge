@@ -456,7 +456,6 @@ class EstimateRequest(BaseModel):
 # Avg ~7.5s/scene (non-finale ≤9s, finale ≤15s) → Pro 24 scenes ≈ 3 min video.
 # Pydantic allows up to max(PLAN_MAX_SCENES); per-plan caps below are the ceiling.
 PLAN_MAX_SCENES = {"free": 8, "creator": 16, "pro": 24}
-MAX_SCENES_BY_PLAN = PLAN_MAX_SCENES  # alias used by docs / callers
 MUSIC_EXTRA_CREDIT_COST = 1  # flat surcharge on top of scene credits, Creator/Pro only
 DIALOGUE_EXTRA_CREDIT_COST = 1  # per scene, Pro only
 # Per scene, Pro only, on top of dialogue. Lip sync is a second paid provider
@@ -471,19 +470,29 @@ def _lipsync_configured() -> bool:
     Kept separate from the per-request opt-in so an unconfigured deployment
     never quotes (or charges) for a stage it cannot run.
 
-    WHICH key depends on MUSEFORGE_LIPSYNC_PROVIDER. This used to demand
-    FAL_KEY unconditionally, which was correct only while fal.ai was the sole
-    backend. Since MuAPI became the DEFAULT provider (tools/muapi_lipsync), a
-    deployment running that default reported lipsync_available=False forever:
+    WHAT readiness means depends on MUSEFORGE_LIPSYNC_PROVIDER. This used to
+    demand FAL_KEY unconditionally, which was correct only while fal.ai was the
+    sole backend. Since MuAPI became the DEFAULT provider (tools/muapi_lipsync),
+    a deployment running that default reported lipsync_available=False forever:
     the toggle never appeared in the UI, and a request that asked for it anyway
     was silently dropped in generate(). The feature was unreachable in its own
     default configuration -- ask the provider what it needs instead.
+
+    The self-hosted backend (tools/local_lipsync) is the reason this is a
+    mapping rather than a key name: it authenticates with nothing, so the
+    variable that says whether it can run is its base URL. Falling back to
+    "MUAPI_KEY" for anything unrecognised would have made a local deployment
+    report ready on the strength of a key it never calls, and one holding no
+    MuAPI key at all report unready while a perfectly good GPU sat idle.
     """
     if not is_lipsync_enabled():
         return False
     provider = (os.environ.get("MUSEFORGE_LIPSYNC_PROVIDER", "muapi") or "").strip().lower()
-    key = "FAL_KEY" if provider == "falai" else "MUAPI_KEY"
-    return bool((os.environ.get(key) or "").strip())
+    required = {
+        "falai": "FAL_KEY",
+        "local": "MUSEFORGE_LOCAL_LIPSYNC_URL",
+    }.get(provider, "MUAPI_KEY")
+    return bool((os.environ.get(required) or "").strip())
 
 
 def _enforce_plan_scene_limit(plan: str, num_scenes: int) -> None:
@@ -526,8 +535,23 @@ def build_credit_breakdown(
     # ("5 scenes") into one the pipeline actually keeps ("40 seconds"), and
     # keeps the quote aligned with what the provider will bill.
     video_seconds = int(total_budget_seconds(num_scenes))
+    # Every row carries a translation KEY and its variables as well as the
+    # rendered `label`.
+    #
+    # The label alone was Turkish, hardcoded, on a product whose client is
+    # English-first in twenty locales and renders `row.label` verbatim
+    # (client/components/IdeaForm.js) -- so every non-Turkish customer read
+    # "Temel üretim", "Müzik", "Diyalog" at the one moment they were deciding
+    # whether to spend credits. A price the buyer cannot read is not a price.
+    #
+    # The label stays because the client that renders it is deployed
+    # separately: a browser holding the previous bundle keeps working, and one
+    # holding the new bundle prefers the key. It is the fallback, not the
+    # source of truth -- which is why it is no longer the only thing here.
     breakdown = [
         {
+            "key": "estimate_row_base",
+            "vars": {"scenes": num_scenes, "seconds": video_seconds},
             "label": f"Temel üretim ({num_scenes} sahne, {video_seconds} sn video)",
             "credits": num_scenes,
         }
@@ -535,17 +559,38 @@ def build_credit_breakdown(
     total = num_scenes
 
     if music_on:
-        breakdown.append({"label": "Müzik", "credits": MUSIC_EXTRA_CREDIT_COST})
+        breakdown.append(
+            {
+                "key": "estimate_row_music",
+                "vars": {},
+                "label": "Müzik",
+                "credits": MUSIC_EXTRA_CREDIT_COST,
+            }
+        )
         total += MUSIC_EXTRA_CREDIT_COST
 
     if dialogue_on:
         dialogue_credits = num_scenes * DIALOGUE_EXTRA_CREDIT_COST
-        breakdown.append({"label": "Diyalog", "credits": dialogue_credits})
+        breakdown.append(
+            {
+                "key": "estimate_row_dialogue",
+                "vars": {},
+                "label": "Diyalog",
+                "credits": dialogue_credits,
+            }
+        )
         total += dialogue_credits
 
     if lipsync_on:
         lipsync_credits = num_scenes * LIPSYNC_EXTRA_CREDIT_COST
-        breakdown.append({"label": "Dudak senkronu", "credits": lipsync_credits})
+        breakdown.append(
+            {
+                "key": "estimate_row_lipsync",
+                "vars": {},
+                "label": "Dudak senkronu",
+                "credits": lipsync_credits,
+            }
+        )
         total += lipsync_credits
 
     return {
@@ -626,8 +671,8 @@ async def public_stats():
                 if r_monthly.status_code == 206:
                     cr = r_monthly.headers.get("Content-Range", "")
                     monthly = int(cr.split("/")[-1]) if "/" in cr else 0
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Public stats fell back to the in-memory count: %s", exc)
     # Fall back to in-memory count when Supabase not configured
     if total == 0 and monthly == 0:
         jobs = list(job_store._jobs.values())
@@ -761,8 +806,13 @@ async def _get_user_credits(user_id: str) -> int:
             data = resp.json()
             if isinstance(data, list) and data:
                 return data[0].get("credits", 0)
-    except Exception:
-        pass
+    except Exception as exc:
+        # Said out loud, because -1 is not a balance: it is "the balance could
+        # not be read", and it travels all the way to the customer's dashboard,
+        # where a negative number reads as OUT OF CREDITS (client/lib/credits
+        # .isOutOfCredits). A paying account being told it is empty during a
+        # Supabase blip is worth exactly one log line to explain.
+        logger.warning("Could not read the credit balance for %s: %s", user_id, exc)
     return -1
 
 
@@ -1838,8 +1888,8 @@ async def get_credits(current_user: AuthUser = Depends(get_current_user)):
                     headers=headers,
                 )
                 ledger = resp.json() if isinstance(resp.json(), list) else []
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Could not read the credit ledger: %s", exc)
         try:
             async with httpx.AsyncClient(timeout=6.0) as client:
                 resp = await client.get(
@@ -1982,8 +2032,8 @@ async def stripe_portal(
                 data = resp.json()
                 if isinstance(data, list) and data:
                     customer_id = data[0].get("stripe_customer_id")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Could not look up the Stripe customer id: %s", exc)
 
     if not customer_id:
         raise HTTPException(

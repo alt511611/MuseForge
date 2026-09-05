@@ -2,7 +2,10 @@
 
 import { createContext, useContext, useCallback, useMemo } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { LOCALES, LOCALE_CODES, DEFAULT_LOCALE, translations } from "../lib/i18n/index";
+// Metadata only (names, flags, direction) -- 20 short rows. The STRINGS
+// arrive as a prop: importing them here is what used to put all twenty
+// languages in every visitor's bundle. See lib/i18n/dictionary.js.
+import { LOCALES, LOCALE_CODES, DEFAULT_LOCALE } from "../lib/i18n/locales";
 import { splitLocale, withLocale } from "../lib/i18n/routing";
 
 const LanguageContext = createContext(null);
@@ -12,13 +15,25 @@ const LanguageContext = createContext(null);
    source of truth — it exists only to make the switcher sticky. */
 const LS_KEY = "mf_locale";
 
+/* A provider mounted without a dictionary still renders: t() answers with the
+   key. Stable identity so it cannot re-trigger the memo on every render. */
+const EMPTY_DICTIONARY = {};
+
 /**
  * The active locale comes from the URL segment (app/[locale]), passed down by
  * the root layout. That makes it available during SSR, so translated markup is
  * in the initial HTML instead of appearing after hydration.
+ *
+ * `dictionary` is that locale's strings, already merged over English by the
+ * layout (lib/i18n/dictionary.getDictionary). It is a prop rather than an
+ * import because an import here is a client import: it would carry all twenty
+ * languages into the browser bundle -- 372 KB of JS (102 KB gzipped) on every
+ * page load, nineteen twentieths of it unread. Handing one language down keeps
+ * SSR translated, which a lazily loaded dictionary would not.
  */
-export function LanguageProvider({ children, locale: localeProp }) {
+export function LanguageProvider({ children, locale: localeProp, dictionary }) {
   const locale = LOCALE_CODES.includes(localeProp) ? localeProp : DEFAULT_LOCALE;
+  const dict = dictionary || EMPTY_DICTIONARY;
   const router = useRouter();
   const pathname = usePathname();
 
@@ -44,8 +59,10 @@ export function LanguageProvider({ children, locale: localeProp }) {
 
   const t = useCallback(
     (key, vars) => {
-      const dict = translations[locale] ?? translations[DEFAULT_LOCALE] ?? {};
-      let s = dict[key] ?? translations[DEFAULT_LOCALE]?.[key] ?? key;
+      // English is already merged in under the active locale, so a missing
+      // key means missing everywhere -- and then the key itself is the
+      // honest answer, exactly as it was before the split.
+      let s = dict[key] ?? key;
       if (vars && typeof s === "string") {
         for (const [k, v] of Object.entries(vars)) {
           s = s.replaceAll(`{${k}}`, String(v));
@@ -53,7 +70,7 @@ export function LanguageProvider({ children, locale: localeProp }) {
       }
       return s;
     },
-    [locale]
+    [dict]
   );
 
   /** Prefix a site-relative href with the active locale. */

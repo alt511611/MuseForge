@@ -13,13 +13,6 @@ from tools.muapi_client import MuAPIClient, MuAPIError
 
 logger = logging.getLogger(__name__)
 
-# Real internal cost of one music generation call, expressed in MuseForge
-# credits. This is tracked separately from what's charged to the user
-# (server/api.py currently charges a flat +1 credit surcharge for
-# music_enabled, independent of this constant) so the two can be tuned
-# independently as real usage data comes in.
-MUSIC_CREDIT_COST = 2
-
 DEMO_MUSIC_URL = ""  # no audio track in demo mode — silent video is fine
 
 

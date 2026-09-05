@@ -294,7 +294,10 @@ export default function DashboardPage() {
         if (typeof data.pack_validity_days === "number") {
           setPackValidityDays(data.pack_validity_days);
         }
-        if (data.credits !== undefined && profile) {
+        // -1 means the server could not read the balance, not that the
+        // account is empty. Overwriting a known number with the sentinel is
+        // how a stocked account started showing as out of credits.
+        if (typeof data.credits === "number" && data.credits >= 0 && profile) {
           setProfile((p) => p ? { ...p, credits: data.credits } : p);
         }
       }
