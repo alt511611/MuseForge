@@ -72,6 +72,8 @@ def make_lipsync(demo: bool = False):
     MUSEFORGE_LIPSYNC_PROVIDER:
       - "muapi" (default) — this module, no second vendor key needed
       - "falai" — fal.ai Sync Lipsync, which exposes sync_mode directly
+      - "local" — a self-hosted LatentSync service; no key, no per-scene bill,
+        and sync_mode is ours to set rather than the vendor's to withhold
     """
     provider = (os.environ.get("MUSEFORGE_LIPSYNC_PROVIDER", "muapi") or "").strip().lower()
     if provider == "falai":
@@ -79,6 +81,10 @@ def make_lipsync(demo: bool = False):
         from tools.falai_lipsync import FalAILipsync
 
         return FalAILipsync(os.environ.get("FAL_KEY", ""), demo=demo)
+    if provider == "local":
+        from tools.local_lipsync import LocalLipsync
+
+        return LocalLipsync(os.environ.get("MUSEFORGE_LOCAL_LIPSYNC_URL", ""), demo=demo)
     return MuAPILipsync(os.environ.get("MUAPI_KEY", ""), demo=demo)
 
 

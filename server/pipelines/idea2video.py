@@ -44,7 +44,7 @@ from pipelines.script2video import (
 )
 from tools.muapi_client import is_account_locked
 from tools.muapi_lipsync import is_lipsync_enabled, make_lipsync
-from tools.muapi_sfx_generator import MuAPISFXGenerator, is_foley_enabled
+from tools.muapi_sfx_generator import is_foley_enabled, make_sfx_generator
 from tools.muapi_voice_generator import MuAPIVoiceGenerator, is_dialogue_enabled
 
 logger = logging.getLogger(__name__)
@@ -285,7 +285,7 @@ async def _split_off_tail(
     to the previous behaviour rather than losing the scene, because every
     failure here is recoverable and none of them is worth a dropped shot.
     """
-    duration = _probe_video_duration(source_path)
+    duration = await _probe_video_duration_async(source_path)
     head_seconds = duration - tail_seconds
     if duration <= 0 or head_seconds < MIN_TRIMMED_SECONDS:
         return source_path, None
@@ -320,7 +320,7 @@ async def _split_off_lead(
     Returns ``(None, source_path)`` when the split cannot be made, which leaves
     the caller with a whole clip and the decision it had before.
     """
-    duration = _probe_video_duration(source_path)
+    duration = await _probe_video_duration_async(source_path)
     rest_seconds = duration - lead_seconds
     if (
         duration <= 0
@@ -480,8 +480,8 @@ async def _trim_overrun_length(
     Returns None when the trim cannot be made or does not come out at the right
     length, which leaves the caller with the behaviour it had: keep the take.
     """
-    original = _clip_duration(source_path)
-    synced = _clip_duration(synced_path)
+    original = await _clip_duration_async(source_path)
+    synced = await _clip_duration_async(synced_path)
     if original is None or synced is None:
         return None
     overrun = synced - original
@@ -539,8 +539,8 @@ async def _restore_trimmed_length(
     right length, which leaves the caller with the behaviour it had: keep the
     unsynced take.
     """
-    original = _clip_duration(source_path)
-    synced = _clip_duration(synced_path)
+    original = await _clip_duration_async(source_path)
+    synced = await _clip_duration_async(synced_path)
     if original is None or synced is None:
         return None
     # A clip that is not a short head of the source is not the trim this
@@ -1452,14 +1452,14 @@ async def mix_audio_layers(
     Returns None rather than raising on any problem, so the caller can fall
     back to the mixer that has always shipped.
     """
-    duration = _probe_video_duration(video_path)
+    duration = await _probe_video_duration_async(video_path)
     if duration <= 0:
         return None
 
     dialogue_tracks = dialogue_tracks or []
     sfx_tracks = sfx_tracks or []
 
-    scene_durations = [_probe_video_duration(path) for path in scene_paths or []]
+    scene_durations = await _probe_video_durations_async(scene_paths or [])
     scene_starts: List[float] = []
     elapsed = 0.0
     for scene_duration in scene_durations:
@@ -2680,6 +2680,47 @@ def _probe_video_duration(video_path: str) -> float:
             return float(clip.duration or 0.0)
     except Exception:
         return 0.0
+
+
+async def _probe_video_duration_async(video_path: str) -> float:
+    """``_probe_video_duration`` off the event loop.
+
+    The probe itself is cheap -- an ffprobe header read, tens of milliseconds
+    -- and that is exactly why it was never noticed: it is called two or three
+    times PER SCENE, from async code, in a process that is also serving the
+    API. A job does not have its own worker; jobs.py awaits pipeline.run() on
+    the same loop FastAPI answers on (asyncio.wait_for around it), so every
+    blocking millisecond spent here is a millisecond in which /api/jobs/{id}
+    does not answer the browser polling it and /api/health does not answer the
+    platform deciding whether this instance is alive.
+
+    The fallback path is the one that makes this more than tidiness: when the
+    header cannot be read, _probe_video_duration opens the clip with moviepy,
+    which is hundreds of milliseconds and a decoder.
+    """
+    return await asyncio.to_thread(_probe_video_duration, video_path)
+
+
+async def _probe_video_durations_async(paths: Sequence[str]) -> List[float]:
+    """Durations for a list of clips, in ONE hop off the loop.
+
+    Deliberately not a gather: the probes stay sequential exactly as they were,
+    because the fix here is "not on the event loop", not "all at once". A
+    24-scene job fanning out 24 ffprobes at once on a 2GB instance would be
+    trading a latency problem for the memory problem the encode pool exists to
+    prevent (see DEFAULT_ENCODE_CONCURRENCY).
+    """
+    paths = list(paths or [])
+    if not paths:
+        return []
+    return await asyncio.to_thread(
+        lambda: [_probe_video_duration(path) for path in paths]
+    )
+
+
+async def _clip_duration_async(path: str) -> Optional[float]:
+    """``_clip_duration`` off the event loop. See _probe_video_duration_async."""
+    return await asyncio.to_thread(_clip_duration, path)
 
 
 def _escape_subtitles_filter_path(path: str) -> str:
@@ -5007,7 +5048,15 @@ class Idea2VideoPipeline:
         if self.demo or not is_foley_enabled() or not scene_paths:
             return []
 
-        generator = MuAPISFXGenerator(self.api_key, demo=self.demo)
+        try:
+            generator = make_sfx_generator(self.api_key, demo=self.demo)
+        except Exception as exc:
+            # A misconfigured provider (MUSEFORGE_SFX_PROVIDER=falai with no
+            # FAL_KEY) raises at construction, and this method's promise is
+            # that it never raises: foley is the layer a film can most afford
+            # to lose, and losing it must not take the finished drama with it.
+            logger.warning("Foley provider unavailable, continuing without it: %s", exc)
+            return []
 
         async def _one(scene: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             clip_index = scene.get("clip_index")
@@ -6105,7 +6154,13 @@ class Idea2VideoPipeline:
             # not repaired: the fix is a layer the operator has to switch on
             # and pay for, and inventing ambience here would be a decision this
             # code is not entitled to make.
-            silence_notice = check_master_is_not_mostly_silent(final_path)
+            # Off the loop: this one decodes the WHOLE master's audio to raw
+            # PCM through a pipe. On a three-minute delivery that is seconds of
+            # a process that is also answering the API (see
+            # _probe_video_duration_async for why that matters here).
+            silence_notice = await asyncio.to_thread(
+                check_master_is_not_mostly_silent, final_path
+            )
             if silence_notice:
                 warnings.append(silence_notice)
 

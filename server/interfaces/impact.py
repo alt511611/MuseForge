@@ -133,7 +133,6 @@ def build_impact_filters(
     if not beats or width <= 0 or height <= 0:
         return []
 
-    frame = 1.0 / max(1.0, float(fps))
     filters: List[str] = []
 
     shake_beats = [b for b in beats if b.shake]

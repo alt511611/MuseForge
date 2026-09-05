@@ -179,9 +179,6 @@ def model_chain(profile: str, plan: str = "free") -> List[str]:
     return chain
 
 
-#: Fields every image-to-video endpoint in the MuAPI catalogue takes.
-UNIVERSAL_FIELDS = frozenset({"prompt", "image_url"})
-
 #: What to send to an endpoint we have no schema for. MuAPI validates the
 #: payload, so an unknown field is not ignored -- it comes back as a 422, which
 #: this module's fallback chain then reads as "this endpoint does not exist"

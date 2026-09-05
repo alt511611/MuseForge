@@ -21,7 +21,6 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("MUAPI_KEY", "test-key-not-real")
 
-from interfaces import impact  # noqa: E402
 from interfaces.impact import (  # noqa: E402
     ABERRATION_FRAMES,
     FLASH_FRAMES,

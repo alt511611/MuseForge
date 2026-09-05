@@ -28,7 +28,6 @@ nothing audible, and keeping the file's LENGTH identical is what leaves the
 drift maths, the cutaway split and the length guard reading the clock they
 already read.
 """
-import asyncio
 import os
 import subprocess
 import sys

@@ -105,7 +105,6 @@ def test_an_unchanged_scene_keeps_its_prompt_exactly_as_it_was():
 async def test_the_frame_check_is_told_what_the_story_did_to_the_place(
     monkeypatch, tmp_path
 ):
-    from agents.storyboard_artist import StoryboardArtist
     from pipelines.script2video import Script2VideoPipeline
 
     checked = []

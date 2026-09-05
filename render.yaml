@@ -82,6 +82,19 @@ services:
       # over closed, motionless mouths and no way for the user to fix it.
       - key: MUSEFORGE_LIPSYNC_ENABLED
         value: "1"
+      # Which backend syncs the mouths. Empty = "muapi" (the shipped default).
+      # "falai" needs FAL_KEY below and is the only hosted path that exposes
+      # sync_mode; "local" needs MUSEFORGE_LOCAL_LIPSYNC_URL instead of a key.
+      #
+      # On the fal path the MODEL decides the bill, and the cheap one is not
+      # the one with the low per-minute headline: fal-ai/latentsync is $0.20
+      # FLAT up to 40 seconds, against $3/min ($0.50 for a ten-second scene)
+      # for sync-lipsync/v2 and $8/min for sync-3 -- which costs more than the
+      # footage it is correcting. See .env.example for the full table.
+      - key: MUSEFORGE_LIPSYNC_PROVIDER
+        value: ""
+      - key: FALAI_LIPSYNC_MODEL
+        value: ""
       - key: FAL_KEY
         sync: false
       # Film-look finishing (free — folded into the existing finishing encode).
@@ -166,6 +179,11 @@ services:
       - key: MUSEFORGE_FOLEY
         value: "1"
       - key: MUAPI_SFX_MODEL
+        value: ""
+      # Empty = "muapi". "falai" routes the SAME model (MMAudio v2) through
+      # fal, which is what lets a deployment that has moved everything else
+      # stop holding a MuAPI key alive for a one-cent call.
+      - key: MUSEFORGE_SFX_PROVIDER
         value: ""
 
       # Kinetic (word-by-word) captions. Requires the ElevenLabs voice path

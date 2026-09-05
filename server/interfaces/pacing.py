@@ -103,9 +103,6 @@ FACE_Y_BIAS = 0.40
 #: of it finds sky and ceiling. Those punch in from the middle.
 WIDE_Y_BIAS = 0.50
 
-#: Tension at or above this cuts at the fast end of the hold range.
-FAST_TENSION = 8
-
 #: A take this long gets cut internally whatever the director style says.
 #:
 #: Not a taste call -- measured on a delivered 30-second drama whose three

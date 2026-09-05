@@ -44,10 +44,9 @@ CREDIT_PACKAGES = {
 #
 # A monthly allowance is rented: it is sized to one month of work and lapses
 # with the month, which is what stops it being hoarded across renewals.
-CREDIT_VALIDITY_DAYS = 30
 #: Must match public.credit_validity_days() in supabase_migration.sql, which is
 #: the fallback used when a caller passes no p_days.
-DEFAULT_CREDIT_VALIDITY_DAYS = CREDIT_VALIDITY_DAYS
+CREDIT_VALIDITY_DAYS = 30
 
 # A credit PACK was bought outright, not rented, and it is bought precisely by
 # the people whose work is lumpy -- an agency with one shoot this quarter. A

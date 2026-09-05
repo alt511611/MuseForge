@@ -234,7 +234,7 @@ async def test_a_line_longer_than_its_shot_is_mixed_whole(tmp_path):
         scene_paths=scenes,
     )
 
-    from moviepy import AudioFileClip, VideoFileClip
+    from moviepy import VideoFileClip
 
     with VideoFileClip(out) as mixed:
         assert mixed.audio is not None
