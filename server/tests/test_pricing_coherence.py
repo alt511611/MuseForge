@@ -349,14 +349,31 @@ def test_dashboard_buy_modal_charges_the_advertised_price():
         ), f"{pack} should be ${price}"
 
 
+def _client_translation_strings() -> str:
+    """Every locale's dictionary, concatenated.
+
+    The dictionaries used to be nine topic files each holding all twenty
+    languages, and these checks read ONE of them -- so they only ever policed
+    the four languages that happened to live in t-a.js. One file per language
+    (client/lib/i18n/locales) means the same regexes now cover all twenty, and
+    a card that understates the product in Korean fails here too.
+    """
+    directory = os.path.join(
+        os.path.dirname(__file__), "..", "..", "client", "lib", "i18n", "locales"
+    )
+    parts = []
+    for name in sorted(os.listdir(directory)):
+        if name.endswith(".js"):
+            with open(os.path.join(directory, name), encoding="utf-8") as f:
+                parts.append(f.read())
+    assert parts, f"no locale dictionaries found in {directory}"
+    return "\n".join(parts)
+
+
 def test_plan_feature_strings_match_granted_credits():
     """The pricing page renders its bullet list from these translations, so a
     stale string contradicts the credit count printed right above it."""
-    path = os.path.join(
-        os.path.dirname(__file__), "..", "..", "client", "lib", "i18n", "t-a.js"
-    )
-    with open(path, encoding="utf-8") as f:
-        strings = f.read()
+    strings = _client_translation_strings()
 
     for plan in PLAN_CREDITS:
         for quoted in re.findall(rf"plan_{plan}_features:\s*\"(\d+) [^,]*?/", strings):
@@ -388,11 +405,7 @@ def test_plan_feature_strings_claim_the_right_running_time():
     raise to 10s left every plan card understating the product by a minute."""
     from api import PLAN_MAX_SCENES
 
-    path = os.path.join(
-        os.path.dirname(__file__), "..", "..", "client", "lib", "i18n", "t-a.js"
-    )
-    with open(path, encoding="utf-8") as f:
-        strings = f.read()
+    strings = _client_translation_strings()
 
     for plan, scenes in PLAN_MAX_SCENES.items():
         expected = round(scenes * SECONDS_PER_CREDIT / 60)
