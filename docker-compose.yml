@@ -11,8 +11,31 @@ services:
       # override this if the built-in default stops resolving -- a dead fixture
       # makes demo jobs complete with a video that will not play.
       - MUSEFORGE_DEMO_VIDEO=${MUSEFORGE_DEMO_VIDEO:-}
+      # fal.ai geçişi. Compose değişkenleri AÇIKÇA aktarır: burada yazmayan
+      # bir satır .env'de dursa bile container'a ulaşmaz -- yani sağlayıcıyı
+      # .env'den çevirir, hiçbir şeyin değişmediğini görürsün ve neden
+      # olduğunu söyleyen tek bir log satırı bile olmaz. Yeni bir anahtar
+      # eklerken buraya da ekle.
+      - FAL_KEY=${FAL_KEY:-}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
+      - MUSEFORGE_IMAGE_PROVIDER=${MUSEFORGE_IMAGE_PROVIDER:-}
+      - MUSEFORGE_MUSIC_PROVIDER=${MUSEFORGE_MUSIC_PROVIDER:-}
+      - MUSEFORGE_SFX_PROVIDER=${MUSEFORGE_SFX_PROVIDER:-}
+      - MUSEFORGE_VIDEO_PROVIDER=${MUSEFORGE_VIDEO_PROVIDER:-}
+      - MUSEFORGE_LIPSYNC_PROVIDER=${MUSEFORGE_LIPSYNC_PROVIDER:-}
+      - FALAI_LIPSYNC_MODEL=${FALAI_LIPSYNC_MODEL:-}
+      - MUSEFORGE_VOICE_PROVIDER=${MUSEFORGE_VOICE_PROVIDER:-}
+      - ELEVENLABS_DIALOGUE_MODEL=${ELEVENLABS_DIALOGUE_MODEL:-}
+      # Ücretli aşamalar: dağıtım hazır olsun diye açık, harcama iş başına
+      # opt-in'in ve kredi düşümünün arkasında.
+      - MUSEFORGE_DIALOGUE_ENABLED=${MUSEFORGE_DIALOGUE_ENABLED:-}
+      - MUSEFORGE_LIPSYNC_ENABLED=${MUSEFORGE_LIPSYNC_ENABLED:-}
+      - MUSEFORGE_FOLEY=${MUSEFORGE_FOLEY:-}
+      # Supabase ve Stripe hâlâ aktarılmıyor: bu compose dosyası kimlik
+      # doğrulaması ve faturalama olmadan çalışan bir yerel yığın için.
       - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
       - MUSEFORGE_JOBS_DIR=/data/jobs
+      - MUSEFORGE_LOG_LEVEL=${MUSEFORGE_LOG_LEVEL:-INFO}
     volumes:
       - museforge_jobs:/data/jobs
 

@@ -190,3 +190,84 @@ def test_quoted_seconds_match_what_the_pipeline_will_request():
         quoted = build_credit_breakdown(scenes, plan="pro")["video_seconds"]
         actual = billable_seconds(distribute_budget(tensions))
         assert quoted == actual, (scenes, quoted, actual)
+
+
+# --- the split also has to know what there is to say ---------------------
+#
+# Tension decides how the total is spread, and tension does not know how long
+# the line is. Delivered job 1ac6d945-b53: three scenes, rising tension, split
+# 8/10/12 -- and the 12 went to the scene with the SHORTEST line in the
+# script. Its climax spoke for 1.38 seconds and held for 10.7 more in silence,
+# while the scene carrying 4.5 seconds of dialogue was cut at 10. The film
+# ends on ten seconds of someone standing still.
+
+
+#: Speech the voice provider actually measured on that job, per scene.
+DELIVERED_SPEECH = [1.76, 4.50, 1.38]
+#: Its tensions, recovered from the 8/10/12 the run logged.
+DELIVERED_TENSIONS = [4, 5, 6]
+
+
+def test_the_ceiling_goes_to_the_scene_with_something_to_say():
+    """Not to the tensest scene regardless. The longest line gets the most
+    room; the 1.38-second line stops being handed the ceiling."""
+    before = distribute_budget(DELIVERED_TENSIONS)
+    after = distribute_budget(DELIVERED_TENSIONS, speech_seconds=DELIVERED_SPEECH)
+
+    assert before == [8.0, 10.0, 12.0], "the delivered split, for the record"
+
+    longest_line = DELIVERED_SPEECH.index(max(DELIVERED_SPEECH))
+    assert after[longest_line] == max(after), (
+        "the scene with the most to say gets the most screen time", after
+    )
+    assert after[2] < before[2], (
+        "the 1.38-second climax gives back some of the silence", after
+    )
+    assert after[1] > before[1], (
+        "and the 4.5-second scene is what it is given to", after
+    )
+
+
+def test_the_total_is_untouched_by_what_the_script_says():
+    """The billing invariant. Distribution is open; the total is the number
+    the credit was charged against and may not move."""
+    for tensions, speech in (
+        (DELIVERED_TENSIONS, DELIVERED_SPEECH),
+        ([3, 6, 8, 10, 4], [9.0, 0.4, 0.4, 0.4, 0.4]),
+        ([5] * 8, [0.0] * 7 + [30.0]),
+        ([1, 10], [12.0, 0.5]),
+        ([5] * 24, [i * 0.5 for i in range(24)]),
+    ):
+        without = billable_seconds(distribute_budget(tensions))
+        with_speech = billable_seconds(
+            distribute_budget(tensions, speech_seconds=speech)
+        )
+        assert with_speech == without, (tensions, without, with_speech)
+
+
+def test_every_scene_stays_inside_the_clamps():
+    durations = distribute_budget([1, 10, 1, 10, 1], speech_seconds=[11, 0.2, 9, 0.2, 8])
+    for seconds in durations:
+        assert MIN_SCENE_SECONDS <= seconds <= MAX_SCENE_SECONDS, durations
+
+
+@pytest.mark.parametrize(
+    "speech",
+    [(), [], [0.0, 0.0, 0.0], None],
+)
+def test_a_job_with_no_measured_speech_splits_exactly_as_before(speech):
+    """A silent drama, a caption-only fallback, a provider that failed, or a
+    caller that never passed speech at all. Every one of them keeps the
+    tension-only split byte for byte."""
+    kwargs = {} if speech is None else {"speech_seconds": speech}
+    assert distribute_budget([3, 6, 8, 10, 4], **kwargs) == distribute_budget(
+        [3, 6, 8, 10, 4]
+    )
+
+
+def test_a_quiet_scene_is_still_allowed_to_breathe():
+    """The rule only RAISES a scene that cannot fit its line. A short line
+    does not shrink a scene to the length of its speech -- pacing is not
+    dictation, and a beat with two words in it is still a beat."""
+    durations = distribute_budget([5, 5, 5], speech_seconds=[0.5, 0.5, 0.5])
+    assert durations == distribute_budget([5, 5, 5]), durations
