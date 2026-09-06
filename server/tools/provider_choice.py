@@ -19,12 +19,17 @@ An unrecognised value is worse than a wrong one. ``MUSEFORGE_VIDEO_PROVIDER
 =fal`` is not a typo the deployment ever finds out about: it renders, it bills,
 it succeeds, and it does all of that on the vendor the operator was trying to
 leave. So a value that does not name a known backend is a WARNING naming what
-was asked for and what will run instead, and a value that does is an INFO
-line -- because "I flipped the provider and nothing changed" should be
-answerable from the job log rather than by reading this file.
+was asked for and what will run instead.
 
-Silent only when the variable is unset, which is the shipped default and must
-stay as quiet as it has always been.
+EVERY stage says which vendor it resolved to, including the ones that resolved
+to the default because nothing was set. That looks like noise and is not. The
+job above ran entirely on MuAPI for the plainest reason there is -- four of the
+five fal.ai selectors were never added to the deployment at all, and the fifth
+(voice) was, which is exactly why voice is the one stage that switched. An
+operator who sets one variable and believes they have moved the pipeline gets
+no contradiction from a log that only speaks when spoken to. Six lines a job,
+against a stage that can bill for minutes, is what makes "which vendor rendered
+this?" a question the log answers.
 """
 
 from __future__ import annotations
@@ -53,13 +58,10 @@ def resolve_provider(
     choice = (raw or "").strip().lower()
     label = stage or env_var
 
-    if not choice:
-        return default
-
-    if choice not in known:
+    if choice and choice not in known:
         logger.warning(
             "%s is set to %r, which is not a backend this build knows "
-            "(%s) — %s will run on %r instead. Nothing else will say so.",
+            "(%s) — %s will run on %r instead.",
             env_var,
             raw,
             ", ".join(known),
@@ -68,8 +70,13 @@ def resolve_provider(
         )
         return default
 
-    # Said even when it resolves to the default, because "I set it and it
-    # still ran on MuAPI" and "I set it to MuAPI" are the same log line
-    # otherwise, and only one of them is a bug.
+    if not choice:
+        # The line that would have answered the delivered job in one look.
+        # An unset selector is the shipped default AND the shape of "I meant
+        # to switch this and never did", and those two must not look the same
+        # in a log.
+        logger.info("%s runs on %r (%s is not set).", label, default, env_var)
+        return default
+
     logger.info("%s runs on %r (%s=%r).", label, choice, env_var, raw)
     return choice

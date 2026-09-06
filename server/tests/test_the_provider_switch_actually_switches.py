@@ -84,19 +84,28 @@ def test_an_unknown_backend_falls_back_and_says_so(var, caplog):
 
 
 def test_a_recognised_choice_is_logged_too(var, caplog):
-    """Not only the failures. 'I set it and it still ran on MuAPI' and 'I set
-    it to MuAPI' are the same log line otherwise, and only one is a bug."""
+    """Every stage names its vendor, so "which vendor rendered this?" is a
+    question the job log answers rather than one the source does."""
     with caplog.at_level(logging.INFO, logger="tools.provider_choice"):
         assert var("falai") == "falai"
     assert any("falai" in r.getMessage() for r in caplog.records)
 
 
-def test_the_default_path_stays_silent(var, caplog):
-    """A deployment that never set the variable must be as quiet as it has
-    always been -- this line is for operators who changed something."""
+def test_an_unset_stage_still_says_what_it_will_run(var, caplog):
+    """The line that would have answered the delivered job in one look.
+
+    That deployment had MUSEFORGE_VOICE_PROVIDER=elevenlabs and none of the
+    other four fal.ai selectors set at all -- so voice switched, everything
+    else silently stayed on MuAPI, and nothing anywhere contradicted an
+    operator who believed the pipeline had moved. "Not set" and "deliberately
+    MuAPI" must not look the same in a log."""
     with caplog.at_level(logging.INFO, logger="tools.provider_choice"):
-        var(None)
-    assert not caplog.records
+        assert var(None) == "muapi"
+
+    assert caplog.records, "an unset selector is exactly the case that hid"
+    message = caplog.records[0].getMessage()
+    assert "muapi" in message, "says what will actually run"
+    assert "not set" in message, "and that nobody asked for it"
 
 
 # ── every stage now reads its variable the same way ─────────────────────────
