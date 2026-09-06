@@ -28,6 +28,7 @@ from tools.character_qa import (
 from tools.muapi_image_generator import MuAPIImageGenerator
 from tools.muapi_video_generator import MuAPIVideoGenerator
 from tools.muapi_client import MuAPICancelled
+from tools.provider_choice import resolve_provider
 from interfaces.shot_plan import REACTION as REACTION_ROLE
 from interfaces.shot_plan import shots_the_line_reaches
 from tools.video_model_router import REACTION as REACTION_PROFILE
@@ -51,7 +52,12 @@ def _make_video_generator(api_key: str, demo: bool):
       - "falai_reference" — fal.ai Kling O3 Pro reference-to-video
         (one-step character-consistent video; skips separate frame gen)
     """
-    provider = os.environ.get("MUSEFORGE_VIDEO_PROVIDER", "muapi")
+    provider = resolve_provider(
+        "MUSEFORGE_VIDEO_PROVIDER",
+        ("muapi", "falai", "falai_reference"),
+        default="muapi",
+        stage="Video generation",
+    )
     if provider == "falai":
         from tools.falai_video_generator import FalAIVideoGenerator
 
@@ -68,7 +74,12 @@ def _make_image_generator(api_key: str, demo: bool):
     MUSEFORGE_IMAGE_PROVIDER=falai opts into fal.ai FLUX (v1.1 text-to-image
     + flux-pro/kontext for reference). Lazy-imported.
     """
-    provider = os.environ.get("MUSEFORGE_IMAGE_PROVIDER", "muapi")
+    provider = resolve_provider(
+        "MUSEFORGE_IMAGE_PROVIDER",
+        ("muapi", "falai"),
+        default="muapi",
+        stage="Image generation",
+    )
     if provider == "falai":
         from tools.falai_image_generator import FalAIImageGenerator
 

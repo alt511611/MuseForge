@@ -32,6 +32,7 @@ import logging
 import os
 from typing import Callable, Optional
 
+from tools.provider_choice import resolve_provider
 from tools.muapi_client import MuAPIClient, MuAPIError
 
 logger = logging.getLogger(__name__)
@@ -138,7 +139,12 @@ def make_sfx_generator(api_key: str = "", demo: bool = False):
     Lazy import for the same reason make_lipsync uses one: the default path
     must never require fal-client to be installed.
     """
-    provider = (os.environ.get("MUSEFORGE_SFX_PROVIDER", "muapi") or "").strip().lower()
+    provider = resolve_provider(
+        "MUSEFORGE_SFX_PROVIDER",
+        ("muapi", "falai"),
+        default="muapi",
+        stage="Foley / SFX",
+    )
     if provider == "falai":
         from tools.falai_sfx_generator import FalAISFXGenerator
 

@@ -34,6 +34,7 @@ import logging
 import os
 from typing import Callable, Optional
 
+from tools.provider_choice import resolve_provider
 from tools.muapi_client import MuAPIClient, MuAPIError
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,12 @@ def make_lipsync(demo: bool = False):
       - "local" — a self-hosted LatentSync service; no key, no per-scene bill,
         and sync_mode is ours to set rather than the vendor's to withhold
     """
-    provider = (os.environ.get("MUSEFORGE_LIPSYNC_PROVIDER", "muapi") or "").strip().lower()
+    provider = resolve_provider(
+        "MUSEFORGE_LIPSYNC_PROVIDER",
+        ("muapi", "falai", "local"),
+        default="muapi",
+        stage="Lip sync",
+    )
     if provider == "falai":
         # Lazy: the default path must never require fal-client to be installed.
         from tools.falai_lipsync import FalAILipsync
