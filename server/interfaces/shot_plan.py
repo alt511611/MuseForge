@@ -189,6 +189,56 @@ def plan_scene_shots(
 SCALE_LADDER = ("wide shot", "medium shot", "close-up", "extreme close-up")
 
 
+#: Framings whose subject is small enough in frame that a driven mouth is not
+#: something the audience can read. Matched as substrings of the normalised
+#: shot_type, so "extreme wide" and "establishing shot" are both caught by the
+#: word they share with the ladder.
+_FACELESS_FRAMINGS = (
+    "wide",
+    "establishing",
+    "long shot",
+    "aerial",
+    "overhead",
+    "drone",
+    "bird",
+    "vista",
+    "panorama",
+)
+
+#: Framings that put a face on screen whatever else the shot_type says. A
+#: "medium wide" is still a face; the word it shares with a wide shot is not
+#: the word that decides it.
+_FACE_FRAMINGS = ("close", "medium", "portrait", "profile")
+
+
+def framing_shows_a_face(shot_type: str) -> bool:
+    """Is this framing tight enough that driving a mouth would be visible?
+
+    Lip sync is bought per scene and paid for whether or not anybody can see
+    the result. Nothing in the pipeline used to ask this question: scenes were
+    selected for sync purely on "does this scene have dialogue audio"
+    (idea2video._lipsync_scenes), so a line spoken in an extreme wide bought a
+    full sync of a face roughly forty pixels tall.
+
+    Delivered job 1ac6d945-b53, whose lip-sync stage was 311 of its 862
+    seconds: its scene 3 speaks "What are you--" over a harbour wide with the
+    speaker at the frame edge, and about a third of that stage went on a mouth
+    twelve pixels across. The film is identical without it.
+
+    Fails OPEN, which is the same contract the rest of the sync pass keeps: an
+    unknown, empty or unparseable framing is treated as showing a face, so a
+    storyboard that stops filling shot_type loses no feature. Only a framing
+    that positively names itself wide declines.
+    """
+    text = (shot_type or "").strip().lower().replace("-", " ")
+    if not text:
+        return True
+    # Checked FIRST, so a compound framing is decided by its tighter half.
+    if any(word in text for word in _FACE_FRAMINGS):
+        return True
+    return not any(word in text for word in _FACELESS_FRAMINGS)
+
+
 def _base_scale(function: str, tension: int) -> str:
     """The framing a scene wants on its own, before its neighbours are known."""
     function = (function or "").strip().lower()
@@ -309,6 +359,24 @@ def _scene_attr(scene: Any, field: str) -> str:
     if isinstance(scene, dict):
         return str(scene.get(field) or "")
     return str(getattr(scene, field, "") or "")
+
+
+def _shot_field(shot: Any, field: str, default: Any = None) -> Any:
+    """One shot's field, whether it is still a model or already a dict.
+
+    A shot is a StoryboardShot while the storyboard is being planned and a
+    plain dict from the moment script2video records it (``shot.model_dump()``
+    into ``shot_meta``), and both shapes reach the readers below --
+    idea2video._reaction_tail_seconds has always taken the dict one. Read with
+    getattr alone, a dict answers the default for every field: role comes back
+    empty and screen_seconds comes back 0, so a walk along a scene's shots
+    never advances and every angle looks like it opens at zero.
+    """
+    if isinstance(shot, dict):
+        value = shot.get(field, default)
+    else:
+        value = getattr(shot, field, default)
+    return default if value is None else value
 
 
 def delivered_seconds(plan: List[PlannedShot]) -> float:
@@ -468,7 +536,7 @@ def screen_seconds(shot: Any) -> float:
     """
     for field in ("deliver_seconds", "duration_seconds"):
         try:
-            value = float(getattr(shot, field, 0.0) or 0.0)
+            value = float(_shot_field(shot, field, 0.0) or 0.0)
         except (TypeError, ValueError):
             value = 0.0
         if value > 0:
@@ -532,7 +600,7 @@ def shots_the_line_reaches(
         # A reaction cutaway is the other character LISTENING (see
         # plan_scene_shots); there is no mouth in it to drive whatever the
         # clock says.
-        role = str(getattr(shot, "role", "") or "").strip().lower()
+        role = str(_shot_field(shot, "role", "") or "").strip().lower()
         reached.append(role != REACTION and opens_at < line_ends)
         opens_at += screen_seconds(shot)
     return reached

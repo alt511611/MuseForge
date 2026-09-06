@@ -25,7 +25,11 @@ from interfaces.second_budget import (
     total_budget_seconds,
 )
 from interfaces.shot_plan import REACTION as REACTION_ROLE
-from interfaces.shot_plan import plan_shot_scales
+from interfaces.shot_plan import (
+    framing_shows_a_face,
+    plan_shot_scales,
+    shots_the_line_reaches,
+)
 from interfaces.transitions import plan_transitions
 from interfaces.visual_style import resolve as resolve_visual_style
 from pipelines.script2video import (
@@ -273,6 +277,64 @@ def _reaction_tail_seconds(shots: Optional[List[Dict[str, Any]]]) -> float:
             return 0.0
         tail += seconds
     return tail if tail >= MIN_REACTION_TAIL_SECONDS else 0.0
+
+
+def _shot_field_text(shot: Any, field: str) -> str:
+    """One shot field as text, whether the shot is a model or a dict."""
+    if isinstance(shot, dict):
+        return str(shot.get(field) or "")
+    return str(getattr(shot, field, "") or "")
+
+
+def _speaks_in_a_readable_framing(
+    shots: Optional[Sequence[Any]],
+    lines: Sequence[Dict[str, Any]],
+    line_seconds: Optional[float],
+) -> bool:
+    """Is this scene's line spoken in a framing that shows a face?
+
+    Lip sync is bought per scene, costs a provider round trip plus a rejoin
+    re-encode, and is paid for whether or not the result is visible. The pass
+    never asked this: scenes were selected purely on "has dialogue audio", so a
+    line spoken in a harbour wide bought a full sync of a face forty pixels
+    tall.
+
+    Delivered job 1ac6d945-b53 is the case. Its lip-sync stage ran 311s of an
+    862s render -- 36% -- and its third scene speaks "What are you--" over an
+    extreme wide with the speaker at the frame edge, then holds for another ten
+    seconds in silence. About a third of the stage went on a mouth twelve
+    pixels across, and the delivered film is indistinguishable without it.
+
+    Only the angles the line actually REACHES are asked. A scene that opens
+    wide and cuts to a close-up still gets synced when the words are still
+    running under the close-up, and is declined when they finished during the
+    wide -- which is the same question shots_the_line_reaches already answers
+    for shot direction, asked here about a different feature.
+
+    Fails OPEN at every step, matching the rest of this pass: no storyboard, no
+    framings, or an unmeasured line all return True and sync exactly as before.
+    Only a scene whose speaking angles ALL name themselves wide is declined.
+    """
+    shots = list(shots or ())
+    if not shots:
+        return True
+    # The word-count fallback inside shots_the_line_reaches needs the words
+    # when the speech was never measured. Same text the storyboard step feeds
+    # it, rebuilt from the tracks this pass already holds.
+    spoken_text = " ".join(
+        str(track.get("line") or "") for track in lines or ()
+    ).strip()
+    reached = shots_the_line_reaches(shots, spoken_text, line_seconds=line_seconds)
+    speaking = [shot for shot, under in zip(shots, reached) if under]
+    if not speaking:
+        # Nothing is under the line. Not this guard's call to make -- a scene
+        # with no speaking angle is what shots_the_line_reaches exists to
+        # direct, and declining here would attribute it to framing.
+        return True
+    return any(
+        framing_shows_a_face(str(_shot_field_text(shot, "shot_type")))
+        for shot in speaking
+    )
 
 
 async def _split_off_tail(
@@ -3390,6 +3452,27 @@ class Idea2VideoPipeline:
 
         async def _portrait(char) -> tuple:
             wardrobe = (getattr(char, "wardrobe", "") or "").strip()
+            if not wardrobe:
+                # The one costume anchor this pipeline has is TEXT: a
+                # front-facing portrait binds a face and cannot bind a
+                # garment (interfaces/character.wardrobe says so), and the
+                # global "clothing is FIXED" sentence in the identity clause
+                # fixes nothing a model can draw. With this field empty every
+                # shot invents an outfit from the brief's adjectives.
+                #
+                # Delivered job 1ac6d945-b53 wore four different yellow
+                # jackets in thirty seconds -- a matte field jacket, a belted
+                # coverall with reflective stripes, a single-stripe jacket and
+                # a glossy PVC bomber -- with the face consistent throughout,
+                # which is exactly the signature of an anchored face and an
+                # unanchored costume. Nothing in that job's log said the field
+                # was empty, so the report was unanswerable after the fact.
+                logger.warning(
+                    "Character %r has no wardrobe, so nothing but the brief "
+                    "tells any shot what they are wearing — expect the "
+                    "costume to drift between scenes.",
+                    char.name,
+                )
             # The same reading the CASTING step already made, said where the
             # picture can see it. interfaces/gender exists so that "a word
             # that counts as female for a voice counts as female for a face",
@@ -3507,6 +3590,7 @@ class Idea2VideoPipeline:
         requested: bool = True,
         reaction_tails: Optional[Dict[int, float]] = None,
         off_screen: Optional[Set[str]] = None,
+        shots_by_clip: Optional[Dict[int, Sequence[Any]]] = None,
     ) -> List[int]:
         """Replace each speaking scene's clip with a lip-synced one, in place.
 
@@ -3522,6 +3606,11 @@ class Idea2VideoPipeline:
         second angle whenever lip sync was on -- so turning lip sync on flattened
         every peak scene to a single framing, which is the pair of features
         users ask for together.
+
+        ``shots_by_clip`` is each scene's storyboarded angles, keyed the same
+        way ``reaction_tails`` is. It answers one question before the provider
+        is called: is the line spoken in a framing where a driven mouth can be
+        SEEN? See _speaks_in_a_readable_framing.
 
         ``off_screen`` names the speakers the film only hears, the same set
         _heard_but_never_seen computes for the portrait and storyboard steps.
@@ -3682,6 +3771,31 @@ class Idea2VideoPipeline:
                     length > 0 for length in scene_lengths[: scene_index + 1]
                 )
                 drift = speech_anchors.get(scene_index, picture_start) - picture_start
+
+                # Asked BEFORE the splits below, which are ffmpeg re-encodes,
+                # and before the provider is called at all: a sync nobody can
+                # see is not worth the round trip OR the CPU behind it.
+                scene_lines = lines_by_scene.get(scene_index, ())
+                spoken = spoken_seconds(list(scene_lines)) or 0.0
+                if not _speaks_in_a_readable_framing(
+                    (shots_by_clip or {}).get(scene_index),
+                    scene_lines,
+                    # Where the last word falls from this scene's first frame.
+                    # The drift is part of it -- a line held back by the scene
+                    # before starts later inside this one -- but only where the
+                    # timeline is known, on the same terms the lead split uses.
+                    line_seconds=(
+                        ((drift if timeline_known else 0.0) + spoken) or None
+                    ),
+                ):
+                    logger.info(
+                        "Scene %s speaks its line in a framing too wide to read "
+                        "a mouth in, so a sync would not be visible; keeping the "
+                        "unsynced take.",
+                        scene_index,
+                    )
+                    return None
+
                 # A scene that bought a second angle is master-then-reaction in one
                 # file. Sync the master, keep the cutaway out of it, put them back
                 # together -- see _reaction_tail_seconds.
@@ -4300,6 +4414,11 @@ class Idea2VideoPipeline:
                     int(scene["clip_index"]): _reaction_tail_seconds(
                         scene.get("shots")
                     )
+                    for scene in scenes
+                    if scene.get("clip_index") is not None
+                },
+                shots_by_clip={
+                    int(scene["clip_index"]): scene.get("shots") or []
                     for scene in scenes
                     if scene.get("clip_index") is not None
                 },
@@ -5640,20 +5759,6 @@ class Idea2VideoPipeline:
         # Drama-wide direction: identical for every scene, so build it once.
         character_direction = _format_character_direction(script)
 
-        # Fixed second budget for the whole drama, split by tension. The total
-        # is decided here -- before any provider call -- so the cost of the job
-        # is known at charge time and cannot drift with what the story turns
-        # out to be. Tension still shapes the RHYTHM within that total.
-        scene_durations = distribute_budget(
-            [_scene_tension(scene) for scene in script.scenes]
-        )
-        logger.info(
-            "Second budget for job: %s (total %ss across %s scenes)",
-            scene_durations,
-            billable_seconds(scene_durations),
-            len(script.scenes),
-        )
-
         async def _measured_speech_length(
             task: Optional["asyncio.Task"],
         ) -> Optional[float]:
@@ -5672,6 +5777,41 @@ class Idea2VideoPipeline:
             except Exception:
                 return None
             return spoken_seconds(tracks)
+
+        # How long each scene actually speaks for. Awaited HERE, before the
+        # budget is split, because the split is the one decision that cannot
+        # be revisited later: a scene handed twelve seconds has bought twelve
+        # seconds of video by the time anyone knows its line was 1.38 of them
+        # (see interfaces/second_budget).
+        #
+        # This is the only place the render waits on ALL the speech rather
+        # than on scene N's own. The tasks are already in flight and run
+        # concurrently, so the cost is the slowest single voice -- seconds of
+        # work, against the minutes of video it is about to size -- and the
+        # storyboard step below awaited most of them anyway.
+        measured_speech = [
+            (await _measured_speech_length(speech_tasks.get(index))) or 0.0
+            for index in range(len(script.scenes))
+        ]
+
+        # Fixed second budget for the whole drama, split by tension and by how
+        # much each scene has to say. The total is decided here -- before any
+        # provider call -- so the cost of the job is known at charge time and
+        # cannot drift with what the story turns out to be. Tension still
+        # shapes the RHYTHM within that total; the measured line only stops a
+        # scene being handed seconds it will spend in silence.
+        scene_durations = distribute_budget(
+            [_scene_tension(scene) for scene in script.scenes],
+            speech_seconds=measured_speech,
+        )
+        logger.info(
+            "Second budget for job: %s (total %ss across %s scenes); "
+            "measured speech %s",
+            scene_durations,
+            billable_seconds(scene_durations),
+            len(script.scenes),
+            [round(seconds, 2) for seconds in measured_speech],
+        )
 
         async def _scene_line_end_seconds(scene_index: int) -> Optional[float]:
             """Seconds from this scene's first frame to its last spoken word.
@@ -6036,6 +6176,13 @@ class Idea2VideoPipeline:
                     int(scene["clip_index"]): _reaction_tail_seconds(
                         scene.get("shots")
                     )
+                    for scene in scene_results
+                    if scene.get("clip_index") is not None
+                },
+                # The framings each scene was actually shot in, so a line
+                # spoken in a wide is not paid to have its mouth driven.
+                shots_by_clip={
+                    int(scene["clip_index"]): scene.get("shots") or []
                     for scene in scene_results
                     if scene.get("clip_index") is not None
                 },

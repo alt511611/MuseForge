@@ -80,24 +80,87 @@ MAX_SCENE_SECONDS = 12.0
 #: distribute evenly instead of collapsing to the floor.
 DEFAULT_TENSION = 5
 
+#: Air a spoken scene needs on top of its line: a beat to arrive on the first
+#: word and a beat for the last one to land. A scene sized to its speech alone
+#: cuts on the closing consonant.
+SPEECH_BEAT_SECONDS = 1.5
+
 
 def total_budget_seconds(num_scenes: int) -> float:
     """Total seconds a job of this many scenes is entitled to."""
     return max(1, int(num_scenes)) * SECONDS_PER_CREDIT
 
 
-def distribute_budget(
-    tensions: Sequence[int], seconds_per_credit: float = SECONDS_PER_CREDIT
+def _scene_shares(
+    weights: Sequence[int], speech_seconds: Sequence[float] = ()
 ) -> List[float]:
-    """Split the drama's fixed budget across scenes, weighted by tension.
+    """Each scene's fraction of the total: tension, raised to fit its line.
+
+    Deliberately ``max`` rather than a blend. A scene whose line is shorter
+    than its tension share is not asking for less time -- a quiet beat is
+    allowed to breathe, and that is the pacing this module exists to keep. It
+    is only the scene whose line does NOT fit that has a claim tension cannot
+    see, so only that one moves, and renormalising pays for it out of the
+    scenes that had room to spare.
+    """
+    weight_sum = sum(weights) or 1
+    shares = [w / weight_sum for w in weights]
+
+    needs = []
+    for index in range(len(weights)):
+        try:
+            spoken = float(
+                speech_seconds[index] if index < len(speech_seconds) else 0.0
+            )
+        except (TypeError, ValueError):
+            spoken = 0.0
+        # A silent scene claims nothing here and keeps its tension share.
+        needs.append(spoken + SPEECH_BEAT_SECONDS if spoken > 0 else 0.0)
+
+    need_sum = sum(needs)
+    if need_sum <= 0:
+        return shares
+
+    raised = [
+        max(share, need / need_sum) for share, need in zip(shares, needs)
+    ]
+    raised_sum = sum(raised) or 1.0
+    return [share / raised_sum for share in raised]
+
+
+def distribute_budget(
+    tensions: Sequence[int],
+    seconds_per_credit: float = SECONDS_PER_CREDIT,
+    speech_seconds: Sequence[float] = (),
+) -> List[float]:
+    """Split the drama's fixed budget across scenes, by tension and by line.
 
     Returns one duration per scene. The sum equals the total budget (within
     floating-point tolerance) unless the [MIN, MAX] clamps make that
     impossible -- with N scenes the reachable range is N*MIN to N*MAX, and
-    SECONDS_PER_CREDIT sits inside it by construction.
+    SECONDS_PER_CREDIT sits inside it by construction. The TOTAL is untouched
+    by anything here: it is the number the credit was charged against, and
+    only its distribution is open.
 
-    Weighting is by tension directly, so a tension-10 climax gets twice the
-    screen time of a tension-5 scene before clamping.
+    Tension alone decided that distribution, and tension does not know how
+    much there is to say. Delivered job 1ac6d945-b53: three scenes, tensions
+    rising, budget split 8/10/12 -- and the 12 went to the scene with the
+    SHORTEST line in the script. Its climax spoke for 1.38 seconds and then
+    held for 10.7 more in silence, while the scene with 4.5 seconds of
+    dialogue was cut at 10. The film ends on ten seconds of someone standing
+    still, because the longest scene was chosen before anyone knew it had
+    nothing to say.
+
+    So a scene's share is now the larger of what tension asks for and what its
+    own line needs (``speech_seconds`` plus SPEECH_BEAT_SECONDS), renormalised
+    back onto the fixed total. Tension still shapes the rhythm -- it is
+    untouched wherever the speech is shorter than the tension share already
+    grants, which is most scenes -- but it can no longer hand the ceiling to a
+    scene that will spend it in silence.
+
+    ``speech_seconds`` is optional and empty by default: a caller that has not
+    measured its speech (or has none) gets exactly the tension-only split this
+    function has always returned.
     """
     weights = [
         max(1, min(10, int(t) if t else DEFAULT_TENSION)) for t in tensions
@@ -111,11 +174,12 @@ def distribute_budget(
     # always terminates with a consistent answer.
     total = max(count * MIN_SCENE_SECONDS, min(total, count * MAX_SCENE_SECONDS))
 
+    shares = _scene_shares(weights, speech_seconds)
+
     # Proportional first pass, then clamp.
-    weight_sum = sum(weights)
     durations = [
-        min(MAX_SCENE_SECONDS, max(MIN_SCENE_SECONDS, total * w / weight_sum))
-        for w in weights
+        min(MAX_SCENE_SECONDS, max(MIN_SCENE_SECONDS, total * share))
+        for share in shares
     ]
 
     # Clamping breaks the total, in BOTH directions: a tension spread like
