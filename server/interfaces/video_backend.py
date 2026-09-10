@@ -144,14 +144,25 @@ class VideoBackend:
     #: Reference images / character elements it reads. 0 means image-to-video
     #: only: the start frame is the whole of its visual conditioning.
     max_elements: int = 0
-    #: Whether it can cut between framings inside ONE generation. The thing
-    #: that decides whether a scene is one call or several.
-    multishot: bool = False
+    #: How many framings it can cut between inside ONE generation.
+    #:
+    #: 1 means a single continuous take, which is what every endpoint here did
+    #: until now and is why a scene covered in three angles cost three
+    #: generations. Above 1 the arithmetic of coverage inverts: the bill is for
+    #: the scene's SECONDS, so a second and third angle are free, and the
+    #: reason a delivered 30-second film only ever had six shots -- each extra
+    #: angle being a whole extra generation -- stops applying.
+    max_beats: int = 1
     billing: str = FLAT
     #: USD per generation when billing is FLAT, per second when PER_SECOND.
     rate: float = 0.0
     #: Free-text, for the log line an operator reads at 2am.
     note: str = ""
+
+    @property
+    def multishot(self) -> bool:
+        """Whether a scene can be one request with cuts inside it."""
+        return self.max_beats > 1
 
     def accepts_aspect_ratio(self, aspect_ratio: str) -> bool:
         if not self.aspect_ratios:
@@ -301,6 +312,60 @@ BACKENDS = {
         slug="minimax-hailuo-2.3-fast",
         fields=frozenset(),
         duration=Duration(absent=True),
+    ),
+    # -- fal.ai's Kling v3, which is the same model family reached a different
+    # way and a materially different ENDPOINT: it cuts inside one generation
+    # (`multi_prompt`), binds characters as reusable elements, and bills per
+    # second instead of flat.
+    #
+    # Schema read off fal's own API reference for
+    # fal-ai/kling-video/v3/{standard,pro}/image-to-video:
+    #
+    #     start_image_url  required
+    #     prompt | multi_prompt   one of the two
+    #     duration         enum 3..15, default 5
+    #     generate_audio   bool, default true
+    #     elements         characters/objects, cited in prompts as @Element1
+    #     end_image_url    optional
+    #     shot_type        "customize" | "intelligent"
+    #     negative_prompt  cfg_scale
+    #
+    # Aspect ratio is DERIVED FROM THE START IMAGE and is not a field, which is
+    # why none is declared -- sending one is a 422.
+    #
+    # `max_beats` is 5 because five is the largest shot list fal's and Kling's
+    # own documentation demonstrate. The real ceiling is not published, so this
+    # is the largest number either vendor has shown working rather than a
+    # measurement, and it is the conservative direction: asking for four cuts
+    # where six were possible costs coverage, asking for eight where five were
+    # possible could cost the take.
+    "fal-ai/kling-video/v3/standard/image-to-video": VideoBackend(
+        slug="fal-ai/kling-video/v3/standard/image-to-video",
+        fields=frozenset(
+            {"duration", "generate_audio", "end_image_url", "elements",
+             "multi_prompt", "shot_type", "negative_prompt", "cfg_scale"}
+        ),
+        duration=KLING_DURATION,
+        native_audio=frozenset({"en", "zh"}),
+        max_elements=7,
+        max_beats=5,
+        billing=PER_SECOND,
+        rate=0.126,
+        note="per second with audio on; $0.084 silent, $0.154 with voice binding",
+    ),
+    "fal-ai/kling-video/v3/pro/image-to-video": VideoBackend(
+        slug="fal-ai/kling-video/v3/pro/image-to-video",
+        fields=frozenset(
+            {"duration", "generate_audio", "end_image_url", "elements",
+             "multi_prompt", "shot_type", "negative_prompt", "cfg_scale"}
+        ),
+        duration=KLING_DURATION,
+        native_audio=frozenset({"en", "zh"}),
+        max_elements=7,
+        max_beats=5,
+        billing=PER_SECOND,
+        rate=0.168,
+        note="per second with audio on; $0.112 silent, $0.196 with voice binding",
     ),
 }
 

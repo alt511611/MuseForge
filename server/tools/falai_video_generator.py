@@ -62,14 +62,50 @@ def _duration_str(seconds) -> str:
     return str(value)
 
 
+#: How one character/object element is written into the payload.
+#:
+#: THIS SHAPE IS THE LEAST CONFIRMED THING IN THIS FILE. fal's schema listing
+#: says `elements` is "a list of characters/objects, each either an image set
+#: or a video, referenced as @Element1" and does not spell out the keys inside
+#: one. Kling's own element model is a set of views of a subject plus, for a
+#: character, an optional speech sample the generated voice is bound to, and
+#: that is what is written here.
+#:
+#: Isolated in its own function precisely because of that: when the playground
+#: confirms the real keys this is a one-line correction rather than an edit
+#: threaded through a payload builder. Until it is confirmed, a scene rendered
+#: this way may come back with its cast unlocked -- which is why the multi-shot
+#: path is reached only by an explicit provider selection and is not any
+#: deployment's default.
+def _element_payload(element) -> dict:
+    images = [url for url in (getattr(element, "images", ()) or []) if url]
+    if not images:
+        return {}
+    payload = {"image_urls": images}
+    name = (getattr(element, "name", "") or "").strip()
+    if name:
+        payload["name"] = name
+    voice = (getattr(element, "voice_sample", "") or "").strip()
+    if voice:
+        # The other half of the lock, and the reason native audio does not
+        # cost this product its cast: given a clean sample, the take speaks
+        # this character in THAT voice instead of one the model picked.
+        payload["audio_url"] = voice
+    return payload
+
+
 class FalAIVideoGenerator:
     # Endpoint ID confirmed against fal.ai's own model page/API docs.
     ENDPOINT = os.environ.get(
         "FALAI_VIDEO_MODEL", "fal-ai/kling-video/o3/pro/image-to-video"
     )
 
-    def __init__(self, api_key: str, demo: bool = False):
+    def __init__(self, api_key: str, demo: bool = False, multishot: bool = False):
         self.demo = demo
+        #: Whether this instance renders a scene per generation rather than a
+        #: shot per generation. Set from MUSEFORGE_VIDEO_PROVIDER, never
+        #: inferred: see script2video.scene_take_backend.
+        self.multishot = multishot
         # .strip() guards against a stray trailing newline/whitespace in the
         # env var value (easy to introduce when pasting into Render's
         # dashboard) which httpx/fal_client would otherwise send verbatim
@@ -125,14 +161,30 @@ class FalAIVideoGenerator:
         if last_image:
             payload["end_image_url"] = last_image
 
-        handle = await self.client.submit(self.ENDPOINT, arguments=payload)
+        return await self._run(payload, self.ENDPOINT, is_cancelled=is_cancelled)
+
+    async def _run(
+        self,
+        payload: dict,
+        endpoint: str,
+        is_cancelled: Optional[Callable[[], bool]] = None,
+    ) -> str:
+        """Submit, poll and fetch one fal job. Shared by every render path here.
+
+        Extracted when the multi-shot path arrived: the difference between
+        animating one still and rendering a whole scene with cuts in it is
+        entirely in the PAYLOAD, and duplicating ninety lines of polling to
+        express that would have meant two places to fix the next time a
+        cancellation or a content-policy error needed handling.
+        """
+        handle = await self.client.submit(endpoint, arguments=payload)
         request_id = handle.request_id
 
         for _ in range(DEFAULT_MAX_POLLS):
             if is_cancelled and is_cancelled():
-                raise await self._cancel(request_id)
+                raise await self._cancel(request_id, endpoint)
 
-            status = await self.client.status(self.ENDPOINT, request_id, with_logs=False)
+            status = await self.client.status(endpoint, request_id, with_logs=False)
             logger.info(
                 "fal.ai poll for %s: type=%s repr=%.300s",
                 request_id,
@@ -147,7 +199,7 @@ class FalAIVideoGenerator:
                 break
 
             if is_cancelled and is_cancelled():
-                raise await self._cancel(request_id)
+                raise await self._cancel(request_id, endpoint)
             await asyncio.sleep(DEFAULT_POLL_INTERVAL)
         else:
             raise TimeoutError(
@@ -156,7 +208,7 @@ class FalAIVideoGenerator:
             )
 
         try:
-            result = await self.client.result(self.ENDPOINT, request_id)
+            result = await self.client.result(endpoint, request_id)
         except Exception as exc:
             if "content_policy_violation" in str(exc):
                 raise RuntimeError(
@@ -172,7 +224,88 @@ class FalAIVideoGenerator:
             raise RuntimeError(f"fal.ai completed but no video URL in result: {result}")
         return video_url
 
-    async def _cancel(self, request_id: str) -> MuAPICancelled:
+    #: The endpoint that renders a whole scene in one generation.
+    #:
+    #: Deliberately a SECOND constant rather than a mode on ENDPOINT above:
+    #: the two take different payloads (`image_url` against `start_image_url`,
+    #: one prompt against a list) and a single slug with a branch inside it is
+    #: how a caller ends up sending the wrong shape to the right URL.
+    MULTISHOT_ENDPOINT = os.environ.get(
+        "FALAI_MULTISHOT_VIDEO_MODEL",
+        "fal-ai/kling-video/v3/standard/image-to-video",
+    )
+
+    async def generate_scene_take(
+        self,
+        take,
+        is_cancelled: Optional[Callable[[], bool]] = None,
+        generate_audio: bool = True,
+        negative_prompt: str = "",
+    ) -> str:
+        """Render a whole scene -- its cuts included -- in ONE generation.
+
+        ``take`` is an interfaces.scene_take.SceneTake: the beats in cut
+        order, the elements the whole scene is locked to, and the length the
+        backend has already agreed it can deliver.
+
+        What this replaces, per scene, is one image generation and one video
+        generation PER ANGLE, the concat that joined them, the timescale
+        repair that concat needs, and -- when the take carries its own audio
+        in the film's language -- the lip-sync pass over the result.
+        """
+        if self.demo:
+            return DEMO_VIDEO_URL
+
+        prompts = take.multi_prompt()
+        cast = take.cast_clause()
+        if cast and prompts:
+            # Said once, at the top: which token is whom. A model handed
+            # `@Element1` and a beat that reads "she deals" has to guess which
+            # of two people that is, and guessing is how the wrong face gets
+            # the line.
+            prompts = [cast + prompts[0]] + list(prompts[1:])
+
+        payload = {
+            "start_image_url": take.start_image,
+            # Same integer-string enum as the sibling endpoint above; see
+            # _duration_str.
+            "duration": _duration_str(take.seconds),
+            "generate_audio": bool(generate_audio),
+        }
+        if len(prompts) > 1:
+            payload["multi_prompt"] = prompts
+            # "customize" is what makes the shot list binding rather than a
+            # suggestion; "intelligent" lets the model choose its own cuts,
+            # which throws away the storyboard.
+            payload["shot_type"] = "customize"
+        else:
+            # One beat is not a multi-shot request. Sending a one-item list
+            # asks a multi-shot planner to plan nothing.
+            payload["prompt"] = prompts[0] if prompts else ""
+        if take.end_image:
+            payload["end_image_url"] = take.end_image
+        if negative_prompt:
+            payload["negative_prompt"] = negative_prompt
+
+        elements = [_element_payload(e) for e in take.elements]
+        elements = [e for e in elements if e]
+        if elements:
+            payload["elements"] = elements
+
+        logger.info(
+            "fal multi-shot take: %ss, %d beat(s), %d element(s) on %s",
+            payload["duration"],
+            len(prompts),
+            len(elements),
+            self.MULTISHOT_ENDPOINT,
+        )
+        return await self._run(
+            payload, self.MULTISHOT_ENDPOINT, is_cancelled=is_cancelled
+        )
+
+    async def _cancel(
+        self, request_id: str, endpoint: Optional[str] = None
+    ) -> MuAPICancelled:
         """Best-effort remote cancel, then return (not raise) the exception
         the caller should raise -- lets the caller keep a single `raise`
         call site regardless of which cancellation check triggered it.
@@ -182,7 +315,7 @@ class FalAIVideoGenerator:
         works unchanged for this provider too.
         """
         try:
-            await self.client.cancel(self.ENDPOINT, request_id)
+            await self.client.cancel(endpoint or self.ENDPOINT, request_id)
         except Exception as exc:
             logger.warning("fal.ai cancel request failed (already finishing?): %s", exc)
         return MuAPICancelled(f"Job cancelled while polling fal.ai request {request_id}")
