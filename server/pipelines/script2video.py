@@ -723,8 +723,8 @@ def build_frame_prompt(
             )
         else:
             setting_clause += (
-                f"Only the time-of-day lighting may shift subtly; the room "
-                f"itself must not change. "
+                "Only the time-of-day lighting may shift subtly; the room "
+                "itself must not change. "
             )
     else:
         setting_clause = ""
@@ -1148,17 +1148,6 @@ CONCAT_FPS = 24
 #: How far a concatenated master may sit from the sum of its parts. Joins move
 #: the total by a frame or two; anything past this is a broken timeline.
 CONCAT_DURATION_TOLERANCE = 0.02
-
-
-def _probe_duration(video_path: str) -> float:
-    """Duration in seconds, or 0.0 when it cannot be read."""
-    try:
-        from moviepy import VideoFileClip
-
-        with VideoFileClip(video_path) as clip:
-            return float(clip.duration or 0.0)
-    except Exception:
-        return 0.0
 
 
 def _concat_is_intact(out_path: str, expected: float) -> bool:

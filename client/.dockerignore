@@ -1,0 +1,28 @@
+# What must not enter the build context.
+#
+# `node_modules` is the one that actually breaks the build rather than merely
+# bloating it. The Dockerfile installs dependencies in a `deps` stage, copies
+# that install into the builder, and THEN runs `COPY . .` -- so a `node_modules`
+# present on the developer's machine is copied straight over the top of it.
+#
+# Next.js resolves its compiler by platform (`@next/swc-darwin-arm64` on a Mac,
+# `@next/swc-linux-x64-gnu` in this image), so what `npm run build` then finds
+# is a tree of binaries for the wrong operating system. The `deps` stage is
+# there precisely to avoid that, and without this file it is undone one line
+# later.
+node_modules/
+
+# A build output from the host, which the builder stage is about to produce
+# properly and would otherwise be layered on top of.
+.next/
+out/
+
+# Secrets: gitignored, so absent from a CI checkout, and present in a local
+# build context. A key copied into a layer stays in that layer.
+.env
+.env.*
+!.env.example
+
+npm-debug.log*
+yarn-error.log*
+.DS_Store

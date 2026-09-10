@@ -57,6 +57,67 @@ MIN_CUE_SECONDS = 0.85
 #: Sentence-final punctuation, in the languages this product ships in.
 _SENTENCE_END = tuple(".!?…:;")
 
+#: Tokens whose trailing full stop is part of the WORD, not the end of a
+#: sentence. Without this list a caption breaks in the middle of a name.
+#:
+#: Delivered job 4c7bbe85-e5c, the line "Play your cards, Mr. Voss.": the
+#: karaoke path splits one sentence at a time and divides each evenly, so
+#: five words should have come out 3 + 2. "Mr." ended in a full stop, so it
+#: was read as the end of a sentence -- and the second "sentence" was the
+#: single word "Voss.", which went to screen alone for a third of a second.
+#: MIN_WORDS_PER_CUE exists to stop exactly that, and could not help: from
+#: inside the chunker this was not an orphan, it was a complete sentence that
+#: happened to be one word long, which is the one case the floor is relaxed
+#: for ("Run.").
+#:
+#: Titles are the common case in a drama, because a title is how one character
+#: addresses another. Turkish included alongside English for the same reason
+#: _BREAK_BEFORE is: it is the language most of these films are written in.
+_ABBREVIATIONS = {
+    # English titles and the handful of abbreviations dialogue actually uses.
+    "mr", "mrs", "ms", "dr", "prof", "st", "sgt", "lt", "capt", "col",
+    "gen", "rev", "hon", "jr", "sr", "mt", "no", "vs", "etc", "inc", "ltd",
+    # Turkish
+    "dr", "prof", "doç", "av", "sn", "bay", "bn", "yrd", "öğr", "gör",
+    "vb", "bkz", "örn",
+}
+
+
+def ends_sentence(token: str) -> bool:
+    """Whether ``token`` closes a sentence, rather than merely ending in a dot.
+
+    Shared by both caption paths -- the broadcast SRT wrapper below and the
+    karaoke ASS chunker -- because a boundary the two disagree about is a
+    caption that breaks differently depending on which style is switched on.
+
+    Two things are not sentence ends despite the punctuation: a known
+    abbreviation ("Mr.", "Dr."), and a single initial ("J. Voss"), which no
+    list can enumerate.
+
+    The failure this refuses is asymmetric, which is why the doubt resolves
+    toward "not a sentence": a missed boundary merges two cues that could have
+    been separate, and the reader loses nothing. A false boundary strands a
+    word on screen by itself.
+    """
+    text = (token or "").rstrip()
+    if not text:
+        return False
+    if text[-1] not in _SENTENCE_END:
+        return False
+    if text[-1] != ".":
+        # "!", "?", "…", ":" and ";" are never part of a word.
+        return True
+    body = text[:-1].strip("\"'([)]").casefold()
+    if not body:
+        return False
+    if body in _ABBREVIATIONS:
+        return False
+    # A single initial: "J.", "A." -- and "J.R." style runs, whose segments
+    # are all one letter.
+    if all(len(part) == 1 for part in body.split(".") if part):
+        return False
+    return True
+
 #: Clause boundaries, ranked below sentence ends but above everything else.
 _CLAUSE_END = tuple(",—–")
 
@@ -115,7 +176,7 @@ def _break_score(words: List[str], at: int) -> int:
         return -1
     previous = words[at - 1]
     following = words[at]
-    if previous.endswith(_SENTENCE_END):
+    if ends_sentence(previous):
         return 3
     if previous.endswith(_CLAUSE_END):
         return 2

@@ -30,7 +30,7 @@ from typing import Dict, List, Optional, Sequence
 # The same break vocabulary the broadcast-style path uses. Two tables of
 # linking words would let a caption break before "on" in one renderer and
 # after it in the other.
-from interfaces.subtitles import _BREAK_BEFORE, _CLAUSE_END, _SENTENCE_END
+from interfaces.subtitles import _BREAK_BEFORE, _CLAUSE_END, ends_sentence
 
 #: Words on screen at once. Three is about what the eye takes in a single
 #: fixation at phone reading distance; four starts to be read rather than
@@ -116,7 +116,12 @@ def emphasis_stems(*sources: str) -> set:
 
 
 def _ends_sentence(text: str) -> bool:
-    return text.rstrip()[-1:] in _SENTENCE_END
+    """Delegates to the shared rule, which knows "Mr." is not a sentence.
+
+    Kept as a name here because the chunker below reads better for it, and
+    because the two paths must not drift: see `subtitles.ends_sentence`.
+    """
+    return ends_sentence(text)
 
 
 def _chunk_sizes(count: int, words_per_cue: int) -> List[int]:

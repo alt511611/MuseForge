@@ -1,11 +1,14 @@
 """Stripe payment integration for MuseForge subscriptions + credit packages."""
 
 import asyncio
+import logging
 import os
 from typing import Optional
 
 import httpx
 import stripe
+
+logger = logging.getLogger(__name__)
 
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
@@ -256,14 +259,65 @@ async def _mark_event_processed(event_id: str) -> bool:
         return True  # fail-open on Supabase issues
 
 
+async def _release_event_mark(event_id: str) -> None:
+    """Undo `_mark_event_processed`, so Stripe's retry is allowed to work.
+
+    The mark is taken BEFORE the event is handled, which is the right order --
+    it is what stops two concurrent deliveries of the same event from granting
+    the credits twice. It is also why a handler that raises must give the mark
+    back. See `handle_webhook`.
+
+    Fails quietly. If this delete does not land, the event stays marked and
+    the credits stay ungranted, which is exactly the state we were already in;
+    raising here would replace one lost event with a lost event AND a
+    misleading traceback about the delete rather than the cause.
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            await client.delete(
+                f"{SUPABASE_URL}/rest/v1/processed_stripe_events",
+                params={"event_id": f"eq.{event_id}"},
+                headers={
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    "Prefer": "return=minimal",
+                },
+            )
+    except Exception as exc:
+        logger.error(
+            "Stripe event %s failed AND its idempotency mark could not be "
+            "released (%s). Stripe's retry will be treated as a duplicate and "
+            "this payment will not be credited without manual repair.",
+            event_id,
+            exc,
+        )
+
+
 async def handle_webhook(payload: bytes, sig_header: str) -> dict:
     """Verify Stripe webhook signature and process supported events."""
     if not STRIPE_WEBHOOK_SECRET:
+        # Every webhook this deployment ever receives will be rejected, and
+        # the access log shows only "400". Said once, loudly, with the cause.
+        logger.error(
+            "Stripe webhook rejected: STRIPE_WEBHOOK_SECRET is not configured, "
+            "so no payment event can be verified or credited."
+        )
         raise ValueError("STRIPE_WEBHOOK_SECRET is not configured")
 
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
     except stripe.error.SignatureVerificationError as exc:
+        # A bare 400 in the access log cannot be told apart from a port scan.
+        # The two causes need different actions -- rotate the endpoint secret,
+        # or ignore the noise -- so the log says which one this is.
+        logger.error(
+            "Stripe webhook rejected: signature verification failed (%s). "
+            "If Stripe's dashboard shows these as failed deliveries, the "
+            "endpoint's signing secret does not match STRIPE_WEBHOOK_SECRET.",
+            exc,
+        )
         raise ValueError(f"Invalid webhook signature: {exc}") from exc
 
     event_id = event["id"]
@@ -275,6 +329,36 @@ async def handle_webhook(payload: bytes, sig_header: str) -> dict:
     if not is_new:
         return {"status": "already_processed", "event_id": event_id}
 
+    try:
+        return await _dispatch_event(event_type, data)
+    except Exception:
+        # The mark was taken before the work; the work did not happen. Leaving
+        # it in place is the expensive failure: Stripe retries a 5xx, the
+        # retry finds the event already marked, returns 200 "already
+        # processed", and a customer who paid is never credited -- silently,
+        # permanently, and with a green delivery in the Stripe dashboard.
+        #
+        # Releasing it makes the retry do the work instead. The duplicate-grant
+        # risk this reintroduces is bounded by the same failure having to
+        # happen AFTER the credits landed, which is the one ordering
+        # `_add_credits_to_profile` does not produce -- it is the last thing
+        # every branch below does.
+        logger.exception(
+            "Stripe event %s (%s) failed while being handled; releasing its "
+            "idempotency mark so the retry can be processed.",
+            event_id,
+            event_type,
+        )
+        await _release_event_mark(event_id)
+        raise
+
+
+async def _dispatch_event(event_type: str, data: dict) -> dict:
+    """Apply one verified, not-yet-processed Stripe event.
+
+    Split out of `handle_webhook` so the idempotency mark has a single place
+    to be given back when this raises.
+    """
     # ── Subscription checkout completed ──────────────────────────────────────
     if event_type == "checkout.session.completed":
         user_id = data.get("client_reference_id") or data.get("metadata", {}).get("user_id")

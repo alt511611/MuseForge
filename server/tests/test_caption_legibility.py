@@ -189,3 +189,58 @@ def test_the_style_always_carries_the_readability_settings():
         assert "Outline=" in style and "Shadow=" in style, size
         assert "PrimaryColour=&H00FFFFFF" in style, size
         assert "MarginL=" in style and "MarginR=" in style, size
+
+
+# --------------------------------------------------------------------------
+# A title is not the end of a sentence.
+# --------------------------------------------------------------------------
+
+def test_a_title_does_not_end_a_sentence():
+    """"Mr." ends in a full stop and does not end a thought.
+
+    Delivered job 4c7bbe85-e5c put the single word "Voss." on screen alone,
+    because the sentence "Play your cards, Mr. Voss." was read as two -- and a
+    one-word sentence is the one case MIN_WORDS_PER_CUE stands aside for.
+    """
+    from interfaces.ass_captions import chunk_into_cues
+
+    line = "Play your cards, Mr. Voss."
+    words = [
+        {"text": word, "start": i * 0.4, "end": i * 0.4 + 0.35}
+        for i, word in enumerate(line.split())
+    ]
+    cues = chunk_into_cues(words)
+
+    assert [len(cue.words) for cue in cues] == [3, 2], (
+        "Five words in one sentence divide evenly, not into an orphan: "
+        + str([" ".join(w.text for w in c.words) for c in cues])
+    )
+    assert all(len(cue.words) >= 2 for cue in cues)
+
+
+def test_a_real_full_stop_still_splits():
+    """The rule above must not swallow ordinary sentence ends."""
+    from interfaces.ass_captions import chunk_into_cues
+
+    line = "Chips don't lie. Neither do you."
+    words = [
+        {"text": word, "start": i * 0.4, "end": i * 0.4 + 0.35}
+        for i, word in enumerate(line.split())
+    ]
+    cues = chunk_into_cues(words)
+
+    joined = [" ".join(w.text for w in cue.words) for cue in cues]
+    assert not any("lie." in text and "Neither" in text for text in joined), (
+        "A cue must not span a full stop: " + str(joined)
+    )
+
+
+def test_an_initial_is_not_a_sentence_end():
+    """No list can enumerate initials, so they are recognised by shape."""
+    from interfaces.subtitles import ends_sentence
+
+    assert not ends_sentence("J.")
+    assert not ends_sentence("J.R.")
+    assert not ends_sentence("Dr.")
+    assert ends_sentence("Voss.")
+    assert ends_sentence("Run.")
