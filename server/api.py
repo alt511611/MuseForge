@@ -240,17 +240,21 @@ _rate_limiter = _SlidingWindowRateLimiter(limit=5, window=60.0)
 async def lifespan(app: FastAPI):
     jobs_dir = os.environ.get("MUSEFORGE_JOBS_DIR", "/tmp/museforge_jobs")
     os.makedirs(jobs_dir, exist_ok=True)
-    # Independent background tasks (disk orphans + stale DB job rows)
+    # Independent background tasks (disk orphans + stale DB job rows + the
+    # Storage bucket, which nothing pruned until retention was added)
     from jobs import orphan_cleanup_loop, stale_job_reaper_loop
+    from tools.supabase_storage import storage_retention_loop
 
     cleanup_task = asyncio.create_task(orphan_cleanup_loop())
     reaper_task = asyncio.create_task(stale_job_reaper_loop())
+    retention_task = asyncio.create_task(storage_retention_loop())
+    tasks = (cleanup_task, reaper_task, retention_task)
     try:
         yield
     finally:
-        cleanup_task.cancel()
-        reaper_task.cancel()
-        for task in (cleanup_task, reaper_task):
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
             try:
                 await task
             except asyncio.CancelledError:

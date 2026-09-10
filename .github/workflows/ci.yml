@@ -16,6 +16,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      # The suite shells out to ffprobe to measure what it just encoded -- a
+      # trim that lands on the right frame, a guide track that kept its length,
+      # a concat that copied packets instead of re-encoding. The runner ships
+      # neither ffprobe nor ffmpeg, so four of those tests raised
+      # FileNotFoundError and CI had been red on main since 2026-08-30. A suite
+      # that always fails is not a signal, and every merge after that point
+      # went in without one. server/Dockerfile installs the same binary for the
+      # same reason.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
       - name: Run tests

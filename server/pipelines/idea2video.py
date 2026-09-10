@@ -24,6 +24,7 @@ from interfaces.second_budget import (
     distribute_budget,
     total_budget_seconds,
 )
+from tools.provider_choice import resolve_provider
 from interfaces.shot_plan import REACTION as REACTION_ROLE
 from interfaces.shot_plan import (
     framing_shows_a_face,
@@ -75,7 +76,13 @@ def _make_voice_generator(api_key: str, demo: bool, working_dir: str = ""):
     rather than estimated. Lazy-imported so a deployment that never sets the
     variable does not import httpx clients it will not use.
     """
-    if os.environ.get("MUSEFORGE_VOICE_PROVIDER", "muapi").strip().lower() == "elevenlabs":
+    provider = resolve_provider(
+        "MUSEFORGE_VOICE_PROVIDER",
+        ("muapi", "elevenlabs"),
+        default="muapi",
+        stage="Dialogue voices",
+    )
+    if provider == "elevenlabs":
         from tools.elevenlabs_voice_generator import ElevenLabsVoiceGenerator
 
         return ElevenLabsVoiceGenerator(
@@ -91,7 +98,12 @@ def _make_music_generator(api_key: str, demo: bool):
     MUSEFORGE_MUSIC_PROVIDER=falai opts into fal.ai Beatoven
     (endpoint ``beatoven/music-generation``). Lazy-imported.
     """
-    provider = os.environ.get("MUSEFORGE_MUSIC_PROVIDER", "muapi")
+    provider = resolve_provider(
+        "MUSEFORGE_MUSIC_PROVIDER",
+        ("muapi", "falai"),
+        default="muapi",
+        stage="Music",
+    )
     if provider == "falai":
         from tools.falai_music_generator import FalAIMusicGenerator
 
