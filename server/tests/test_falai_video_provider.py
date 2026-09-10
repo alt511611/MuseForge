@@ -110,7 +110,7 @@ async def test_submits_confirmed_schema_and_returns_video_url(monkeypatch):
 @pytest.mark.asyncio
 async def test_api_key_is_stripped_before_use(monkeypatch):
     """A trailing newline/whitespace in FAL_KEY (easy to introduce when
-    pasting into Render's dashboard) must never reach the real request --
+    pasting into a dashboard) must never reach the real request --
     it would otherwise cause an opaque 'Illegal header value' error."""
     import fal_client
     from tools.falai_video_generator import FalAIVideoGenerator

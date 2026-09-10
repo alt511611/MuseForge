@@ -261,12 +261,13 @@ def test_it_is_on_when_nothing_is_configured(monkeypatch):
     ids=["empty", "whitespace", "garbage"],
 )
 def test_an_empty_setting_falls_back_instead_of_killing_the_import(monkeypatch, raw):
-    """render.yaml writes an unset knob as ``value: ""``.
+    """A deployment writes an unset knob as an empty value, not as an absence.
 
-    That does not leave the variable unset -- it sets it to an empty string, so
-    a bare int(os.environ.get(...)) never sees its default and raises. These
-    are read at module scope, so the failure is not a bad setting, it is an API
-    that will not import.
+    Render's blueprint wrote ``value: ""``; Coolify's environment editor stores
+    ``NAME=``. Either way the variable exists and is empty, so a bare
+    int(os.environ.get(...)) never sees its default and raises. These are read
+    at module scope, so the failure is not a bad setting, it is an API that
+    will not import.
     """
     monkeypatch.setenv("MUSEFORGE_SIGNED_URL_TTL", raw)
 

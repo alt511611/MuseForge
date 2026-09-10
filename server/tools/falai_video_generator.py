@@ -41,7 +41,7 @@ DEMO_VIDEO_URL = os.environ.get("MUSEFORGE_DEMO_VIDEO", "").strip() or (
     # broke demo mode: jobs completed but the "finished" video would not
     # play. Any third-party fixture can go the same way -- set
     # MUSEFORGE_DEMO_VIDEO in the deployment env to override without a
-    # code change (render.yaml / docker-compose.yml both declare it).
+    # code change (deploy/coolify.env and docker-compose.yml both declare it).
     "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4"
 )
 
@@ -107,7 +107,7 @@ class FalAIVideoGenerator:
         #: inferred: see script2video.scene_take_backend.
         self.multishot = multishot
         # .strip() guards against a stray trailing newline/whitespace in the
-        # env var value (easy to introduce when pasting into Render's
+        # env var value (easy to introduce when pasting into Coolify's
         # dashboard) which httpx/fal_client would otherwise send verbatim
         # in a request header, causing an opaque "Illegal header value".
         self.api_key = (api_key or os.environ.get("FAL_KEY", "")).strip()
@@ -122,7 +122,7 @@ class FalAIVideoGenerator:
             raise RuntimeError(
                 "FAL_KEY is not set (or is empty) -- cannot use "
                 "MUSEFORGE_VIDEO_PROVIDER=falai without it. Set FAL_KEY in "
-                "Render's environment, or switch back to \"muapi\"."
+                "Coolify's environment, or switch back to \"muapi\"."
             )
         self.client = fal_client.AsyncClient(key=self.api_key or None)
 

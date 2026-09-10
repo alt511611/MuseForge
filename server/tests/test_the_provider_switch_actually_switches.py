@@ -62,8 +62,10 @@ def test_an_unset_variable_is_the_shipped_default(var):
 
 
 def test_an_empty_variable_is_the_shipped_default(var):
-    """render.yaml declares several of these as `value: ""`, so empty is the
-    normal state of a deployment that has not opted in."""
+    """A deployment declares several of these with an empty value, so empty --
+    not absent -- is the normal state of one that has not opted in.
+    deploy/coolify.env carries MUSEFORGE_IMAGE_PROVIDER= for exactly that
+    reason."""
     assert var("") == "muapi"
     assert var("   ") == "muapi"
 

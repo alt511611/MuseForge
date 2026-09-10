@@ -12,12 +12,31 @@
    on arrival and erased by the next grant or deduction.
 """
 import os
-import re
 import sys
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from tools.muapi_lipsync import TRUTHY
+
+#: What the running service is configured to do. See deploy/coolify.env.
+SHIPPED_CONFIG = os.path.join(
+    os.path.dirname(__file__), "..", "..", "deploy", "coolify.env"
+)
+
+
+def _shipped_config() -> dict:
+    """deploy/coolify.env as a dict, comments and blank lines dropped."""
+    config = {}
+    with open(SHIPPED_CONFIG, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, _, value = line.partition("=")
+            config[name.strip()] = value.strip().lower()
+    return config
 os.environ.setdefault("MUAPI_KEY", "test-key-not-real")
 
 import api as api_mod  # noqa: E402
@@ -49,30 +68,63 @@ def test_falai_provider_still_requires_the_fal_key(monkeypatch):
     assert api_mod._lipsync_configured() is True
 
 
-def test_the_blueprint_ships_the_feature_switched_on():
-    """The flag was declared in render.yaml with an empty value, which is the
-    same as absent everywhere it is read: /api/health reported
-    lipsync_available=false, the Pro toggle never rendered, and a request that
-    asked for lip sync anyway was dropped in generate(). Delivered dramas came
-    back with the voice laid over closed, motionless mouths.
+def test_the_shipped_configuration_switches_the_feature_on():
+    """The flag was declared with an empty value, which is the same as absent
+    everywhere it is read: /api/health reported lipsync_available=false, the Pro
+    toggle never rendered, and a request that asked for lip sync anyway was
+    dropped in generate(). Delivered dramas came back with the voice laid over
+    closed, motionless mouths.
 
     Readiness is not spending. The per-job opt-in still sits behind the Pro
     toggle and still charges +1 credit per speaking scene, so an operator who
     wants the old behaviour turns the flag off; nobody is billed by this line.
+
+    Read from deploy/coolify.env, which replaced render.yaml when Coolify
+    became the only deployment. Coolify keeps its environment in a database
+    rather than in the repository, so without that file nothing in version
+    control would say what the running service is configured to do -- and this
+    assertion, which is the only thing that has ever caught this flag going
+    quiet, would have had nothing to read.
     """
-    path = os.path.join(os.path.dirname(__file__), "..", "..", "render.yaml")
-    with open(path, encoding="utf-8") as f:
-        blueprint = f.read()
-
-    declared = re.search(
-        r"- key: MUSEFORGE_LIPSYNC_ENABLED\s*\n\s*value: \"([^\"]*)\"", blueprint
-    )
-    assert declared, "the blueprint must declare the flag at all"
-    from tools.muapi_lipsync import TRUTHY
-
-    assert declared.group(1).strip().lower() in TRUTHY, (
+    assert _shipped_config()["MUSEFORGE_LIPSYNC_ENABLED"] in TRUTHY, (
         "declared but empty reads as OFF, which is how the feature shipped "
         "unreachable in its own default configuration"
+    )
+
+
+def test_the_shipped_configuration_can_speak_before_it_syncs():
+    """Lip sync on with dialogue off is the one pairing that cannot work.
+
+    There is nothing to drive a mouth from without a generated voice, so the
+    sync pass runs over silence and the film ships with the voice -- when one
+    is finally switched on -- laid across closed mouths. The two flags were in
+    exactly that state in the blueprint this file used to read.
+    """
+    config = _shipped_config()
+    if config["MUSEFORGE_LIPSYNC_ENABLED"] in TRUTHY:
+        assert config.get("MUSEFORGE_DIALOGUE_ENABLED", "") in TRUTHY, (
+            "lip sync is on and dialogue is off: the sync pass has no voice "
+            "to drive a mouth from"
+        )
+
+
+def test_the_shipped_configuration_holds_no_secrets():
+    """deploy/coolify.env is committed. Nothing that authenticates goes in it.
+
+    Named rather than pattern-matched: a check that looks for "KEY" in a
+    variable name would pass a file with a Stripe price id in it and fail on
+    MUAPI_KONTEXT_MODEL, which is neither a secret nor a key.
+    """
+    forbidden = (
+        "ANTHROPIC_API_KEY", "ELEVENLABS_API_KEY", "FAL_KEY", "MUAPI_KEY",
+        "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_KEY", "SUPABASE_URL",
+        "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET",
+    )
+    config = _shipped_config()
+    leaked = sorted(name for name in forbidden if name in config)
+    assert not leaked, (
+        f"{leaked} must live in Coolify and nowhere else; this file is "
+        "committed"
     )
 
 

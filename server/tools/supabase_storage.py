@@ -35,12 +35,15 @@ STORAGE_BUCKET = os.environ.get("MUSEFORGE_STORAGE_BUCKET", "videos")
 def _int_env(name: str, default: int) -> int:
     """An integer setting, falling back to ``default`` on anything unusable.
 
-    Bare ``int(os.environ.get(...))`` is wrong for every knob declared in
-    render.yaml, because the blueprint's way of saying "leave this alone" is
-    ``value: ""`` -- which sets the variable to an EMPTY STRING rather than
-    leaving it unset, so the default never applies and int() raises. At module
-    scope that is not a bad setting, it is a server that will not import.
-    Same shape as jobs._stale_timeout_minutes.
+    Bare ``int(os.environ.get(...))`` is wrong for every knob a deployment
+    declares without a value, because "leave this alone" is written as an
+    EMPTY STRING rather than as an absent variable -- so the default never
+    applies and int() raises. At module scope that is not a bad setting, it is
+    a server that will not import.
+
+    Every platform this has run on does it: Render's blueprint wrote
+    ``value: ""``, and Coolify's environment editor stores ``NAME=`` the same
+    way. Same shape as jobs._stale_timeout_minutes.
     """
     raw = os.environ.get(name, "").strip()
     if not raw:

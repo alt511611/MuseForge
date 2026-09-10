@@ -2,7 +2,7 @@
 missing/empty, instead of silently constructing a key=None client that
 could fail unpredictably deep inside the first real network call --
 found during a deep audit after a generation produced zero logs at all,
-with FAL_KEY missing from Render's environment as the leading suspect.
+with FAL_KEY missing from the deployment's environment as the leading suspect.
 """
 import os
 import sys

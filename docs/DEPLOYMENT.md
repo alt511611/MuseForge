@@ -1,8 +1,26 @@
 # MuseForge Deployment Notes
 
+## Where this runs
+
+**Coolify is the only deployment.** It builds `server/Dockerfile` and holds the
+environment in its own database, which is why the repository no longer carries
+a blueprint: `render.yaml` was deleted when Render was retired.
+
+That leaves one gap worth knowing about. Coolify's configuration is not in
+version control, so a flag can be flipped without a diff, a review or a commit
+message. `deploy/coolify.env` is the record that closes it — the non-secret
+half of the production configuration, in the exact format Coolify's developer
+view accepts, with the reasoning for each value. It is not read at deploy
+time; it is what you paste in, and what
+`server/tests/test_lipsync_readiness_and_refund.py` asserts against so a
+setting cannot go quiet unnoticed.
+
+Secrets are in Coolify and nowhere else, and `deploy/coolify.env` has a test
+that fails if one is ever committed into it.
+
 ## Supabase Storage — Video Bucket (required for production)
 
-Generated videos are uploaded to **Supabase Storage** so they survive Render
+Generated videos are uploaded to **Supabase Storage** so they survive container
 restarts and work across multiple instances. The local `/tmp/museforge_jobs`
 directory is only a working scratch space.
 
@@ -72,7 +90,7 @@ Storage signed URLs.
   moviepy/ffmpeg, after the final video is concatenated.
 - The watermark step needs a real TrueType font on the host. The backend
   `Dockerfile` installs `fonts-dejavu-core` for this; if you deploy without
-  that Dockerfile (e.g. a bare Render/Railway Python buildpack), install a
+  that Dockerfile (e.g. a bare Python buildpack), install a
   TTF font package or set `MUSEFORGE_WATERMARK_FONT` to an absolute font
   path. If no font is found, the watermark step **fails open** (video ships
   unwatermarked, job never fails) and logs a warning — check logs after
@@ -81,14 +99,14 @@ Storage signed URLs.
 ## Long-running generation jobs (multi-scene)
 
 Generation is scheduled with FastAPI `BackgroundTasks` after `/api/generate`
-returns `job_id`, so Render's ~100-minute HTTP request timeout does **not**
-apply to the pipeline itself. In-process guards still matter:
+returns `job_id`, so a proxy's HTTP request timeout does **not** apply to the
+pipeline itself. In-process guards still matter:
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `MUSEFORGE_PIPELINE_HARD_TIMEOUT` | `7200` (2h) | `asyncio.wait_for` around `pipeline.run()` |
 | `MUSEFORGE_STALE_JOB_TIMEOUT_MINUTES` | `150` | Reaper marks stuck queued/running DB rows failed |
-| `MUSEFORGE_SECONDS_PER_SCENE` | `100` | `/api/estimate` wall-clock per sequential scene |
+| `MUSEFORGE_SECONDS_PER_SCENE` | `10` | Seconds of finished video one credit buys |
 
 Scenes render **sequentially** (character continuity). Pro allows up to 24
 scenes (~3 min finished video at ~7.5s/scene average); expect 30–60+ minutes
@@ -105,6 +123,10 @@ renders run.
    generation.
 2. Create the private `videos` Storage bucket before the first non-demo
    production render.
-3. Set Stripe price IDs and webhook secret on Render.
+3. Set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` and every `STRIPE_PRICE_*`
+   in Coolify. Without them `stripe.api_key` is empty, so `/api/checkout`
+   raises and **every webhook delivery answers 400** — a customer who somehow
+   paid is never credited, and the only visible symptom is a 400 in the access
+   log.
 4. Rebuild/redeploy the backend image after this change so the Dockerfile's
    `fonts-dejavu-core` install takes effect (see watermark section above).
