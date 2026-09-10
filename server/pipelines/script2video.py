@@ -33,6 +33,8 @@ from interfaces.shot_plan import REACTION as REACTION_ROLE
 from interfaces.shot_plan import shots_the_line_reaches
 from tools.video_model_router import REACTION as REACTION_PROFILE
 from tools.video_model_router import classify_shot
+from interfaces.video_backend import backend_for
+from interfaces.scene_take import Element, plan_scene_take
 
 logger = logging.getLogger(__name__)
 
@@ -51,17 +53,29 @@ def _make_video_generator(api_key: str, demo: bool):
       - "falai" — fal.ai Kling O3 Pro image-to-video
       - "falai_reference" — fal.ai Kling O3 Pro reference-to-video
         (one-step character-consistent video; skips separate frame gen)
+      - "falai_multishot" — fal.ai Kling v3, a whole SCENE per generation with
+        its cuts inside it (interfaces/scene_take)
+
+    "falai_multishot" is a separate value rather than a capability the "falai"
+    path discovers for itself, and deliberately so: the two render a scene by
+    completely different routes, and an existing deployment that set
+    MUSEFORGE_VIDEO_PROVIDER=falai months ago must not change strategy because
+    a new endpoint was declared. Opting in is a decision, not a side effect.
     """
     provider = resolve_provider(
         "MUSEFORGE_VIDEO_PROVIDER",
-        ("muapi", "falai", "falai_reference"),
+        ("muapi", "falai", "falai_reference", "falai_multishot"),
         default="muapi",
         stage="Video generation",
     )
-    if provider == "falai":
+    if provider in ("falai", "falai_multishot"):
         from tools.falai_video_generator import FalAIVideoGenerator
 
-        return FalAIVideoGenerator(os.environ.get("FAL_KEY", ""), demo=demo)
+        return FalAIVideoGenerator(
+            os.environ.get("FAL_KEY", ""),
+            demo=demo,
+            multishot=(provider == "falai_multishot"),
+        )
     if provider == "falai_reference":
         from tools.falai_reference_video_generator import FalAIReferenceVideoGenerator
 
@@ -398,6 +412,181 @@ IDENTITY_CLAUSE_OVERHEAD = (
     + len(_NO_UNNAMED_ITEMS)
     + len(_REFERENCE_NOTE.format(name="X" * 40))
 )
+
+
+def characters_in_frame(shot, characters, matched_char=None) -> list:
+    """Who this shot SHOWS, anchor first -- not who the SCENE has.
+
+    Extracted so that the two things that must never disagree about it cannot:
+    the identity CLAUSE that describes these people to the image model, and
+    the reference SET that shows it their faces. When those two answered
+    separately, a frame could be handed one person's portrait while being
+    told about somebody else's face, which is the most expensive way to draw
+    a stranger.
+
+    The anchor -- the character whose portrait leads the reference set -- is
+    first by construction, because a single-identity endpoint reads only the
+    first reference and it has to be the one the frame is actually about.
+
+    A shot that names nobody falls back to the scene's whole cast. Narrowing
+    on no evidence, in the direction of describing FEWER of the people who
+    might be on screen, is how a character comes back as a stranger; that is
+    also the right answer for an insert or an establishing plate, which get
+    the cast they were written with.
+    """
+    in_frame = [
+        character
+        for _, character in on_screen_name_matches(
+            f"{shot.visual_desc} {getattr(shot, 'motion_desc', '') or ''}".lower(),
+            characters or [],
+        )
+        # is_visible is the cast-level answer to the same question, and the
+        # identity clause filters by it anyway: without this, a shot naming
+        # only a never-seen character would narrow to a list that then
+        # describes NOBODY, and the frame would go out with no appearance
+        # lock at all.
+        if getattr(character, "is_visible", True)
+    ]
+    if in_frame and matched_char is not None and matched_char not in in_frame:
+        # The reference portrait's owner is in the frame by construction.
+        in_frame.insert(0, matched_char)
+    if in_frame:
+        return in_frame
+    # The fallback is filtered too. `build_character_identity_clause` drops
+    # invisible characters itself, so this changes no prompt -- but the
+    # REFERENCE SET reads the same list, and a radio voice with no face is not
+    # somebody a frame can be shown a picture of.
+    return [c for c in (characters or []) if getattr(c, "is_visible", True)]
+
+
+def scene_take_backend(video_gen):
+    """The declaration for this generator's one-take endpoint, or None.
+
+    None is the answer for every backend this pipeline has ever used, and the
+    per-shot path below is untouched by it. A backend answers otherwise only
+    when it was selected for exactly this (MUSEFORGE_VIDEO_PROVIDER=
+    falai_multishot) AND its declaration says it can cut inside a generation.
+    Both halves are required: the capability without the selection would
+    change how an existing deployment renders, and the selection without the
+    capability would send a shot list to something that cannot cut.
+    """
+    if not getattr(video_gen, "multishot", False):
+        return None
+    endpoint = (getattr(video_gen, "MULTISHOT_ENDPOINT", "") or "").strip()
+    if not endpoint or not hasattr(video_gen, "generate_scene_take"):
+        return None
+    declared = backend_for(endpoint)
+    return declared if declared.multishot else None
+
+
+def resolve_frame_references(
+    shot,
+    characters,
+    portraits,
+    scene_subject=None,
+    location_plate_url=None,
+    reference_snapshot=None,
+    dynamic_reference_enabled: bool = False,
+    scene_idx: int = 0,
+    shot_idx: int = 0,
+):
+    """Which pictures this frame is drawn from: ``(anchor_char, anchor, set)``.
+
+    Extracted so a scene rendered as ONE take (interfaces/scene_take) resolves
+    its opening frame exactly the way a per-shot render does. The alternative
+    was a second copy of this, and a second copy is how two render paths start
+    disagreeing about who is in a frame -- which is the disagreement
+    `characters_in_frame` was extracted to make impossible in the first place.
+    """
+    reference_url = None
+    matched_char = None
+    shot_text = f"{shot.visual_desc} {getattr(shot, 'motion_desc', '') or ''}".lower()
+    visible_chars = [c for c in characters if getattr(c, "is_visible", True)]
+    portraits = portraits or {}
+    reference_snapshot = reference_snapshot or {}
+
+    # Found via a real report of character-swap between scenes: this ALWAYS
+    # used visible_chars[0] (the first character in the list) as the reference
+    # portrait for every shot, regardless of which character the shot's own
+    # text describes. Now: whichever known character's name appears FIRST by
+    # text position -- narrative order, so "Sam looks at Maria" anchors Sam.
+    named_matches = on_screen_name_matches(shot_text, visible_chars)
+    if named_matches:
+        named_matches.sort(key=lambda pair: pair[0])
+        matched_char = named_matches[0][1]
+    elif scene_subject is not None and shot_shows_a_person(shot_text):
+        # Named nobody, but there is plainly a person in it -- "the old
+        # bookseller walks the alley", "her hand on the door". Falling through
+        # to the plate here is what let the model draw a new stranger at every
+        # outdoor cut, because the plate is shot deliberately empty and gives
+        # the frame no face to hold. Anchor to whoever the SCENE is about.
+        matched_char = scene_subject
+        logger.info(
+            "Scene %s shot %s names no character but shows one; anchoring to "
+            "the scene's subject %r instead of the empty location plate.",
+            scene_idx + 1,
+            shot_idx,
+            scene_subject.name,
+        )
+    elif location_plate_url:
+        # No character name AND no person in the text at all -- an establishing
+        # shot, an insert, an object. The fallback before it handed this
+        # visible_chars[0]'s PORTRAIT, which is the wrong anchor twice over: it
+        # pushes a face into a shot the storyboard deliberately wrote without
+        # one, and it leaves the room re-invented from the text every time.
+        reference_url = location_plate_url
+    elif visible_chars:
+        # No plate available (no location in the script, or plate generation
+        # failed) -- keep the original first-visible-character fallback rather
+        # than dropping to an unreferenced frame.
+        matched_char = visible_chars[0]
+
+    if matched_char:
+        # Default: always anchor to the character's LOCKED portrait, so
+        # identity error stays bounded instead of compounding across scenes
+        # (see is_dynamic_reference_enabled). Opting in restores the previous
+        # chain-forward behaviour, where the most recently generated frame
+        # wins -- only populated from the second shot/scene onward, so the very
+        # first reference for any character is the portrait either way.
+        locked_portrait = portraits.get(matched_char.name)
+        if dynamic_reference_enabled:
+            reference_url = reference_snapshot.get(matched_char.name) or locked_portrait
+        else:
+            reference_url = locked_portrait or reference_snapshot.get(matched_char.name)
+
+    # THE REST OF THE EVIDENCE.
+    #
+    # The anchor used to be the whole reference set, which is only enough for
+    # a shot with one person in it. A two-hander gets one anchor, so the OTHER
+    # face in the frame is drawn from the prompt's prose -- and prose produces
+    # somebody who matches the description and is not the same person twice.
+    # Delivered job 4c7bbe85-e5c: two characters, six frames, twelve face
+    # appearances, six locks. Its male lead is three different men.
+    frame_references = [reference_url] if reference_url else []
+    if matched_char is not None:
+        # ONLY a shot that is about somebody collects the rest of the faces. A
+        # shot with no matched character is an establishing plate, an insert or
+        # an object -- written deliberately without people -- and handing it the
+        # cast's portraits is the same mistake the plate branch above exists to
+        # undo.
+        for other in characters_in_frame(shot, characters, matched_char):
+            if other is matched_char:
+                continue
+            portrait = portraits.get(getattr(other, "name", ""))
+            if portrait:
+                frame_references.append(portrait)
+    if location_plate_url:
+        # Last: the room is the cheapest thing to lose, and the only one a
+        # later frame can be corrected against. It is still worth sending --
+        # the plate is the one picture of the set that does not change between
+        # scenes, and the setting clause it backs up is the clause the prompt
+        # ladder drops first.
+        frame_references.append(location_plate_url)
+    # De-duplicated here as well as in the backend, because the anchor and the
+    # plate are the same URL on a characterless shot, and a caller that hands a
+    # model the same picture twice has spent a reference slot on nothing.
+    frame_references = list(dict.fromkeys(frame_references))
+    return matched_char, reference_url, frame_references
 
 
 def build_character_identity_clause(characters, matched_char=None, limit=None) -> str:
@@ -838,27 +1027,7 @@ def build_frame_prompt(
     # the frame's picture and its words agree about who is present. A shot that
     # names nobody falls back to the scene's cast, which is exactly the old
     # behaviour and the right answer for an insert or an establishing plate.
-    in_frame = [
-        character
-        for _, character in on_screen_name_matches(
-            f"{shot.visual_desc} {getattr(shot, 'motion_desc', '') or ''}".lower(),
-            characters or [],
-        )
-        # is_visible is the cast-level answer to the same question, and the
-        # clause below filters by it anyway: without this, a shot naming only
-        # a never-seen character would narrow to a list that then describes
-        # NOBODY, and the frame would go out with no appearance lock at all.
-        if getattr(character, "is_visible", True)
-    ]
-    if in_frame and matched_char is not None and matched_char not in in_frame:
-        # The reference portrait's owner is in the frame by construction.
-        in_frame.insert(0, matched_char)
-    # Narrowed ONLY on evidence. A shot that named nobody may still have the
-    # whole scene in it -- the pipeline had to guess its own anchor there (see
-    # scene_subject) -- and guessing a second time, in the direction of
-    # describing FEWER of the people who might be on screen, is how a
-    # character comes back as a stranger.
-    identity_characters = in_frame or characters
+    identity_characters = characters_in_frame(shot, characters, matched_char)
 
     # Budget for the identity clause: whatever is left after the shot itself
     # and its framing, minus room for the setting clause. Everything else is
@@ -1328,6 +1497,59 @@ async def _concat_by_demuxer(
             except OSError:
                 pass
     return False
+
+
+async def extract_audio_track(video_path: str, out_path: str) -> Optional[str]:
+    """Lift a clip's own soundtrack out to a file, or None when it has none.
+
+    A scene rendered as one take with native audio arrives with the dialogue
+    already in the picture -- and the picture is the one place it cannot stay.
+    `concatenate_videos` joins scenes with `-an` and the mixer maps `0:v`
+    alone, both deliberately: a generated clip's incidental audio has no
+    business reaching a master that is about to have a scored, ducked mix laid
+    on it. So the take's voice would be dropped at the join and the film would
+    ship with moving mouths over silence.
+
+    Extracting it here turns that dialogue into an ordinary audio layer. From
+    the mixer's point of view it is then indistinguishable from a track the
+    voice generator made -- same anchor, same ducking, same subtitle row --
+    which is what lets a whole rendering strategy change without the audio
+    pipeline learning a new special case.
+
+    Stream-copied, so nothing is re-encoded and a clip with no audio stream
+    simply fails and returns None rather than writing an empty file.
+    """
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    try:
+        process = await asyncio.create_subprocess_exec(
+            _ffmpeg_binary(),
+            "-y",
+            "-i",
+            video_path,
+            "-vn",
+            "-acodec",
+            "copy",
+            out_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+    except Exception as exc:
+        logger.warning("Could not extract audio from %s: %s", video_path, exc)
+        return None
+    if process.returncode != 0 or not os.path.isfile(out_path):
+        logger.warning(
+            "No audio track to extract from %s (exit=%s): %s",
+            video_path,
+            process.returncode,
+            stderr.decode("utf-8", errors="replace")[-300:],
+        )
+        try:
+            os.unlink(out_path)
+        except OSError:
+            pass
+        return None
+    return out_path
 
 
 async def concatenate_videos(paths: List[str], out_path: str) -> str:
@@ -2305,6 +2527,156 @@ class Script2VideoPipeline:
         self.video_gen = _make_video_generator(api_key, demo)
         self.storyboard_artist = StoryboardArtist(demo=demo)
 
+    async def _render_scene_as_one_take(
+        self,
+        *,
+        shots,
+        characters,
+        portraits,
+        scene_subject,
+        location_plate_url,
+        reference_snapshot,
+        dynamic_reference_enabled: bool,
+        backend,
+        scene_seconds: float,
+        working_dir: str,
+        aspect_ratio: str,
+        scene_idx: int,
+        frame_prompt: str,
+        generate_audio: bool,
+        voice_samples,
+        is_cancelled=None,
+    ) -> Dict[str, Any]:
+        """Render a whole scene in ONE generation, cuts included.
+
+        What this replaces, per scene: one image and one video generation PER
+        ANGLE, the concat that joined them, and the timescale repair that
+        concat needs. The scene's angles become beats of a single take, so a
+        second and third framing cost nothing beyond the seconds already
+        budgeted -- which is why a delivered 30-second drama only ever had six
+        shots, and why it no longer has to.
+
+        The opening frame is resolved by the SAME function the per-shot path
+        uses (resolve_frame_references), so the two routes cannot disagree
+        about whose faces this scene is drawn from.
+        """
+        opening = shots[0]
+        matched_char, _anchor_url, frame_references = resolve_frame_references(
+            opening,
+            characters=characters,
+            portraits=portraits,
+            scene_subject=scene_subject,
+            location_plate_url=location_plate_url,
+            reference_snapshot=reference_snapshot,
+            dynamic_reference_enabled=dynamic_reference_enabled,
+            scene_idx=scene_idx,
+            shot_idx=0,
+        )
+        if frame_references:
+            start_image = await self.image_gen.generate_image_with_reference(
+                frame_prompt, frame_references, aspect_ratio, is_cancelled=is_cancelled
+            )
+        else:
+            start_image = await self.image_gen.generate_image(
+                frame_prompt, aspect_ratio, is_cancelled=is_cancelled
+            )
+
+        # The cast, as elements the whole take is locked to. Ordered with the
+        # opening frame's anchor first for the same reason the reference set
+        # is: the take is about that person, and a backend that reads fewer
+        # elements than it was offered reads them from the front.
+        present = characters_in_frame(opening, characters, matched_char)
+        ordered = list(present) + [c for c in characters if c not in present]
+        elements = []
+        for character in ordered:
+            name = getattr(character, "name", "")
+            portrait = portraits.get(name)
+            if not portrait or not getattr(character, "is_visible", True):
+                continue
+            elements.append(
+                Element(
+                    name=name,
+                    images=(portrait,),
+                    voice_sample=(voice_samples or {}).get(name, ""),
+                )
+            )
+
+        take = plan_scene_take(
+            scene_seconds,
+            shots,
+            backend,
+            elements=elements,
+            start_image=start_image,
+        )
+        if take is None:
+            raise RuntimeError(
+                f"Scene {scene_idx + 1} could not be planned as a single take "
+                f"on {backend.slug}; refusing to fall through to a path this "
+                "job was not configured for."
+            )
+
+        logger.info(
+            "Scene %s as one take on %s: %ss in %d beat(s) %s, %d element(s), "
+            "audio %s",
+            scene_idx + 1,
+            backend.slug,
+            take.seconds,
+            take.beat_count,
+            [beat.seconds for beat in take.beats],
+            len(take.elements),
+            "on" if generate_audio else "off",
+        )
+
+        video_url = await self.video_gen.generate_scene_take(
+            take, is_cancelled=is_cancelled, generate_audio=generate_audio
+        )
+        output_path = os.path.join(working_dir, "scene_output.mp4")
+        await download_video(video_url, output_path)
+
+        # The take's own voice, lifted out before the join drops it. See
+        # extract_audio_track: the concat is `-an` and the mixer maps `0:v`,
+        # so dialogue left inside the picture never reaches the master.
+        scene_audio = None
+        if generate_audio:
+            scene_audio = await extract_audio_track(
+                output_path, os.path.join(working_dir, "scene_take_audio.m4a")
+            )
+            if not scene_audio:
+                logger.warning(
+                    "Scene %s was rendered with native audio but none came "
+                    "back in the clip; it will be voiced the usual way.",
+                    scene_idx + 1,
+                )
+
+        # One meta entry per BEAT, so everything downstream that counts shots
+        # (the regeneration UI, the retake flow, the scene archive) still sees
+        # the framings the storyboard designed rather than a single opaque
+        # clip. They share a frame_url and a video_url because they share a
+        # generation -- which is the point.
+        shot_meta = [
+            {
+                "index": i,
+                "frame_url": start_image if i == 0 else None,
+                "video_url": video_url,
+                "seconds": beat.seconds,
+                "shot_type": beat.shot_type,
+                "one_take": True,
+            }
+            for i, beat in enumerate(take.beats)
+        ]
+        return {
+            "path": output_path,
+            "url": video_url,
+            "shots": shot_meta,
+            # Present and truthy only when this scene's dialogue came out of
+            # the video model rather than the voice generator. The caller uses
+            # it for three decisions at once: which file the mixer lays down,
+            # which scenes lip sync must leave alone (the mouth already
+            # matches), and which lines were never sent to a TTS provider.
+            "take_audio_path": scene_audio,
+            "speaks_for_itself": bool(scene_audio),
+        }
+
     async def _apply_scene_pacing(
         self,
         scene_path: str,
@@ -2542,6 +2914,16 @@ class Script2VideoPipeline:
         # The framing this scene must use, planned across the whole drama so
         # two scenes in a row cannot come back as the same setup.
         scene_shot_scale: str = "",
+        #: The film's language, which decides whether a backend's native audio
+        #: is usable at all. Defaults to English rather than to "unset" so a
+        #: caller that never passes it gets the answer that is true for every
+        #: backend declared here.
+        language: str = "en",
+        #: One clean speech sample per character, for backends that bind a
+        #: generated voice to an element. This is what stops native audio
+        #: costing the product its cast: given a sample, the take speaks the
+        #: character in THAT voice instead of one the model picked.
+        voice_samples: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         os.makedirs(working_dir, exist_ok=True)
         portraits = character_portraits or {}
@@ -2660,6 +3042,64 @@ class Script2VideoPipeline:
             # coin toss between faces, so the plate keeps the fallback.
             scene_subject = None
 
+        # ONE TAKE, OR THE PATH THIS PIPELINE HAS ALWAYS TAKEN.
+        #
+        # None for every backend used here so far, so the per-shot route below
+        # is untouched by this branch existing. A backend answers otherwise
+        # only when it was selected for exactly this AND its declaration says
+        # it can cut inside a generation -- see scene_take_backend.
+        take_backend = scene_take_backend(self.video_gen)
+        if take_backend is not None and not self.demo:
+            _check_cancel()
+            await progress(
+                "video", f"Rendering scene {scene_idx + 1} in one take", 20
+            )
+            opening = shots[0]
+            result = await self._render_scene_as_one_take(
+                shots=shots,
+                characters=characters,
+                portraits=portraits,
+                scene_subject=scene_subject,
+                location_plate_url=location_plate_url,
+                reference_snapshot=reference_snapshot,
+                dynamic_reference_enabled=dynamic_reference_enabled,
+                backend=take_backend,
+                scene_seconds=scene_duration,
+                working_dir=working_dir,
+                aspect_ratio=aspect_ratio,
+                scene_idx=scene_idx,
+                frame_prompt=build_frame_prompt(
+                    style,
+                    opening,
+                    setting_location=setting_location,
+                    setting_time_of_day=setting_time_of_day,
+                    setting_era=setting_era,
+                    has_dialogue=has_dialogue,
+                    lipsync_enabled=lipsync_enabled,
+                    characters=characters,
+                    matched_char=None,
+                    world_change=world_change,
+                    world_state=world_state,
+                ),
+                # The take speaks for itself only when it can speak this
+                # film's language. An endpoint that has native audio in
+                # English is not an endpoint with native audio -- see
+                # interfaces/video_backend.VideoBackend.speaks -- and a scene
+                # rendered mute keeps the dialogue and lip-sync passes it
+                # always had.
+                generate_audio=bool(has_dialogue)
+                and take_backend.speaks(language or "en"),
+                voice_samples=voice_samples,
+                is_cancelled=is_cancelled,
+            )
+            await progress(
+                "scene_complete",
+                f"Scene {scene_idx + 1} complete",
+                100,
+                {"path": result["path"]},
+            )
+            return result
+
         async def _process_shot(i: int, shot) -> None:
             nonlocal completed_count
             async with semaphore:
@@ -2667,76 +3107,19 @@ class Script2VideoPipeline:
                 try:
                     _check_cancel()
 
-                    reference_url = None
-                    matched_char = None
-                    shot_text = f"{shot.visual_desc} {shot.motion_desc}".lower()
-                    visible_chars = [c for c in characters if c.is_visible]
-
-                    # Found via a real report of character-swap between
-                    # scenes: previously this ALWAYS used visible_chars[0]
-                    # (the first character in the list) as the reference
-                    # portrait for every single shot, regardless of which
-                    # character the shot's own text actually describes.
-                    # Now: pick whichever known character's name appears
-                    # FIRST (by text position, i.e. narrative order --
-                    # "Sam looks at Maria" -> Sam is the subject) in this
-                    # shot's own visual_desc/motion_desc.
-                    named_matches = on_screen_name_matches(shot_text, visible_chars)
-                    if named_matches:
-                        named_matches.sort(key=lambda pair: pair[0])
-                        matched_char = named_matches[0][1]
-                    elif scene_subject is not None and shot_shows_a_person(shot_text):
-                        # Named nobody, but there is plainly a person in it --
-                        # "the old bookseller walks the alley", "her hand on
-                        # the door". Falling through to the plate here is what
-                        # let the model draw a new stranger at every outdoor
-                        # cut, because the plate is shot deliberately empty and
-                        # gives the frame no face to hold. Anchor to whoever
-                        # the SCENE is about instead.
-                        matched_char = scene_subject
-                        logger.info(
-                            "Scene %s shot %s names no character but shows one; "
-                            "anchoring to the scene's subject %r instead of the "
-                            "empty location plate.",
-                            scene_idx + 1,
-                            i,
-                            scene_subject.name,
+                    matched_char, reference_url, frame_references = (
+                        resolve_frame_references(
+                            shot,
+                            characters=characters,
+                            portraits=portraits,
+                            scene_subject=scene_subject,
+                            location_plate_url=location_plate_url,
+                            reference_snapshot=reference_snapshot,
+                            dynamic_reference_enabled=dynamic_reference_enabled,
+                            scene_idx=scene_idx,
+                            shot_idx=i,
                         )
-                    elif location_plate_url:
-                        # No character name AND no person in the text at all --
-                        # an establishing shot, an insert, an object, which is
-                        # what this branch always meant to catch. The
-                        # fallback before it handed it visible_chars[0]'s PORTRAIT,
-                        # which is the wrong anchor twice over: it pushes a
-                        # face into a shot the storyboard deliberately wrote
-                        # without one, and it leaves the room itself
-                        # re-invented from the text every time. The locked set
-                        # plate is the right reference for exactly these shots.
-                        reference_url = location_plate_url
-                    elif visible_chars:
-                        # No plate available (no location in the script, or
-                        # plate generation failed) -- keep the original
-                        # first-visible-character fallback rather than
-                        # dropping to an unreferenced frame.
-                        matched_char = visible_chars[0]
-
-                    if matched_char:
-                        # Default: always anchor to the character's LOCKED
-                        # portrait, so identity error stays bounded instead
-                        # of compounding across scenes (see
-                        # is_dynamic_reference_enabled). Opting in restores
-                        # the previous chain-forward behavior, where the most
-                        # recently generated frame wins -- only populated from
-                        # the second shot/scene onward, so the very first
-                        # reference for any character is the portrait either way.
-                        locked_portrait = portraits.get(matched_char.name)
-                        if dynamic_reference_enabled:
-                            dynamic_reference = reference_snapshot.get(matched_char.name)
-                            reference_url = dynamic_reference or locked_portrait
-                        else:
-                            reference_url = locked_portrait or reference_snapshot.get(
-                                matched_char.name
-                            )
+                    )
 
                     # Belt-and-braces: design_storyboard already repairs a
                     # missing/neutral expression, but the frame prompt is the
@@ -2826,9 +3209,9 @@ class Script2VideoPipeline:
                         # animation (the expensive, slow step) so a rejected
                         # frame is retried without wasting money on animating
                         # a frame we're about to throw away.
-                        if reference_url:
+                        if frame_references:
                             frame_url = await self.image_gen.generate_image_with_reference(
-                                frame_prompt, reference_url, aspect_ratio, is_cancelled=is_cancelled
+                                frame_prompt, frame_references, aspect_ratio, is_cancelled=is_cancelled
                             )
                         else:
                             frame_url = await self.image_gen.generate_image(
@@ -2864,7 +3247,14 @@ class Script2VideoPipeline:
                                 try:
                                     frame_url = await self.image_gen.generate_image_with_reference(
                                         repair_prompt,
-                                        reference_url,
+                                        # The repair is a re-send of the SAME
+                                        # frame with one correction added, so
+                                        # it is entitled to the same evidence.
+                                        # Handing it fewer references than the
+                                        # attempt it is correcting would fix
+                                        # the reported issue by introducing
+                                        # another one.
+                                        frame_references,
                                         aspect_ratio,
                                         is_cancelled=is_cancelled,
                                     )

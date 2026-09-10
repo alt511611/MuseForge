@@ -22,6 +22,19 @@ from interfaces.camera import DIRECTOR_STYLES, get_director_style  # noqa: E402
 from interfaces.character import CharacterInScene, CharacterProfile, DramaScript  # noqa: E402
 
 
+def _anchor(references):
+    """The identity anchor of a reference set.
+
+    `generate_image_with_reference` takes an ordered sequence now -- the
+    anchor, then the other faces in the frame, then the set plate. These
+    tests are about which portrait LEADS, which is still index 0.
+    """
+    if references is None or isinstance(references, str):
+        return references
+    return references[0] if references else None
+
+
+
 class FakeShot:
     def __init__(self, idx):
         self.idx = idx
@@ -69,7 +82,7 @@ async def test_pipeline_invariants(monkeypatch):
         return f"https://fake.cdn/portrait_{len(portrait_calls)}.png"
 
     async def fake_generate_image_with_reference(self, prompt, reference_url, aspect_ratio="16:9", is_cancelled=None):
-        return f"https://fake.cdn/frame_from_{reference_url.split('/')[-1]}"
+        return f"https://fake.cdn/frame_from_{_anchor(reference_url).split('/')[-1]}"
 
     async def fake_generate_video_from_image(
         self, prompt, image_url, duration=5, aspect_ratio="16:9", plan="free",

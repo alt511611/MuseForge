@@ -9,6 +9,19 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+def _anchor(references):
+    """The identity anchor of a reference set.
+
+    `generate_image_with_reference` takes an ordered sequence now
+    (the anchor, the other faces in the frame, then the set plate).
+    These tests predate that and are about which portrait leads,
+    which is still exactly index 0.
+    """
+    if references is None or isinstance(references, str):
+        return references
+    return references[0] if references else None
+
 os.environ.setdefault("MUAPI_KEY", "test-key")
 
 
@@ -29,7 +42,9 @@ async def test_reference_uses_named_character_not_always_first(monkeypatch, tmp_
         ]
 
     async def fake_generate_image_with_reference(self, prompt, reference_url, aspect_ratio="16:9", is_cancelled=None):
-        captured_refs.append(reference_url)
+        # The frame is now offered an ordered SET; index 0 is the anchor,
+        # which is what this test is about.
+        captured_refs.append(_anchor(reference_url))
         return "https://fake.cdn/frame.png"
 
     async def fake_generate_image(self, prompt, aspect_ratio="1:1", is_cancelled=None):
@@ -94,7 +109,9 @@ async def test_reference_falls_back_to_first_character_when_no_name_matches(monk
         return [StoryboardShot(idx=0, visual_desc="A wide shot of the harbor at dawn", motion_desc="static")]
 
     async def fake_generate_image_with_reference(self, prompt, reference_url, aspect_ratio="16:9", is_cancelled=None):
-        captured_refs.append(reference_url)
+        # The frame is now offered an ordered SET; index 0 is the anchor,
+        # which is what this test is about.
+        captured_refs.append(_anchor(reference_url))
         return "https://fake.cdn/frame.png"
 
     async def fake_generate_video(self, prompt, image_url, duration, aspect_ratio="16:9", plan="free", is_cancelled=None, shot_profile=None):
@@ -144,7 +161,9 @@ def _stub_generation(monkeypatch, captured_refs):
     async def fake_generate_image_with_reference(
         self, prompt, reference_url, aspect_ratio="16:9", is_cancelled=None
     ):
-        captured_refs.append(reference_url)
+        # The frame is now offered an ordered SET; index 0 is the anchor,
+        # which is what this test is about.
+        captured_refs.append(_anchor(reference_url))
         return "https://fake.cdn/frame.png"
 
     async def fake_generate_image(self, prompt, aspect_ratio="1:1", is_cancelled=None):

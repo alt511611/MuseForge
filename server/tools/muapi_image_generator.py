@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import os
+import re
 
 from tools.muapi_client import (
     MuAPIClient,
@@ -65,6 +66,77 @@ def resolve_dimensions(aspect_ratio: str) -> dict:
         )
         return dims
     return {"width": width, "height": height}
+
+
+#: How many reference images each endpoint actually USES, by endpoint slug.
+#:
+#: This is a capability, not a preference, and being wrong about it is silent
+#: in both directions. Send four images to flux-pulid and three are ignored
+#: with no error and no log line -- the frame is drawn from a quarter of its
+#: evidence and looks like a model failure. Send one to an endpoint that
+#: wanted the whole set and the other faces in the frame are invented from the
+#: prompt's text description, which is the delivered failure this map exists
+#: to end (job 4c7bbe85-e5c: two characters, six frames, six locks, and the
+#: unlocked half of every frame came back as a different person).
+#:
+#: PuLID is 1 by construction: it is an IDENTITY model and its payload field
+#: is the singular `image_url`. That number is certain.
+#:
+#: The Kontext family's field is `images_list`, a LIST -- confirmed against
+#: MuAPI's own 422 ({"loc": ["body", "images_list"]}). What is NOT confirmed
+#: is where its ceiling sits, so the number below is a starting point to be
+#: checked in the playground, not a measurement. Raise or lower it per
+#: endpoint with MUAPI_REFERENCE_CAPACITY_<SLUG> without a deploy; the slug is
+#: upper-cased with non-alphanumerics turned into underscores, so
+#: `flux-kontext-pro-i2i` reads MUAPI_REFERENCE_CAPACITY_FLUX_KONTEXT_PRO_I2I.
+REFERENCE_CAPACITY = {
+    "flux-pulid": 1,
+    "flux-kontext-pro-i2i": 4,
+    "flux-kontext-dev-i2i": 4,
+    "flux-kontext-max-i2i": 4,
+}
+
+#: What an endpoint nobody has measured is assumed to take. One, because the
+#: conservative direction here is the one that cannot invent a face: a model
+#: that would have accepted four gets its anchor and draws the rest from the
+#: prompt, which is exactly today's behaviour.
+DEFAULT_REFERENCE_CAPACITY = 1
+
+
+def reference_capacity(endpoint: str) -> int:
+    """How many references this endpoint will actually read."""
+    slug = (endpoint or "").strip()
+    env_key = "MUAPI_REFERENCE_CAPACITY_" + re.sub(r"[^A-Za-z0-9]", "_", slug).upper()
+    override = (os.environ.get(env_key, "") or "").strip()
+    if override:
+        try:
+            return max(1, int(override))
+        except ValueError:
+            logger.warning(
+                "%s=%r is not a number; using the built-in capacity for %r.",
+                env_key, override, slug,
+            )
+    return REFERENCE_CAPACITY.get(slug, DEFAULT_REFERENCE_CAPACITY)
+
+
+def normalise_references(references) -> list:
+    """A clean, ordered, de-duplicated reference list from str | sequence | None.
+
+    Order is meaning, not presentation: index 0 is the identity ANCHOR, and a
+    single-reference endpoint gets exactly that one. Everything after it is
+    supporting evidence -- the other faces in the frame, then the set.
+    """
+    if not references:
+        return []
+    if isinstance(references, str):
+        references = [references]
+    seen, ordered = set(), []
+    for item in references:
+        url = (item or "").strip() if isinstance(item, str) else ""
+        if url and url not in seen:
+            seen.add(url)
+            ordered.append(url)
+    return ordered
 
 
 #: MuAPI's documented bound on `positivePrompt`: a non-empty, non-whitespace
@@ -254,14 +326,68 @@ class MuAPIImageGenerator:
     async def generate_image_with_reference(
         self,
         prompt: str,
-        reference_url: str,
+        references,
         aspect_ratio: str = "16:9",
         is_cancelled=None,
     ) -> str:
+        """Render a frame from one or more reference images.
+
+        ``references`` is a URL or an ORDERED sequence of them. Index 0 is the
+        identity anchor and is the one a single-reference endpoint receives;
+        everything after it is the rest of the evidence the frame is entitled
+        to -- the other faces in the shot, then the set plate.
+
+        It used to be a single string, and that was the shape of a real
+        defect rather than a simplification: a two-hander gets one anchor, so
+        exactly half of the faces in every frame of a two-character drama were
+        drawn from a prose description instead of a picture. The list is
+        trimmed to what the configured endpoint can actually read, and what
+        was dropped is logged -- a reference that is silently ignored is
+        indistinguishable from a model that ignored it.
+        """
         if self.demo:
             return _demo_image_url(prompt + "|ref", aspect_ratio)
 
         endpoint = self.KONTEXT_ENDPOINT
+        ordered = normalise_references(references)
+        if not ordered:
+            # No usable reference: this is the unreferenced path, and taking
+            # it here beats sending `null` to a model that requires one.
+            return await self.generate_image(
+                prompt, aspect_ratio, is_cancelled=is_cancelled
+            )
+
+        capacity = reference_capacity(endpoint)
+        used, dropped = ordered[:capacity], ordered[capacity:]
+        if dropped:
+            # The remedy differs by WHY the set was trimmed, and telling an
+            # operator to raise a number that cannot be raised is worse than
+            # saying nothing: flux-pulid takes one image because it is an
+            # identity model, not because nobody has measured it.
+            if "pulid" in endpoint.lower():
+                remedy = (
+                    "%s locks a single identity by construction; point "
+                    "MUAPI_KONTEXT_MODEL at a multi-reference endpoint to use "
+                    "the whole set." % endpoint
+                )
+            else:
+                remedy = (
+                    "Raise MUAPI_REFERENCE_CAPACITY_%s once the playground "
+                    "confirms this endpoint takes more."
+                    % re.sub(r"[^A-Za-z0-9]", "_", endpoint).upper()
+                )
+            logger.info(
+                "%s reads %d reference(s); sent the anchor and %d more, held "
+                "back %d. The held-back subjects are described in the prompt "
+                "instead, which is what lets a second face in the frame come "
+                "back as a different person. %s",
+                endpoint,
+                capacity,
+                max(0, len(used) - 1),
+                len(dropped),
+                remedy,
+            )
+
         # Reference-model payloads are built here rather than in
         # _size_payload, so they need the same clamp -- this is the path a
         # character-locked frame actually takes.
@@ -270,7 +396,7 @@ class MuAPIImageGenerator:
             # PuLID is identity-focused and uses a singular reference URL.
             payload = {
                 "prompt": prompt,
-                "image_url": reference_url,
+                "image_url": used[0],
                 "aspect_ratio": aspect_ratio,
             }
         else:
@@ -280,12 +406,13 @@ class MuAPIImageGenerator:
             # earlier attempt ({"loc": ["body", "images_list"]}).
             payload = {
                 "prompt": prompt,
-                "images_list": [reference_url],
+                "images_list": list(used),
                 "aspect_ratio": aspect_ratio,
             }
         logger.info(
-            "Sending %s request with reference (prompt starts: %.80s)",
+            "Sending %s request with %d reference(s) (prompt starts: %.80s)",
             endpoint,
+            len(used),
             prompt,
         )
         try:
@@ -326,7 +453,9 @@ class MuAPIImageGenerator:
             fallback_payload = self._legacy_size_payload(
                 prompt,
                 aspect_ratio,
-                None if is_ref_rejected else reference_url,
+                # The legacy endpoint takes ONE reference; the anchor is the
+                # one worth keeping when the set has to be given up.
+                None if is_ref_rejected else used[0],
             )
             return await self.client.generate(
                 self.LEGACY_SIZE_ENDPOINT,

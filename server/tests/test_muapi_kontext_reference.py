@@ -27,7 +27,7 @@ async def test_reference_generation_uses_flux_pulid_schema():
 
     result = await generator.generate_image_with_reference(
         prompt="Maya walks along the pier",
-        reference_url="https://cdn.example/maya-portrait.png",
+        references="https://cdn.example/maya-portrait.png",
         aspect_ratio="9:16",
     )
 
@@ -57,7 +57,7 @@ async def test_flux_pulid_rejection_falls_back_to_flux_dev(status):
 
     result = await generator.generate_image_with_reference(
         prompt="Maya walks along the pier",
-        reference_url="https://cdn.example/maya-portrait.png",
+        references="https://cdn.example/maya-portrait.png",
         aspect_ratio="16:9",
     )
 
@@ -96,7 +96,7 @@ async def test_flux_pulid_internal_runtime_failure_falls_back_to_flux_dev():
 
     result = await generator.generate_image_with_reference(
         prompt="Maya walks along the pier",
-        reference_url="https://cdn.example/maya-portrait.png",
+        references="https://cdn.example/maya-portrait.png",
         aspect_ratio="16:9",
     )
 
@@ -135,7 +135,7 @@ async def test_rejected_reference_falls_back_without_the_reference():
 
     result = await generator.generate_image_with_reference(
         prompt="Maya walks along the pier",
-        reference_url="https://cdn.example/maya-portrait.png",
+        references="https://cdn.example/maya-portrait.png",
         aspect_ratio="16:9",
     )
 
@@ -160,7 +160,7 @@ async def test_non_schema_flux_pulid_error_is_not_hidden():
     with pytest.raises(MuAPIError):
         await generator.generate_image_with_reference(
             prompt="Maya walks",
-            reference_url="https://cdn.example/maya.png",
+            references="https://cdn.example/maya.png",
         )
 
     assert generator.client.generate.await_count == 1
