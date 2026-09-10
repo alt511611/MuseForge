@@ -79,16 +79,27 @@ services:
         value: "7200"
       - key: MUSEFORGE_STALE_JOB_TIMEOUT_MINUTES
         value: "150"
+      # Seconds of finished video one credit buys. The planner then divides
+      # the total between the scenes, floored at 6 and capped at 12
+      # (interfaces/second_budget), so a number far above that cap does not
+      # buy a longer film — it reads as a promise and changes nothing. This
+      # was "100", which no scene has ever been.
       - key: MUSEFORGE_SECONDS_PER_SCENE
-        value: "100"
+        value: "10"
       # Spoken character dialogue (ElevenLabs text-to-dialogue via MuAPI).
-      # Off by default — every line is a paid call — but it must be declared
-      # here: /api/health reports `dialogue_available` from this flag, and the
-      # client only offers the Pro dialogue toggle when that is true. Left out
-      # of the blueprint entirely, a deployment ships with the feature sold on
-      # the pricing page and unreachable in the product. Set to "1" to enable.
+      # Every line is a paid call, but it must be declared here: /api/health
+      # reports `dialogue_available` from this flag, and the client only offers
+      # the Pro dialogue toggle when that is true. Left out of the blueprint
+      # entirely, a deployment ships with the feature sold on the pricing page
+      # and unreachable in the product.
+      #
+      # ON. It was shipped empty while MUSEFORGE_LIPSYNC_ENABLED below was
+      # "1", which is the one combination that cannot work: lip sync has
+      # nothing to sync a mouth to without a generated voice. The per-job
+      # opt-in still sits behind the Pro toggle, so this spends nothing on its
+      # own — it decides whether the product can be asked at all.
       - key: MUSEFORGE_DIALOGUE_ENABLED
-        value: ""
+        value: "1"
       # Lip sync. Requires dialogue to be on — with no generated voice there
       # is nothing to sync a mouth to — and the key its provider needs:
       # MUAPI_KEY on the default MuAPI backend, FAL_KEY only when
@@ -156,6 +167,19 @@ services:
       # instead of in the source -- same reasoning as MUSEFORGE_DIALOGUE_ENABLED
       # above.
 
+      # Frame QA: a Claude-vision check that the rendered frame holds the
+      # character and the setting it was asked for, with ONE targeted repair
+      # when it does not. It runs BEFORE the shot is animated, which is the
+      # whole point of the arithmetic: a frame costs $0.04 and the video
+      # generation that follows it costs $0.72, eighteen times more.
+      #
+      # ON. Shipped off, a delivered job spent $4.32 of video on six frames
+      # nothing had looked at — and two of its three scenes came back with the
+      # wrong man in them. Fail-open throughout: a QA error never blocks a
+      # shot. Costs one vision call per frame against ANTHROPIC_API_KEY.
+      - key: MUSEFORGE_CHARACTER_QA_ENABLED
+        value: "1"
+
       # Acted end frames: the shot's start frame is edited into the emotional
       # peak and handed to the video model as `last_image`, so the performance
       # is interpolated rather than described. Costs one image per shot
@@ -170,8 +194,16 @@ services:
       # cutaway on the listening face. ~$0.34 a scene, which takes a Pro-plan
       # scene from ~78% margin to ~69% -- above the floor the pricing tests
       # enforce, but a business decision rather than a default.
+      #
+      # ON. The decision is worth taking because this is the only profile with
+      # a built-in cheap default (veo3.1-lite, $0.30 FLAT, takes an end frame),
+      # and with reaction shots off that default never fires — the routing
+      # exists and is unreachable. A delivered 30-second drama covered itself
+      # in six shots, 5.04s of unbroken picture on average, the bottom of the
+      # band short-form retention research recommends; on the current backend
+      # this is the only lever that moves it.
       - key: MUSEFORGE_REACTION_SHOTS
-        value: ""
+        value: "1"
       # The cutaway's model. Empty uses veo3.1-lite ($0.30 FLAT, takes an end
       # frame). Do not point this at Kling: $0.72 for two seconds of a face is
       # not a second angle, it is a second scene.
@@ -208,6 +240,61 @@ services:
       - key: MUSEFORGE_SFX_PROVIDER
         value: ""
 
+      # ── How a scene is rendered ──────────────────────────────────────────
+      # All empty, which is the shipped strategy: one image and one video
+      # generation per ANGLE, joined by ffmpeg, voiced separately and
+      # lip-synced afterwards. Declared here because the alternative below is
+      # a different pipeline rather than a setting, and an operator should be
+      # able to see that it exists.
+      #
+      # NOTHING HERE HAS BEEN RUN AGAINST A LIVE PROVIDER. Every backend
+      # interaction is unit-tested against doubles; the first real render is
+      # the test that matters and has not happened. Turn these on for a test
+      # job before a paying one.
+
+      # How many reference pictures a frame is drawn from. Empty = flux-pulid,
+      # which reads ONE by construction (it is an identity model), so in a
+      # two-hander the other face in every frame is drawn from the prompt's
+      # prose -- and prose produces somebody who matches the description and is
+      # not the same person twice. A delivered job's male lead is three men.
+      #
+      # "flux-kontext-pro-i2i" takes a LIST and receives the whole set: the
+      # anchor, the other faces the shot shows, then the location plate. The
+      # list's real ceiling is unmeasured -- confirm it in the playground and
+      # set MUAPI_REFERENCE_CAPACITY_FLUX_KONTEXT_PRO_I2I accordingly.
+      - key: MUAPI_KONTEXT_MODEL
+        value: ""
+      - key: MUAPI_REFERENCE_CAPACITY_FLUX_KONTEXT_PRO_I2I
+        value: ""
+
+      # A character's lock as a 2x2 sheet of four views instead of one front
+      # portrait. Pair it WITH a reference model that combines multiple views;
+      # flux-pulid expects a photograph of a face and a four-panel grid is not
+      # one, so switching this on alone degrades every face in the film.
+      - key: MUSEFORGE_CHARACTER_SHEET
+        value: ""
+
+      # "falai_multishot" renders a whole SCENE per generation with its cuts
+      # inside it, speaks its own dialogue in the voices this film cast, and
+      # therefore skips the lip-sync pass -- 329 seconds of a delivered
+      # 918-second render, its largest single stage. Needs FAL_KEY.
+      #
+      # Only for films in a language the backend speaks (Kling v3: English and
+      # Chinese). Any other language keeps every stage it has today; that
+      # decision is made per job, not here.
+      - key: MUSEFORGE_VIDEO_PROVIDER
+        value: ""
+      - key: FALAI_MULTISHOT_VIDEO_MODEL
+        value: ""
+
+      # Angles per scene. Empty = 1. DO NOT RAISE THIS on the current backend:
+      # every angle is a separate flat-rate generation, so 3 takes a 12-second
+      # scene from $0.72 to $2.16. It is only affordable once
+      # MUSEFORGE_VIDEO_PROVIDER above cuts inside one generation, where the
+      # bill is for the scene's seconds and extra cuts are free.
+      - key: MUSEFORGE_SHOTS_PER_SCENE
+        value: ""
+
       # Kinetic (word-by-word) captions. Requires the ElevenLabs voice path
       # above for measured word timings; falls back to plain captions without
       # it rather than guessing, because a highlight on the wrong word reads as
@@ -217,8 +304,12 @@ services:
       - key: MUSEFORGE_SPEAKER_LABELS
         value: ""
 
+      # ON: MUSEFORGE_VOICE_PROVIDER above is ElevenLabs, which is what
+      # supplies the per-word timings this style needs. On the MuAPI voice
+      # wrapper it silently does nothing, which is why it is tied to that
+      # choice rather than set independently.
       - key: MUSEFORGE_WORD_CAPTIONS
-        value: ""
+        value: "1"
 
       # Narrative shape. "micro_drama" opens on the shock, refuses to resolve,
       # and puts a cold-open teaser in front of the film. Also selectable per
