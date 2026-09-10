@@ -138,14 +138,29 @@ def test_the_scene_length_is_snapped_to_what_the_backend_accepts():
 # --------------------------------------------------------------------------
 
 def test_each_beat_carries_its_framing_and_its_length():
-    take = plan_scene_take(12, _three_shots(), backend_for(MULTISHOT))
-    lines = take.multi_prompt()
+    """A beat is an OBJECT with its own duration, not a sentence about one.
 
-    assert len(lines) == 3
-    assert lines[0].startswith("Shot 1 (")
-    assert "medium shot" in lines[0]
-    assert "Vivian deals" in lines[0]
-    assert lines[2].startswith("Shot 3 (")
+    This first went out as a list of strings with the length written into the
+    prose ("Shot 1 (3s): ..."), which is the syntax Kling's own interface
+    documents. The endpoint answered with one error per entry: "Input should
+    be a valid dictionary or object to extract fields from".
+    """
+    take = plan_scene_take(12, _three_shots(), backend_for(MULTISHOT))
+    beats = take.multi_prompt()
+
+    assert len(beats) == 3
+    assert set(beats[0]) == {"prompt", "duration"}
+    assert [b["duration"] for b in beats] == ["5", "4", "3"], (
+        "STRINGS, not integers -- the integer is a 422; and proportional to "
+        "the lengths the storyboard designed"
+    )
+    assert sum(int(b["duration"]) for b in beats) == 12
+    assert "medium shot" in beats[0]["prompt"]
+    assert "Vivian deals" in beats[0]["prompt"]
+    assert "Shot 1" not in beats[0]["prompt"], (
+        "the length is a field now; repeating it in the prose spends prompt "
+        "on something the model is already being told"
+    )
 
 
 def test_the_cast_clause_says_which_token_is_whom():
@@ -218,10 +233,13 @@ async def test_a_multi_beat_take_sends_a_shot_list_and_pins_the_cuts():
         "storyboard."
     )
     assert "prompt" not in payload
+    # The shape the endpoint's own 422 spelled out: a main view plus up to
+    # three more angles. There is no `name` field, which is why the cast
+    # clause below is the only thing that says who @Element1 is.
     assert payload["elements"] == [
-        {"image_urls": ["v1.png", "v2.png"], "name": "Vivian Marsh"}
+        {"frontal_image_url": "v1.png", "reference_image_urls": ["v2.png"]}
     ]
-    assert "@Element1 is Vivian Marsh" in payload["multi_prompt"][0]
+    assert "@Element1 is Vivian Marsh" in payload["multi_prompt"][0]["prompt"]
 
 
 @pytest.mark.asyncio
@@ -240,17 +258,21 @@ async def test_a_single_beat_take_is_not_a_multi_shot_request():
 
     assert "multi_prompt" not in sent
     assert "shot_type" not in sent
-    assert sent["prompt"].startswith("Shot 1 (6s):")
+    assert sent["prompt"] == "a wide of the room", (
+        "a single beat sends `prompt`, which is a plain string -- not the "
+        "object multi_prompt takes"
+    )
 
 
 @pytest.mark.asyncio
-async def test_a_voice_sample_rides_the_element_so_the_cast_survives():
-    """This is what stops native audio costing the product its cast.
+async def test_a_voice_id_rides_the_element_when_one_is_mapped():
+    """Bound by ID, not by uploaded sample.
 
-    Given a clean sample, the take speaks the character in THAT voice instead
-    of one the model picked -- and the separate lip-sync pass, 36% of a
-    delivered render, is no longer needed to put the right voice on the right
-    face.
+    The plan this was built from assumed a 5-30 second clip could be attached
+    to the element. The endpoint takes `voice_id` from its own voice library
+    and has nowhere to put a clip -- so keeping a film's cast through a
+    native-audio take means MAPPING characters onto that library, which is a
+    different job and is not done yet. This pins the plumbing for when it is.
     """
     generator = _generator()
     sent = {}
@@ -268,13 +290,13 @@ async def test_a_voice_sample_rides_the_element_so_the_cast_survives():
             Element(
                 name="Julian Voss",
                 images=("j1.png",),
-                voice_sample="https://cdn/julian-sample.mp3",
+                voice_id="kling-voice-042",
             )
         ],
     )
     await generator.generate_scene_take(take)
 
-    assert sent["elements"][0]["audio_url"] == "https://cdn/julian-sample.mp3"
+    assert sent["elements"][0]["voice_id"] == "kling-voice-042"
 
 
 @pytest.mark.asyncio
@@ -442,7 +464,7 @@ async def test_a_scene_becomes_one_generation_with_its_cuts_inside(monkeypatch, 
         scene_duration=12,
         has_dialogue=True,
         scene_dialogue="Play your cards, Mr. Voss.",
-        voice_samples={"Julian Voss": "https://cdn/julian-voice.mp3"},
+        voice_ids={"Julian Voss": "kling-voice-042"},
     )
 
     assert len(generator.takes) == 1, "One generation for the whole scene."
@@ -521,16 +543,16 @@ async def test_the_cast_reaches_the_take_as_elements_with_their_voices(
             "Julian Voss": "https://cdn/julian.png",
         },
         scene_duration=12,
-        voice_samples={
-            "Vivian Marsh": "https://cdn/vivian-voice.mp3",
-            "Julian Voss": "https://cdn/julian-voice.mp3",
+        voice_ids={
+            "Vivian Marsh": "kling-voice-011",
+            "Julian Voss": "kling-voice-042",
         },
     )
 
     take = generator.takes[0]["take"]
     names = [e.name for e in take.elements]
     assert names == ["Vivian Marsh", "Julian Voss"], "Anchor first."
-    assert take.elements[0].voice_sample == "https://cdn/vivian-voice.mp3"
+    assert take.elements[0].voice_id == "kling-voice-011"
 
 
 @pytest.mark.asyncio

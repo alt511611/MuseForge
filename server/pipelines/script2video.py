@@ -2544,7 +2544,7 @@ class Script2VideoPipeline:
         scene_idx: int,
         frame_prompt: str,
         generate_audio: bool,
-        voice_samples,
+        voice_ids,
         is_cancelled=None,
     ) -> Dict[str, Any]:
         """Render a whole scene in ONE generation, cuts included.
@@ -2597,7 +2597,7 @@ class Script2VideoPipeline:
                 Element(
                     name=name,
                     images=(portrait,),
-                    voice_sample=(voice_samples or {}).get(name, ""),
+                    voice_id=(voice_ids or {}).get(name, ""),
                 )
             )
 
@@ -2919,11 +2919,16 @@ class Script2VideoPipeline:
         #: caller that never passes it gets the answer that is true for every
         #: backend declared here.
         language: str = "en",
-        #: One clean speech sample per character, for backends that bind a
-        #: generated voice to an element. This is what stops native audio
-        #: costing the product its cast: given a sample, the take speaks the
-        #: character in THAT voice instead of one the model picked.
-        voice_samples: Optional[Dict[str, str]] = None,
+        #: Character name -> a voice id from the VIDEO backend's own voice
+        #: library, bound to that character's element so a native-audio take
+        #: speaks them in a chosen voice rather than one the model picked.
+        #:
+        #: Ids, not audio. The plan this was built from assumed a speech
+        #: SAMPLE could be attached and it cannot: the endpoint's element
+        #: takes `voice_id` and there is nowhere to upload a clip. Empty until
+        #: something maps this film's cast onto that library, and empty is a
+        #: working take with voices the model chose.
+        voice_ids: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         os.makedirs(working_dir, exist_ok=True)
         portraits = character_portraits or {}
@@ -3089,7 +3094,7 @@ class Script2VideoPipeline:
                 # always had.
                 generate_audio=bool(has_dialogue)
                 and take_backend.speaks(language or "en"),
-                voice_samples=voice_samples,
+                voice_ids=voice_ids,
                 is_cancelled=is_cancelled,
             )
             await progress(

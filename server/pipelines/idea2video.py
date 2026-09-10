@@ -5844,67 +5844,31 @@ class Idea2VideoPipeline:
             self.script2video.video_gen, language
         )
 
-        # The cast, as audio. A backend that speaks binds a generated voice to
-        # a short sample attached to a character element, so this is what
-        # stops native audio costing the product its cast: one sample per
-        # SPEAKING CHARACTER, made once, instead of one request per scene.
+        # THE CAST'S VOICES: not bound yet, and the reason is worth writing
+        # down because the plan this was built from said otherwise.
         #
-        # It is also where the saving is. A delivered three-scene job spent
-        # 329 seconds -- 36% of its whole render -- on a lip-sync pass that
-        # exists only because the picture arrived mute, plus a TTS request per
-        # scene. This replaces both with two short requests for a two-hander.
-        voice_sample_task: Optional["asyncio.Task"] = None
-        if picture_speaks and voice_gen is not None:
-
-            async def _voice_samples() -> Dict[str, str]:
-                samples: Dict[str, str] = {}
-                first_line: Dict[str, Any] = {}
-                for _scene in script.scenes:
-                    for _line in _scene_dialogue(_scene) or []:
-                        who = (
-                            _line.get("character")
-                            if isinstance(_line, dict)
-                            else getattr(_line, "character", "")
-                        ) or ""
-                        if who and who not in first_line:
-                            first_line[who] = _line
-                for who, line in first_line.items():
-                    try:
-                        tracks = await voice_gen.generate_scene_dialogue(
-                            [line], is_cancelled=is_cancelled, language=language
-                        )
-                    except Exception as exc:
-                        # Fail-open, one character at a time. A cast member
-                        # without a sample is spoken in a voice the model
-                        # picked, which is worse than the voice we cast and
-                        # very much better than a scene that does not render.
-                        logger.warning(
-                            "Could not make a voice sample for %r; the take "
-                            "will pick its own voice for them: %s",
-                            who,
-                            exc,
-                        )
-                        continue
-                    url = next(
-                        (
-                            str(t.get("audio_url") or "")
-                            for t in tracks or []
-                            if str(t.get("audio_url") or "").strip()
-                        ),
-                        "",
-                    )
-                    if url:
-                        samples[who] = url
-                logger.info(
-                    "Voice samples for %d of %d speaking character(s); the "
-                    "picture carries the dialogue in %r.",
-                    len(samples),
-                    len(first_line),
-                    language,
-                )
-                return samples
-
-            voice_sample_task = asyncio.create_task(_voice_samples())
+        # The intent was one clean speech sample per speaking character,
+        # attached to that character's element, so a native-audio take spoke
+        # them in the voice this film cast. The endpoint does not work that
+        # way: its element takes a `voice_id` from the BACKEND'S OWN voice
+        # library and there is nowhere to upload a clip. Generating samples
+        # anyway is a TTS call per character that produces a file nothing can
+        # read, so it is not done.
+        #
+        # What that costs, plainly: a take renders with native, lip-synced
+        # audio in voices the MODEL chose, and a character can sound like a
+        # different person between scenes -- the failure the cast exists to
+        # prevent, moved from the face to the voice. Closing it means mapping
+        # each character onto one of the backend's voices, which is its own
+        # piece of work.
+        voice_ids: Dict[str, str] = {}
+        if picture_speaks:
+            logger.warning(
+                "The picture speaks this film (%r), but no voice ids are "
+                "mapped: the take will choose its own voices, so a character "
+                "may not sound the same in every scene.",
+                language,
+            )
 
         speech_tasks: Dict[int, "asyncio.Task"] = {}
         if voice_gen is not None and not picture_speaks:
@@ -6064,20 +6028,15 @@ class Idea2VideoPipeline:
                             stage, f"[{_idx + 1}/{total_scenes}] {message}", base, data
                         )
 
-                # A backend that speaks needs both: the language, to know
-                # whether it may, and the samples, to know in whose voice.
-                take_voices: Dict[str, str] = {}
-                if voice_sample_task is not None:
-                    try:
-                        take_voices = await voice_sample_task
-                    except Exception as exc:  # pragma: no cover -- fail-open
-                        logger.warning("Voice samples unavailable: %s", exc)
-
+                # A backend that speaks needs the language, to know whether
+                # it may, and the voice ids, to know in whose voice. The
+                # second is empty until this film's cast is mapped onto the
+                # backend's voice library -- see `voice_ids` above.
                 scene_slots[idx] = await self.script2video.run(
                     script=_scene_action(scene),
                     characters=characters,
                     language=language,
-                    voice_samples=take_voices,
+                    voice_ids=voice_ids,
                     user_requirement=user_requirement,
                     style=style,
                     working_dir=os.path.join(working_dir, f"scene_{idx}"),

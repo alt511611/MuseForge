@@ -2,9 +2,31 @@
 
 ## Where this runs
 
-**Coolify is the only deployment.** It builds `server/Dockerfile` and holds the
-environment in its own database, which is why the repository no longer carries
-a blueprint: `render.yaml` was deleted when Render was retired.
+Two hosts, and knowing which is which matters more than it sounds:
+
+| Part | Host | Address |
+|---|---|---|
+| Backend (FastAPI, `server/Dockerfile`) | **Coolify** | `api2.museforge.studio` |
+| Frontend (Next.js, `client/`) | **Vercel** | `museforge.studio` |
+
+**Coolify is the only BACKEND deployment.** It holds the environment in its own
+database, which is why the repository no longer carries a blueprint:
+`render.yaml` was deleted when Render was retired.
+
+### The frontend has to be told where the backend is, and rebuilt
+
+`NEXT_PUBLIC_API_URL` on Vercel must be `https://api2.museforge.studio`. Next.js
+bakes `NEXT_PUBLIC_*` into the browser bundle **at build time**, so changing the
+variable is not enough on its own — without a redeploy the old value keeps
+shipping.
+
+This is the failure that hid: after the API moved off Render, the deployed
+bundle went on calling the retired Render URL, so every generate, estimate and
+credit request answered 503 — while the site looked alive, because the
+dashboard reads Supabase directly rather than through the API. Nothing in the
+repository named the variable that decides this (`API_URL`, which is a
+different thing, was the only one documented), so there was nothing to check
+it against.
 
 That leaves one gap worth knowing about. Coolify's configuration is not in
 version control, so a flag can be flipped without a diff, a review or a commit

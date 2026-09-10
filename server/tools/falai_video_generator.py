@@ -64,33 +64,38 @@ def _duration_str(seconds) -> str:
 
 #: How one character/object element is written into the payload.
 #:
-#: THIS SHAPE IS THE LEAST CONFIRMED THING IN THIS FILE. fal's schema listing
-#: says `elements` is "a list of characters/objects, each either an image set
-#: or a video, referenced as @Element1" and does not spell out the keys inside
-#: one. Kling's own element model is a set of views of a subject plus, for a
-#: character, an optional speech sample the generated voice is bound to, and
-#: that is what is written here.
+#: Read off the endpoint's own 422, which is the only source that was ever
+#: going to settle it. This first went out as `{"image_urls": [...], "name":
+#: ...}` -- a guess, and flagged as one -- and came back:
 #:
-#: Isolated in its own function precisely because of that: when the playground
-#: confirms the real keys this is a one-line correction rather than an edit
-#: threaded through a payload builder. Until it is confirmed, a scene rendered
-#: this way may come back with its cast unlocked -- which is why the multi-shot
-#: path is reached only by an explicit provider selection and is not any
-#: deployment's default.
+#:     Either frontal_image_url and reference_image_urls or video_url
+#:     must be provided.
+#:
+#: So the real shape is a MAIN view plus up to three additional angles, or a
+#: video instead of both. There is no `name` field at all, which is why the
+#: cast clause in the prompt is not decoration: it is the only place the model
+#: learns that @Element1 is Vera Kessler.
+#:
+#: And the voice is a `voice_id` -- an id from the backend's own voice library
+#: -- not an uploaded sample. That is a real correction to the plan this was
+#: built from, which assumed a 5-30 second clip could be attached: keeping a
+#: film's cast through a native-audio take means MAPPING each character to one
+#: of the backend's voices, which is a different job from generating speech
+#: and is not done here yet. Without it the take still speaks; the model
+#: chooses the voice.
 def _element_payload(element) -> dict:
-    images = [url for url in (getattr(element, "images", ()) or []) if url]
-    if not images:
+    frontal = (getattr(element, "frontal", "") or "").strip()
+    if not frontal:
+        # No main view: the endpoint rejects the whole request rather than
+        # ignoring the element, so an empty one must never be sent.
         return {}
-    payload = {"image_urls": images}
-    name = (getattr(element, "name", "") or "").strip()
-    if name:
-        payload["name"] = name
-    voice = (getattr(element, "voice_sample", "") or "").strip()
-    if voice:
-        # The other half of the lock, and the reason native audio does not
-        # cost this product its cast: given a clean sample, the take speaks
-        # this character in THAT voice instead of one the model picked.
-        payload["audio_url"] = voice
+    payload = {"frontal_image_url": frontal}
+    references = [url for url in (getattr(element, "reference_images", []) or []) if url]
+    if references:
+        payload["reference_image_urls"] = references
+    voice_id = (getattr(element, "voice_id", "") or "").strip()
+    if voice_id:
+        payload["voice_id"] = voice_id
     return payload
 
 
@@ -256,14 +261,15 @@ class FalAIVideoGenerator:
         if self.demo:
             return DEMO_VIDEO_URL
 
-        prompts = take.multi_prompt()
+        beats = take.multi_prompt()
         cast = take.cast_clause()
-        if cast and prompts:
-            # Said once, at the top: which token is whom. A model handed
-            # `@Element1` and a beat that reads "she deals" has to guess which
-            # of two people that is, and guessing is how the wrong face gets
-            # the line.
-            prompts = [cast + prompts[0]] + list(prompts[1:])
+        if cast and beats:
+            # Said once, at the top of the first beat: which token is whom.
+            # The element object has NO name field, so this is the only place
+            # the model learns that @Element1 is Vera Kessler -- and a model
+            # handed `@Element1` beside a beat that reads "she deals" has to
+            # guess which of two people that is.
+            beats = [{**beats[0], "prompt": cast + beats[0]["prompt"]}] + list(beats[1:])
 
         payload = {
             "start_image_url": take.start_image,
@@ -272,16 +278,17 @@ class FalAIVideoGenerator:
             "duration": _duration_str(take.seconds),
             "generate_audio": bool(generate_audio),
         }
-        if len(prompts) > 1:
-            payload["multi_prompt"] = prompts
+        if len(beats) > 1:
+            payload["multi_prompt"] = beats
             # "customize" is what makes the shot list binding rather than a
             # suggestion; "intelligent" lets the model choose its own cuts,
             # which throws away the storyboard.
             payload["shot_type"] = "customize"
         else:
             # One beat is not a multi-shot request. Sending a one-item list
-            # asks a multi-shot planner to plan nothing.
-            payload["prompt"] = prompts[0] if prompts else ""
+            # asks a multi-shot planner to plan nothing -- and `prompt` here is
+            # a plain string, not the object `multi_prompt` takes.
+            payload["prompt"] = beats[0]["prompt"] if beats else ""
         if take.end_image:
             payload["end_image_url"] = take.end_image
         if negative_prompt:
@@ -295,7 +302,7 @@ class FalAIVideoGenerator:
         logger.info(
             "fal multi-shot take: %ss, %d beat(s), %d element(s) on %s",
             payload["duration"],
-            len(prompts),
+            len(beats),
             len(elements),
             self.MULTISHOT_ENDPOINT,
         )

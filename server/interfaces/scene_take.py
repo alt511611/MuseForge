@@ -38,20 +38,42 @@ class Element:
     """A character (or object) the whole take is locked to.
 
     An element is cited from the beat prompts by its token -- ``@Element1`` --
-    so the model is told which subject a beat is about rather than being asked
-    to infer it from a name it has only read.
+    and the CAST CLAUSE is the only place its name appears, because the
+    endpoint's element object has no name field. A model handed `@Element1`
+    with nothing to attach it to has to guess which subject that is.
 
-    ``images`` is a small SET of views of one subject, which is what the
-    backends that accept elements ask for and what
-    MUSEFORGE_CHARACTER_SHEET produces. ``voice_sample`` is the other half of
-    the same lock: given a clean 5-30 second sample, a backend with native
-    audio speaks this character in THAT voice, which is what lets a film keep
-    its cast and still lose the separate lip-sync pass.
+    ``images`` is an ordered set of views of one subject: the first is the
+    frontal (main) view and the rest are additional angles, which is exactly
+    the shape MUSEFORGE_CHARACTER_SHEET produces. The split into
+    `frontal_image_url` and `reference_image_urls` happens at the payload,
+    because it is that endpoint's spelling rather than a fact about the film.
+
+    ``voice_id`` is the other half of the lock: an id from the backend's own
+    voice library, bound to this element, so a take with native audio speaks
+    this character in a chosen voice rather than one the model picked.
     """
 
     name: str
     images: Tuple[str, ...] = ()
-    voice_sample: str = ""
+    #: A VOICE ID, not an audio file. The endpoint's element takes
+    #: `voice_id`; there is nowhere to upload a sample. See the note on
+    #: MUSEFORGE_VOICE_PROVIDER in .env.example -- keeping the film's cast
+    #: through a native-audio take means mapping each character to one of the
+    #: backend's voices, which is a different job from generating speech.
+    voice_id: str = ""
+
+    #: The endpoint takes 1-3 additional angles beside the frontal view.
+    MAX_REFERENCE_IMAGES = 3
+
+    @property
+    def frontal(self) -> str:
+        """The main view. First, because order is how the caller ranks them."""
+        return self.images[0] if self.images else ""
+
+    @property
+    def reference_images(self) -> List[str]:
+        """The other angles, trimmed to what the endpoint accepts."""
+        return list(self.images[1 : 1 + self.MAX_REFERENCE_IMAGES])
 
     def token(self, index: int) -> str:
         """``@Element1`` for the first element, and so on. One-based."""
@@ -66,20 +88,25 @@ class Beat:
     description: str
     shot_type: str = ""
 
-    def as_prompt(self, position: int) -> str:
-        """This beat as one entry of a multi-shot prompt list.
+    def as_prompt(self) -> str:
+        """What this beat SHOWS. Its length is a field, not prose.
 
-        The seconds are written into the text in the syntax Kling's own
-        documentation uses ("Shot 1 (3s): ..."), because the vendor APIs
-        disagree about whether per-beat timing is a field at all: fal takes a
-        LIST of prompts and one total duration, while Kling's own interface
-        takes the timing inline. Writing it inline satisfies both -- a backend
-        that parses it honours the pacing, and one that does not still gets the
-        right number of beats in the right order and paces them itself.
+        The seconds used to be written into the text as "Shot 1 (3s): ...",
+        which is the syntax Kling's own interface documents and which this
+        endpoint rejects outright: it takes an object per beat with its own
+        `duration`, so the timing belongs there and repeating it in the prose
+        only spends prompt on something the model is already being told.
         """
-        head = f"Shot {position + 1} ({self.seconds}s):"
-        framing = f" {self.shot_type}." if self.shot_type else ""
-        return f"{head}{framing} {self.description}".strip()
+        framing = f"{self.shot_type}. " if self.shot_type else ""
+        return f"{framing}{self.description}".strip()
+
+    def as_payload(self) -> dict:
+        """One entry of `multi_prompt`.
+
+        `duration` is a STRING enum ("1".."15"), not an integer -- sending the
+        number is a 422, and a 422 on this endpoint is the whole take.
+        """
+        return {"prompt": self.as_prompt(), "duration": str(self.seconds)}
 
 
 @dataclass(frozen=True)
@@ -102,9 +129,14 @@ class SceneTake:
     def beat_count(self) -> int:
         return len(self.beats)
 
-    def multi_prompt(self) -> List[str]:
-        """The beat list, in cut order."""
-        return [beat.as_prompt(i) for i, beat in enumerate(self.beats)]
+    def multi_prompt(self) -> List[dict]:
+        """The beat list, in cut order, as the endpoint's own objects.
+
+        A list of STRINGS is what this sent first, and the endpoint answered
+        with one error per entry: "Input should be a valid dictionary or
+        object to extract fields from". Each beat is `{prompt, duration}`.
+        """
+        return [beat.as_payload() for beat in self.beats]
 
     def cast_clause(self) -> str:
         """Which token is whom, said once at the top of the take.
