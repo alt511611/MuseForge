@@ -164,9 +164,9 @@ async def test_all_four_phases_render_one_scene_together(monkeypatch, tmp_path):
         has_dialogue=True,
         scene_dialogue="Play your cards, Mr. Voss.",
         language="en",
-        voice_samples={
-            "Vivian Marsh": "https://cdn/vivian-voice.mp3",
-            "Julian Voss": "https://cdn/julian-voice.mp3",
+        voice_ids={
+            "Vivian Marsh": "kling-voice-011",
+            "Julian Voss": "kling-voice-042",
         },
         aspect_ratio="9:16",
     )
@@ -204,11 +204,14 @@ async def test_all_four_phases_render_one_scene_together(monkeypatch, tmp_path):
     assert len(take.elements) <= declared.max_elements
     assert declared.duration.honours(take.seconds)
 
-    # ---- Phase 4: it speaks, in the voices this film cast.
+    # ---- Phase 4: it speaks, and each element carries the voice it was
+    # given. Ids from the backend's own library, not uploaded samples -- see
+    # falai_video_generator._element_payload for why that distinction cost a
+    # 422 to learn.
     assert generator.takes[0]["audio"] is True
     by_name = {e.name: e for e in take.elements}
-    assert by_name["Vivian Marsh"].voice_sample == "https://cdn/vivian-voice.mp3"
-    assert by_name["Julian Voss"].voice_sample == "https://cdn/julian-voice.mp3"
+    assert by_name["Vivian Marsh"].voice_id == "kling-voice-011"
+    assert by_name["Julian Voss"].voice_id == "kling-voice-042"
 
     # ...and the voice is lifted back out of the picture, by real ffmpeg,
     # before the join that would have dropped it.
