@@ -1499,6 +1499,59 @@ async def _concat_by_demuxer(
     return False
 
 
+async def extract_audio_track(video_path: str, out_path: str) -> Optional[str]:
+    """Lift a clip's own soundtrack out to a file, or None when it has none.
+
+    A scene rendered as one take with native audio arrives with the dialogue
+    already in the picture -- and the picture is the one place it cannot stay.
+    `concatenate_videos` joins scenes with `-an` and the mixer maps `0:v`
+    alone, both deliberately: a generated clip's incidental audio has no
+    business reaching a master that is about to have a scored, ducked mix laid
+    on it. So the take's voice would be dropped at the join and the film would
+    ship with moving mouths over silence.
+
+    Extracting it here turns that dialogue into an ordinary audio layer. From
+    the mixer's point of view it is then indistinguishable from a track the
+    voice generator made -- same anchor, same ducking, same subtitle row --
+    which is what lets a whole rendering strategy change without the audio
+    pipeline learning a new special case.
+
+    Stream-copied, so nothing is re-encoded and a clip with no audio stream
+    simply fails and returns None rather than writing an empty file.
+    """
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    try:
+        process = await asyncio.create_subprocess_exec(
+            _ffmpeg_binary(),
+            "-y",
+            "-i",
+            video_path,
+            "-vn",
+            "-acodec",
+            "copy",
+            out_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+    except Exception as exc:
+        logger.warning("Could not extract audio from %s: %s", video_path, exc)
+        return None
+    if process.returncode != 0 or not os.path.isfile(out_path):
+        logger.warning(
+            "No audio track to extract from %s (exit=%s): %s",
+            video_path,
+            process.returncode,
+            stderr.decode("utf-8", errors="replace")[-300:],
+        )
+        try:
+            os.unlink(out_path)
+        except OSError:
+            pass
+        return None
+    return out_path
+
+
 async def concatenate_videos(paths: List[str], out_path: str) -> str:
     """Concatenate clips with low-memory fallbacks.
 
@@ -2580,6 +2633,21 @@ class Script2VideoPipeline:
         output_path = os.path.join(working_dir, "scene_output.mp4")
         await download_video(video_url, output_path)
 
+        # The take's own voice, lifted out before the join drops it. See
+        # extract_audio_track: the concat is `-an` and the mixer maps `0:v`,
+        # so dialogue left inside the picture never reaches the master.
+        scene_audio = None
+        if generate_audio:
+            scene_audio = await extract_audio_track(
+                output_path, os.path.join(working_dir, "scene_take_audio.m4a")
+            )
+            if not scene_audio:
+                logger.warning(
+                    "Scene %s was rendered with native audio but none came "
+                    "back in the clip; it will be voiced the usual way.",
+                    scene_idx + 1,
+                )
+
         # One meta entry per BEAT, so everything downstream that counts shots
         # (the regeneration UI, the retake flow, the scene archive) still sees
         # the framings the storyboard designed rather than a single opaque
@@ -2596,7 +2664,18 @@ class Script2VideoPipeline:
             }
             for i, beat in enumerate(take.beats)
         ]
-        return {"path": output_path, "url": video_url, "shots": shot_meta}
+        return {
+            "path": output_path,
+            "url": video_url,
+            "shots": shot_meta,
+            # Present and truthy only when this scene's dialogue came out of
+            # the video model rather than the voice generator. The caller uses
+            # it for three decisions at once: which file the mixer lays down,
+            # which scenes lip sync must leave alone (the mouth already
+            # matches), and which lines were never sent to a TTS provider.
+            "take_audio_path": scene_audio,
+            "speaks_for_itself": bool(scene_audio),
+        }
 
     async def _apply_scene_pacing(
         self,

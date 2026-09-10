@@ -192,6 +192,38 @@ def _scene_dialogue(scene: Any) -> List[Any]:
     return list(getattr(scene, "dialogue", None) or [])
 
 
+def picture_carries_dialogue(video_gen, language: str) -> bool:
+    """Whether this job's spoken lines come out of the VIDEO model.
+
+    The question every stage of the soundtrack turns on, asked once so the
+    stages cannot answer it differently. Two halves, and both are required:
+
+    * the scene is being rendered as one take by a backend that speaks at all
+      (script2video.scene_take_backend), and
+    * that backend speaks THIS FILM'S language.
+
+    The second half is the one that looks like a detail and is not. "Has
+    native audio" is not a property an endpoint has -- a language is. Kling v3
+    covers English and Chinese; a Turkish drama rendered on it comes back
+    spoken in translated English, which is not a degraded version of the
+    product, it is a different film. So a language the backend cannot speak
+    keeps every stage it always had: the voice generator, the lip-sync pass,
+    and the mixer laying speech over a silent picture.
+
+    When it IS true, three things stop happening. No per-scene TTS request
+    (one short sample per CHARACTER is made instead, to bind the take's voice
+    to the cast). No lip-sync pass, because the mouth was never out of sync.
+    And no second dialogue track laid over a picture that is already speaking.
+    """
+    try:
+        from pipelines.script2video import scene_take_backend
+
+        backend = scene_take_backend(video_gen)
+    except Exception:  # pragma: no cover -- a missing optional backend
+        return False
+    return bool(backend is not None and backend.speaks(language))
+
+
 def caption_only_tracks(dialogue: List[Any], scene_index: int) -> List[Dict[str, Any]]:
     """Subtitle rows for a scene whose voice generation failed.
 
@@ -3737,6 +3769,13 @@ class Idea2VideoPipeline:
             # synced_audio_url is the same file, kept under a name the mixer
             # ignores, so re-syncing a REGENERATED scene later still has the
             # voice to sync against instead of finding it deleted.
+            if track.get("speaks_for_itself"):
+                # The dialogue came out of the video model, so the mouth on
+                # screen is the mouth that said it. Driving it again from the
+                # same audio is a generation spent to re-create sync that was
+                # never lost -- and the sync pass returns only the spoken
+                # stretch, so it would also cut the scene down to its line.
+                continue
             audio_url = track.get("audio_url") or track.get("synced_audio_url")
             if not audio_url:
                 continue
@@ -5795,8 +5834,80 @@ class Idea2VideoPipeline:
         # the render has now already paid for its voices. That is a few cents
         # against a scene of video, and it buys every shot in the drama a
         # measured answer instead of a guessed one.
+        # WHO SPEAKS THIS FILM: the video model, or us.
+        #
+        # Asked once, here, because every stage of the soundtrack below turns
+        # on it -- and a job in which the picture speaks and the mixer also
+        # lays down a voice track is a film in which every line is heard
+        # twice, slightly out of phase.
+        picture_speaks = not self.demo and picture_carries_dialogue(
+            self.script2video.video_gen, language
+        )
+
+        # The cast, as audio. A backend that speaks binds a generated voice to
+        # a short sample attached to a character element, so this is what
+        # stops native audio costing the product its cast: one sample per
+        # SPEAKING CHARACTER, made once, instead of one request per scene.
+        #
+        # It is also where the saving is. A delivered three-scene job spent
+        # 329 seconds -- 36% of its whole render -- on a lip-sync pass that
+        # exists only because the picture arrived mute, plus a TTS request per
+        # scene. This replaces both with two short requests for a two-hander.
+        voice_sample_task: Optional["asyncio.Task"] = None
+        if picture_speaks and voice_gen is not None:
+
+            async def _voice_samples() -> Dict[str, str]:
+                samples: Dict[str, str] = {}
+                first_line: Dict[str, Any] = {}
+                for _scene in script.scenes:
+                    for _line in _scene_dialogue(_scene) or []:
+                        who = (
+                            _line.get("character")
+                            if isinstance(_line, dict)
+                            else getattr(_line, "character", "")
+                        ) or ""
+                        if who and who not in first_line:
+                            first_line[who] = _line
+                for who, line in first_line.items():
+                    try:
+                        tracks = await voice_gen.generate_scene_dialogue(
+                            [line], is_cancelled=is_cancelled, language=language
+                        )
+                    except Exception as exc:
+                        # Fail-open, one character at a time. A cast member
+                        # without a sample is spoken in a voice the model
+                        # picked, which is worse than the voice we cast and
+                        # very much better than a scene that does not render.
+                        logger.warning(
+                            "Could not make a voice sample for %r; the take "
+                            "will pick its own voice for them: %s",
+                            who,
+                            exc,
+                        )
+                        continue
+                    url = next(
+                        (
+                            str(t.get("audio_url") or "")
+                            for t in tracks or []
+                            if str(t.get("audio_url") or "").strip()
+                        ),
+                        "",
+                    )
+                    if url:
+                        samples[who] = url
+                logger.info(
+                    "Voice samples for %d of %d speaking character(s); the "
+                    "picture carries the dialogue in %r.",
+                    len(samples),
+                    len(first_line),
+                    language,
+                )
+                return samples
+
+            voice_sample_task = asyncio.create_task(_voice_samples())
+
         speech_tasks: Dict[int, "asyncio.Task"] = {}
-        if voice_gen is not None:
+        if voice_gen is not None and not picture_speaks:
             for _idx, _scene in enumerate(script.scenes):
                 _lines = _scene_dialogue(_scene)
                 if not _lines:
@@ -5953,9 +6064,20 @@ class Idea2VideoPipeline:
                             stage, f"[{_idx + 1}/{total_scenes}] {message}", base, data
                         )
 
+                # A backend that speaks needs both: the language, to know
+                # whether it may, and the samples, to know in whose voice.
+                take_voices: Dict[str, str] = {}
+                if voice_sample_task is not None:
+                    try:
+                        take_voices = await voice_sample_task
+                    except Exception as exc:  # pragma: no cover -- fail-open
+                        logger.warning("Voice samples unavailable: %s", exc)
+
                 scene_slots[idx] = await self.script2video.run(
                     script=_scene_action(scene),
                     characters=characters,
+                    language=language,
+                    voice_samples=take_voices,
                     user_requirement=user_requirement,
                     style=style,
                     working_dir=os.path.join(working_dir, f"scene_{idx}"),
@@ -6084,6 +6206,34 @@ class Idea2VideoPipeline:
                     dialogue_tasks.append(
                         (assembled_scene_index, idx, task, list(scene_dialogue_lines))
                     )
+                elif (
+                    scene_result.get("speaks_for_itself")
+                    and scene_dialogue_lines
+                    and assembled_scene_index is not None
+                ):
+                    # This scene said its own lines. The audio was lifted out
+                    # of the clip before the join dropped it
+                    # (script2video.extract_audio_track), and from here it is
+                    # an ordinary dialogue layer: same anchor, same ducking,
+                    # same subtitle rows.
+                    #
+                    # Attached to the FIRST line only, which is the convention
+                    # the voice generator already uses for a scene voiced in
+                    # one file -- the mixer lays down the rows that carry
+                    # audio and reads the rest for captions alone.
+                    rows = caption_only_tracks(
+                        scene_dialogue_lines, assembled_scene_index
+                    )
+                    if rows:
+                        rows[0]["audio_url"] = scene_result["take_audio_path"]
+                        # Read by the lip-sync pass, which must leave this
+                        # scene alone: the mouth on screen is the mouth that
+                        # said it.
+                        rows[0]["speaks_for_itself"] = True
+                        turn = _scene_field(script.scenes[idx], "turn")
+                        for row in rows:
+                            row["emphasis"] = turn
+                        dialogue_tracks.extend(rows)
 
                 serialized_scene = scene.model_dump() if hasattr(scene, "model_dump") else scene
                 scene_results.append(
