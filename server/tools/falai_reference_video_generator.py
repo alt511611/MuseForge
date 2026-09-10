@@ -40,7 +40,7 @@ DEMO_VIDEO_URL = os.environ.get("MUSEFORGE_DEMO_VIDEO", "").strip() or (
     # broke demo mode: jobs completed but the "finished" video would not
     # play. Any third-party fixture can go the same way -- set
     # MUSEFORGE_DEMO_VIDEO in the deployment env to override without a
-    # code change (render.yaml / docker-compose.yml both declare it).
+    # code change (deploy/coolify.env and docker-compose.yml both declare it).
     "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4"
 )
 

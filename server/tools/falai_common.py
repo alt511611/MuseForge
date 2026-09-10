@@ -22,7 +22,7 @@ DEFAULT_MAX_POLLS = 200
 
 
 def make_fal_client(api_key: str, demo: bool = False) -> fal_client.AsyncClient:
-    # .strip() guards against trailing whitespace/newlines from Render env paste
+    # .strip() guards against trailing whitespace/newlines from a dashboard paste
     # that would otherwise cause "Illegal header value".
     key = (api_key or "").strip()
     if not key and not demo:
@@ -40,7 +40,7 @@ def make_fal_client(api_key: str, demo: bool = False) -> fal_client.AsyncClient:
             "FAL_KEY is not set (or is empty) -- cannot use a fal.ai "
             "provider (MUSEFORGE_IMAGE_PROVIDER/MUSEFORGE_MUSIC_PROVIDER/"
             "MUSEFORGE_VIDEO_PROVIDER=falai) without it. Set FAL_KEY in "
-            "Render's environment, or switch the provider(s) back to "
+            "Coolify's environment, or switch the provider(s) back to "
             "\"muapi\"."
         )
     return fal_client.AsyncClient(key=key or None)
