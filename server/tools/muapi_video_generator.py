@@ -113,8 +113,8 @@ class MuAPIVideoGenerator:
         """
         from tools.video_model_router import (
             accepts_aspect_ratio,
-            fixed_duration,
             optional_fields,
+            send_duration,
         )
 
         target = endpoint or endpoint_for_plan("free")
@@ -122,12 +122,15 @@ class MuAPIVideoGenerator:
 
         payload: Dict[str, Any] = {"prompt": prompt, "image_url": image_url}
         if "duration" in allowed:
-            # Some endpoints declare a single-value duration enum rather than a
-            # range (Veo: 8 and only 8). clamp_duration's 3-15 bound is Kling's,
-            # and sending a Kling-shaped number to one of those is a 422 that
-            # the fallback chain misreads as a missing endpoint.
-            only = fixed_duration(target)
-            payload["duration"] = only if only else clamp_duration(duration)
+            # The endpoint's own declaration decides both halves: whether
+            # there is a field (`allowed`) and what may go in it
+            # (`send_duration`). Endpoints do not agree about the second --
+            # Kling takes any integer 3..15, MuAPI's veo3.1 takes 8 and
+            # nothing else -- and sending a Kling-shaped 6 or 10 to Veo is a
+            # 422 the fallback chain misreads as a missing endpoint.
+            sent = send_duration(target, duration)
+            if sent is not None:
+                payload["duration"] = sent
         if "generate_audio" in allowed:
             payload["generate_audio"] = generate_audio
         if "last_image" in allowed and last_image:
@@ -174,6 +177,7 @@ class MuAPIVideoGenerator:
 
         from tools.video_model_router import STANDARD as STANDARD_PROFILE
         from tools.video_model_router import is_routing_active, model_chain
+        from interfaces.video_backend import is_declared
 
         profile = shot_profile or STANDARD_PROFILE
         chain = model_chain(profile, plan)
@@ -221,12 +225,35 @@ class MuAPIVideoGenerator:
                 is_last = position == len(chain) - 1
                 if is_last or not _is_endpoint_rejected(exc):
                     raise
-                logger.warning(
-                    "MuAPI rejected endpoint=%r for profile=%r (%s); falling back to %r",
-                    endpoint,
-                    profile,
-                    exc,
-                    chain[position + 1],
-                )
+                # A 404 and a 422 both demote, and they mean opposite things.
+                # 404 is "this build knows a slug this vendor does not have",
+                # which is a configuration question. 422 from an endpoint we
+                # DECLARED is "the payload we built from our own declaration
+                # was refused", which is a bug in
+                # interfaces/video_backend.BACKENDS -- and it is the failure
+                # this whole registry exists to prevent, so it must not read
+                # like routine fallback noise.
+                #
+                # Still fail-open: a shot is worth more than a correct log.
+                if is_declared(endpoint) and "422" in str(exc):
+                    logger.error(
+                        "%r refused a payload built from its own declaration "
+                        "(fields sent: %s). interfaces/video_backend.BACKENDS "
+                        "is wrong about this endpoint -- check its schema in "
+                        "the playground. Demoting to %r so the shot survives, "
+                        "but the routed model is not running: %s",
+                        endpoint,
+                        sorted(payload),
+                        chain[position + 1],
+                        exc,
+                    )
+                else:
+                    logger.warning(
+                        "MuAPI rejected endpoint=%r for profile=%r (%s); falling back to %r",
+                        endpoint,
+                        profile,
+                        exc,
+                        chain[position + 1],
+                    )
         # Unreachable: the loop either returns or raises on its last link.
         raise last_exc or MuAPIError("No video endpoint configured")

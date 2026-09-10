@@ -26,58 +26,67 @@ os.environ.setdefault("MUAPI_KEY", "test-key-not-real")
 from interfaces.second_budget import SECONDS_PER_CREDIT  # noqa: E402
 from stripe_integration import CREDIT_PACKAGES, PLAN_CREDITS  # noqa: E402
 
-#: Flat, per clip, any duration the endpoint accepts.
+from interfaces.video_backend import BACKENDS, backend_for
+
+#: What one credit's worth of rendering costs us.
 #:
-#: VERIFIED against muapi.ai/pricing on 2026-08-14, along with everything in
-#: MUAPI_RATES below. Re-check before trusting a margin figure computed here;
-#: the whole point of writing the rates down is that the next person does not
-#: have to guess at them, and a stale number is worse than no number.
-KLING_PER_GENERATION = 0.72
+#: The VIDEO half is read from interfaces.video_backend.BACKENDS rather than
+#: restated here. It used to be a second copy of the same table, and a second
+#: copy is how a margin gets computed from a rate the router does not actually
+#: charge: this file would have gone on reporting a healthy margin after
+#: somebody re-pointed a profile at a dearer endpoint. Now a rate change in the
+#: registry is checked by the assertions below on the next test run.
+#:
+#: VERIFIED against muapi.ai/pricing on 2026-08-14. Re-check before trusting a
+#: margin figure computed here; a stale number is worse than no number.
+KLING_PER_GENERATION = backend_for("kling-v3.0-standard-image-to-video").rate
 FIXED_PER_SCENE = 0.067  # frame + storyboard call + amortised portraits
 CREDIT_COST = KLING_PER_GENERATION + FIXED_PER_SCENE
 
-#: The rest of MuAPI's list, as observed, kept here because the SHAPE of these
-#: prices is the thing that decides what this product can do -- not their size.
+#: The IMAGE endpoints, which have no VideoBackend to declare them: they are
+#: not routed, they are called directly, and nothing plans a scene against
+#: their capabilities.
 #:
-#: There are two billing shapes in the catalogue and they are not comparable:
-#:
-#:   FLAT, per generation, any length the endpoint accepts:
-#:     kling-v3.0-standard/pro-image-to-video   $0.72   (up to 15s)
-#:     veo3.1-lite-image-to-video               $0.30
-#:     wan2.2-image-to-video                    $0.30
-#:     ovi-image-to-video                       $0.20
-#:     wan2.2-spicy-image-to-video              $0.20
 #:     flux-pulid            (frame)            $0.04
 #:     flux-kontext-pro-i2i  (edit / end frame) $0.03
 #:     flux-kontext-dev-i2i  (edit / end frame) $0.02
-#:
-#:   PER SECOND, where every extra second is real money:
-#:     kling-v3-turbo-standard-image-to-video   $0.112/s  ($0.56 per 5s)
-#:     kling-v3-turbo-pro-image-to-video        $0.14/s   ($0.70 per 5s)
-#:     kling-v3.0-omni-standard-image-to-video  $0.084/s base, $0.112/s w/ audio
-#:     seedance-2.5-image-to-video              $0.34/s (720p), $0.17/s (480p)
-#:     seedance-2.5-image-to-video-480p         $0.17/s
-#:     kling-v3.0-std-motion-control  (V2V)     $0.10/s
-#:
-#: The counter-intuitive consequence, and the reason this block exists: the
-#: "cheap"-sounding endpoints are the expensive ones for this workload. A
-#: 3-second reaction shot costs $0.336 on turbo-standard and $0.51 on seedance
-#: 480p, but only $0.30 on veo3.1-lite and $0.20 on ovi -- because those are
-#: flat, and a short clip does not get a discount from a per-second rate it
-#: gets a smaller bill from a rate we are not paying at all.
-MUAPI_RATES = {
-    "kling-v3.0-standard-image-to-video": 0.72,
-    "kling-v3.0-pro-image-to-video": 0.72,
-    "veo3.1-lite-image-to-video": 0.30,
-    "ovi-image-to-video": 0.20,
+IMAGE_RATES = {
     "flux-pulid": 0.04,
     "flux-kontext-pro-i2i": 0.03,
+    "flux-kontext-dev-i2i": 0.02,
+}
+
+#: Video endpoints the registry does not declare, kept because the SHAPE of
+#: these prices is what decides what this product can do:
+#:
+#:     wan2.2-image-to-video                    $0.30  flat
+#:     ovi-image-to-video                       $0.20  flat
+#:     kling-v3.0-omni-standard-image-to-video  $0.084/s base, $0.112/s w/ audio
+#:     kling-v3.0-std-motion-control  (V2V)     $0.10/s
+UNDECLARED_VIDEO_RATES = {
+    "wan2.2-image-to-video": 0.30,
+    "ovi-image-to-video": 0.20,
+}
+
+#: One lookup over all three, so a test reads a rate without caring which of
+#: them holds it.
+#:
+#: The counter-intuitive consequence this exists to pin: the "cheap"-sounding
+#: endpoints are the expensive ones for this workload. A 3-second reaction shot
+#: costs $0.336 on turbo-standard and $0.51 on seedance-480p, but only $0.30 on
+#: veo3.1-lite -- because those are flat, and a short clip does not get a
+#: discount from a per-second rate, it gets a smaller bill from a rate we are
+#: not paying at all.
+MUAPI_RATES = {
+    **IMAGE_RATES,
+    **UNDECLARED_VIDEO_RATES,
+    **{slug: declared.rate for slug, declared in BACKENDS.items()},
 }
 
 #: One extra image per shot, for the acted end frame (interfaces/acting,
 #: MUSEFORGE_ACTING_END_FRAME). Off by default; this is what turning it on
 #: costs.
-END_FRAME_COST = MUAPI_RATES["flux-kontext-pro-i2i"]
+END_FRAME_COST = IMAGE_RATES["flux-kontext-pro-i2i"]
 
 #: What the pricing page shows. Kept here so a change on one side without the
 #: other fails loudly instead of shipping a page that lies about the product.

@@ -37,13 +37,16 @@ makes they rank in the opposite order to how they read:
 "Turbo" and "480p" sound like the budget options and are not: a 3-second
 insert costs $0.34 on turbo and $0.51 on seedance-480p, against $0.30 for the
 same shot on veo3.1-lite -- which also takes `last_image`, so it can carry an
-acted end frame where turbo cannot (see _ENDPOINT_FIELDS). Verified against
-muapi.ai/pricing on 2026-08-14; the full table lives in
-tests/test_pricing_coherence.MUAPI_RATES, which pins the margin consequences.
+acted end frame where turbo cannot -- both facts are declared in
+interfaces/video_backend, which is also where the rates now live. Verified
+against muapi.ai/pricing on 2026-08-14; tests/test_pricing_coherence reads
+them from that registry and pins the margin consequences.
 """
 
 import os
 from typing import List, Optional
+
+from interfaces.video_backend import backend_for
 
 #: Shot profiles. Deliberately few -- a taxonomy nobody can classify
 #: reliably is worse than no taxonomy, because it routes shots at random.
@@ -179,95 +182,37 @@ def model_chain(profile: str, plan: str = "free") -> List[str]:
     return chain
 
 
-#: What to send to an endpoint we have no schema for. MuAPI validates the
-#: payload, so an unknown field is not ignored -- it comes back as a 422, which
-#: this module's fallback chain then reads as "this endpoint does not exist"
-#: and quietly demotes the shot to Standard. The routed model would never
-#: actually run, and nothing in the logs would say why. `duration` is in the
-#: default because nearly every i2v model in the catalogue takes it; the
-#: handful that do not are listed in _NO_DURATION below.
-DEFAULT_OPTIONAL_FIELDS = frozenset({"duration"})
-
-#: Optional fields each endpoint is KNOWN to accept, read off the model's
-#: schema in the MuAPI playground. Only fields this client actually sends are
-#: listed -- an endpoint may well take `seed` or `resolution` too, but we have
-#: nothing to put in them.
+#: Everything below now reads ONE declaration per endpoint
+#: (interfaces/video_backend.BACKENDS) instead of the five parallel maps that
+#: used to live here -- the accepted fields, whether there is a duration field,
+#: whether that field is an enum, which aspect ratios it admits, and what it
+#: costs. They were five answers to one question, keyed by the same slug and
+#: maintained by hand, and forgetting one of them is not an error anybody sees:
+#: an undeclared field is a 422, the chain below reads 422 as "this model does
+#: not exist here", and the shot demotes to Standard in silence.
 #:
-#: Keep this in step with the playground when adding a model: getting it wrong
-#: in the permissive direction (listing a field the model rejects) costs a
-#: silent demotion to Standard, which is exactly what this map exists to stop.
-_ENDPOINT_FIELDS = {
-    # Kling v3.0 is the one family that takes an audio flag and an end frame.
-    "kling-v3.0-pro-image-to-video": frozenset(
-        {"duration", "generate_audio", "last_image"}
-    ),
-    "kling-v3.0-standard-image-to-video": frozenset(
-        {"duration", "generate_audio", "last_image"}
-    ),
-    "kling-v3.0-4k-image-to-video": frozenset(
-        {"duration", "generate_audio", "last_image"}
-    ),
-    # Turbo drops both: prompt, image_url and duration only.
-    "kling-v3-turbo-pro-image-to-video": frozenset({"duration"}),
-    "kling-v3-turbo-standard-image-to-video": frozenset({"duration"}),
-    # Veo takes an end frame and an aspect ratio, but no audio flag (its audio
-    # is always on). Its `duration` is a single-value enum -- see FIXED_DURATION.
-    "veo3.1-image-to-video": frozenset({"duration", "last_image", "aspect_ratio"}),
-    "veo3.1-fast-image-to-video": frozenset({"duration", "last_image", "aspect_ratio"}),
-    "veo3.1-lite-image-to-video": frozenset({"duration", "last_image", "aspect_ratio"}),
-    # Seedance takes an aspect ratio and a seed; no audio flag, no end frame.
-    "seedance-2.5-image-to-video": frozenset({"duration", "aspect_ratio"}),
-    "seedance-2.5-image-to-video-480p": frozenset({"duration", "aspect_ratio"}),
-    "seedance-2-image-to-video": frozenset({"duration", "aspect_ratio"}),
-}
-
-#: Endpoints with NO duration field at all -- their clip length is fixed by the
-#: model. Sending `duration` to one is a 422; not sending it means the shot
-#: comes back at whatever length the model produces, which the second budget
-#: (interfaces/second_budget) cannot then honour. Route to these only if you
-#: are prepared for that.
-_NO_DURATION = frozenset(
-    {
-        "minimax-hailuo-2.3-pro-i2v",
-        "minimax-hailuo-2.3-standard-i2v",
-        "minimax-hailuo-2.3-fast",
-    }
-)
+#: These functions are kept as the router's public surface because that is what
+#: `muapi_video_generator._payload` and the shot-plan tests already call. They
+#: are readers now, not storage.
 
 
-#: Endpoints whose `duration` is a single-value ENUM rather than a range.
-#:
-#: Read off the model's own API Reference on muapi.ai (veo3.1-lite: "duration
-#: int, Options: 8, Default: 8"), and the reason this map exists rather than a
-#: comment: `clamp_duration` bounds a value to 3-15, which is right for Kling
-#: and wrong here -- a scene budgeted at 6 or 10 seconds would be sent as 6 or
-#: 10, rejected as a 422, read by the fallback chain as "this endpoint does not
-#: exist" and silently demoted to Standard. A routed Veo would have been
-#: configured, expected, billed for in planning, and never once actually run.
-#:
-#: A shot sent here comes back at the model's fixed length regardless of the
-#: second budget (interfaces/second_budget), so the caller has to trim it --
-#: which is exactly what a short reaction shot wants anyway.
-FIXED_DURATION = {
-    "veo3.1-image-to-video": 8,
-    "veo3.1-fast-image-to-video": 8,
-    "veo3.1-lite-image-to-video": 8,
-}
-
-#: Aspect ratios an endpoint actually accepts, where that is narrower than
-#: what this product sells. Veo's enum is 16:9 and 9:16 only, so a square job
-#: routed there is another silent demotion -- dropping the field lets the
-#: model use its own default instead of failing the call.
-SUPPORTED_ASPECT_RATIOS = {
-    "veo3.1-image-to-video": frozenset({"16:9", "9:16"}),
-    "veo3.1-fast-image-to-video": frozenset({"16:9", "9:16"}),
-    "veo3.1-lite-image-to-video": frozenset({"16:9", "9:16"}),
-}
+def optional_fields(endpoint: str) -> frozenset:
+    """Which optional fields this endpoint accepts, beyond prompt + image_url."""
+    return backend_for(endpoint).fields
 
 
 def fixed_duration(endpoint: str) -> Optional[int]:
-    """The only duration this endpoint accepts, or None when it takes a range."""
-    return FIXED_DURATION.get((endpoint or "").strip())
+    """The only duration this endpoint accepts, or None when it takes a range.
+
+    An endpoint whose duration is a single-value enum is the case that used to
+    demote silently: `clamp_duration` bounds a value to Kling's 3-15, and a
+    scene budgeted at 6 or 10 seconds was sent as 6 or 10, rejected as a 422,
+    read as "this endpoint does not exist" and quietly replaced.
+    """
+    duration = backend_for(endpoint).duration
+    if duration.absent or len(duration.allowed) != 1:
+        return None
+    return duration.allowed[0]
 
 
 def accepts_aspect_ratio(endpoint: str, aspect_ratio: str) -> bool:
@@ -276,20 +221,26 @@ def accepts_aspect_ratio(endpoint: str, aspect_ratio: str) -> bool:
     True for every endpoint with no declared restriction, so an unknown model
     keeps the previous behaviour.
     """
-    allowed = SUPPORTED_ASPECT_RATIOS.get((endpoint or "").strip())
-    if not allowed:
-        return True
-    return (aspect_ratio or "").strip() in allowed
+    return backend_for(endpoint).accepts_aspect_ratio(aspect_ratio)
 
 
-def optional_fields(endpoint: str) -> frozenset:
-    """Which optional fields this endpoint accepts, beyond prompt + image_url."""
-    endpoint = (endpoint or "").strip()
-    if endpoint in _ENDPOINT_FIELDS:
-        return _ENDPOINT_FIELDS[endpoint]
-    if endpoint in _NO_DURATION:
-        return frozenset()
-    return DEFAULT_OPTIONAL_FIELDS
+def send_duration(endpoint: str, wanted) -> Optional[int]:
+    """The duration to put in this endpoint's payload, or None to omit it.
+
+    The one place that knows how to turn "this scene is budgeted at ten
+    seconds" into a number a particular endpoint will accept. A caller no
+    longer has to know whether ten is legal here.
+    """
+    return backend_for(endpoint).duration.send(wanted)
+
+
+def delivered_seconds(endpoint: str, wanted) -> float:
+    """How much footage comes back when ``wanted`` seconds are asked for.
+
+    Longer than ``wanted`` when an enum rounds up, which is the caller's cue
+    to trim; 0.0 -- meaning unknown -- for an endpoint with no duration field.
+    """
+    return backend_for(endpoint).duration.delivers(wanted)
 
 
 def is_routing_active() -> bool:
