@@ -2062,10 +2062,22 @@ async def stripe_webhook(request: Request):
     payload = await request.body()
     sig = request.headers.get("stripe-signature", "")
     try:
-        result = await handle_webhook(payload, sig)
-        return result
+        return await handle_webhook(payload, sig)
     except ValueError as exc:
+        # `handle_webhook` has already logged WHY with the detail that
+        # distinguishes a missing secret from a bad signature; this is the
+        # line that ties it to the request in the access log.
+        logger.warning("Stripe webhook returned 400: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        # Anything else is ours, not Stripe's. It has to be a 5xx so Stripe
+        # RETRIES -- a 200 here tells Stripe the payment was handled, and the
+        # customer is never credited. The handler releases its idempotency
+        # mark on the way out so the retry is allowed to do the work.
+        logger.exception("Stripe webhook failed while handling the event.")
+        raise HTTPException(
+            status_code=500, detail="Webhook handler failed; retry expected."
+        )
 
 
 if __name__ == "__main__":
