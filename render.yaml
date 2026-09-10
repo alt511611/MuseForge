@@ -239,6 +239,12 @@ services:
       # stop holding a MuAPI key alive for a one-cent call.
       - key: MUSEFORGE_SFX_PROVIDER
         value: ""
+      # Empty = "muapi". Declared for the same reason as everything else in
+      # this file: it was set in a developer's .env and nowhere here, so the
+      # two ran different backends and nobody could see that from the
+      # blueprint.
+      - key: MUSEFORGE_MUSIC_PROVIDER
+        value: ""
 
       # ── How a scene is rendered ──────────────────────────────────────────
       # All empty, which is the shipped strategy: one image and one video
@@ -265,6 +271,13 @@ services:
       - key: MUAPI_KONTEXT_MODEL
         value: ""
       - key: MUAPI_REFERENCE_CAPACITY_FLUX_KONTEXT_PRO_I2I
+        value: ""
+      # Which vendor renders frames at all. Empty = "muapi" (flux-2-pro for
+      # the unreferenced path, MUAPI_KONTEXT_MODEL above for the referenced
+      # one). Declared because it was set to "falai" in a developer's .env and
+      # nowhere here, so what was tested locally was not what production
+      # rendered -- and the two paths do not share a schema.
+      - key: MUSEFORGE_IMAGE_PROVIDER
         value: ""
 
       # A character's lock as a 2x2 sheet of four views instead of one front
