@@ -8,6 +8,19 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+
+def _anchor(references):
+    """The identity anchor of a reference set.
+
+    `generate_image_with_reference` takes an ordered sequence now -- the
+    anchor, then the other faces in the frame, then the set plate. These
+    tests are about which portrait LEADS, which is still index 0.
+    """
+    if references is None or isinstance(references, str):
+        return references
+    return references[0] if references else None
+
 os.environ.setdefault("MUAPI_KEY", "test-key")
 
 
@@ -57,7 +70,7 @@ async def test_qa_failure_triggers_single_corrective_repair(monkeypatch, tmp_pat
     calls = []
 
     async def fake_generate_image_with_reference(self, prompt, reference_url, aspect_ratio="16:9", is_cancelled=None):
-        calls.append({"prompt": prompt, "reference_url": reference_url})
+        calls.append({"prompt": prompt, "reference_url": _anchor(reference_url)})
         if len(calls) == 1:
             return "https://fake.cdn/frame_bad.png"
         return "https://fake.cdn/frame_repaired.png"

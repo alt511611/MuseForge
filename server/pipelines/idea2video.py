@@ -3408,6 +3408,47 @@ def _heard_but_never_seen(script: DramaScript, cast: List[CharacterInScene]) -> 
     return unseen
 
 
+#: Whether a character's lock is a single front-facing portrait or a
+#: multi-angle SHEET.
+#:
+#: OFF by default, and the reason is a real incompatibility rather than
+#: caution. The shipped reference model is flux-pulid, which is an IDENTITY
+#: model: it expects a photograph OF A FACE and returns that face in a picture
+#: of its own choosing. A four-panel contact sheet is not a photograph of a
+#: face, and handing one to PuLID is asking it to lock the identity of a
+#: collage.
+#:
+#: What it is for is the reference models that ask for exactly this. Kling's
+#: element definition takes "up to 4" views of one subject and combines them
+#: into a single locked subject, and Nano Banana Pro reads a multi-view sheet
+#: as evidence about the same person rather than as four people. On those a
+#: sheet is strictly more information than one front view -- a profile is what
+#: stops a character from being redrawn every time the camera moves off axis.
+#:
+#: So this is switched on WITH the backend that can use it, and the pairing is
+#: the operator's to make: there is no reliable way to ask a MuAPI slug what
+#: it does with a grid, and guessing wrong degrades every face in the film.
+def is_character_sheet_enabled() -> bool:
+    return os.environ.get("MUSEFORGE_CHARACTER_SHEET", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+#: The sheet's own instruction. Kept beside the flag because the two only ever
+#: make sense together, and separated from the prompt below because the
+#: single-portrait wording is not a special case of it -- they ask for
+#: different pictures.
+CHARACTER_SHEET_DIRECTION = (
+    "Character reference sheet: a 2x2 grid of the SAME person, four views -- "
+    "front, three-quarter left, profile, three-quarter right. Identical face, "
+    "hair, age and clothing in all four panels. Even neutral studio lighting, "
+    "plain seamless background, no text, no labels, no borders. "
+)
+
+
 class Idea2VideoPipeline:
     def __init__(self, api_key: str, demo: bool = False):
         self.api_key = api_key
@@ -3506,14 +3547,20 @@ class Idea2VideoPipeline:
             subject = gender_of.noun(
                 gender_of.infer(f"{char.name} {char.static_features}")
             )
+            # A sheet and a portrait are different pictures, not the same
+            # picture at two settings: the sheet's whole value is the angles a
+            # front-facing portrait does not have, and its framing direction
+            # replaces rather than extends the portrait's.
+            sheet = is_character_sheet_enabled()
             prompt = (
-                f"Character portrait{f' of a {subject}' if subject else ''}, "
+                f"Character {'reference sheet' if sheet else 'portrait'}"
+                f"{f' of a {subject}' if subject else ''}, "
                 f"{style} style. "
                 f"{char.static_features}. {char.dynamic_features}. "
                 # The locked portrait is the costume reference too -- generating
                 # it without wardrobe leaves every scene to invent an outfit.
                 f"{('Wearing ' + wardrobe + '. ') if wardrobe else ''}"
-                f"Front-facing, neutral expression, studio lighting, high detail."
+                f"{CHARACTER_SHEET_DIRECTION if sheet else 'Front-facing, neutral expression, studio lighting, high detail.'}"
                 # The portrait is the identity anchor every frame is matched
                 # against, so it has to be made the same way the frames are.
                 # A photographic face bound into cel-shaded scenes fights the

@@ -30,10 +30,12 @@ Errors raise (no silent MuAPI fallback).
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 from typing import Callable, Optional
 
 from tools.falai_common import fal_generate, make_fal_client
+from tools.muapi_image_generator import normalise_references
 
 ASPECT_RATIO_MAP = {
     "1:1": {"width": 1024, "height": 1024},
@@ -49,6 +51,8 @@ IMAGE_SIZE_ENUM = {
     "9:16": "portrait_16_9",
     "4:3": "landscape_4_3",
 }
+
+logger = logging.getLogger(__name__)
 
 KONTEXT_ASPECT_RATIOS = {
     "21:9",
@@ -104,17 +108,41 @@ class FalAIImageGenerator:
     async def generate_image_with_reference(
         self,
         prompt: str,
-        reference_url: str,
+        references,
         aspect_ratio: str = "16:9",
         is_cancelled: Optional[Callable[[], bool]] = None,
     ) -> str:
+        """Render a frame from one or more reference images.
+
+        Same contract as the MuAPI backend: ``references`` is a URL or an
+        ORDERED sequence, index 0 being the identity anchor.
+
+        This endpoint reads exactly one. That is a property of fal's Kontext
+        schema (singular ``image_url``), not a choice made here, so the rest
+        of the set is reported rather than quietly discarded -- the caller
+        assembled it for a reason and is entitled to know it did not arrive.
+        """
         if self.demo:
             return _demo_image_url(prompt + "|ref", aspect_ratio)
+
+        ordered = normalise_references(references)
+        if not ordered:
+            return await self.generate_image(
+                prompt, aspect_ratio, is_cancelled=is_cancelled
+            )
+        if len(ordered) > 1:
+            logger.info(
+                "%s takes a single reference image; using the anchor and "
+                "holding back %d. Point MUSEFORGE_IMAGE_PROVIDER at a "
+                "multi-reference backend to use the whole set.",
+                self.KONTEXT_ENDPOINT,
+                len(ordered) - 1,
+            )
 
         # Confirmed: fal Kontext wants singular image_url, not a list.
         payload = {
             "prompt": prompt,
-            "image_url": reference_url,
+            "image_url": ordered[0],
             "aspect_ratio": (
                 aspect_ratio if aspect_ratio in KONTEXT_ASPECT_RATIOS else "16:9"
             ),

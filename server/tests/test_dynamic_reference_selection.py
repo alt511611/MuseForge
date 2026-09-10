@@ -22,6 +22,19 @@ os.environ.setdefault("MUAPI_KEY", "test-key-not-real")
 from interfaces.character import CharacterInScene, CharacterProfile, DramaScript  # noqa: E402
 
 
+def _anchor(references):
+    """The identity anchor of a reference set.
+
+    `generate_image_with_reference` takes an ordered sequence now -- the
+    anchor, then the other faces in the frame, then the set plate. These
+    tests are about which portrait LEADS, which is still index 0.
+    """
+    if references is None or isinstance(references, str):
+        return references
+    return references[0] if references else None
+
+
+
 class FakeShot:
     """One shot per scene, always naming the same character."""
 
@@ -62,7 +75,7 @@ async def _run_three_scene_drama(monkeypatch, working_dir):
         return "https://fake.cdn/maya_portrait.png"
 
     async def fake_generate_image_with_reference(self, prompt, reference_url, aspect_ratio="16:9", is_cancelled=None):
-        reference_calls.append(reference_url)
+        reference_calls.append(_anchor(reference_url))
         return f"https://fake.cdn/frame_{len(reference_calls)}.png"
 
     async def fake_generate_video_from_image(
@@ -179,7 +192,7 @@ async def test_single_scene_call_without_shared_dict_still_uses_portrait(monkeyp
     import agents.storyboard_artist as storyboard_mod
 
     async def fake_img_ref(self, prompt, reference_url, aspect_ratio="16:9", is_cancelled=None):
-        return f"https://fake.cdn/frame_from_{reference_url.split('/')[-1]}"
+        return f"https://fake.cdn/frame_from_{_anchor(reference_url).split('/')[-1]}"
 
     async def fake_vid(self, prompt, image_url, duration=5, aspect_ratio="16:9", plan="free", is_cancelled=None, shot_profile=None):
         return "https://fake.cdn/clip.mp4"

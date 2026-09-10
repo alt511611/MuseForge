@@ -18,6 +18,19 @@ os.environ.setdefault("MUAPI_KEY", "test-key-not-real")
 from interfaces.character import CharacterProfile, DramaScript  # noqa: E402
 
 
+def _anchor(references):
+    """The identity anchor of a reference set.
+
+    `generate_image_with_reference` takes an ordered sequence now -- the
+    anchor, then the other faces in the frame, then the set plate. These
+    tests are about which portrait LEADS, which is still index 0.
+    """
+    if references is None or isinstance(references, str):
+        return references
+    return references[0] if references else None
+
+
+
 class FakeShot:
     def __init__(self, visual_desc):
         self.idx = 0
@@ -57,7 +70,7 @@ async def _run(monkeypatch, working_dir, shot_descs, location="", location_overr
     async def fake_generate_image_with_reference(
         self, prompt, reference_url, aspect_ratio="16:9", is_cancelled=None
     ):
-        reference_calls.append(reference_url)
+        reference_calls.append(_anchor(reference_url))
         return f"https://fake.cdn/frame_{len(reference_calls)}.png"
 
     async def fake_generate_video_from_image(

@@ -400,6 +400,51 @@ IDENTITY_CLAUSE_OVERHEAD = (
 )
 
 
+def characters_in_frame(shot, characters, matched_char=None) -> list:
+    """Who this shot SHOWS, anchor first -- not who the SCENE has.
+
+    Extracted so that the two things that must never disagree about it cannot:
+    the identity CLAUSE that describes these people to the image model, and
+    the reference SET that shows it their faces. When those two answered
+    separately, a frame could be handed one person's portrait while being
+    told about somebody else's face, which is the most expensive way to draw
+    a stranger.
+
+    The anchor -- the character whose portrait leads the reference set -- is
+    first by construction, because a single-identity endpoint reads only the
+    first reference and it has to be the one the frame is actually about.
+
+    A shot that names nobody falls back to the scene's whole cast. Narrowing
+    on no evidence, in the direction of describing FEWER of the people who
+    might be on screen, is how a character comes back as a stranger; that is
+    also the right answer for an insert or an establishing plate, which get
+    the cast they were written with.
+    """
+    in_frame = [
+        character
+        for _, character in on_screen_name_matches(
+            f"{shot.visual_desc} {getattr(shot, 'motion_desc', '') or ''}".lower(),
+            characters or [],
+        )
+        # is_visible is the cast-level answer to the same question, and the
+        # identity clause filters by it anyway: without this, a shot naming
+        # only a never-seen character would narrow to a list that then
+        # describes NOBODY, and the frame would go out with no appearance
+        # lock at all.
+        if getattr(character, "is_visible", True)
+    ]
+    if in_frame and matched_char is not None and matched_char not in in_frame:
+        # The reference portrait's owner is in the frame by construction.
+        in_frame.insert(0, matched_char)
+    if in_frame:
+        return in_frame
+    # The fallback is filtered too. `build_character_identity_clause` drops
+    # invisible characters itself, so this changes no prompt -- but the
+    # REFERENCE SET reads the same list, and a radio voice with no face is not
+    # somebody a frame can be shown a picture of.
+    return [c for c in (characters or []) if getattr(c, "is_visible", True)]
+
+
 def build_character_identity_clause(characters, matched_char=None, limit=None) -> str:
     """Restate every on-screen character's fixed appearance in the prompt text.
 
@@ -838,27 +883,7 @@ def build_frame_prompt(
     # the frame's picture and its words agree about who is present. A shot that
     # names nobody falls back to the scene's cast, which is exactly the old
     # behaviour and the right answer for an insert or an establishing plate.
-    in_frame = [
-        character
-        for _, character in on_screen_name_matches(
-            f"{shot.visual_desc} {getattr(shot, 'motion_desc', '') or ''}".lower(),
-            characters or [],
-        )
-        # is_visible is the cast-level answer to the same question, and the
-        # clause below filters by it anyway: without this, a shot naming only
-        # a never-seen character would narrow to a list that then describes
-        # NOBODY, and the frame would go out with no appearance lock at all.
-        if getattr(character, "is_visible", True)
-    ]
-    if in_frame and matched_char is not None and matched_char not in in_frame:
-        # The reference portrait's owner is in the frame by construction.
-        in_frame.insert(0, matched_char)
-    # Narrowed ONLY on evidence. A shot that named nobody may still have the
-    # whole scene in it -- the pipeline had to guess its own anchor there (see
-    # scene_subject) -- and guessing a second time, in the direction of
-    # describing FEWER of the people who might be on screen, is how a
-    # character comes back as a stranger.
-    identity_characters = in_frame or characters
+    identity_characters = characters_in_frame(shot, characters, matched_char)
 
     # Budget for the identity clause: whatever is left after the shot itself
     # and its framing, minus room for the setting clause. Everything else is
@@ -2738,6 +2763,53 @@ class Script2VideoPipeline:
                                 matched_char.name
                             )
 
+                    # THE REST OF THE EVIDENCE.
+                    #
+                    # `reference_url` is the anchor and has always been the
+                    # whole reference set, which is only enough for a shot
+                    # with one person in it. A two-hander gets one anchor, so
+                    # the OTHER face in the frame is drawn from the prompt's
+                    # prose -- and prose produces somebody who matches the
+                    # description and is not the same person twice. Delivered
+                    # job 4c7bbe85-e5c: two characters, six frames, twelve
+                    # face appearances, six locks. Its male lead is three
+                    # different men.
+                    #
+                    # So the frame is offered everything it is entitled to,
+                    # in priority order, and the backend takes what it can
+                    # read (tools.muapi_image_generator.reference_capacity).
+                    # A single-reference endpoint therefore behaves exactly as
+                    # it does today -- it receives the same anchor, first --
+                    # and says in the log what it could not use.
+                    frame_references = [reference_url] if reference_url else []
+                    if matched_char is not None:
+                        # ONLY a shot that is about somebody collects the rest
+                        # of the faces. A shot with no matched character is an
+                        # establishing plate, an insert or an object -- written
+                        # deliberately without people -- and handing it the
+                        # cast's portraits is the same mistake the plate branch
+                        # above exists to undo: it pushes a face into a frame
+                        # the storyboard wrote empty.
+                        for other in characters_in_frame(shot, characters, matched_char):
+                            if other is matched_char:
+                                continue
+                            portrait = portraits.get(getattr(other, "name", ""))
+                            if portrait:
+                                frame_references.append(portrait)
+                    if location_plate_url:
+                        # Last: the room is the cheapest thing to lose, and the
+                        # only one a later frame can be corrected against. It is
+                        # still worth sending -- the plate is the one picture of
+                        # the set that does not change between scenes, and the
+                        # setting clause it backs up is the clause the prompt
+                        # ladder drops first.
+                        frame_references.append(location_plate_url)
+                    # De-duplicated HERE as well as in the backend, because the
+                    # anchor and the plate are the same URL on a characterless
+                    # shot, and a caller that hands a model the same picture
+                    # twice has spent one of its reference slots on nothing.
+                    frame_references = list(dict.fromkeys(frame_references))
+
                     # Belt-and-braces: design_storyboard already repairs a
                     # missing/neutral expression, but the frame prompt is the
                     # thing that actually decides whether the scene reads as
@@ -2826,9 +2898,9 @@ class Script2VideoPipeline:
                         # animation (the expensive, slow step) so a rejected
                         # frame is retried without wasting money on animating
                         # a frame we're about to throw away.
-                        if reference_url:
+                        if frame_references:
                             frame_url = await self.image_gen.generate_image_with_reference(
-                                frame_prompt, reference_url, aspect_ratio, is_cancelled=is_cancelled
+                                frame_prompt, frame_references, aspect_ratio, is_cancelled=is_cancelled
                             )
                         else:
                             frame_url = await self.image_gen.generate_image(
@@ -2864,7 +2936,14 @@ class Script2VideoPipeline:
                                 try:
                                     frame_url = await self.image_gen.generate_image_with_reference(
                                         repair_prompt,
-                                        reference_url,
+                                        # The repair is a re-send of the SAME
+                                        # frame with one correction added, so
+                                        # it is entitled to the same evidence.
+                                        # Handing it fewer references than the
+                                        # attempt it is correcting would fix
+                                        # the reported issue by introducing
+                                        # another one.
+                                        frame_references,
                                         aspect_ratio,
                                         is_cancelled=is_cancelled,
                                     )
