@@ -10,6 +10,28 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
+from dotenv import load_dotenv
+
+# FIRST, before anything reads os.environ.
+#
+# This call used to sit two hundred lines down, below `_configure_logging()`
+# and below every first-party import. Python runs a module top to bottom, so
+# everything above it read an environment `.env` had not been applied to yet,
+# and read it ONCE -- these are module-level constants, not lookups:
+#
+#     MUSEFORGE_LOG_LEVEL   read by _configure_logging() below
+#     SUPABASE_URL          read by auth.py at import
+#     SUPABASE_SERVICE_KEY  read by auth.py at import
+#     JOBS_DIR              read by jobs.py at import
+#
+# So a developer who put SUPABASE_URL in `.env` got an unconfigured auth
+# module and no indication of why, while the same variable worked perfectly on
+# Render -- because a platform sets it in the real environment, where load
+# order cannot matter. That is the worst shape a configuration bug takes: it
+# only appears off the deployment that is being tested.
+load_dotenv()
+
+
 def _configure_logging() -> None:
     """Give the application's own loggers somewhere to write.
 
@@ -57,7 +79,6 @@ _configure_logging()
 logger = logging.getLogger(__name__)
 
 import httpx
-from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
@@ -89,8 +110,6 @@ from jobs import (
     run_restore_take_job,
     run_timeline_edit_job,
 )
-
-load_dotenv()
 
 ALLOWED_ORIGINS = os.environ.get(
     "ALLOWED_ORIGINS",
