@@ -42,6 +42,28 @@ services:
         value: "https://your-project.vercel.app"
       - key: MUSEFORGE_JOBS_DIR
         value: /tmp/museforge_jobs
+      # Storage retention. ON when empty, and declared here because it is the
+      # one flag in this file that DELETES customer content -- an operator
+      # should meet it in the dashboard, not discover it in the source.
+      #
+      # Nothing pruned the videos bucket before this: upload_video writes and
+      # jobs._sb_delete removes the job ROW, which strands the object instead
+      # of removing it. A deployment met its plan quota at 1.12 GB, roughly a
+      # dozen masters.
+      #
+      # What it deletes is already unreachable. The sweep's window is DERIVED
+      # from MUSEFORGE_SIGNED_URL_TTL (plus a grace), and nothing here ever
+      # re-signs an object, so past that age the customer's URL has stopped
+      # resolving and /api's re-export answers 502 for it. If this deployment
+      # promises videos a longer life, raise the TTL -- the window follows it —
+      # rather than turning retention off and going back to a bucket that only
+      # grows.
+      - key: MUSEFORGE_SIGNED_URL_TTL
+        value: ""
+      - key: MUSEFORGE_STORAGE_RETENTION
+        value: ""
+      - key: MUSEFORGE_STORAGE_RETENTION_GRACE_SECONDS
+        value: ""
       # INFO is what makes a delivered job explainable after the fact: the
       # second budget it was costed at, which stage declined lip sync, how
       # many scenes got foley. Nothing configured logging before, so those
