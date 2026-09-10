@@ -1,0 +1,40 @@
+# What must not enter the build context.
+#
+# The Dockerfile ends in `COPY . .`, and `render.yaml` sets this directory as
+# the docker context. Without this file that COPY takes everything sitting
+# here on the machine that runs the build -- including a 158 MB `.venv` full
+# of binaries compiled for the developer's laptop, which land on top of an
+# image whose dependencies were just installed for linux.
+#
+# It cannot import them (the CMD runs the system interpreter), so the failure
+# is not a crash: it is an image several times larger than it needs to be, and
+# a layer that changes every time anyone runs a test locally, which is a cache
+# miss on every build after it.
+
+# Virtualenvs: the wrong platform's binaries, and the largest thing here.
+.venv/
+venv/
+env/
+
+# Python build noise.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Secrets. `server/.env` is gitignored, so it is not in a CI checkout -- but a
+# local `docker build` copies the working tree, not the commit, and an API key
+# baked into a layer stays in that layer.
+.env
+.env.*
+!.env.example
+
+# The suite does not run in the image.
+tests/
+pytest.ini
+requirements-dev.txt
+
+# Job artifacts: generated video, which is measured in gigabytes.
+jobs_output/
+
+.DS_Store
