@@ -110,7 +110,11 @@ async def _run_three_scene_drama(monkeypatch, working_dir):
             f.write(b"fake concatenated video")
         return out_path
 
-    async def fake_add_background_music(video_path, output_path, music_url=None):
+    # **kw, like every other double of this function: the mixer grows a
+    # keyword whenever the soundtrack learns something new (foley, the
+    # speech plan, the score's ride), and a double that lists them is a
+    # test that fails for the crime of the product improving.
+    async def fake_add_background_music(video_path, output_path, music_url=None, **kw):
         with open(output_path, "wb") as f:
             f.write(b"fake video with music")
         return output_path

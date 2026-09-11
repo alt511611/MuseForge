@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from agents.screenwriter import ScreenwriterAgent, ScriptGenerationFailed
 from interfaces import ass_captions
+from interfaces import score
 from interfaces import subtitles
 from interfaces.character import CharacterInScene, DramaScript
 from interfaces.film_look import build_film_look_filters
@@ -1430,6 +1431,7 @@ def build_audio_mix_graph(
     dialogue: List[Tuple[int, float]],
     foley: List[Tuple[int, float]],
     duration: float,
+    score_levels: Sequence["score.Level"] = (),
 ) -> Optional[str]:
     """The filter_complex that mixes one drama's audio.
 
@@ -1494,7 +1496,16 @@ def build_audio_mix_graph(
             chains.append("[speechraw]acopy[speech]")
 
     if music_index is not None:
-        chains.append(f"[{music_index}:a]volume={MUSIC_LEVEL}[musicraw]")
+        # The score's own level, ridden by the drama where the caller planned
+        # a ride (interfaces/score). `eval=frame` because the expression is a
+        # function of time: without it ffmpeg evaluates once, at t=0, and the
+        # whole film gets the opening scene's level -- which is the behaviour
+        # this replaces, arrived at by accident.
+        if score_levels:
+            volume = f"volume='{score.level_expression(score_levels, MUSIC_LEVEL)}':eval=frame"
+        else:
+            volume = f"volume={MUSIC_LEVEL}"
+        chains.append(f"[{music_index}:a]{volume}[musicraw]")
         if speech_bus:
             chains.append(
                 f"[musicraw][sc]sidechaincompress="
@@ -1565,13 +1576,17 @@ async def mix_audio_layers(
     dialogue_tracks: Optional[List[Dict[str, Any]]] = None,
     scene_paths: Optional[List[str]] = None,
     sfx_tracks: Optional[List[Dict[str, Any]]] = None,
+    scene_tensions: Optional[Sequence[int]] = None,
 ) -> Optional[str]:
     """Mix score, foley and dialogue in ONE ffmpeg pass. None when it can't.
 
-    Three things this does that the moviepy mixer cannot:
+    Four things this does that the moviepy mixer cannot:
 
     * **The score ducks.** Under each line and back up between them, instead
       of one flat -14dB applied to the whole film (see DUCK_THRESHOLD).
+    * **The score rides the drama.** ``scene_tensions`` is the curve the
+      script agent already wrote; interfaces/score turns it into a slow swell
+      under the picture instead of one level for thirty seconds.
     * **Foley has somewhere to go.** A third bus, laid at each scene's own
       start (see tools/muapi_sfx_generator).
     * **The picture is not re-encoded.** ``-c:v copy``: the mix costs a
@@ -1645,7 +1660,23 @@ async def mix_audio_layers(
             continue
         foley_inputs.append((_add_input(audio_url), start))
 
-    graph = build_audio_mix_graph(music_index, dialogue_inputs, foley_inputs, duration)
+    # The score's ride, planned here because this is where the scenes' real
+    # lengths are known -- probed off the clips, not taken from the plan.
+    score_levels = score.plan_score_levels(
+        [(start, start + length) for start, length in zip(scene_starts, scene_durations)],
+        scene_tensions or [],
+    )
+    if score_levels:
+        logger.info(
+            "Scoring %d scene(s) on tension %s: music rides %.2f to %.2f",
+            len(scene_durations),
+            list(scene_tensions or []),
+            MUSIC_LEVEL * min(level.gain for level in score_levels),
+            MUSIC_LEVEL * max(level.gain for level in score_levels),
+        )
+    graph = build_audio_mix_graph(
+        music_index, dialogue_inputs, foley_inputs, duration, score_levels
+    )
     if not graph:
         return None
 
@@ -1751,6 +1782,7 @@ async def add_background_music(
     dialogue_tracks: Optional[List[Dict[str, Any]]] = None,
     scene_paths: Optional[List[str]] = None,
     sfx_tracks: Optional[List[Dict[str, Any]]] = None,
+    scene_tensions: Optional[Sequence[int]] = None,
 ) -> str:
     """Lay the drama's audio over its picture.
 
@@ -1767,6 +1799,7 @@ async def add_background_music(
         dialogue_tracks=dialogue_tracks,
         scene_paths=scene_paths,
         sfx_tracks=sfx_tracks,
+        scene_tensions=scene_tensions,
     )
     if mixed:
         return mixed
@@ -4861,6 +4894,10 @@ class Idea2VideoPipeline:
             dialogue_tracks=assembly_dialogue,
             director_style=previous_result.get("director_style", "cinematic_balanced"),
             transitions=plan_transitions([s["script"] for s in ordered]),
+            # The same list, asked a second question: transitions want to know
+            # where the scenes MEET, the score wants to know how each one
+            # feels. See interfaces/score.
+            scene_tensions=[_scene_tension(s["script"]) for s in ordered],
             aspect_ratio=previous_result.get("aspect_ratio", "16:9"),
             sfx_tracks=assembly_sfx,
         )
@@ -5352,6 +5389,7 @@ class Idea2VideoPipeline:
             dialogue_tracks=dialogue_tracks,
             director_style=previous_result.get("director_style", "cinematic_balanced"),
             transitions=plan_transitions([e["scene"]["script"] for e in entries]),
+            scene_tensions=[_scene_tension(e["scene"]["script"]) for e in entries],
             aspect_ratio=previous_result.get("aspect_ratio", "16:9"),
             sfx_tracks=sfx_tracks,
         )
@@ -5642,6 +5680,7 @@ class Idea2VideoPipeline:
         transitions: Optional[List[float]] = None,
         aspect_ratio: str = "16:9",
         sfx_tracks: Optional[List[Dict[str, Any]]] = None,
+        scene_tensions: Optional[Sequence[int]] = None,
     ) -> str:
         """Concatenate all scene videos, add background music, then master
         the result — colour grade, delivery conform, film look, captions,
@@ -5730,7 +5769,7 @@ class Idea2VideoPipeline:
         # keyword whose value is None still changes the call's shape, and the
         # music-only path is the one every existing caller and test double
         # was written against.
-        if dialogue_tracks or sfx_tracks:
+        if dialogue_tracks or sfx_tracks or scene_tensions:
             await add_background_music(
                 graded_path,
                 with_music_path,
@@ -5738,6 +5777,7 @@ class Idea2VideoPipeline:
                 dialogue_tracks=dialogue_tracks,
                 scene_paths=scene_paths,
                 sfx_tracks=sfx_tracks,
+                scene_tensions=scene_tensions,
             )
         else:
             await add_background_music(graded_path, with_music_path, music_url)
@@ -6803,6 +6843,11 @@ class Idea2VideoPipeline:
                 transitions=plan_transitions(
                     [s["script"] for s in scene_results if s.get("clip_index") is not None]
                 ),
+                scene_tensions=[
+                    _scene_tension(s["script"])
+                    for s in scene_results
+                    if s.get("clip_index") is not None
+                ],
                 aspect_ratio=aspect_ratio,
                 sfx_tracks=sfx_tracks,
             )
