@@ -2542,7 +2542,7 @@ class Script2VideoPipeline:
         working_dir: str,
         aspect_ratio: str,
         scene_idx: int,
-        frame_prompt: str,
+        frame_prompt_for,
         generate_audio: bool,
         voice_ids,
         scene_dialogue: str = "",
@@ -2573,6 +2573,18 @@ class Script2VideoPipeline:
             scene_idx=scene_idx,
             shot_idx=0,
         )
+        # Built HERE, not by the caller, because it needs the anchor and the
+        # anchor is what resolve_frame_references just worked out. Passed in
+        # finished, it could only ever be built with matched_char=None -- and
+        # that is the one argument that decides whether the prompt carries
+        # _REFERENCE_NOTE, the sentence that says WHICH of the pictures being
+        # sent is the subject and that their outfit is to be copied "down to
+        # colour and material". Job a66acd59 went out without it: three
+        # references (two portraits and the plate), no statement of who was
+        # who, and a lead who is a different woman in a different outfit in
+        # each of three scenes -- which is precisely the drift the per-shot
+        # path resolves first in order to avoid.
+        frame_prompt = frame_prompt_for(matched_char)
         if frame_references:
             start_image = await self.image_gen.generate_image_with_reference(
                 frame_prompt, frame_references, aspect_ratio, is_cancelled=is_cancelled
@@ -3082,7 +3094,12 @@ class Script2VideoPipeline:
                 working_dir=working_dir,
                 aspect_ratio=aspect_ratio,
                 scene_idx=scene_idx,
-                frame_prompt=build_frame_prompt(
+                # A function of the anchor rather than a finished string:
+                # which character the reference images are OF is decided
+                # inside, by the same resolve_frame_references the per-shot
+                # path calls before it builds its prompt, and the prompt
+                # cannot be built correctly without it.
+                frame_prompt_for=lambda anchor: build_frame_prompt(
                     style,
                     opening,
                     setting_location=setting_location,
@@ -3091,7 +3108,7 @@ class Script2VideoPipeline:
                     has_dialogue=has_dialogue,
                     lipsync_enabled=lipsync_enabled,
                     characters=characters,
-                    matched_char=None,
+                    matched_char=anchor,
                     world_change=world_change,
                     world_state=world_state,
                 ),
