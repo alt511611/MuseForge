@@ -2078,6 +2078,60 @@ TARGET_RESOLUTIONS: Dict[str, Tuple[int, int]] = {
     "1:1": (1080, 1080),
 }
 
+#: The sizes a finished film is allowed to BE, largest first, per ratio.
+#:
+#: The ceiling above answers "how big may this get". It never answered "and
+#: what if the source is nowhere near it", and the honest answer used to be
+#: "then ship whatever arithmetic falls out". Delivered drama 10e143bb shipped
+#: at 1276x718 -- not 1280x720, not 1920x1080, and not exactly 16:9 either
+#: (1.7771 against 1.7778). Nothing was wrong with the reasoning that produced
+#: it: the provider handed back 1276x718 and the no-upscaling rule declined to
+#: invent the missing four pixels. The mistake was treating "do not upscale"
+#: as "any size is a delivery size".
+#:
+#: A rung is a size a player, a platform and an editor all recognise. Landing
+#: on one costs at most SNAP_TO_TARGET_TOLERANCE of resampling in either
+#: direction, which is inside the noise of the encode that is happening
+#: anyway -- and outside that margin nothing snaps, so a 768px render is still
+#: never inflated and sold as 1080p.
+DELIVERY_LADDER: Dict[str, Tuple[Tuple[int, int], ...]] = {
+    "16:9": ((3840, 2160), (2560, 1440), (1920, 1080), (1280, 720), (960, 540), (640, 360)),
+    "9:16": ((2160, 3840), (1440, 2560), (1080, 1920), (720, 1280), (540, 960), (360, 640)),
+    "1:1": ((2160, 2160), (1440, 1440), (1080, 1080), (720, 720), (540, 540), (360, 360)),
+}
+
+
+def _snap_to_ladder(
+    width: int, height: int, aspect_ratio: str
+) -> Tuple[int, int]:
+    """``(width, height)`` moved onto DELIVERY_LADDER when one is within reach.
+
+    Within reach means UPWARD, on both axes, by no more than
+    SNAP_TO_TARGET_TOLERANCE: the rung is the size just above what the
+    arithmetic produced. Four pixels of resampling to reach 1280x720 invents
+    nothing anybody can see; the same four pixels of odd size travel with the
+    file forever.
+
+    Never downward, which is the direction that looks equally close and is
+    not: a 756x1344 master is 5% from 720x1280, and taking it would throw away
+    detail that was generated and paid for in order to win a round number.
+    Between rungs, a file keeps the size it earned.
+    """
+    rungs = DELIVERY_LADDER.get((aspect_ratio or "").strip())
+    if not rungs or width <= 0 or height <= 0:
+        return width, height
+    # Smallest rung first: the one just above the fitted size is the cheapest
+    # reachable standard, and the list is written largest-first for reading.
+    for rung_w, rung_h in reversed(rungs):
+        if rung_w < width or rung_h < height:
+            continue
+        if (
+            rung_w / width - 1.0 <= SNAP_TO_TARGET_TOLERANCE
+            and rung_h / height - 1.0 <= SNAP_TO_TARGET_TOLERANCE
+        ):
+            return rung_w, rung_h
+    return width, height
+
 
 def _even_dimension(value: float) -> int:
     """Round a pixel dimension DOWN to the nearest even number.
@@ -2171,8 +2225,12 @@ def resolve_output_dimensions(
     # The binding side keeps its own pixels; only the derived side is rounded,
     # so the crop takes as little as the even-pixel rule allows.
     if source_width / source_height > ratio:
-        return _nearest_even(width), _even_dimension(height)
-    return _even_dimension(width), _nearest_even(height)
+        fitted = _nearest_even(width), _even_dimension(height)
+    else:
+        fitted = _even_dimension(width), _nearest_even(height)
+    # ...and onto a size somebody recognises, when one is close enough to
+    # reach without inventing detail. See DELIVERY_LADDER.
+    return _snap_to_ladder(fitted[0], fitted[1], aspect_ratio)
 
 
 def _ratio_of(aspect_ratio: str) -> float:

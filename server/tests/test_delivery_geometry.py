@@ -192,3 +192,56 @@ def test_every_delivery_is_even_and_within_a_tenth_of_a_percent(source, ratio):
     assert width % 2 == 0 and height % 2 == 0, "yuv420p refuses odd dimensions"
     wanted = target_w / target_h
     assert abs(width / height - wanted) / wanted < 0.0025
+
+
+# ---------------------------------------------------------------------------
+# The delivery ladder
+#
+# Delivered drama 10e143bb shipped at 1276x718: not 1280x720, not 1920x1080,
+# and not exactly 16:9 either (1.7771 against 1.7778). The provider handed
+# back that size and the no-upscaling rule -- correctly -- declined to invent
+# the missing four pixels. What was missing was the other half of the rule:
+# "do not upscale" had been read as "any size is a delivery size".
+# ---------------------------------------------------------------------------
+
+
+def test_four_pixels_short_of_a_standard_size_is_that_standard_size():
+    from pipelines.script2video import resolve_output_dimensions
+
+    assert resolve_output_dimensions(1276, 718, "16:9") == (1280, 720)
+    assert resolve_output_dimensions(718, 1276, "9:16") == (720, 1280)
+
+
+def test_the_ladder_never_takes_pixels_away_to_win_a_round_number():
+    """Downward looks equally close and is not: it discards generated detail."""
+    from pipelines.script2video import resolve_output_dimensions
+
+    # 756x1344 sits 5% above 720x1280 -- inside the tolerance, wrong direction.
+    assert resolve_output_dimensions(768, 1344, "9:16") == (756, 1344)
+    # And a source between two rungs keeps the size it earned.
+    assert resolve_output_dimensions(1024, 576, "16:9") == (1024, 576)
+
+
+def test_every_rung_is_exactly_its_ratio_and_encodable():
+    """A rung that is not its own ratio would defeat the thing it is for."""
+    from pipelines.script2video import DELIVERY_LADDER, _ratio_of
+
+    for aspect_ratio, rungs in DELIVERY_LADDER.items():
+        ratio = _ratio_of(aspect_ratio)
+        for width, height in rungs:
+            assert width % 2 == 0 and height % 2 == 0, (
+                f"{width}x{height} is not encodable in yuv420p"
+            )
+            assert abs(width / height - ratio) < 1e-9, (
+                f"{width}x{height} is not exactly {aspect_ratio}"
+            )
+        assert list(rungs) == sorted(rungs, reverse=True), (
+            "the ladder is read largest-first"
+        )
+
+
+def test_the_ceiling_still_outranks_the_ladder():
+    """A 4K source is still delivered at the size the product sells."""
+    from pipelines.script2video import TARGET_RESOLUTIONS, resolve_output_dimensions
+
+    assert resolve_output_dimensions(3840, 2160, "16:9") == TARGET_RESOLUTIONS["16:9"]
