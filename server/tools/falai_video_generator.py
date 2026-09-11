@@ -273,6 +273,7 @@ class FalAIVideoGenerator:
         is_cancelled: Optional[Callable[[], bool]] = None,
         generate_audio: bool = True,
         negative_prompt: str = "",
+        aspect_ratio: str = "",
     ) -> str:
         """Render a whole scene -- its cuts included -- in ONE generation.
 
@@ -302,6 +303,17 @@ class FalAIVideoGenerator:
             "duration": _duration_str(take.seconds),
             "generate_audio": bool(generate_audio),
         }
+        # The endpoint HAS this field, and its default is 16:9.
+        #
+        # It is not in fal's published schema for this model, and it was only
+        # ever visible because a validation error echoed the whole input back
+        # with the defaults filled in: "aspect_ratio": "16:9", beside fields
+        # nothing here sends. A vertical film ordered without it is a
+        # landscape order, and the delivered takes were then conformed to 9:16
+        # by discarding 44% of every frame. So it is said, rather than left to
+        # a default nobody chose.
+        if aspect_ratio:
+            payload["aspect_ratio"] = aspect_ratio
         if len(beats) > 1:
             payload["multi_prompt"] = beats
             # "customize" is what makes the shot list binding rather than a

@@ -117,3 +117,42 @@ def test_the_declared_limit_travels_from_the_backend():
     assert take is not None
     assert take.max_prompt_chars == backend.max_prompt_chars == 512
     assert all(len(beat["prompt"]) <= 512 for beat in take.multi_prompt())
+
+
+def test_the_budget_is_counted_the_way_the_wire_counts_it():
+    """510 characters were refused by a 512-character limit.
+
+        'msg': 'multiPrompt[0].prompt: size must be between 0 and 512'
+
+    The prompt carried four double quotes around its spoken lines. JSON
+    escapes each of them, so what reached the validator was 514. A budget
+    measured in `len` cannot see that, and the take it lets through does not
+    exist.
+    """
+    from interfaces.scene_take import wire_length
+
+    assert wire_length('say "hello"') == len('say "hello"') + 2
+    assert wire_length("plain") == 5
+    assert wire_length("") == 0
+
+
+def test_the_refused_beat_measured_on_the_wire_now_fits():
+    from interfaces.scene_take import PROMPT_BUDGET_RESERVE, wire_length
+
+    description = (
+        "Medium shot at the green felt table: Vera sits frame-left in her "
+        "charcoal vest, Silas frame-right under his fedora, cigarette smoke "
+        "curling; the untouched chip stack sits between them beneath the "
+        "hanging bulb's harsh light, venetian-blind shadows striping both "
+        "faces. Vera's fingers twitch toward her pinky."
+    )
+    lines = (
+        "Vera: You're playing careless hands tonight, Silas.",
+        "Silas: Maybe I already know what's coming.",
+    )
+
+    prompt = _take(description=description, lines=lines).multi_prompt()[0]["prompt"]
+
+    assert wire_length(prompt) <= 512 - PROMPT_BUDGET_RESERVE
+    assert "You're playing careless hands tonight" in prompt
+    assert "Maybe I already know what's coming" in prompt

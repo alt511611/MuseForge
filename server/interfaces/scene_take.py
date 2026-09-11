@@ -29,6 +29,7 @@ is what makes them affordable.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, List, Optional, Sequence, Tuple
 
@@ -99,6 +100,24 @@ def _as_spoken(line: str) -> str:
 #: nowhere -- the model fills the seconds with whatever the last frame implied.
 MIN_BEAT_DESCRIPTION = 140
 
+#: Held back from every declared prompt budget. See _fit_beat_prompt.
+PROMPT_BUDGET_RESERVE = 8
+
+
+def wire_length(text: str) -> int:
+    """How long this string is to the validator on the other side.
+
+    Not ``len``. A beat measured at 510 characters was refused by an endpoint
+    whose limit is 512: the prompt carried four double quotes around its
+    spoken lines, and JSON escapes each of them, so what arrived on the wire
+    was 514. Curly quotes and any non-ASCII a screenwriter model produces cost
+    more again.
+
+    So the budget is counted the way the wire counts, which is the only count
+    that can refuse a take.
+    """
+    return len(json.dumps(text or "")) - 2
+
 
 def _trim(text: str, limit: int) -> str:
     """``text`` cut to ``limit`` on a word boundary, never mid-token.
@@ -110,9 +129,14 @@ def _trim(text: str, limit: int) -> str:
     """
     if limit <= 0:
         return ""
-    if len(text) <= limit:
+    if wire_length(text) <= limit:
         return text
-    cut = text[: max(0, limit - 1)].rsplit(" ", 1)[0].rstrip(" ,;:-")
+    # Walk back from the character count, because an escaped character costs
+    # more than one and the difference is only knowable by measuring.
+    cut = text
+    while cut and wire_length(cut) + 1 > limit:
+        cut = cut[: len(cut) - max(1, (wire_length(cut) + 1 - limit))]
+    cut = cut.rsplit(" ", 1)[0].rstrip(" ,;:-") if " " in cut else cut
     if not cut:
         return text[:limit]
     return cut if cut.endswith(".") else cut + "."
@@ -154,20 +178,31 @@ def _fit_beat_prompt(
     """
     said = list(lines or [])
     spoken = _spoken_clause(said)
-    if limit <= 0 or len(cast) + len(framing) + len(description) + len(spoken) <= limit:
-        return f"{cast}{framing}{description}{spoken}".strip()
+    if limit > 0:
+        # The wire count above is INFERRED from one refusal, not read off a
+        # documented rule: 510 characters carrying four double quotes were
+        # refused by a 512-character limit, and JSON escaping is the only
+        # mechanism that turns that into 514. If the real rule is something
+        # else again, this reserve is what absorbs it -- and the trade is not
+        # close. It costs a few words of a description that has hundreds; the
+        # alternative costs the scene.
+        limit = max(MIN_BEAT_DESCRIPTION, limit - PROMPT_BUDGET_RESERVE)
+
+    whole = f"{cast}{framing}{description}{spoken}"
+    if limit <= 0 or wire_length(whole) <= limit:
+        return whole.strip()
 
     head = f"{cast}{framing}"
-    room = max(0, limit - len(head))
+    room = max(0, limit - wire_length(head))
     # The description, cut to whatever the speech leaves it, floored -- and
     # closed with a full stop, because a sentence that stops mid-clause runs
     # straight into "Spoken aloud in this shot" and reads as one sentence.
-    kept = _trim(description, max(MIN_BEAT_DESCRIPTION, room - len(spoken)))
+    kept = _trim(description, max(MIN_BEAT_DESCRIPTION, room - wire_length(spoken)))
 
     # Still over with the description at its floor: whole lines come off the
     # end of the speech until it fits.
     dropped_a_line = False
-    while said and len(kept) + len(spoken) > room:
+    while said and wire_length(kept) + wire_length(spoken) > room:
         said.pop()
         spoken = _spoken_clause(said)
         dropped_a_line = True
@@ -175,10 +210,10 @@ def _fit_beat_prompt(
         # Dropping by whole lines overshoots -- it has to, a half sentence is
         # worse than a missing one -- so the description takes back what the
         # speech gave up rather than leaving the budget unspent.
-        kept = _trim(description, room - len(spoken))
+        kept = _trim(description, room - wire_length(spoken))
 
     assembled = f"{head}{kept}{spoken}".strip()
-    return assembled if len(assembled) <= limit else _trim(assembled, limit)
+    return assembled if wire_length(assembled) <= limit else _trim(assembled, limit)
 
 
 @dataclass(frozen=True)
