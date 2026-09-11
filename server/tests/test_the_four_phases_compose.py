@@ -190,6 +190,14 @@ async def test_all_four_phases_render_one_scene_together(monkeypatch, tmp_path):
         "https://cdn/basement-plate.png",
     ], "the beat's anchor, then the set; nobody who is not in this framing"
 
+    # ...and the prompt SAYS which of those pictures is the subject. Without
+    # it the model is handed a portrait and a plate and left to guess, and
+    # _REFERENCE_NOTE is also where the outfit is pinned "down to colour and
+    # material" -- job a66acd59 shipped without it because the take path built
+    # its frame prompt before it knew the anchor, and its lead is a different
+    # woman in a different outfit in each of three scenes.
+    assert "The reference image is Vivian Marsh" in frame_calls[0]["prompt"]
+
     # ...and the face that is NOT in the opening frame is locked anyway, as an
     # element, because the take runs past that beat into one he is in. This is
     # the invariant that makes a one-take render safe: every face the SCENE

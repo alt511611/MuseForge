@@ -2232,7 +2232,7 @@ def plan_scene_speech_anchors(
 
 
 def _lay_out_scene_captions(
-    durations: List[float], span: float
+    durations: List[float], span: float, fill: bool = False
 ) -> List[Tuple[float, float]]:
     """Sequential (start, end) pairs for one scene's lines, inside ``span``.
 
@@ -2252,6 +2252,16 @@ def _lay_out_scene_captions(
     gaps = CAPTION_GAP_SECONDS * max(0, len(durations) - 1)
     needed = sum(durations) + gaps
     scale = span / needed if span > 0 and needed > span else 1.0
+    if fill and span > 0 and needed > 0:
+        # A scene the TAKE voiced is speaking for its whole length: there is
+        # one recording, no per-line measurement, and the words are spread
+        # across the scene rather than finished early. Reading estimates laid
+        # end to end would run the captions ahead of the voice -- the three
+        # lines of job a66acd59's opening scene add up to 4.4 read-seconds
+        # under ten seconds of speech, so the last one would come off screen
+        # five seconds before it is said. Stretched in proportion, each line
+        # keeps its share of a scene that is talking throughout.
+        scale = span / needed
 
     placed: List[Tuple[float, float]] = []
     cursor = 0.0
@@ -2332,6 +2342,15 @@ def build_srt_from_dialogue_tracks(
         dialogue_tracks, bounds[:-1], bounds[-1] if bounds else 0.0
     )
 
+    # Which scenes the PICTURE voiced. Read once, off the track that carries
+    # the take's audio, because it is the only one marked -- the scene's other
+    # lines are caption rows hanging off the same recording and know nothing
+    # about where it came from.
+    scene_is_self_voiced: Dict[int, bool] = {}
+    for track in dialogue_tracks or []:
+        if track.get("speaks_for_itself"):
+            scene_is_self_voiced[int(track.get("scene_index", -1))] = True
+
     # Two passes: a scene cannot be fitted to its shot until every line in it
     # is known, and the lines arrive one at a time.
     rows: List[Dict[str, Any]] = []
@@ -2348,13 +2367,32 @@ def build_srt_from_dialogue_tracks(
         # long for two 42-character lines becomes SEVERAL cues instead of one
         # unreadable one.
         text = f"{subtitles.format_speaker(character)}{line}"
+        # A measurement of the recording of THIS LINE, when there is one.
+        #
+        # On a self-voiced scene there is not. The take speaks the whole scene
+        # in one file, and the mixer hangs that file on the scene's FIRST
+        # line (the convention the voice generator already used for a scene
+        # voiced in one recording) -- so probing it reads the length of the
+        # whole scene as the length of one sentence. Measured on job
+        # a66acd59: "Your bet, mister." held the screen for six seconds while
+        # "Call." and "Nice tell you've got there." were squeezed into one
+        # second each at the end of the scene, and every scene in the drama
+        # failed the same way. Estimating all three from their words puts
+        # them in proportion, and _lay_out_scene_captions then fits the set to
+        # the scene it plays under.
+        measured = (
+            0.0
+            if track.get("speaks_for_itself")
+            else _probe_audio_duration_seconds(str(track.get("audio_url") or ""))
+        )
         duration = float(
             track.get("duration_seconds")
-            or _probe_audio_duration_seconds(str(track.get("audio_url") or ""))
+            or measured
             or _estimate_line_duration_seconds(line)
         )
         row: Dict[str, Any] = {"text": text, "duration": duration}
         row["voiced"] = bool(str(track.get("audio_url") or "").strip())
+        row["take_voiced"] = bool(scene_is_self_voiced.get(int(track.get("scene_index", -1))))
 
         # Word-at-a-time captions, when the provider measured the words and
         # the deployment asked for them. Emitted INSTEAD of the whole-line cue
@@ -2438,7 +2476,11 @@ def build_srt_from_dialogue_tracks(
         else:
             scene_start, span = 0.0, 0.0
         placed = _lay_out_scene_captions(
-            [rows[at]["duration"] for at in positions], span
+            [rows[at]["duration"] for at in positions],
+            span,
+            # Only when the take is the voice: a TTS scene has a real
+            # measurement per line and must not be stretched away from it.
+            fill=all(rows[at].get("take_voiced") for at in positions),
         )
         for at, (local_start, local_end) in zip(positions, placed):
             rows[at]["start"] = scene_start + local_start
@@ -6302,7 +6344,15 @@ class Idea2VideoPipeline:
                         "silent scene is a deliberate choice; this many is the "
                         "script coming back thinner than it should have."
                     )
-                if not dialogue_tasks:
+                if not any(_scene_dialogue(scene) for scene in script.scenes):
+                    # Asked of the SCRIPT, not of the voice queue. The queue
+                    # is empty on a job where the picture speaks for itself
+                    # (picture_carries_dialogue) -- no TTS task is ever
+                    # created, because the take says the lines -- and reading
+                    # that as "the script has no spoken lines" told a user
+                    # watching a subtitled, fully voiced drama that their
+                    # script came back silent.
+                    #
                     # The script came back with no spoken lines at all, so
                     # there was never anything to voice. The screenwriter is
                     # now told when a run is going to be voiced (see
@@ -6384,7 +6434,22 @@ class Idea2VideoPipeline:
             # video is indistinguishable from one that never asked -- closed
             # mouths and a voice over the top -- so the job has to say so
             # rather than let them wonder whether the feature exists.
-            if lipsync_enabled and dialogue_requested and not lipsynced_scenes:
+            # A scene that spoke for itself has already had its mouths
+            # driven -- by the model that made the picture, in the same
+            # generation -- so the lip-sync pass declining it is the pass
+            # working. Counted here rather than tested for emptiness below,
+            # because a job can be part one and part the other: a scene the
+            # take could not carry still goes through TTS and still needs the
+            # sync, and that one failing is worth saying.
+            self_voiced = sum(
+                1 for track in dialogue_tracks if track.get("speaks_for_itself")
+            )
+            if (
+                lipsync_enabled
+                and dialogue_requested
+                and not lipsynced_scenes
+                and not self_voiced
+            ):
                 warnings.append(
                     "Lip sync did not run on any scene, so the voices play "
                     "over the picture instead of driving the mouths. The "

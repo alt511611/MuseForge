@@ -80,6 +80,20 @@ class Element:
         return f"@Element{index + 1}"
 
 
+def _as_spoken(line: str) -> str:
+    """``Vera: you're quick`` as ``Vera says: "you're quick"``.
+
+    The quotes are the point. Without them the words sit in the prompt
+    looking like more description of the shot, and a model reading "Vera:
+    you're quick" as staging notes performs the sense of it rather than
+    saying it.
+    """
+    name, separator, said = line.partition(":")
+    if not separator or not said.strip():
+        return f'"{line.strip()}"'
+    return f'{name.strip()} says: "{said.strip()}"'
+
+
 @dataclass(frozen=True)
 class Beat:
     """One framing inside a take, and how long it holds."""
@@ -87,6 +101,9 @@ class Beat:
     seconds: int
     description: str
     shot_type: str = ""
+    #: The lines SAID during this beat, already written "Name: line". Only
+    #: filled when the take carries its own audio -- see plan_scene_take.
+    dialogue: Tuple[str, ...] = ()
 
     def as_prompt(self) -> str:
         """What this beat SHOWS. Its length is a field, not prose.
@@ -98,7 +115,17 @@ class Beat:
         only spends prompt on something the model is already being told.
         """
         framing = f"{self.shot_type}. " if self.shot_type else ""
-        return f"{framing}{self.description}".strip()
+        spoken = ""
+        if self.dialogue:
+            # The words, verbatim and in quotes, because on a native-audio
+            # backend this is the SCRIPT: the model says what it is given and
+            # invents the rest. A take told only what the shot looks like
+            # speaks lines nobody wrote -- while the subtitle burned into the
+            # same frame comes from the script and says something else, so the
+            # viewer both hears and reads the scene, differently.
+            said = " ".join(_as_spoken(line) for line in self.dialogue)
+            spoken = f" Spoken aloud in this shot, exactly as written: {said}"
+        return f"{framing}{self.description}{spoken}".strip()
 
     def as_payload(self) -> dict:
         """One entry of `multi_prompt`.
@@ -248,6 +275,46 @@ def _apportion(total: int, weights: Sequence[float]) -> List[int]:
     return shares
 
 
+#: Words per second of delivered speech. Deliberately unhurried: this is used
+#: to decide WHICH beat a line falls in, and putting a line one beat early
+#: (the model holds it a moment) is a smaller error than putting it one beat
+#: late, where it lands over a cut it was never written for.
+WORDS_PER_SECOND = 2.5
+
+
+def _spread_dialogue(
+    dialogue: Sequence[str], beats: Sequence[Beat]
+) -> List[Tuple[str, ...]]:
+    """Which beat each line is said in, laid end to end from the scene's start.
+
+    The scene's speech begins with the scene and runs continuously -- that is
+    how the mixer anchors it (idea2video.plan_scene_speech_anchors) and how
+    the subtitle rows are timed -- so a line's place in the take is decided by
+    when it falls, not by which shot the storyboard happened to describe it
+    in. A line whose start lands past the end of the last beat still goes
+    somewhere: the last beat, said quickly, rather than nowhere at all.
+    """
+    per_beat: List[List[str]] = [[] for _ in beats]
+    if not per_beat:
+        return []
+    edges: List[float] = []
+    running = 0.0
+    for beat in beats:
+        running += float(beat.seconds)
+        edges.append(running)
+
+    at = 0.0
+    for line in dialogue:
+        _, _, said = line.partition(":")
+        words = len((said or line).split())
+        index = next(
+            (i for i, edge in enumerate(edges) if at < edge), len(per_beat) - 1
+        )
+        per_beat[index].append(line)
+        at += max(1.0, words / WORDS_PER_SECOND)
+    return [tuple(lines) for lines in per_beat]
+
+
 def plan_scene_take(
     scene_seconds: float,
     shots: Sequence[Any],
@@ -255,6 +322,7 @@ def plan_scene_take(
     elements: Sequence[Element] = (),
     start_image: str = "",
     end_image: str = "",
+    dialogue: Sequence[str] = (),
 ) -> Optional[SceneTake]:
     """This scene as ONE request, or None when the backend cannot cut.
 
@@ -291,6 +359,21 @@ def plan_scene_take(
         )
         for run, share in zip(runs, shares)
     )
+    # The words, given to the beats they are said in. Passed only when the
+    # take carries its own audio: a scene rendered mute is voiced by the TTS
+    # pass and lip-synced afterwards, and telling the video model to speak
+    # lines it will not be heard saying only spends prompt.
+    spoken = [line for line in (dialogue or []) if str(line).strip()]
+    if spoken:
+        beats = tuple(
+            Beat(
+                seconds=beat.seconds,
+                description=beat.description,
+                shot_type=beat.shot_type,
+                dialogue=lines,
+            )
+            for beat, lines in zip(beats, _spread_dialogue(spoken, beats))
+        )
     trimmed = tuple(
         element
         for element in list(elements)[: max(0, int(getattr(backend, "max_elements", 0)))]
