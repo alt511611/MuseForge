@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import tempfile
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
@@ -477,6 +478,47 @@ def scene_take_backend(video_gen):
         return None
     declared = backend_for(endpoint)
     return declared if declared.multishot else None
+
+
+def configured_scene_take_backend():
+    """The same answer as ``scene_take_backend``, from the ENVIRONMENT alone.
+
+    For callers that must know how a scene will be rendered before there is a
+    pipeline to ask -- /api/estimate quotes a price for a job whose generator
+    has not been built yet, and quoting one that omits a stage the render will
+    run (or charges for one it will skip) is the estimate lying about the bill.
+
+    It does not construct a generator, because constructing one is not free:
+    ``FalAIVideoGenerator`` raises without FAL_KEY and imports ``fal_client``,
+    neither of which a price quote should depend on. What it borrows from the
+    class instead is the endpoint slug -- the one thing that varies with
+    deployment (FALAI_MULTISHOT_VIDEO_MODEL) and so must not be copied here,
+    where a second copy would answer for an endpoint nobody is calling.
+
+    The decision itself is still `scene_take_backend`'s, handed a stand-in
+    describing what `_make_video_generator` would build. Two functions that
+    each decided for themselves is how the estimate and the render start
+    disagreeing, which is the disagreement this exists to prevent.
+    """
+    provider = resolve_provider(
+        "MUSEFORGE_VIDEO_PROVIDER",
+        ("muapi", "falai", "falai_reference", "falai_multishot"),
+        default="muapi",
+        stage="Video generation",
+    )
+    if provider != "falai_multishot":
+        return None
+    try:
+        from tools.falai_video_generator import FalAIVideoGenerator
+    except Exception:  # pragma: no cover -- fal-client not installed
+        return None
+    return scene_take_backend(
+        SimpleNamespace(
+            multishot=True,
+            MULTISHOT_ENDPOINT=FalAIVideoGenerator.MULTISHOT_ENDPOINT,
+            generate_scene_take=FalAIVideoGenerator.generate_scene_take,
+        )
+    )
 
 
 def resolve_frame_references(
