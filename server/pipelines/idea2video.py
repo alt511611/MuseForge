@@ -39,6 +39,7 @@ from pipelines.script2video import (
     _make_image_generator,
     apply_color_grade,
     build_delivery_filters,
+    resolve_delivery,
     concatenate_videos,
     concatenate_videos_with_transitions,
     download_video,
@@ -47,6 +48,8 @@ from pipelines.script2video import (
     moviepy_encode_kwargs,
     video_encode_args,
 )
+from interfaces.delivery import describe as describe_delivery
+from interfaces.delivery import resolve_tier
 from tools.muapi_client import is_account_locked
 from tools.muapi_lipsync import is_lipsync_enabled, make_lipsync
 from tools.muapi_sfx_generator import is_foley_enabled, make_sfx_generator
@@ -4742,6 +4745,10 @@ class Idea2VideoPipeline:
             transitions=plan_transitions([s["script"] for s in ordered]),
             aspect_ratio=previous_result.get("aspect_ratio", "16:9"),
             sfx_tracks=assembly_sfx,
+            # A re-cut of a 4K drama is still a 4K drama. Read off the result
+            # rather than re-resolved from the environment, which would
+            # silently re-master an old job at whatever today's default is.
+            delivery_tier=previous_result.get("delivery_tier", ""),
         )
 
         # Update just the re-rendered scenes' records, then re-archive them so
@@ -5233,6 +5240,7 @@ class Idea2VideoPipeline:
             transitions=plan_transitions([e["scene"]["script"] for e in entries]),
             aspect_ratio=previous_result.get("aspect_ratio", "16:9"),
             sfx_tracks=sfx_tracks,
+            delivery_tier=previous_result.get("delivery_tier", ""),
         )
 
         # The source scenes are kept intact (with their original clips) so the
@@ -5521,6 +5529,8 @@ class Idea2VideoPipeline:
         transitions: Optional[List[float]] = None,
         aspect_ratio: str = "16:9",
         sfx_tracks: Optional[List[Dict[str, Any]]] = None,
+        delivery_tier: str = "",
+        delivery_out: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Concatenate all scene videos, add background music, then master
         the result — colour grade, delivery conform, film look, captions,
@@ -5575,11 +5585,25 @@ class Idea2VideoPipeline:
         finishing = is_finishing_enabled()
         grade_filter, delivered_size = "", None
         graded_path = concatenated_path
+
+        # What this master will ship at, decided once, off the assembled
+        # picture, before anything re-encodes it. Recorded through
+        # ``delivery_out`` because the delivered size is a FACT ABOUT THE
+        # PRODUCT -- which tier was sold, and whether the pixels above the
+        # render came from a model or from a scaler (see interfaces/delivery).
+        # A caller that does not care passes nothing and behaves as before.
+        rendered_size = _probe_video_size(concatenated_path)
+        delivery = resolve_delivery(*rendered_size, aspect_ratio, delivery_tier)
+        if delivery_out is not None and delivery:
+            delivery_out.update(delivery.as_dict())
+        logger.info("Delivering master: %s", describe_delivery(delivery))
+
         if finishing:
             filters, delivered_size = build_delivery_filters(
-                *_probe_video_size(concatenated_path),
+                *rendered_size,
                 director_style=director_style,
                 aspect_ratio=aspect_ratio,
+                tier=delivery_tier,
             )
             grade_filter = ",".join(filters)
         if not grade_filter:
@@ -5592,6 +5616,7 @@ class Idea2VideoPipeline:
                 graded_path,
                 director_style=director_style,
                 aspect_ratio=aspect_ratio,
+                tier=delivery_tier,
             )
 
         # Before music mix
@@ -5792,9 +5817,17 @@ class Idea2VideoPipeline:
         location_image_override: Optional[str] = None,
         language: str = DEFAULT_LANGUAGE,
         narrative_mode: str = "",
+        delivery_tier: str = "",
     ) -> dict:
         """Phase B: everything after screenwriting (portraits → scenes → assemble)."""
         os.makedirs(working_dir, exist_ok=True)
+
+        # Resolved here rather than at the encode, so the tier this drama is
+        # delivered at is decided once, under the plan that paid for it, and
+        # is on the result even when the assembly could not measure a size
+        # (demo runs produce no master to probe).
+        delivery = resolve_tier(delivery_tier, plan)
+        delivered: Dict[str, Any] = {}
 
         def _check_cancel():
             if is_cancelled and is_cancelled():
@@ -6684,6 +6717,8 @@ class Idea2VideoPipeline:
                 ),
                 aspect_ratio=aspect_ratio,
                 sfx_tracks=sfx_tracks,
+                delivery_tier=delivery,
+                delivery_out=delivered,
             )
             # Measure the real assembled length before upload/cleanup — the
             # screenwriter's estimated_duration_seconds is a pre-generation
@@ -6816,6 +6851,13 @@ class Idea2VideoPipeline:
             "director_style": director_style,
             "style": style,
             "aspect_ratio": aspect_ratio,
+            # The tier this master was delivered at, and what it measures --
+            # including whether anything above the render came from a scaler
+            # (see interfaces/delivery). Carried on the result so a retake or
+            # a re-cut of a 4K drama stays a 4K drama, and so "we shipped 4K"
+            # is a record rather than a claim.
+            "delivery_tier": delivery,
+            "delivery": delivered or None,
             # Recorded rather than persisted on the job row: the drama's
             # language is a property of what was MADE, and the result already
             # survives the Supabase round-trip that a new jobs column would
@@ -6860,6 +6902,7 @@ class Idea2VideoPipeline:
         location_image_override: Optional[str] = None,
         language: str = DEFAULT_LANGUAGE,
         narrative_mode: str = "",
+        delivery_tier: str = "",
     ) -> dict:
         """Full end-to-end run (script + production). Default path unchanged."""
         script = await self.write_script_only(
@@ -6893,4 +6936,5 @@ class Idea2VideoPipeline:
             location_image_override=location_image_override,
             language=language,
             narrative_mode=narrative_mode,
+            delivery_tier=delivery_tier,
         )

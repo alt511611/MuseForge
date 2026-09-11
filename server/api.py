@@ -93,6 +93,7 @@ from auth import (
     get_optional_user,
 )
 from interfaces.camera import DIRECTOR_STYLES
+from interfaces.delivery import resolve_tier as resolve_delivery_tier
 from interfaces.language import normalize as normalize_language
 from interfaces.render_eta import RenderPlan, prior_seconds
 from interfaces.second_budget import SECONDS_PER_CREDIT, total_budget_seconds
@@ -393,6 +394,12 @@ class GenerateRequest(BaseModel):
     # hook (see interfaces/micro_drama). Defaults to the cinematic shape, so
     # every existing client keeps the product it already had.
     narrative_mode: str = Field(default="cinematic", pattern=r"^(cinematic|micro_drama)$")
+    # The size the finished master is delivered at (see interfaces/delivery).
+    # "" means the deployment default, which is 1080p and never upscales.
+    # 1440p and 4K are Pro-only and are an explicit, recorded upscale of a
+    # 1080p-class render -- no video model in this pipeline generates 4K, and
+    # neither does anyone else's.
+    delivery_tier: str = Field(default="", pattern=r"^(|480p|720p|1080p|1440p|4k)$")
     user_requirement: str = ""
     character_image: Optional[str] = None
     character_name: str = ""
@@ -1002,6 +1009,9 @@ async def generate(
     music_enabled = False
     dialogue_enabled = False
     lipsync_enabled = False
+    # "" resolves at render time under the job's own plan, which is what an
+    # anonymous or demo run wants: the deployment default, never a paid tier.
+    delivery_tier = ""
     if current_user and not demo:
         plan = await _get_user_plan(current_user.user_id)
         _enforce_plan_scene_limit(plan, req.num_scenes)
@@ -1023,6 +1033,10 @@ async def generate(
             and bool(req.lipsync_enabled)
             and _lipsync_configured()
         )
+        # A paid tier ordered by a plan that does not carry it degrades to the
+        # default instead of erroring, exactly like music and dialogue above:
+        # the drama still ships, at the size the plan bought.
+        delivery_tier = resolve_delivery_tier(req.delivery_tier, plan)
 
         if not req.require_script_approval:
             credit_cost = build_credit_breakdown(
@@ -1064,6 +1078,7 @@ async def generate(
         user_requirement=req.user_requirement,
         language=normalize_language(req.language),
         narrative_mode=req.narrative_mode,
+        delivery_tier=delivery_tier,
         demo=demo,
         user_id=current_user.user_id if current_user else None,
         user_email=current_user.email if current_user else None,

@@ -16,6 +16,15 @@ from interfaces import acting
 from interfaces.camera import get_director_style
 from interfaces.character import CharacterInScene
 from interfaces.color_grade import get_color_grade
+from interfaces.delivery import (
+    DELIVERY_LADDER,
+    SNAP_TO_LADDER_TOLERANCE,
+    Delivery,
+    is_exact_resolution_enabled,
+    plan_delivery,
+    scale_suffix,
+    tier_size,
+)
 from interfaces.lighting import is_interior, resolve_lighting
 from interfaces.impact import build_impact_filters, plan_impacts
 from interfaces.pacing import plan_internal_cuts
@@ -2072,10 +2081,14 @@ def moviepy_encode_kwargs() -> Dict[str, Any]:
 
 #: Delivery resolution per supported ratio -- the ceiling, not a floor (see
 #: resolve_output_dimensions).
+#:
+#: Derived from interfaces/delivery rather than written out here: the size a
+#: master ships at is a product decision with a tier ladder behind it now, and
+#: two lists of resolutions that have to agree are one list that eventually
+#: does not. This name stays because it is what the rest of the pipeline (and
+#: every caller measuring a frame against the delivery size) already asks for.
 TARGET_RESOLUTIONS: Dict[str, Tuple[int, int]] = {
-    "16:9": (1920, 1080),
-    "9:16": (1080, 1920),
-    "1:1": (1080, 1080),
+    ratio: tier_size(ratio) for ratio in DELIVERY_LADDER
 }
 
 
@@ -2089,90 +2102,49 @@ def _even_dimension(value: float) -> int:
     return max(2, int(value) // 2 * 2)
 
 
-def is_exact_resolution_enabled() -> bool:
-    """Force delivery at exactly TARGET_RESOLUTIONS, upscaling when the
-    provider returned something smaller. OFF by default: upscaling invents no
-    detail, it only spends bitrate to claim a resolution the pixels do not
-    have. Turn on when a distributor demands literal 1080x1920 files.
+#: How far short of a standard delivery size a render may fall and still be
+#: delivered AT that size. Kept as a name here because the geometry tests and
+#: the audit notes both refer to it; the rule itself lives in
+#: interfaces/delivery.
+SNAP_TO_TARGET_TOLERANCE = SNAP_TO_LADDER_TOLERANCE
+
+
+def resolve_delivery(
+    source_width: int,
+    source_height: int,
+    aspect_ratio: str,
+    tier: str = "",
+) -> Optional[Delivery]:
+    """The full delivery decision for one master -- size, tier, and whether
+    any of it was invented by a scaler. See interfaces/delivery.
+
+    The resolution question used to be answered by "the largest correctly
+    shaped rectangle inside the source, capped at 1080p", and that produced a
+    delivered 16:9 master measuring 1276x718: not a standard size, and not
+    exactly 16:9 either, for the sake of fourteen pixels. Landing on a rung of
+    the ladder is now part of the answer.
     """
-    return os.environ.get("MUSEFORGE_EXACT_RESOLUTION", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return plan_delivery(
+        source_width,
+        source_height,
+        aspect_ratio,
+        tier=tier,
+        force=is_exact_resolution_enabled(),
     )
 
 
-#: How far short of the canonical delivery size a source may fall and still be
-#: delivered AT that size.
-#:
-#: Providers hand back their own house sizes: a 16:9 order came back as
-#: 1904x1072 (multiples of 16, 0.8% short of 1920x1080), and the no-upscaling
-#: rule turned that into a 1904x1070 master -- neither a standard resolution
-#: nor exactly 16:9, for the sake of 16 pixels. The rule is there so a 768px
-#: render is not inflated to 1080p and sold as one; it was never meant to
-#: refuse the last 1% and ship an odd size instead. Within this margin the
-#: canonical size wins, because "1920x1080" is the thing every downstream
-#: player, platform and editor expects to see.
-SNAP_TO_TARGET_TOLERANCE = 0.05
-
-
-def _nearest_even(value: float) -> int:
-    """Round a pixel dimension to the NEAREST even number.
-
-    The derived side of a crop is fractional almost every time (9:16 out of a
-    1080-tall master wants 607.5px). Flooring it, as this did, always biases
-    the shape the same way and doubles the ratio error it costs: 606x1080 is
-    0.25% off 9:16 where 608x1080 is 0.09% off.
-    """
-    return max(2, int(round(value / 2)) * 2)
-
-
 def resolve_output_dimensions(
-    source_width: int, source_height: int, aspect_ratio: str
+    source_width: int, source_height: int, aspect_ratio: str, tier: str = ""
 ) -> Optional[Tuple[int, int]]:
     """Dimensions the delivered video should have for ``aspect_ratio``.
 
-    The largest rectangle of that ratio that fits inside the source, capped at
-    the canonical delivery size -- so a 9:16 job ships 9:16 without being
-    upscaled past what was really generated, except within
-    ``SNAP_TO_TARGET_TOLERANCE`` of the canonical size, where the standard
-    resolution is worth more than the handful of pixels it costs. Returns None
-    for a ratio we do not deliver, which leaves the video untouched.
-
-    The ratio is exact wherever the geometry allows it and within 0.1%
-    otherwise: both sides must be even (yuv420p halves each axis), and one
+    Returns None for a ratio we do not deliver, which leaves the video
+    untouched. The ratio is exact wherever the geometry allows it and within
+    0.1% otherwise: both sides must be even (yuv420p halves each axis), and one
     exact ratio in even pixels does not always exist at the source's size.
     """
-    target = TARGET_RESOLUTIONS.get((aspect_ratio or "").strip())
-    if not target:
-        return None
-    target_w, target_h = target
-    if source_width <= 0 or source_height <= 0 or is_exact_resolution_enabled():
-        return target
-
-    # Close enough to the delivery size on BOTH axes to be that size. Checked
-    # per axis, so a landscape master ordered vertical never "snaps" to a
-    # shape it does not have -- its short axis is nowhere near 1920.
-    floor = 1.0 - SNAP_TO_TARGET_TOLERANCE
-    if source_width >= target_w * floor and source_height >= target_h * floor:
-        return target
-
-    ratio = target_w / target_h
-    if source_width / source_height > ratio:
-        # Source is wider than the target: height is the binding constraint.
-        height = float(source_height)
-        width = height * ratio
-    else:
-        width = float(source_width)
-        height = width / ratio
-    if width > target_w:
-        width, height = float(target_w), float(target_h)
-    # The binding side keeps its own pixels; only the derived side is rounded,
-    # so the crop takes as little as the even-pixel rule allows.
-    if source_width / source_height > ratio:
-        return _nearest_even(width), _even_dimension(height)
-    return _even_dimension(width), _nearest_even(height)
+    delivery = resolve_delivery(source_width, source_height, aspect_ratio, tier)
+    return delivery.size if delivery else None
 
 
 def _ratio_of(aspect_ratio: str) -> float:
@@ -2192,7 +2164,10 @@ GEOMETRY_LOSS_WARNING = 0.9
 
 
 def build_geometry_filters(
-    source_width: int, source_height: int, aspect_ratio: str
+    source_width: int,
+    source_height: int,
+    aspect_ratio: str,
+    tier: str = "",
 ) -> List[str]:
     """ffmpeg filters that conform a clip to the delivered geometry.
 
@@ -2202,10 +2177,10 @@ def build_geometry_filters(
     upload. Returns [] when the clip is already correct, so the caller can
     skip the work entirely.
     """
-    dimensions = resolve_output_dimensions(source_width, source_height, aspect_ratio)
-    if not dimensions:
+    delivery = resolve_delivery(source_width, source_height, aspect_ratio, tier)
+    if not delivery:
         return []
-    width, height = dimensions
+    width, height = delivery.size
     if (source_width, source_height) == (width, height):
         return []
     # How much of the frame this costs. A clip that came back in roughly the
@@ -2232,8 +2207,19 @@ def build_geometry_filters(
             aspect_ratio,
             kept * 100,
         )
+    if delivery.upscaled:
+        logger.info(
+            "Delivering %s at %dx%d from a %dx%d render: the extra pixels are "
+            "a scaler's, not a model's, and the job records them as such.",
+            delivery.tier,
+            width,
+            height,
+            source_width,
+            source_height,
+        )
     return [
-        f"scale={width}:{height}:force_original_aspect_ratio=increase",
+        f"scale={width}:{height}:force_original_aspect_ratio=increase"
+        f"{scale_suffix(delivery.upscaled)}",
         f"crop={width}:{height}",
         "setsar=1",
     ]
@@ -2658,6 +2644,7 @@ def build_delivery_filters(
     source_height: int,
     director_style: str = "cinematic_balanced",
     aspect_ratio: Optional[str] = None,
+    tier: str = "",
 ) -> Tuple[List[str], Tuple[int, int]]:
     """What turns a concatenated master into a DELIVERED one, as filter
     fragments: conform the geometry, then apply the director style's grade.
@@ -2676,10 +2663,12 @@ def build_delivery_filters(
     filters: List[str] = []
     width, height = source_width, source_height
     if aspect_ratio:
-        geometry = build_geometry_filters(source_width, source_height, aspect_ratio)
+        geometry = build_geometry_filters(
+            source_width, source_height, aspect_ratio, tier
+        )
         if geometry:
             dimensions = resolve_output_dimensions(
-                source_width, source_height, aspect_ratio
+                source_width, source_height, aspect_ratio, tier
             )
             if dimensions:
                 width, height = dimensions
@@ -2707,6 +2696,7 @@ async def apply_color_grade(
     output_path: str,
     director_style: str = "cinematic_balanced",
     aspect_ratio: Optional[str] = None,
+    tier: str = "",
 ) -> str:
     """Color-grade the drama according to its DIRECTOR STYLE in a pass of its
     own -- pure ffmpeg, no extra API calls or cost.
@@ -2744,7 +2734,7 @@ async def apply_color_grade(
         _probe_dimensions(video_path) if aspect_ratio else (0, 0)
     )
     filters, _delivered = build_delivery_filters(
-        source_width, source_height, director_style, aspect_ratio
+        source_width, source_height, director_style, aspect_ratio, tier
     )
     filter_chain = ",".join(filters)
 

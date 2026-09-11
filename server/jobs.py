@@ -160,6 +160,11 @@ def _sb_row_to_dict(row: dict) -> dict:
         # still reports the shape it was actually made in rather than the
         # default one.
         "narrative_mode": result.get("narrative_mode") or "cinematic",
+        # Not a column either, and recovered from the same place: the tier a
+        # master was delivered at is a property of what was MADE, so it is
+        # written on the result (see interfaces/delivery). A job stored before
+        # tiers existed reports "", which is what every one of them shipped at.
+        "delivery_tier": result.get("delivery_tier") or "",
         "demo": row.get("demo", False),
         "music_enabled": row.get("music_enabled", False),
         "dialogue_enabled": row.get("dialogue_enabled", False),
@@ -409,6 +414,11 @@ class Job:
     # "cinematic" or "micro_drama" -- the dramatic shape the script is written
     # to, and whether the finished cut gets a cold-open hook.
     narrative_mode: str = "cinematic"
+    # The size the finished master is delivered at (see interfaces/delivery).
+    # Absent from _sb_row for the same reason `language` is -- it matters
+    # while the run is in flight and is recorded on the result afterwards,
+    # where it survives the Supabase round-trip without a migration.
+    delivery_tier: str = ""
     demo: bool = False
     user_id: Optional[str] = None
     user_email: Optional[str] = None
@@ -475,6 +485,7 @@ class Job:
             "user_requirement": self.user_requirement,
             "language": self.language,
             "narrative_mode": self.narrative_mode,
+            "delivery_tier": self.delivery_tier,
             "demo": self.demo,
             "user_id": self.user_id,
             "user_email": self.user_email,
@@ -1149,6 +1160,7 @@ async def run_generation_job(job: Job, api_key: str):
                     aspect_ratio=job.aspect_ratio,
                     language=job.language,
                     narrative_mode=job.narrative_mode,
+                    delivery_tier=job.delivery_tier,
                     working_dir=working_dir,
                     progress_callback=progress_callback,
                     is_cancelled=is_cancelled,
@@ -1604,6 +1616,7 @@ async def run_continue_from_script_job(job: Job, api_key: str, script_data: Dict
                 aspect_ratio=job.aspect_ratio,
                 language=job.language,
                 narrative_mode=job.narrative_mode,
+                delivery_tier=job.delivery_tier,
                 working_dir=working_dir,
                 progress_callback=progress_callback,
                 is_cancelled=is_cancelled,
