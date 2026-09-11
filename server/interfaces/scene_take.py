@@ -94,6 +94,93 @@ def _as_spoken(line: str) -> str:
     return f'{name.strip()} says: "{said.strip()}"'
 
 
+#: What a beat's own description may never fall below. Under this it has
+#: stopped describing a shot, and a beat with no picture in it is a cut to
+#: nowhere -- the model fills the seconds with whatever the last frame implied.
+MIN_BEAT_DESCRIPTION = 140
+
+
+def _trim(text: str, limit: int) -> str:
+    """``text`` cut to ``limit`` on a word boundary, never mid-token.
+
+    A cut sentence is closed with a full stop, and the stop is paid for out
+    of the same budget -- otherwise the clause comes back one character over
+    and the caller's last-resort truncation lands on the speech instead,
+    which is the one part of a beat that must never be cut mid-sentence.
+    """
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    cut = text[: max(0, limit - 1)].rsplit(" ", 1)[0].rstrip(" ,;:-")
+    if not cut:
+        return text[:limit]
+    return cut if cut.endswith(".") else cut + "."
+
+
+def _spoken_clause(lines: Sequence[str]) -> str:
+    """The lines this beat says, as one clause, or "" for a silent beat."""
+    said = " ".join(_as_spoken(line) for line in lines if str(line).strip())
+    if not said:
+        return ""
+    return f" Spoken aloud in this shot, exactly as written: {said}"
+
+
+def _fit_beat_prompt(
+    cast: str, framing: str, description: str, lines: Sequence[str], limit: int
+) -> str:
+    """One beat's prompt, inside the endpoint's per-beat character budget.
+
+    Unlike the frame prompt's ladder, an overrun here is not a degraded
+    picture: the endpoint answers 422 and the whole scene fails. A delivered
+    take went over by eighteen characters and returned nothing.
+
+    What gives, in order, and why.
+
+    The DESCRIPTION gives first, down to a floor. It is the one part with
+    slack -- a storyboard's visual and motion lines are written to be read by
+    a text model, not to fit a budget -- and a shorter description still
+    describes the shot.
+
+    The SPOKEN LINES give last, and by whole lines. They are the audio: a
+    line cut out of the prompt is a line the take does not say, while the
+    subtitle burned into the same frame still shows it, which is the exact
+    mismatch this prompt exists to prevent. Cutting one mid-sentence would be
+    worse than cutting it, so the trim lands on line boundaries.
+
+    The CAST CLAUSE never gives. It is short, and it is the only place the
+    model learns that @Element1 is Vera Kessler; without it the tokens in the
+    description point at nothing.
+    """
+    said = list(lines or [])
+    spoken = _spoken_clause(said)
+    if limit <= 0 or len(cast) + len(framing) + len(description) + len(spoken) <= limit:
+        return f"{cast}{framing}{description}{spoken}".strip()
+
+    head = f"{cast}{framing}"
+    room = max(0, limit - len(head))
+    # The description, cut to whatever the speech leaves it, floored -- and
+    # closed with a full stop, because a sentence that stops mid-clause runs
+    # straight into "Spoken aloud in this shot" and reads as one sentence.
+    kept = _trim(description, max(MIN_BEAT_DESCRIPTION, room - len(spoken)))
+
+    # Still over with the description at its floor: whole lines come off the
+    # end of the speech until it fits.
+    dropped_a_line = False
+    while said and len(kept) + len(spoken) > room:
+        said.pop()
+        spoken = _spoken_clause(said)
+        dropped_a_line = True
+    if dropped_a_line:
+        # Dropping by whole lines overshoots -- it has to, a half sentence is
+        # worse than a missing one -- so the description takes back what the
+        # speech gave up rather than leaving the budget unspent.
+        kept = _trim(description, room - len(spoken))
+
+    assembled = f"{head}{kept}{spoken}".strip()
+    return assembled if len(assembled) <= limit else _trim(assembled, limit)
+
+
 @dataclass(frozen=True)
 class Beat:
     """One framing inside a take, and how long it holds."""
@@ -105,35 +192,42 @@ class Beat:
     #: filled when the take carries its own audio -- see plan_scene_take.
     dialogue: Tuple[str, ...] = ()
 
-    def as_prompt(self) -> str:
-        """What this beat SHOWS. Its length is a field, not prose.
+    def as_prompt(self, cast: str = "", limit: int = 0) -> str:
+        """What this beat SHOWS, inside ``limit`` characters.
 
         The seconds used to be written into the text as "Shot 1 (3s): ...",
         which is the syntax Kling's own interface documents and which this
         endpoint rejects outright: it takes an object per beat with its own
         `duration`, so the timing belongs there and repeating it in the prose
         only spends prompt on something the model is already being told.
-        """
-        framing = f"{self.shot_type}. " if self.shot_type else ""
-        spoken = ""
-        if self.dialogue:
-            # The words, verbatim and in quotes, because on a native-audio
-            # backend this is the SCRIPT: the model says what it is given and
-            # invents the rest. A take told only what the shot looks like
-            # speaks lines nobody wrote -- while the subtitle burned into the
-            # same frame comes from the script and says something else, so the
-            # viewer both hears and reads the scene, differently.
-            said = " ".join(_as_spoken(line) for line in self.dialogue)
-            spoken = f" Spoken aloud in this shot, exactly as written: {said}"
-        return f"{framing}{self.description}{spoken}".strip()
 
-    def as_payload(self) -> dict:
+        ``cast`` is the scene's cast clause, carried on the first beat only,
+        and it is assembled HERE rather than by the caller because a caller
+        that prepends it afterwards has already spent a budget it did not
+        know about -- which is exactly how a 530-character beat reached an
+        endpoint that takes 512.
+        """
+        # The words go in verbatim and in quotes, because on a native-audio
+        # backend this is the SCRIPT: the model says what it is given and
+        # invents the rest. A take told only what the shot looks like speaks
+        # lines nobody wrote -- while the subtitle burned into the same frame
+        # comes from the script and says something else, so the viewer both
+        # hears and reads the scene, differently.
+        framing = f"{self.shot_type}. " if self.shot_type else ""
+        return _fit_beat_prompt(
+            cast, framing, self.description, self.dialogue, limit
+        )
+
+    def as_payload(self, cast: str = "", limit: int = 0) -> dict:
         """One entry of `multi_prompt`.
 
         `duration` is a STRING enum ("1".."15"), not an integer -- sending the
         number is a 422, and a 422 on this endpoint is the whole take.
         """
-        return {"prompt": self.as_prompt(), "duration": str(self.seconds)}
+        return {
+            "prompt": self.as_prompt(cast=cast, limit=limit),
+            "duration": str(self.seconds),
+        }
 
 
 @dataclass(frozen=True)
@@ -151,6 +245,11 @@ class SceneTake:
     elements: Tuple[Element, ...] = ()
     start_image: str = ""
     end_image: str = ""
+    #: The endpoint's per-beat prompt budget, copied off the backend at plan
+    #: time (interfaces/video_backend.max_prompt_chars). 0 is "unmeasured",
+    #: read as no limit, which is what every backend was until one answered
+    #: 422 over eighteen characters.
+    max_prompt_chars: int = 0
 
     @property
     def beat_count(self) -> int:
@@ -162,8 +261,20 @@ class SceneTake:
         A list of STRINGS is what this sent first, and the endpoint answered
         with one error per entry: "Input should be a valid dictionary or
         object to extract fields from". Each beat is `{prompt, duration}`.
+
+        The cast clause is applied HERE, on the first beat, rather than by the
+        caller afterwards. Prepending it afterwards is how a beat reached the
+        endpoint 18 characters over its 512-character budget: the fitting had
+        already happened, against a length that was about to change.
         """
-        return [beat.as_payload() for beat in self.beats]
+        cast = self.cast_clause()
+        return [
+            beat.as_payload(
+                cast=cast if index == 0 else "",
+                limit=self.max_prompt_chars,
+            )
+            for index, beat in enumerate(self.beats)
+        ]
 
     def cast_clause(self) -> str:
         """Which token is whom, said once at the top of the take.
@@ -384,4 +495,5 @@ def plan_scene_take(
         elements=trimmed,
         start_image=start_image,
         end_image=end_image,
+        max_prompt_chars=int(getattr(backend, "max_prompt_chars", 0) or 0),
     )

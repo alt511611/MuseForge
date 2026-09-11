@@ -288,15 +288,12 @@ class FalAIVideoGenerator:
         if self.demo:
             return DEMO_VIDEO_URL
 
+        # Already carrying the cast clause on its first beat, and already cut
+        # to the endpoint's per-beat budget. Both belong to the take, not to
+        # this caller: prepending the cast here is what once pushed a beat 18
+        # characters past a 512-character limit that the fitting had been
+        # measured against before the clause existed.
         beats = take.multi_prompt()
-        cast = take.cast_clause()
-        if cast and beats:
-            # Said once, at the top of the first beat: which token is whom.
-            # The element object has NO name field, so this is the only place
-            # the model learns that @Element1 is Vera Kessler -- and a model
-            # handed `@Element1` beside a beat that reads "she deals" has to
-            # guess which of two people that is.
-            beats = [{**beats[0], "prompt": cast + beats[0]["prompt"]}] + list(beats[1:])
 
         payload = {
             "start_image_url": take.start_image,
