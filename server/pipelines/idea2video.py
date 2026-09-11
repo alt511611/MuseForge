@@ -2232,7 +2232,10 @@ def plan_scene_speech_anchors(
 
 
 def _lay_out_scene_captions(
-    durations: List[float], span: float, fill: bool = False
+    durations: List[float],
+    span: float,
+    fill: bool = False,
+    windows: Sequence[Tuple[float, float]] = (),
 ) -> List[Tuple[float, float]]:
     """Sequential (start, end) pairs for one scene's lines, inside ``span``.
 
@@ -2248,7 +2251,20 @@ def _lay_out_scene_captions(
     ``span`` of 0 means the scene's length is unknown (no paths passed, or a
     clip that would not probe), and then nothing is scaled -- an unknown
     boundary is not a boundary to squeeze against.
+
+    ``windows`` is the framing each line is spoken in, scene-relative, for a
+    scene rendered as ONE TAKE and therefore cutting inside itself. Given
+    them, the scene stops being the window: each cue is laid out inside its
+    own shot instead (subtitles.fit_cues_to_shots). Scaling to the scene was
+    only ever right because a scene WAS a shot -- it stopped a cue running
+    past the cut at the end of the scene and knew nothing about the cuts
+    within it, because until interfaces/scene_take there were none.
     """
+    if windows:
+        return subtitles.fit_cues_to_shots(
+            durations, windows, gap=CAPTION_GAP_SECONDS, fill=fill
+        )
+
     gaps = CAPTION_GAP_SECONDS * max(0, len(durations) - 1)
     needed = sum(durations) + gaps
     scale = span / needed if span > 0 and needed > span else 1.0
@@ -2270,6 +2286,44 @@ def _lay_out_scene_captions(
         placed.append((cursor, end))
         cursor = end + CAPTION_GAP_SECONDS * scale
     return placed
+
+
+def _take_line_windows(
+    shots: Sequence[Dict[str, Any]],
+) -> List[Tuple[float, float]]:
+    """The framing each of a one-take scene's lines is spoken in, per line.
+
+    One (start, end) per LINE, in fractions of the scene's own length, in the
+    order the lines appear in the script. Handed to subtitles.fit_cues_to_shots
+    against the span probed off the finished clip.
+
+    FRACTIONS RATHER THAN SECONDS, because the two numbers do not agree and
+    only one of them is measurable here. A beat is planned in whole seconds
+    summing to the length the backend was ASKED for -- 8, 10 and 12 on a
+    delivered drama -- and each of those generations came back one frame
+    longer, so the film was 30.125 seconds of picture against 30 seconds of
+    plan. A framing written down as "from 8s to 18s" is three frames out by
+    the end of it. Written down as a share of the scene it survives, and the
+    caller multiplies it by what the clip actually measured.
+
+    Returns [] for anything that is not a one-take scene with lines placed in
+    its beats: the per-shot path, whose framings are separate clips, and a
+    take that was rendered mute, whose lines were voiced afterwards and were
+    never assigned to a beat by anybody.
+    """
+    beats = [shot for shot in shots or () if shot.get("one_take")]
+    total = sum(float(beat.get("seconds") or 0.0) for beat in beats)
+    if total <= 0 or len(beats) < 2:
+        return []
+
+    windows: List[Tuple[float, float]] = []
+    running = 0.0
+    for beat in beats:
+        seconds = float(beat.get("seconds") or 0.0)
+        window = (running / total, (running + seconds) / total)
+        windows.extend([window] * int(beat.get("line_count") or 0))
+        running += seconds
+    return windows
 
 
 def build_kinetic_ass(
@@ -2392,6 +2446,10 @@ def build_srt_from_dialogue_tracks(
         )
         row: Dict[str, Any] = {"text": text, "duration": duration}
         row["voiced"] = bool(str(track.get("audio_url") or "").strip())
+        # The framing this line is said in, as a share of its scene, when the
+        # take that said it placed it in one. Carried on the row because the
+        # rows are all this function is given -- see _take_line_windows.
+        row["shot_window"] = tuple(track.get("shot_window") or ())
         row["take_voiced"] = bool(scene_is_self_voiced.get(int(track.get("scene_index", -1))))
 
         # Word-at-a-time captions, when the provider measured the words and
@@ -2475,12 +2533,25 @@ def build_srt_from_dialogue_tracks(
             span = max(0.0, scene_end - scene_start)
         else:
             scene_start, span = 0.0, 0.0
+        # Each line's framing, in the same clock the cues are laid out in:
+        # measured against the span probed off the finished clip, not the
+        # seconds the take was ordered in, which are not the same number.
+        # Taken only when EVERY line in the scene has one -- a partial answer
+        # would place some cues by shot and the rest by scene, and the two
+        # layouts would overlap each other.
+        shot_windows = [rows[at]["shot_window"] for at in positions]
+        windows = (
+            [(start * span, end * span) for start, end in shot_windows]
+            if span > 0 and all(len(w) == 2 for w in shot_windows)
+            else ()
+        )
         placed = _lay_out_scene_captions(
             [rows[at]["duration"] for at in positions],
             span,
             # Only when the take is the voice: a TTS scene has a real
             # measurement per line and must not be stretched away from it.
             fill=all(rows[at].get("take_voiced") for at in positions),
+            windows=windows,
         )
         for at, (local_start, local_end) in zip(positions, placed):
             rows[at]["start"] = scene_start + local_start
@@ -6408,6 +6479,40 @@ class Idea2VideoPipeline:
                         f"which play with captions instead of spoken lines."
                         + _reason_suffix(dialogue_failure_reasons)
                     )
+
+            # Which framing each line is spoken in, written onto the line.
+            # Placed here because it is the first point where both halves
+            # exist: the rendered scenes know their beats, and the dialogue
+            # tracks -- however they were voiced -- have all arrived. A scene
+            # rendered as one take is several framings of one clip
+            # (interfaces/scene_take), and a caption whose length is an
+            # estimate lands across those framings at random unless something
+            # tells it where they are. See _take_line_windows.
+            windows_by_clip = {
+                int(scene["clip_index"]): _take_line_windows(scene.get("shots") or [])
+                for scene in scene_results
+                if scene.get("clip_index") is not None
+            }
+            tracks_by_clip: Dict[int, List[Dict[str, Any]]] = {}
+            for track in dialogue_tracks:
+                try:
+                    tracks_by_clip.setdefault(int(track["scene_index"]), []).append(track)
+                except (KeyError, TypeError, ValueError):
+                    continue
+            for clip_index, scene_tracks in tracks_by_clip.items():
+                windows = windows_by_clip.get(clip_index) or []
+                # Matched by POSITION, and only when the two lists are the
+                # same length. Both are the scene's dialogue in script order
+                # -- the take was given _format_scene_dialogue's rendering of
+                # it and these rows are caption_only_tracks' rendering of the
+                # same objects -- so the nth window belongs to the nth line.
+                # A length that disagrees means one of the two dropped a line
+                # the other kept, and a window placed against the wrong line
+                # is worse than no window at all.
+                if len(windows) != len(scene_tracks):
+                    continue
+                for track, window in zip(scene_tracks, windows):
+                    track["shot_window"] = window
 
             # Drive the mouths from the voice track that is about to be
             # played. Deliberately placed AFTER dialogue is collected and
