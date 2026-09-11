@@ -1,4 +1,10 @@
-"""Center-crop alternate-format export (naive, not subject-aware)."""
+"""Alternate-format export: the geometry half.
+
+Where the window GOES is decided in interfaces/reframe and tested in
+test_the_vertical_cut_keeps_the_person_in_it. These are the invariants that
+hold whatever it decides: the output is the ordered ratio, it is encodable,
+and an unparseable ratio is refused rather than guessed.
+"""
 import os
 import subprocess
 import sys

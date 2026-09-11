@@ -3217,64 +3217,222 @@ def _parse_aspect_ratio(ratio: str) -> tuple:
     return w, h
 
 
+#: Thumbnail the reframe measurement is taken at, and how often.
+#:
+#: 64 columns is finer than the decision needs -- a 9:16 window out of a 16:9
+#: master is 34 of them -- and coarse enough that the whole measurement of a
+#: 30-second film is under 140KB of pixels and a few hundred thousand
+#: additions. Two frames a second because the answer is one position per SHOT:
+#: sampling faster measures the same shot more times, not more shots.
+REFRAME_SAMPLE_COLUMNS = 64
+REFRAME_SAMPLE_ROWS = 36
+REFRAME_SAMPLE_FPS = 2
+
+#: Scene-change score above which a frame is read as a new shot.
+#:
+#: 0.3 is ffmpeg's own conventional threshold for a hard cut. Missing a cut
+#: costs a shot the window it would have had -- it inherits its neighbour's,
+#: which is what the product does everywhere today. Inventing one splits a
+#: held shot into two windows that may not agree, which is the drift this
+#: module refuses. So the threshold errs high.
+REFRAME_CUT_THRESHOLD = 0.3
+
+
+async def _reframe_cuts(source_path: str, duration: float) -> List[float]:
+    """Times the picture cuts, in seconds, read off the master itself.
+
+    Off the FILE rather than off the job, because an export is offered for
+    any finished master -- including one the customer has re-cut since, whose
+    scene boundaries no longer describe it. The file is the only thing that
+    is certainly true about the film being converted.
+    """
+    command = [
+        resolve_ffmpeg_binary(), "-hide_banner", "-loglevel", "error",
+        "-i", source_path,
+        "-filter:v", f"select='gt(scene,{REFRAME_CUT_THRESHOLD})',metadata=print",
+        "-an", "-f", "null", "-",
+    ]
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+    except Exception as exc:
+        logger.warning("Could not read the master's cuts for reframing: %s", exc)
+        return []
+    text = (stdout or b"").decode("utf-8", "replace") + (stderr or b"").decode("utf-8", "replace")
+    times = [
+        float(match)
+        for match in re.findall(r"pts_time:([0-9.]+)", text)
+    ]
+    return [t for t in sorted(set(times)) if 0.0 < t < duration]
+
+
+async def _reframe_column_energy(source_path: str) -> List[List[float]]:
+    """Per sampled frame, how much local contrast each column carries.
+
+    Local contrast is the stand-in for "where the subject is": a face carries
+    more of it than a wall, and unlike anything that recognises faces it costs
+    one thumbnail decode and no model. interfaces/reframe is written knowing
+    it is coarse, which is why it pulls every answer back toward the middle.
+    """
+    width, height = REFRAME_SAMPLE_COLUMNS, REFRAME_SAMPLE_ROWS
+    command = [
+        resolve_ffmpeg_binary(), "-hide_banner", "-loglevel", "error",
+        "-i", source_path,
+        "-vf", f"fps={REFRAME_SAMPLE_FPS},scale={width}:{height}",
+        "-pix_fmt", "gray", "-f", "rawvideo", "-",
+    ]
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        raw, _ = await process.communicate()
+    except Exception as exc:
+        logger.warning("Could not sample the master for reframing: %s", exc)
+        return []
+
+    frame_bytes = width * height
+    frames: List[List[float]] = []
+    for offset in range(0, len(raw or b"") - frame_bytes + 1, frame_bytes):
+        block = raw[offset : offset + frame_bytes]
+        columns = [0.0] * width
+        for y in range(1, height):
+            row = y * width
+            above = row - width
+            for x in range(1, width):
+                pixel = block[row + x]
+                columns[x] += abs(pixel - block[row + x - 1]) + abs(pixel - block[above + x])
+        frames.append(columns)
+    return frames
+
+
+def _reframe_shots(
+    cuts: Sequence[float], frames: Sequence[Sequence[float]], duration: float
+) -> List[Tuple[float, float, float]]:
+    """``(start, end, centre)`` per shot, from the cuts and the samples."""
+    from interfaces import reframe
+
+    edges = [0.0] + [t for t in cuts if 0.0 < t < duration] + [max(duration, 0.0)]
+    shots: List[Tuple[float, float, float]] = []
+    for index in range(len(edges) - 1):
+        start, end = edges[index], edges[index + 1]
+        if end <= start:
+            continue
+        first = int(start * REFRAME_SAMPLE_FPS)
+        last = max(first + 1, int(end * REFRAME_SAMPLE_FPS))
+        sampled = [frame for frame in frames[first:last] if frame]
+        if not sampled:
+            shots.append((start, end, 0.5))
+            continue
+        # The shot's own profile: its frames added together, so a subject that
+        # holds outvotes one frame's worth of a passing highlight.
+        columns = [sum(values) for values in zip(*sampled)]
+        shots.append((start, end, reframe.interest_centre(columns)))
+    return shots
+
+
 async def export_alternate_format(
     source_path: str,
     output_path: str,
     target_ratio: str,
 ) -> str:
-    """Center-crop ``source_path`` to ``target_ratio`` and write ``output_path``.
+    """Reframe ``source_path`` to ``target_ratio`` and write ``output_path``.
 
-    IMPORTANT LIMITATION: this is a *naive center crop*, not smart subject-
-    aware reframing. Content near the edges of the original frame may be
-    lost. Suitable for quick 9:16 / 1:1 exports from a finished 16:9 master
-    without another MuAPI render.
+    A 16:9 master converted to 9:16 keeps 32% of its width, and WHICH 32% is
+    the whole question. This used to take it off the middle and say so: "a
+    naive center crop, not smart subject-aware reframing. Content near the
+    edges of the original frame may be lost." That is an honest description of
+    a button that silently halves the composition of the format the product's
+    market actually watches.
+
+    So the window is now placed per shot, from a measurement of the picture --
+    see interfaces/reframe for what is decided and what is deliberately not.
+    A film whose subjects really are centred comes out exactly as it did
+    before: the rules there refuse to move for anything inside the noise.
+
+    Falls back to the centre when the measurement cannot be taken at all (a
+    master that will not decode, an ffmpeg without the filters). Centre is the
+    old behaviour, so the worst case of this pass is the product as it was.
     """
+    from interfaces import reframe
+    from pipelines.script2video import video_encode_args
+
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     target_w, target_h = _parse_aspect_ratio(target_ratio)
     target = target_w / target_h
 
-    # moviepy is sync/CPU-bound — run in a worker thread so the event loop
-    # stays responsive during the export.
-    def _crop() -> str:
+    def _measure_source() -> Tuple[int, int, float]:
         from moviepy import VideoFileClip
 
-        clip = VideoFileClip(source_path)
-        try:
-            src_w, src_h = clip.w, clip.h
-            src_ratio = src_w / src_h
-            if abs(src_ratio - target) < 1e-3:
-                # Already the right ratio — just remux/copy encode.
-                cropped = clip
-            elif src_ratio > target:
-                # Source is wider than target → crop left/right (center).
-                new_w = _even(src_h * target)
-                x1 = (src_w - new_w) / 2
-                cropped = clip.cropped(x1=x1, y1=0, width=new_w, height=_even(src_h))
-            else:
-                # Source is taller than target → crop top/bottom (center).
-                new_h = _even(src_w / target)
-                y1 = (src_h - new_h) / 2
-                cropped = clip.cropped(x1=0, y1=y1, width=_even(src_w), height=new_h)
-
-            cropped.write_videofile(
-                output_path,
-                codec="libx264",
-                audio_codec="aac",
-                audio_bitrate=DELIVERY_AUDIO_BITRATE,
-                logger=None,
-                **moviepy_encode_kwargs(),
-            )
-            if cropped is not clip:
-                cropped.close()
-        finally:
-            clip.close()
-        return output_path
-
-    import asyncio
+        with VideoFileClip(source_path) as clip:
+            return int(clip.w or 0), int(clip.h or 0), float(clip.duration or 0.0)
 
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_ENCODE_POOL, _crop)
+    source_width, source_height, duration = await loop.run_in_executor(
+        _ENCODE_POOL, _measure_source
+    )
+    if source_width <= 0 or source_height <= 0:
+        raise ValueError(f"Could not read the dimensions of {source_path}")
 
+    source_ratio = source_width / source_height
+    if abs(source_ratio - target) < 1e-3:
+        crop_w, crop_h = _even(source_width), _even(source_height)
+        x_expression, y_offset = "0", 0
+    elif source_ratio > target:
+        # Wider than the target: the width is what gives, and where it gives
+        # from is what this function exists to decide.
+        crop_w, crop_h = _even(source_height * target), _even(source_height)
+        y_offset = 0
+        cuts = await _reframe_cuts(source_path, duration)
+        frames = await _reframe_column_energy(source_path)
+        windows = reframe.plan_windows(
+            _reframe_shots(cuts, frames, duration), source_width, crop_w
+        )
+        if not windows:
+            x_expression = str(_even((source_width - crop_w) / 2))
+        elif reframe.is_still(windows):
+            x_expression = str(windows[0].x)
+        else:
+            x_expression = reframe.crop_x_expression(windows)
+        logger.info(
+            "Reframing %s to %s across %d shot(s): %s",
+            os.path.basename(source_path),
+            target_ratio,
+            len(windows),
+            [window.x for window in windows] or "centre",
+        )
+    else:
+        # Taller than the target: the height gives. Left centred on purpose --
+        # the measurement above reads columns, and a vertical answer needs a
+        # different question (where the heads are, not where the contrast is).
+        crop_w, crop_h = _even(source_width), _even(source_width / target)
+        x_expression = "0"
+        y_offset = _even((source_height - crop_h) / 2)
+
+    command = [
+        resolve_ffmpeg_binary(), "-y", "-i", source_path,
+        "-vf", f"crop={crop_w}:{crop_h}:{x_expression}:{y_offset},setsar=1",
+        "-c:a", "aac", "-b:a", DELIVERY_AUDIO_BITRATE,
+        *video_encode_args(),
+        output_path,
+    ]
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await process.communicate()
+    if process.returncode != 0 or not os.path.isfile(output_path):
+        raise RuntimeError(
+            "Reframing failed: "
+            + (stderr or b"").decode("utf-8", "replace")[-500:]
+        )
+    return output_path
 
 
 #: A clip trimmed below this is not a shot any more, it is a glitch. Guards
