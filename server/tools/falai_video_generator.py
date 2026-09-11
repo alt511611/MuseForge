@@ -89,10 +89,24 @@ def _element_payload(element) -> dict:
         # No main view: the endpoint rejects the whole request rather than
         # ignoring the element, so an empty one must never be sent.
         return {}
-    payload = {"frontal_image_url": frontal}
     references = [url for url in (getattr(element, "reference_images", []) or []) if url]
-    if references:
-        payload["reference_image_urls"] = references
+    # The two fields are not independent. A main view on its own is a 422 per
+    # element -- "Either frontal_image_url and reference_image_urls or
+    # video_url must be provided" -- so `reference_image_urls` is REQUIRED
+    # alongside a frontal, and a cast holding one picture each (which is what
+    # the portrait lock produces, sheet or not: one URL per character) failed
+    # the whole take on it.
+    #
+    # With no second angle to offer, the frontal is its own reference. That is
+    # not a trick played on a validator: the field means "further evidence
+    # about this subject", and the one picture there is remains true evidence
+    # about them. With MUSEFORGE_CHARACTER_SHEET on, that picture is a
+    # four-view grid, so the angles are handed over anyway -- inside a single
+    # image rather than across a list.
+    payload = {
+        "frontal_image_url": frontal,
+        "reference_image_urls": references or [frontal],
+    }
     voice_id = (getattr(element, "voice_id", "") or "").strip()
     if voice_id:
         payload["voice_id"] = voice_id

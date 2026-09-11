@@ -649,3 +649,23 @@ def test_the_route_is_chosen_by_selection_and_capability_together():
     assert scene_take_backend(SelectedButIncapable()) is None
     assert scene_take_backend(Selected()) is not None
     assert scene_take_backend(object()) is None
+
+
+def test_one_picture_is_still_two_fields():
+    """A cast with a single portrait each is the normal case, not an edge one.
+
+    The portrait lock makes ONE image per character -- a front view, or a
+    four-view grid when MUSEFORGE_CHARACTER_SHEET is on, but either way one
+    URL. Sending that as `frontal_image_url` alone is a 422 per element
+    ("Either frontal_image_url and reference_image_urls or video_url must be
+    provided"), and a 422 is the whole take, so the frontal stands as its own
+    reference when there is no second angle to give.
+    """
+    from tools.falai_video_generator import _element_payload
+
+    payload = _element_payload(Element(name="Vera Kessler", images=("portrait.png",)))
+
+    assert payload == {
+        "frontal_image_url": "portrait.png",
+        "reference_image_urls": ["portrait.png"],
+    }
