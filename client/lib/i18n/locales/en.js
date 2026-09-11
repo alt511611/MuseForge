@@ -271,6 +271,10 @@ export default {
   estimate_row_music: "Music",
   estimate_row_dialogue: "Dialogue",
   estimate_row_lipsync: "Lip sync",
+  // Charged at zero: the video model speaks this film itself, so there is no
+  // lip-sync pass to run. Shown rather than omitted so a user who turned the
+  // toggle on can see what happened to it.
+  estimate_row_lipsync_native: "Lip sync (included — the video model speaks this language)",
   form_demo_badge: "Demo mode — preview only, no credits used",
   form_credit_cost: "This generation will use {n} credits",
   form_music_toggle: "Add background music",

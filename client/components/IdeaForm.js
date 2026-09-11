@@ -87,7 +87,7 @@ const ASPECT_RATIOS = [
 ];
 
 export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
-  const { t } = useLanguage();
+  const { t, locale } = useLanguage();
   const { user, profile, getAccessToken } = useAuth();
   const [idea, setIdea] = useState("");
   const [style, setStyle] = useState("Cinematic");
@@ -227,6 +227,12 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
           dialogue_enabled: dialogueEligible && dialogueEnabled,
           lipsync_enabled: lipsyncEligible && dialogueEnabled && lipsyncEnabled,
           plan: plan || "free",
+          // The drama is spoken in the language the site is being read in,
+          // exactly as the generate call sends it (app/[locale]/HomeContent).
+          // The quote needs it because a video model that speaks this
+          // language renders scenes that need no lip-sync pass, and so are
+          // not charged for one.
+          language: locale,
         }),
       })
         .then((r) => (r.ok ? r.json() : null))
@@ -246,6 +252,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
     lipsyncEligible,
     lipsyncEnabled,
     plan,
+    locale,
   ]);
 
   const handlePhotoUpload = (e) => {

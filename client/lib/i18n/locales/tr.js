@@ -268,6 +268,7 @@ export default {
   estimate_row_music: "Müzik",
   estimate_row_dialogue: "Diyalog",
   estimate_row_lipsync: "Dudak senkronu",
+  estimate_row_lipsync_native: "Dudak senkronu (dahil — video modeli bu dili konuşuyor)",
   form_demo_badge: "Demo Modu — önizleme, kredi harcanmaz",
   form_credit_cost: "Bu üretim {n} kredi harcayacak",
   form_music_toggle: "Arka plan müziği ekle",
