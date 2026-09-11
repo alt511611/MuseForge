@@ -42,6 +42,8 @@ import os
 from dataclasses import dataclass
 from typing import Any, List, Optional, Sequence
 
+from interfaces.video_backend import PER_SECOND
+
 TRUTHY = {"1", "true", "yes", "on"}
 FALSY = {"0", "false", "no", "off"}
 
@@ -392,6 +394,51 @@ def delivered_seconds(plan: List[PlannedShot]) -> float:
 #: enforced when the scene can afford it for every shot (a 6-second scene
 #: covered in four is asking for something this cannot give it).
 MIN_COVERAGE_SECONDS = 2.0
+
+#: The most angles a scene is ever asked for, whatever the endpoint affords.
+#: Past this the storyboard is writing a shot list instead of directing a
+#: scene, and `_merge_to_fit` is collapsing most of it back anyway.
+MAX_COVERAGE = 4
+
+
+def coverage_a_take_affords(backend) -> int:
+    """How many angles this endpoint gives away for free.
+
+    ONE, for every endpoint this pipeline had until scene_take. A second
+    angle meant a second frame generation and a second image-to-video call,
+    so coverage roughly doubled or tripled what a scene cost to make, and
+    DEFAULT_SHOTS_PER_SCENE was set to one for that reason. It was a price
+    list, not a directing decision.
+
+    A multishot endpoint billed PER SECOND does not have that price list. The
+    scene is one request from one frame -- `_render_scene_as_one_take`
+    generates exactly one `start_image` no matter how many shots the
+    storyboard designed -- and the bill is the scene's seconds either way. A
+    second angle there is one more entry in `multi_prompt`: same frame, same
+    call, same seconds, one more cut.
+
+    What it costs to leave at one is visible in the delivered films. With a
+    single shot per scene, `plan_scene_take` builds a single beat, and
+    `generate_scene_take` then sends a plain `prompt` rather than
+    `multi_prompt` -- so `shot_type: "customize"`, the field that makes the
+    shot list BINDING, is never sent at all and the model cuts where it
+    likes. Two dramas with nothing in common, job 49512158 (a rain-soaked
+    harbour) and job 9da99938 (a basement card game), came back with seven
+    cuts each and six of them within half a second of each other:
+
+        49512158   1.96  5.42  8.04  11.67  15.00  18.08  27.13
+        9da99938   1.96  4.88  8.04  11.67  15.00  18.04  26.58
+
+    That is not two films that happen to be paced alike. It is the same
+    default rhythm twice, because neither film was asked for one.
+    """
+    if backend is None or not getattr(backend, "multishot", False):
+        return 1
+    if getattr(backend, "billing", "") != PER_SECOND:
+        # FLAT billing prices the GENERATION, so a beat is free only when the
+        # seconds are what is metered. Left at one rather than guessed at.
+        return 1
+    return max(1, min(MAX_COVERAGE, int(getattr(backend, "max_beats", 1) or 1)))
 
 
 def split_scene_seconds(
