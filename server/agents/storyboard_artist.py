@@ -11,6 +11,8 @@ from interfaces.camera import get_director_style
 from interfaces.character import CharacterInScene
 from interfaces.shot import StoryboardShot
 from interfaces.shot_plan import (
+    MAX_COVERAGE,
+    coverage_a_take_affords,
     coverage_scales,
     plan_scene_shots,
     split_scene_seconds,
@@ -47,20 +49,66 @@ logger = logging.getLogger(__name__)
 DEFAULT_SHOTS_PER_SCENE = 1
 
 
+#: Memo for the coverage answer, keyed by the environment that decides it.
+#: shots_per_scene is called several times a scene -- including inside the
+#: CACHED system prompt -- and resolving the backend logs which vendor it
+#: picked every time it is asked. Keyed rather than cached outright so a test
+#: that changes the environment gets a different answer, which a bare
+#: lru_cache would not give it.
+_COVERAGE_MEMO: dict = {}
+
+
 def shots_per_scene() -> int:
-    """The configured shot count, clamped to something a scene can hold."""
+    """The shot count, which is a question about the ENDPOINT, not a constant.
+
+    An operator's value still wins outright; nothing below runs when
+    MUSEFORGE_SHOTS_PER_SCENE is set.
+
+    Without one, the old answer was DEFAULT_SHOTS_PER_SCENE -- one -- and the
+    note on that constant says why: a second angle was a second frame
+    generation and a second image-to-video call. That is still true of every
+    endpoint it was written for, and false of the one this pipeline added
+    afterwards. See shot_plan.coverage_a_take_affords for the argument and
+    for what leaving it at one cost two delivered films.
+
+    The answer is stable for a deployment, which is what lets it sit inside a
+    cached prompt prefix: it is decided by environment variables, and an
+    environment that changes between two calls was going to invalidate that
+    cache anyway.
+    """
     raw = os.environ.get("MUSEFORGE_SHOTS_PER_SCENE", "").strip()
-    if not raw:
-        return DEFAULT_SHOTS_PER_SCENE
-    try:
-        return max(1, min(4, int(raw)))
-    except ValueError:
-        logger.warning(
-            "MUSEFORGE_SHOTS_PER_SCENE=%r is not a number; using %d.",
-            raw,
-            DEFAULT_SHOTS_PER_SCENE,
-        )
-        return DEFAULT_SHOTS_PER_SCENE
+    if raw:
+        try:
+            return max(1, min(MAX_COVERAGE, int(raw)))
+        except ValueError:
+            logger.warning(
+                "MUSEFORGE_SHOTS_PER_SCENE=%r is not a number; using %d.",
+                raw,
+                DEFAULT_SHOTS_PER_SCENE,
+            )
+            return DEFAULT_SHOTS_PER_SCENE
+
+    key = (
+        os.environ.get("MUSEFORGE_VIDEO_PROVIDER", ""),
+        os.environ.get("FALAI_MULTISHOT_VIDEO_MODEL", ""),
+    )
+    if key not in _COVERAGE_MEMO:
+        try:
+            # Imported here: pipelines.script2video imports this module, so a
+            # module-level import is a cycle. It is the function that already
+            # exists to answer "how will a scene be rendered" before there is
+            # a pipeline to ask -- the estimate endpoint uses the same one, so
+            # the quote and the render cannot disagree about coverage either.
+            from pipelines.script2video import configured_scene_take_backend
+
+            _COVERAGE_MEMO[key] = coverage_a_take_affords(
+                configured_scene_take_backend()
+            )
+        except Exception:  # pragma: no cover -- no fal client, no video deps
+            # The old answer, which is the right one for every endpoint that
+            # cannot cut inside a generation.
+            _COVERAGE_MEMO[key] = DEFAULT_SHOTS_PER_SCENE
+    return _COVERAGE_MEMO[key]
 
 
 #: The two sentences in SYSTEM_PROMPT that hard-code a shot count, and what
