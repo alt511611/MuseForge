@@ -185,6 +185,19 @@ character IS that gender and stays it in every scene. The brief's protagonist is
 protagonist: do not demote them to a supporting role, do not split their action between
 two new characters, and do not add a second lead the brief never asked for.
 
+SHOW THE BRIEF'S OWN VERBS. Every action the brief names is an event the film SHOWS, not
+a state it may open in the aftermath of. A brief that says she FINDS a letter inside a
+returned novel is a brief whose first scene is the finding — the book coming back over
+the counter, the envelope in it, her face. Opening on her already reading it spends the
+inciting incident off screen and leaves the drama with nothing to have caused it. The
+same goes for the objects: a thing the brief makes the story turn on (an address on an
+envelope, a key, a name) has to be something the camera looks at, in its own moment, or
+the audience is asked to take the pipeline's word for it.
+
+SPEND THE SCENES ON THE BRIEF. With only three to five of them, a scene invented around a
+character the brief never mentions is a third of the film spent away from the story it
+asked for. Add a character only when the brief's own action cannot happen without them.
+
 FIND THE THROUGH-LINE. Give the drama a "theme" (its controlling idea in one sentence)
 and a "visual_motif": one recurring visual element — an object, a gesture, a quality of
 light — that you deliberately restage across scenes so the film reads as a whole.
