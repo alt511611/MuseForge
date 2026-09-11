@@ -15,6 +15,7 @@ from interfaces.second_budget import (
     MIN_SCENE_SECONDS,
     SECONDS_PER_CREDIT,
 )
+from tools.anthropic_request import classify
 from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
 
 logger = logging.getLogger(__name__)
@@ -968,28 +969,42 @@ into a single scene rather than adding one."""
             ) as stream:
                 message = await stream.get_final_message()
         except anthropic.APIStatusError as exc:
-            # The response body is where the API states the actual cause --
-            # an expired key, an exhausted quota, a model the key can't reach.
-            body = ""
-            try:
-                body = f" body={exc.response.text[:500]}"
-            except Exception:
-                pass
+            # _failure_message already sorts what the USER is told by status.
+            # This sorts what the OPERATOR is told, which was one line for
+            # every status: the body is where the API states the actual cause
+            # -- an expired key, an exhausted quota, a model the key cannot
+            # reach -- and `retryable` is the part a log reader acts on.
+            failure = classify(exc)
             logger.error(
-                f"Anthropic screenwriter call failed: {type(exc).__name__}: "
-                f"{exc} | status={exc.status_code} type={exc.type}{body}"
+                "Anthropic screenwriter call failed (%s, %s): %s",
+                failure.kind,
+                "worth retrying" if failure.retryable else "will not fix itself",
+                failure.detail,
             )
             raise ScriptGenerationFailed(self._failure_message(exc)) from exc
-        except Exception as exc:
+        except anthropic.APIConnectionError as exc:
+            # Covers APITimeoutError. Separated from the bare handler below
+            # because "could not be reached" is TRUE here and was being said
+            # about every unexpected exception in this block as well -- an
+            # outage message printed over a bug in our own code.
             logger.error(
-                f"Anthropic screenwriter call failed: "
-                f"{type(exc).__name__}: {exc}"
+                "Anthropic screenwriter call never reached the API "
+                "(%s): %s", type(exc).__name__, exc
             )
             # Deliberately NOT the template -- see write_script step 3.
             raise ScriptGenerationFailed(
                 "The script model could not be reached, so your idea could "
                 "not be turned into a script. No credits were spent — please "
                 "try again shortly."
+            ) from exc
+        except Exception as exc:
+            logger.exception(
+                "Anthropic screenwriter call raised an unexpected %s -- this "
+                "is not an API failure", type(exc).__name__
+            )
+            raise ScriptGenerationFailed(
+                "Something went wrong turning your idea into a script. No "
+                "credits were spent — please try again shortly."
             ) from exc
 
         # A truncated response is not an outage: the model answered, the

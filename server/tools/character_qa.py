@@ -79,6 +79,8 @@ async def verify_frame(
     try:
         import anthropic
 
+        from tools.anthropic_request import classify, refusal_of
+
         client = anthropic.AsyncAnthropic(api_key=anthropic_api_key, max_retries=2)
         message = await client.messages.create(
             model="claude-sonnet-5",
@@ -88,6 +90,14 @@ async def verify_frame(
             # Sonnet 5 thinks by default, and since `max_tokens` covers
             # thinking plus text, the old 256 left nothing for the answer.
             thinking={"type": "disabled"},
+            # The same argument as the line above, said in the parameter the
+            # current API has for it. Thinking being off does not by itself
+            # ask for a short answer -- effort governs the overall spend, and
+            # the answer wanted here is two booleans and at most a fifteen
+            # word sentence. This is the highest-VOLUME call in the pipeline:
+            # one per generated frame, where the others are one per job and
+            # one per scene.
+            output_config={"effort": "low"},
             max_tokens=512,
             messages=[
                 {
@@ -105,6 +115,18 @@ async def verify_frame(
         # Select the text block by type. Reading content[0] blindly is what
         # made this check die with `KeyError: 'text'` -- and because the QA
         # fails open, it died silently and every frame passed unchecked.
+        # A refusal is an HTTP 200 with no answer in it. Fail-open is right
+        # here -- a QA that cannot run must not block a frame -- but it has
+        # to be LOUD: this reads as "every frame passed" in the results and
+        # is nothing of the kind.
+        declined = refusal_of(message)
+        if declined:
+            logger.error(
+                "character/setting QA was DECLINED (category=%s); the frame "
+                "is passing UNCHECKED, not verified.", declined,
+            )
+            return {"character_ok": True, "setting_ok": True, "issue": ""}
+
         text = next((b.text for b in message.content if b.type == "text"), "")
         match = re.search(r"\{[\s\S]*\}", text)
         if not match:
@@ -119,5 +141,22 @@ async def verify_frame(
             "issue": issue,
         }
     except Exception as exc:
-        logger.warning("character/setting QA failed (fail-open): %s", exc)
+        # Fail-open is deliberate and stays. What was wrong was the LEVEL: a
+        # warning, once per frame, identical for a malformed JSON reply and
+        # for a key that will reject every frame of every job. A failure that
+        # cannot fix itself is an error, and it says so -- otherwise the QA
+        # reports a whole film verified while never having run.
+        failure = classify(exc)
+        if failure.kind in ("auth", "not_found", "request"):
+            logger.error(
+                "character/setting QA cannot run at all (%s) -- every frame "
+                "is passing UNCHECKED: %s", failure.kind, failure.detail,
+            )
+        elif failure.retryable:
+            logger.warning(
+                "character/setting QA failed this frame (%s, worth retrying), "
+                "frame passing unchecked: %s", failure.kind, failure.detail,
+            )
+        else:
+            logger.warning("character/setting QA failed (fail-open): %s", exc)
         return {"character_ok": True, "setting_ok": True, "issue": ""}
