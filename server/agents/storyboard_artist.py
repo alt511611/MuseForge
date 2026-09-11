@@ -19,7 +19,7 @@ from interfaces.visual_style import resolve as resolve_visual_style
 from tools.anthropic_request import (
     cached_system,
     classify,
-    log_cache_use,
+    log_usage,
     refusal_of,
 )
 from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
@@ -1162,7 +1162,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:
                 message = await stream.get_final_message()
-            log_cache_use("storyboard system prompt", message.usage)
+            log_usage("storyboard", "claude-sonnet-5", getattr(message, "usage", None), cached=True)
 
             # A refusal is an HTTP 200. It arrives here as a message with no
             # shot list in it, and without this check it reads as "the model

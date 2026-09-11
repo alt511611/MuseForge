@@ -127,18 +127,46 @@ def cached_system(text: str) -> List[dict]:
     return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
 
 
-def log_cache_use(label: str, usage: Any) -> None:
-    """Say what the cache actually did, at the call that asked for it."""
+def log_usage(label: str, model: str, usage: Any, cached: bool = False) -> None:
+    """One accounting line per call, in the four quantities that are billed.
+
+    Regular input, cache writes, cache reads and output are four different
+    prices, and a log that prints "120 output tokens" once, inside an error
+    branch, can produce none of them. Until this existed there was no way to
+    answer what a film costs to make except by reading the Console, which
+    reports the organisation rather than the pipeline -- and no way at all to
+    tell whether a change helped, which is the thing every other saving here
+    has to be measured against.
+
+    Machine-readable on purpose. The prefix and the `key=value` tail are what
+    let a day of logs be rolled up per label without a parser that has to
+    understand English.
+
+    ``cached`` says this call ASKED to cache, which is the only condition
+    under which zero reads and zero writes is a fault rather than a fact:
+    cache_control is a request, and a prefix under the model's minimum, or one
+    byte different between calls, is accepted and silently does nothing.
+    """
+    # Accounting must never be able to fail the thing it is accounting for.
+    # A stub, a partial response, or a future SDK that moves a field is a
+    # missing log line, not a lost render -- and this sits in the success
+    # path of all three callers, one of which fails OPEN, where an exception
+    # here would read as "the frame passed".
+    if usage is None:
+        logger.info("claude usage: call=%s model=%s (no usage reported)",
+                    label, model)
+        return
+    regular = int(getattr(usage, "input_tokens", 0) or 0)
     written = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
     read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
-    if read:
-        logger.info("%s: %d tokens read from cache", label, read)
-    elif written:
-        logger.info("%s: %d tokens written to cache (first call)", label, written)
-    else:
-        # Neither written nor read means the breakpoint did nothing: a prefix
-        # under the model's minimum, or one that changes between calls.
+    out = int(getattr(usage, "output_tokens", 0) or 0)
+    logger.info(
+        "claude usage: call=%s model=%s input=%d cache_write=%d cache_read=%d "
+        "output=%d", label, model, regular, written, read, out,
+    )
+    if cached and not read and not written:
         logger.warning(
-            "%s: asked to cache and neither wrote nor read -- the prefix is "
-            "too short or is not identical between calls", label
+            "claude usage: call=%s asked to cache and neither wrote nor read "
+            "-- the prefix is too short or is not identical between calls",
+            label,
         )

@@ -262,7 +262,17 @@ async def test_the_per_frame_check_asks_for_the_cheapest_answer(wire):
         anthropic_api_key="k",
     )
 
-    assert captured[0]["output_config"] == {"effort": "low"}
+    config = captured[0]["output_config"]
+    assert config["effort"] == "low"
+    # And the answer's shape is the API's guarantee, not a sentence in the
+    # prompt with a regex underneath it.
+    assert config["format"]["type"] == "json_schema"
+    assert set(config["format"]["schema"]["required"]) == {
+        "character_ok", "setting_ok", "issue",
+    }
+    assert "Reply ONLY with JSON" not in json.dumps(captured[0]["messages"]), (
+        "the prompt half of the workaround goes with the regex half"
+    )
 
 
 # --- a refusal is a 200 -------------------------------------------------

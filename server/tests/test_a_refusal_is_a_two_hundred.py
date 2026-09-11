@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from tools.anthropic_request import (  # noqa: E402
     classify,
-    log_cache_use,
+    log_usage,
     refusal_of,
 )
 
@@ -126,15 +126,45 @@ def test_an_unrecognised_exception_is_not_reported_as_retryable():
     assert failure.retryable is False
 
 
+class _Usage:
+    input_tokens = 900
+    cache_creation_input_tokens = 0
+    cache_read_input_tokens = 0
+    output_tokens = 120
+
+
+def test_every_call_accounts_for_all_four_billed_quantities(caplog):
+    """Regular input, cache writes, cache reads and output are four prices.
+    A roll-up that is missing one of them cannot price a film."""
+    with caplog.at_level("INFO"):
+        log_usage("frame_qa", "claude-sonnet-5", _Usage())
+
+    for field in ("call=frame_qa", "model=claude-sonnet-5", "input=900",
+                  "cache_write=0", "cache_read=0", "output=120"):
+        assert field in caplog.text, f"{field} missing from the accounting line"
+
+
 def test_a_cache_that_neither_read_nor_wrote_says_so(caplog):
     """cache_control is a REQUEST to cache. A prefix under the model's
     minimum, or one that differs between calls, is accepted and silently
-    does nothing -- and the only evidence is these two counters."""
-
-    class _Usage:
-        cache_creation_input_tokens = 0
-        cache_read_input_tokens = 0
-
+    does nothing -- and the only evidence is these counters."""
     with caplog.at_level("WARNING"):
-        log_cache_use("storyboard system prompt", _Usage())
+        log_usage("storyboard", "claude-sonnet-5", _Usage(), cached=True)
     assert "neither wrote nor read" in caplog.text
+
+
+def test_a_call_that_never_asked_to_cache_is_not_scolded_for_not_caching():
+    """The screenwriter deliberately does not cache; a warning there would be
+    noise on every job."""
+    import logging
+
+    records = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    logger = logging.getLogger("tools.anthropic_request")
+    logger.addHandler(handler)
+    try:
+        log_usage("screenwriter", "claude-sonnet-5", _Usage())
+    finally:
+        logger.removeHandler(handler)
+    assert not [r for r in records if r.levelno >= logging.WARNING]
