@@ -954,7 +954,7 @@ def build_frame_prompt(
                 for word in ("close-up", "closeup", "close up")
             )
             visibility = (
-                "Show it as it reaches THIS framing -- in the light, the "
+                "show it as it reaches THIS framing -- in the light, the "
                 "shadow and what it does to the face and hands in frame. Do "
                 "not widen the shot to fit the event in, and do not add "
                 "people the shot does not name. "
@@ -1253,8 +1253,33 @@ def build_frame_prompt(
     # The expression is computed per beat by the storyboard artist and is the
     # difference between a performance and a photograph; the sentences below
     # it are identical in every film this product has ever made.
+    # READING ORDER, which is not the drop order and never has been -- see
+    # fit_image_prompt, whose own docstring says an image model weights the
+    # opening of the prompt and gives "Cinematic style. Maya walks the pier."
+    # as the shape to keep. The list below did not have that shape. The shot
+    # itself arrived sixth, about 60% of the way into a ~2,400-character
+    # prompt, behind the setting, the lighting, the identity lock and the
+    # axis: four blocks that are word-for-word identical in every frame of
+    # the film. Taken off a delivered close-up, the first thing the model read
+    # about what it was drawing was "windowless basement card room" and the
+    # first thing about WHO was a costume lock -- "Close-up on Vivian Kesler
+    # half-risen from her chair" came after both.
+    #
+    # So: this frame first, every frame second. The shot, its framing and the
+    # performance in it; then who these people are and where they stand; then
+    # the room, its light and the film's finish. Priorities are untouched, so
+    # what dies under budget pressure dies in exactly the order the ladder
+    # below already records -- only the order it READS in has changed.
     return fit_image_prompt([
         (REQUIRED, style_prefix),
+        (REQUIRED, desc_clause),
+        (REQUIRED, framing_clause),
+        (2, expression_clause),
+        (4, face_clause),
+        (dialogue_rank, dialogue_clause),
+        (REQUIRED, identity_clause),
+        (OPTIONAL_DIRECTION, direction_clause),
+        (3, cast_clause),
         # RANK, not wording -- the same distinction the mouth clause turned on
         # above. Ordinarily this clause is continuity: worth keeping, and a
         # frame is still the right frame without it, so it sits one rung above
@@ -1286,14 +1311,6 @@ def build_frame_prompt(
         # two. A shot lit slightly differently reads as a lighting change; a
         # person nobody wrote reads as a different film.
         (5, lighting_clause),
-        (REQUIRED, identity_clause),
-        (OPTIONAL_DIRECTION, direction_clause),
-        (REQUIRED, desc_clause),
-        (2, expression_clause),
-        (4, face_clause),
-        (3, cast_clause),
-        (dialogue_rank, dialogue_clause),
-        (REQUIRED, framing_clause),
         (7, resolve_visual_style(style).render_note),
     ])
 

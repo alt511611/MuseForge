@@ -35,7 +35,28 @@ class _Shot:
         self.expression_desc = "shocked betrayal"
 
 
-def _prompt(shot_type, change):
+def _cast():
+    from interfaces.character import CharacterInScene
+
+    return [
+        CharacterInScene(
+            idx=0,
+            name="Vivian Kesler",
+            static_features="woman in her thirties, sharp cheekbones",
+            dynamic_features="composed",
+            wardrobe="black silk blouse",
+        ),
+        CharacterInScene(
+            idx=1,
+            name="Silas Vane",
+            static_features="man in his fifties, gaunt face",
+            dynamic_features="watchful",
+            wardrobe="grey overcoat",
+        ),
+    ]
+
+
+def _prompt(shot_type, change, characters=None):
     return build_frame_prompt(
         "Noir",
         _Shot(shot_type),
@@ -44,6 +65,7 @@ def _prompt(shot_type, change):
         setting_time_of_day="night",
         setting_era="1950s",
         world_change=change,
+        characters=characters,
     )
 
 
@@ -127,3 +149,44 @@ def test_a_synced_scene_keeps_the_sentence_that_is_true_of_it():
     )
 
     assert "will be animated to the dialogue" in synced
+
+
+def test_the_shot_is_the_first_thing_the_model_reads():
+    """fit_image_prompt's own docstring names the shape: style, then the shot.
+
+    The ladder did not have it. Taken off a delivered close-up, the first
+    thing the model read about what it was drawing was "windowless basement
+    card room" and the first thing about WHO was a costume lock; "Close-up on
+    Vivian Kesler half-risen from her chair" arrived sixth, about 60% into a
+    ~2,400-character prompt, behind four blocks that are word-for-word
+    identical in every frame of the film.
+    """
+    prompt = _prompt("close-up", _DOOR, characters=_cast())
+
+    shot = prompt.index("Vivian half-risen")
+    for later, what in (
+        ("Setting:", "the room"),
+        ("Appearance is FIXED", "the identity lock"),
+        ("180-degree rule", "the axis"),
+        ("The cast is closed", "the closed cast"),
+    ):
+        assert shot < prompt.index(later), (
+            f"{what} is identical in every frame of the film; this shot is not"
+        )
+    assert prompt.index("Noir style") < shot, "the style still opens the prompt"
+    assert prompt.index("Shot type:") < prompt.index("Appearance is FIXED"), (
+        "framing belongs with the shot it frames, not after the locks"
+    )
+
+
+def test_reordering_did_not_change_what_dies_first():
+    """Reading order and drop order are separate, and only one of them moved."""
+    from pipelines.script2video import fit_image_prompt
+
+    dropped = fit_image_prompt(
+        [(0, "A" * 40), (7, "Z" * 40), (2, "M" * 40)], limit=90
+    )
+
+    assert "Z" not in dropped, "the worst priority goes first, wherever it reads"
+    assert dropped.startswith("A" * 40)
+    assert "M" * 40 in dropped
