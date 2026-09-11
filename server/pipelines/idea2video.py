@@ -224,6 +224,29 @@ def picture_carries_dialogue(video_gen, language: str) -> bool:
     return bool(backend is not None and backend.speaks(language))
 
 
+def picture_will_carry_dialogue(language: str) -> bool:
+    """``picture_carries_dialogue`` asked BEFORE the job exists.
+
+    Both halves of that question are knowable from the request and the
+    deployment: the backend comes from MUSEFORGE_VIDEO_PROVIDER, and the
+    language is on the request. So /api/estimate can ask it too, and must --
+    a quote that adds the lip-sync surcharge to a job whose mouths were
+    already driven by the generation that made the picture charges a credit
+    per scene for a stage that never runs.
+
+    Asked through the same two functions the pipeline asks through, so the
+    only way the estimate and the render can differ is if the deployment
+    changed between them.
+    """
+    try:
+        from pipelines.script2video import configured_scene_take_backend
+
+        backend = configured_scene_take_backend()
+    except Exception:  # pragma: no cover -- a missing optional backend
+        return False
+    return bool(backend is not None and backend.speaks(language))
+
+
 def caption_only_tracks(dialogue: List[Any], scene_index: int) -> List[Dict[str, Any]]:
     """Subtitle rows for a scene whose voice generation failed.
 

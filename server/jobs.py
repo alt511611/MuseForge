@@ -908,16 +908,27 @@ def arm_job_eta(job: Job, *, scenes: Optional[int] = None, prologue: bool = True
     entirely -- quoting those a fresh screenplay and a fresh cast lock would
     overstate a one-scene retake by about a minute.
     """
-    from pipelines.idea2video import _scene_concurrency
+    from pipelines.idea2video import _scene_concurrency, picture_will_carry_dialogue
 
     num_scenes = max(1, int(scenes if scenes is not None else job.num_scenes or 1))
+    dialogue = bool(job.dialogue_enabled)
+    lipsync = bool(job.lipsync_enabled)
+    # The same question the pipeline asks a few lines into the soundtrack, and
+    # for the same reason -- asked HERE so the countdown the viewer watches is
+    # the run that is actually happening. A speaking take leaves no per-scene
+    # TTS and no sync pass in the tail, and a clock that counts down work
+    # nobody is doing is the "almost there..." this model replaced, back again
+    # with better arithmetic.
+    if dialogue and not job.demo and picture_will_carry_dialogue(job.language):
+        dialogue = False
+        lipsync = False
     job._eta.arm(
         RenderPlan(
             num_scenes=num_scenes,
             concurrency=_scene_concurrency(num_scenes),
             music=bool(job.music_enabled),
-            dialogue=bool(job.dialogue_enabled),
-            lipsync=bool(job.lipsync_enabled),
+            dialogue=dialogue,
+            lipsync=lipsync,
             demo=bool(job.demo),
             include_prologue=prologue,
         ),

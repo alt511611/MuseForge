@@ -172,17 +172,38 @@ def render_plan_for(
     lipsync_enabled: bool = False,
     plan: str = "free",
     demo: Optional[bool] = None,
+    language: str = "en",
 ) -> RenderPlan:
     """The shape of the run these options describe.
 
     Applies the same plan gating as /api/generate, so a stage the caller asks
     for but will not actually get (music on a Free plan, lip sync on a
     deployment without a provider key) is not in the estimate either.
+
+    ``language`` closes the last way a stage could be quoted that will not
+    run. On a job whose scenes are rendered as one take by a backend that
+    speaks the film's language, the soundtrack stages are not skipped by
+    accident -- the picture arrives already speaking, so there is nothing to
+    voice and nothing to re-sync.
     """
     if demo is None:
         demo = _is_demo()
     plan = (plan or "free").lower()
     dialogue_on = bool(dialogue_enabled) and plan == "pro" and is_dialogue_enabled()
+    lipsync_on = dialogue_on and bool(lipsync_enabled) and _lipsync_configured()
+    # Demo mode runs no provider at all, so the pipeline never even asks
+    # (idea2video: `not self.demo and picture_carries_dialogue(...)`) -- and
+    # RenderPlan.total short-circuits to DEMO_SECONDS anyway.
+    if dialogue_on and not demo and _picture_will_carry_dialogue(language):
+        # BOTH flags, because RenderPlan's fields mean "this stage costs
+        # wall-clock", not "this film has spoken lines". The take's audio is
+        # produced by the generation that is already being counted in
+        # `scenes`: no per-scene TTS (DIALOGUE_PER_SCENE) and no sync pass
+        # (LIPSYNC_PER_SCENE) land in the tail behind it. On a 12-scene Pro
+        # job that is 12 x (20 + 40) = 720 seconds of promised wait for work
+        # nobody does.
+        dialogue_on = False
+        lipsync_on = False
     # Scenes render in parallel batches (see idea2video._scene_concurrency),
     # so wall-clock scales with the number of BATCHES, not raw scene count --
     # a 5-scene job at concurrency 3 takes ~2 scene-slots, not 5.
@@ -193,7 +214,7 @@ def render_plan_for(
         concurrency=_scene_concurrency(num_scenes),
         music=bool(music_enabled) and plan in ("creator", "pro"),
         dialogue=dialogue_on,
-        lipsync=dialogue_on and bool(lipsync_enabled) and _lipsync_configured(),
+        lipsync=lipsync_on,
         demo=bool(demo),
     )
 
@@ -206,6 +227,7 @@ def estimate_generation_seconds(
     lipsync_enabled: bool = False,
     plan: str = "free",
     demo: Optional[bool] = None,
+    language: str = "en",
 ) -> int:
     """Wall-clock generation estimate (not output video length).
 
@@ -221,6 +243,7 @@ def estimate_generation_seconds(
             lipsync_enabled=lipsync_enabled,
             plan=plan,
             demo=demo,
+            language=language,
         )
     )
 
@@ -464,6 +487,11 @@ class EstimateRequest(BaseModel):
     music_enabled: bool = False
     dialogue_enabled: bool = False
     lipsync_enabled: bool = False
+    # The drama's spoken language, same field and same default as
+    # GenerateRequest. Not cosmetic here: one surcharge depends on it, because
+    # a backend that speaks THIS film's language renders scenes whose mouths
+    # need no lip-sync pass. A client that omits it gets the English quote.
+    language: str = "en"
     # Client-supplied plan for the credit breakdown preview. The generate
     # path always re-checks the caller's real plan server-side; spoofing
     # here only changes the displayed estimate, not billing.
@@ -518,6 +546,25 @@ def _lipsync_configured() -> bool:
     return bool((os.environ.get(required) or "").strip())
 
 
+def _picture_will_carry_dialogue(language: str) -> bool:
+    """Whether this deployment would render ``language`` as a speaking take.
+
+    Normalised here rather than at each call site, because generate() stores
+    normalize_language(req.language) -- so this answers about the language the
+    film will be written in, not the one the client happened to type.
+
+    Imported inside the call because api.py must stay importable without the
+    optional video backends installed -- and because a quote that cannot name
+    the backend simply prices the stages it knows will run.
+    """
+    try:
+        from pipelines.idea2video import picture_will_carry_dialogue
+
+        return picture_will_carry_dialogue(normalize_language(language))
+    except Exception:  # pragma: no cover -- a missing optional backend
+        return False
+
+
 def _enforce_plan_scene_limit(plan: str, num_scenes: int) -> None:
     """Raise 400 when num_scenes exceeds the caller's plan ceiling."""
     max_allowed = PLAN_MAX_SCENES.get((plan or "free").lower(), PLAN_MAX_SCENES["free"])
@@ -538,11 +585,19 @@ def build_credit_breakdown(
     dialogue_enabled: bool = False,
     lipsync_enabled: bool = False,
     plan: str = "free",
+    language: str = "en",
 ) -> dict:
     """Line-item credit cost matching what /api/generate will charge.
 
     Only includes surcharges that would actually apply (flag on + plan
     eligible + dialogue feature flag). Closed options are omitted entirely.
+
+    ``language`` is here because one surcharge depends on it. A scene rendered
+    as one take by a backend that speaks the film's language arrives with its
+    mouths already driven by the generation that made the picture, so the
+    lip-sync pass never runs (pipelines/idea2video.picture_carries_dialogue) --
+    and a quote that charged for it anyway billed a credit per scene for a
+    stage that was skipped.
     """
     plan = (plan or "free").lower()
     music_on = bool(music_enabled) and plan in ("creator", "pro")
@@ -551,7 +606,13 @@ def build_credit_breakdown(
     )
     # Lip sync has nothing to sync to without generated speech, so it is
     # charged only when dialogue is actually being produced.
-    lipsync_on = dialogue_on and bool(lipsync_enabled) and _lipsync_configured()
+    lipsync_asked = dialogue_on and bool(lipsync_enabled) and _lipsync_configured()
+    # ...and nothing to CORRECT when the picture spoke its own lines: the pass
+    # exists only because the picture used to arrive mute. Asked the way the
+    # pipeline asks it, from the video provider in the environment and the
+    # language on the request, so the quote and the render cannot disagree.
+    picture_speaks = lipsync_asked and _picture_will_carry_dialogue(language)
+    lipsync_on = lipsync_asked and not picture_speaks
 
     # Each credit buys a fixed number of seconds of finished video (see
     # interfaces/second_budget). Stating that here turns a vague promise
@@ -615,6 +676,21 @@ def build_credit_breakdown(
             }
         )
         total += lipsync_credits
+    elif picture_speaks:
+        # Zero credits, but still a ROW. Dropping the line item silently would
+        # leave a user who switched the toggle on staring at an unchanged
+        # total, with nothing on screen saying whether the feature was applied
+        # for free, quietly refused, or simply not priced yet -- and the answer
+        # ("the video model already speaks this film, so there is no pass to
+        # run") is the good news of the three.
+        breakdown.append(
+            {
+                "key": "estimate_row_lipsync_native",
+                "vars": {},
+                "label": "Dudak senkronu (video modeli konuştuğu için ücretsiz)",
+                "credits": 0,
+            }
+        )
 
     return {
         "total_credits": total,
@@ -727,6 +803,7 @@ async def estimate(req: EstimateRequest):
         lipsync_enabled=req.lipsync_enabled,
         plan=req.plan,
         demo=demo,
+        language=req.language,
     )
     minutes = max(1, round(seconds / 60))
     credits = build_credit_breakdown(
@@ -735,6 +812,7 @@ async def estimate(req: EstimateRequest):
         dialogue_enabled=req.dialogue_enabled,
         lipsync_enabled=req.lipsync_enabled,
         plan=req.plan,
+        language=req.language,
     )
     # Surface wall-clock wait for longer jobs so users know before they start.
     # Scenes run sequentially for character continuity — 16–24 scene jobs
@@ -953,6 +1031,7 @@ async def generate(
                 dialogue_enabled=dialogue_enabled,
                 lipsync_enabled=lipsync_enabled,
                 plan=plan,
+                language=req.language,
             )["total_credits"]
             ok = await _deduct_credits(current_user.user_id, credit_cost, "video_generation")
             if not ok:
