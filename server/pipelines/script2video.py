@@ -26,6 +26,9 @@ from interfaces.delivery import (
     tier_size,
 )
 from interfaces.lighting import is_interior, resolve_lighting
+from interfaces.reframe import CENTRE as CENTRE_ANCHOR
+from interfaces.reframe import Anchor
+from interfaces.reframe import crop_filter as build_crop_filter
 from interfaces.impact import build_impact_filters, plan_impacts
 from interfaces.pacing import plan_internal_cuts
 from interfaces.visual_style import PHOTOREAL_RENDER
@@ -2168,14 +2171,21 @@ def build_geometry_filters(
     source_height: int,
     aspect_ratio: str,
     tier: str = "",
+    anchor: Optional[Anchor] = None,
+    spans: Optional[Sequence[Tuple[float, float, Anchor]]] = None,
 ) -> List[str]:
     """ffmpeg filters that conform a clip to the delivered geometry.
 
-    Scale-to-cover then centre-crop: a clip that already has the right shape
-    is only ever resized, and one that drifted loses its edges rather than
-    gaining letterbox bars -- black bars in a vertical feed read as a broken
-    upload. Returns [] when the clip is already correct, so the caller can
-    skip the work entirely.
+    Scale-to-cover then crop: a clip that already has the right shape is only
+    ever resized, and one that drifted loses its edges rather than gaining
+    letterbox bars -- black bars in a vertical feed read as a broken upload.
+    Returns [] when the clip is already correct, so the caller can skip the
+    work entirely.
+
+    The crop is pointed at the subject when the film knows where the subject
+    is (``anchor`` for a whole clip, ``spans`` for a master whose scenes each
+    want their own framing -- see interfaces/reframe), and is the centre crop
+    it has always been when it does not.
     """
     delivery = resolve_delivery(source_width, source_height, aspect_ratio, tier)
     if not delivery:
@@ -2217,10 +2227,25 @@ def build_geometry_filters(
             source_width,
             source_height,
         )
+    crop = build_crop_filter(
+        source_width,
+        source_height,
+        width,
+        height,
+        anchor=anchor or CENTRE_ANCHOR,
+        spans=spans,
+    )
+    if crop != f"crop={width}:{height}":
+        logger.info(
+            "Conform crop is pointed rather than centred: %s. The film staged "
+            "these frames itself (the locked 180-degree axis), so the crop is "
+            "reading a decision rather than guessing at one.",
+            crop,
+        )
     return [
         f"scale={width}:{height}:force_original_aspect_ratio=increase"
         f"{scale_suffix(delivery.upscaled)}",
-        f"crop={width}:{height}",
+        crop,
         "setsar=1",
     ]
 
@@ -2645,6 +2670,7 @@ def build_delivery_filters(
     director_style: str = "cinematic_balanced",
     aspect_ratio: Optional[str] = None,
     tier: str = "",
+    reframe: Optional[Sequence[Tuple[float, float, Anchor]]] = None,
 ) -> Tuple[List[str], Tuple[int, int]]:
     """What turns a concatenated master into a DELIVERED one, as filter
     fragments: conform the geometry, then apply the director style's grade.
@@ -2664,7 +2690,7 @@ def build_delivery_filters(
     width, height = source_width, source_height
     if aspect_ratio:
         geometry = build_geometry_filters(
-            source_width, source_height, aspect_ratio, tier
+            source_width, source_height, aspect_ratio, tier, spans=reframe
         )
         if geometry:
             dimensions = resolve_output_dimensions(
@@ -2697,6 +2723,7 @@ async def apply_color_grade(
     director_style: str = "cinematic_balanced",
     aspect_ratio: Optional[str] = None,
     tier: str = "",
+    reframe: Optional[Sequence[Tuple[float, float, Anchor]]] = None,
 ) -> str:
     """Color-grade the drama according to its DIRECTOR STYLE in a pass of its
     own -- pure ffmpeg, no extra API calls or cost.
@@ -2734,7 +2761,7 @@ async def apply_color_grade(
         _probe_dimensions(video_path) if aspect_ratio else (0, 0)
     )
     filters, _delivered = build_delivery_filters(
-        source_width, source_height, director_style, aspect_ratio, tier
+        source_width, source_height, director_style, aspect_ratio, tier, reframe
     )
     filter_chain = ",".join(filters)
 

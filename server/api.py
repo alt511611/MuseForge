@@ -1226,12 +1226,14 @@ async def export_job_format(
     req: ExportRequest,
     current_user: Optional[AuthUser] = Depends(get_optional_user),
 ):
-    """Center-crop the finished master into 9:16 or 1:1. No MuAPI, no credits.
+    """Crop the finished master into 9:16 or 1:1. No MuAPI, no credits.
 
-    This is a *simple center crop* — not smart subject-aware reframing.
-    Edge content from the original frame may be lost.
+    Pointed at the subject rather than at the middle of the frame wherever the
+    drama recorded where its subject was standing (see interfaces/reframe);
+    centred, as it always was, when it did not. Either way it is one ffmpeg
+    pass and no generation, so the export stays free.
     """
-    from pipelines.idea2video import export_alternate_format
+    from pipelines.idea2video import export_alternate_format, reframe_spans_from_record
     from tools.supabase_storage import upload_video
 
     # Restored from storage on a memory miss: these controls stay on screen
@@ -1265,7 +1267,12 @@ async def export_job_format(
     output_path = os.path.join(working_dir, f"export_{safe_ratio}.mp4")
 
     try:
-        await export_alternate_format(source, output_path, req.aspect_ratio)
+        await export_alternate_format(
+            source,
+            output_path,
+            req.aspect_ratio,
+            spans=reframe_spans_from_record((job.result or {}).get("_reframe")),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
