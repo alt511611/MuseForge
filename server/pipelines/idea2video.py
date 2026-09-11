@@ -6279,7 +6279,15 @@ class Idea2VideoPipeline:
                         "silent scene is a deliberate choice; this many is the "
                         "script coming back thinner than it should have."
                     )
-                if not dialogue_tasks:
+                if not any(_scene_dialogue(scene) for scene in script.scenes):
+                    # Asked of the SCRIPT, not of the voice queue. The queue
+                    # is empty on a job where the picture speaks for itself
+                    # (picture_carries_dialogue) -- no TTS task is ever
+                    # created, because the take says the lines -- and reading
+                    # that as "the script has no spoken lines" told a user
+                    # watching a subtitled, fully voiced drama that their
+                    # script came back silent.
+                    #
                     # The script came back with no spoken lines at all, so
                     # there was never anything to voice. The screenwriter is
                     # now told when a run is going to be voiced (see
@@ -6361,7 +6369,22 @@ class Idea2VideoPipeline:
             # video is indistinguishable from one that never asked -- closed
             # mouths and a voice over the top -- so the job has to say so
             # rather than let them wonder whether the feature exists.
-            if lipsync_enabled and dialogue_requested and not lipsynced_scenes:
+            # A scene that spoke for itself has already had its mouths
+            # driven -- by the model that made the picture, in the same
+            # generation -- so the lip-sync pass declining it is the pass
+            # working. Counted here rather than tested for emptiness below,
+            # because a job can be part one and part the other: a scene the
+            # take could not carry still goes through TTS and still needs the
+            # sync, and that one failing is worth saying.
+            self_voiced = sum(
+                1 for track in dialogue_tracks if track.get("speaks_for_itself")
+            )
+            if (
+                lipsync_enabled
+                and dialogue_requested
+                and not lipsynced_scenes
+                and not self_voiced
+            ):
                 warnings.append(
                     "Lip sync did not run on any scene, so the voices play "
                     "over the picture instead of driving the mouths. The "

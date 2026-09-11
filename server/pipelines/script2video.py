@@ -2545,6 +2545,7 @@ class Script2VideoPipeline:
         frame_prompt: str,
         generate_audio: bool,
         voice_ids,
+        scene_dialogue: str = "",
         is_cancelled=None,
     ) -> Dict[str, Any]:
         """Render a whole scene in ONE generation, cuts included.
@@ -2607,6 +2608,14 @@ class Script2VideoPipeline:
             backend,
             elements=elements,
             start_image=start_image,
+            # The lines, only when this take is the thing that says them. A
+            # scene rendered mute is voiced by the TTS pass and lip-synced
+            # afterwards, and its words reach the picture that way.
+            dialogue=(
+                [line for line in (scene_dialogue or "").splitlines() if line.strip()]
+                if generate_audio
+                else []
+            ),
         )
         if take is None:
             raise RuntimeError(
@@ -3095,6 +3104,7 @@ class Script2VideoPipeline:
                 generate_audio=bool(has_dialogue)
                 and take_backend.speaks(language or "en"),
                 voice_ids=voice_ids,
+                scene_dialogue=scene_dialogue,
                 is_cancelled=is_cancelled,
             )
             await progress(
