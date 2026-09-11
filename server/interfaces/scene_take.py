@@ -107,7 +107,33 @@ def _as_spoken(line: str) -> str:
 MIN_BEAT_DESCRIPTION = 140
 
 #: Held back from every declared prompt budget. See _fit_beat_prompt.
-PROMPT_BUDGET_RESERVE = 8
+#:
+#: This is not a rounding allowance. It is the margin for the fact that
+#: NOBODY HERE KNOWS WHAT THE VALIDATOR COUNTS, and three refusals now say so:
+#:
+#:   530 `len`, refused by a 512 limit -- the cast clause was prepended after
+#:        the fitting, so the budget was measured against the wrong string.
+#:   510 `len` / 514 escaped, refused -- which is where wire_length came from.
+#:   501 `len` / 503 escaped, refused at a reserve of 8, i.e. measured at 503
+#:        against a budget of 504 and refused anyway. Job 49512158's opening
+#:        beat; it rebuilds byte for byte out of _fit_beat_prompt.
+#:
+#: The third one falsifies the second's explanation. For 501 characters to
+#: reach 512 the count has to be at least twelve above `len`, and escaping
+#: two double quotes buys two. Both structural theories that fit all three
+#: land near thirty: the entry as the wire actually carries it,
+#: `{"prompt": "...", "duration": "3"}`, is thirty characters of JSON around
+#: the string, and the negative prompt this pipeline sends -- "blur, distort,
+#: and low quality" -- is thirty characters that a validator summing the two
+#: prompts would add. Neither is checkable from here without spending a
+#: generation to find out.
+#:
+#: So the reserve is twice the largest candidate rather than equal to it,
+#: because the candidate is still a guess. It leaves 448 characters -- more
+#: than three times MIN_BEAT_DESCRIPTION -- and it costs about ten words of a
+#: description that routinely has hundreds. The alternative costs the scene:
+#: a 422 on a multi-shot endpoint is not a poorer picture, it is no picture.
+PROMPT_BUDGET_RESERVE = 64
 
 #: What the whole cast clause -- names, outfits and the continuity sentence --
 #: may spend of the first beat's prompt.
@@ -146,10 +172,27 @@ def wire_length(text: str) -> int:
     was 514. Curly quotes and any non-ASCII a screenwriter model produces cost
     more again.
 
-    So the budget is counted the way the wire counts, which is the only count
-    that can refuse a take.
+    Read this as a FLOOR on the real count rather than as the count itself.
+    It is inferred from a refusal, and a later refusal proved it too small: a
+    beat measuring 503 here was refused by the same 512 limit. What the extra
+    characters are is not known -- see PROMPT_BUDGET_RESERVE, which is the
+    margin that stands in for not knowing, and which is why being slightly
+    wrong here is survivable.
     """
     return len(json.dumps(text or "")) - 2
+
+
+#: Words that cannot be the last word of a sentence: they open the clause that
+#: follows them, so a cut landing after one leaves the reader -- here, the
+#: video model -- holding an unfinished thought. A possessive is the same
+#: shape ("the paperback's."), and is caught by the apostrophe rather than by
+#: this list, which no list could enumerate.
+_DANGLING = frozenset(
+    """a an the of in on at to for from with without into onto over under by
+    as and or but so nor its his her their our your my this that these those
+    is are was were be been being has have had"""
+    .split()
+)
 
 
 def _trim(text: str, limit: int) -> str:
@@ -159,6 +202,14 @@ def _trim(text: str, limit: int) -> str:
     of the same budget -- otherwise the clause comes back one character over
     and the caller's last-resort truncation lands on the speech instead,
     which is the one part of a beat that must never be cut mid-sentence.
+
+    The last word goes on giving until the sentence can end on it. Before the
+    reserve widened, this mattered rarely -- the fitting fired only on a beat
+    that overran a budget almost nothing overran. It fires on most beats now,
+    and the first one it was measured on came back "The envelope tumbles from
+    the paperback's.", which is not a shorter description of the shot, it is
+    a sentence about a paperback that stops before saying anything. Dropping
+    the dangling word costs two words and buys a clause that closes.
     """
     if limit <= 0:
         return ""
@@ -170,6 +221,11 @@ def _trim(text: str, limit: int) -> str:
     while cut and wire_length(cut) + 1 > limit:
         cut = cut[: len(cut) - max(1, (wire_length(cut) + 1 - limit))]
     cut = cut.rsplit(" ", 1)[0].rstrip(" ,;:-") if " " in cut else cut
+    while " " in cut:
+        last = cut.rsplit(" ", 1)[1].strip("\"'([").casefold()
+        if last not in _DANGLING and not last.endswith(("'s", "\u2019s", "'")):
+            break
+        cut = cut.rsplit(" ", 1)[0].rstrip(" ,;:-")
     if not cut:
         return text[:limit]
     return cut if cut.endswith(".") else cut + "."
@@ -258,11 +314,11 @@ def _fit_beat_prompt(
     said = list(lines or [])
     spoken = _spoken_clause(said)
     if limit > 0:
-        # The wire count above is INFERRED from one refusal, not read off a
-        # documented rule: 510 characters carrying four double quotes were
-        # refused by a 512-character limit, and JSON escaping is the only
-        # mechanism that turns that into 514. If the real rule is something
-        # else again, this reserve is what absorbs it -- and the trade is not
+        # The wire count above is INFERRED from a refusal, not read off a
+        # documented rule, and the reserve is what absorbs the inference being
+        # wrong. It was wrong: a beat measured at 503 against a budget of 504
+        # was refused all the same, which is why the reserve is now wide
+        # enough to cover a rule nobody here has identified. The trade is not
         # close. It costs a few words of a description that has hundreds; the
         # alternative costs the scene.
         limit = max(MIN_BEAT_DESCRIPTION, limit - PROMPT_BUDGET_RESERVE)

@@ -2004,6 +2004,26 @@ CAPTION_GAP_SECONDS = 0.2
 #: of caption registers as a change, short enough not to read as a dropout.
 CUE_GAP_SECONDS = 0.08
 
+#: The most of its own spoken length a caption may hold the screen for, when
+#: the scene is voiced by the take and nothing measured the individual lines.
+#:
+#: Delivered job 49512158, one 30.2s take carrying three lines: the closing
+#: caption, "No, no - stay on, stay on-", is 26 characters and stayed up for
+#: 11.5 seconds -- seven times the 1.5 seconds it takes to read at the
+#: 17 characters a second in interfaces/subtitles. The other two ran 3.4x and
+#: 3.7x. The reader finishes the sentence, then watches it sit there while the
+#: actor says two more.
+#:
+#: This is the ceiling on the STRETCH, not on the reading: a line laid out by
+#: _lay_out_scene_captions keeps the slot the fill scale gave it, and simply
+#: stops occupying all of it. Deliberately generous, because the failure on
+#: the other side is worse and is the one the fill path exists to prevent -- a
+#: caption pulled off screen while the line is still being spoken. 2.0 is also
+#: the widest ceiling that still covers most of a scene the take is talking
+#: through: the ten-second three-line scene in tests/test_one_recording_is_not
+#: _one_line.py keeps 8.8 of its 10 seconds captioned.
+CAPTION_FILL_MAX_STRETCH = 2.0
+
 
 def _scene_boundaries(scene_paths: Optional[List[str]]) -> List[float]:
     """Absolute start time of each scene, plus the end of the last one.
@@ -2259,6 +2279,13 @@ def _lay_out_scene_captions(
     only ever right because a scene WAS a shot -- it stopped a cue running
     past the cut at the end of the scene and knew nothing about the cuts
     within it, because until interfaces/scene_take there were none.
+    A filled scene is divided into the same SLOTS it always was. What a cue
+    does inside its slot is the part that changed: it sits at the front of it
+    rather than being stretched across it, and comes off when its own words
+    are done (CAPTION_FILL_MAX_STRETCH). The slot boundaries are the thing
+    that keeps a caption from running ahead of the voice, so they are left
+    exactly where they were -- every cue still STARTS on the frame it started
+    on before. Only the dead tail is given back.
     """
     if windows:
         return subtitles.fit_cues_to_shots(
@@ -2276,15 +2303,25 @@ def _lay_out_scene_captions(
         # lines of job a66acd59's opening scene add up to 4.4 read-seconds
         # under ten seconds of speech, so the last one would come off screen
         # five seconds before it is said. Stretched in proportion, each line
-        # keeps its share of a scene that is talking throughout.
+        # gets the share of the scene in which it is the line being spoken.
+        #
+        # That share is a WINDOW, not a duration. Reading it as a duration is
+        # what put 26 characters on screen for 11.5 seconds in job 49512158.
         scale = span / needed
 
     placed: List[Tuple[float, float]] = []
     cursor = 0.0
     for duration in durations:
-        end = cursor + duration * scale
+        share = duration * scale
+        end = cursor + share
+        if fill:
+            # The slot says WHEN the line is being said; the line itself says
+            # how long there is to read. Past a multiple of its own length the
+            # second is the honest answer, and a caption held past that is not
+            # holding the sentence, it is covering the shot after it.
+            end = min(end, cursor + duration * CAPTION_FILL_MAX_STRETCH)
         placed.append((cursor, end))
-        cursor = end + CAPTION_GAP_SECONDS * scale
+        cursor += share + CAPTION_GAP_SECONDS * scale
     return placed
 
 
