@@ -156,3 +156,95 @@ def test_the_refused_beat_measured_on_the_wire_now_fits():
     assert wire_length(prompt) <= 512 - PROMPT_BUDGET_RESERVE
     assert "You're playing careless hands tonight" in prompt
     assert "Maybe I already know what's coming" in prompt
+
+
+def test_a_beat_measured_under_the_budget_was_refused_by_it_anyway():
+    """Three characters of margin is not margin; it is a coin toss.
+
+        'msg': 'multiPrompt[0].prompt: size must be between 0 and 512'
+
+    Job 49512158's opening beat. It measured 501 by `len` and 503 by
+    wire_length, against an effective budget of 504 -- so the fitting never
+    fired, the prompt went out exactly as the storyboard wrote it, and the
+    endpoint refused it anyway. Two double quotes cannot carry 501 to 512,
+    which is the explanation wire_length was built on, so the rule is
+    something else and this pipeline cannot see what.
+
+    What it can do is stop trying to land on a number it cannot measure. The
+    same beat is now fitted rather than waved through, and the two things a
+    beat may not lose survive the fitting: the cast clause and the line.
+    """
+    from interfaces.scene_take import PROMPT_BUDGET_RESERVE, wire_length
+
+    description = (
+        "Wide shot of the secondhand bookshop at dusk: Vivian Reyes stands "
+        "behind the wooden counter as Daniel faces her, tote bag strap in "
+        "hand, dusk light spilling through the open glass door onto the "
+        "counter where the cream envelope has just slid free. The envelope "
+        "tumbles from the paperback's pages and comes to rest on the counter "
+        "as Daniel shifts."
+    )
+    lines = ("Daniel: Sorry, I dog-eared a page near the end.",)
+
+    take = SceneTake(
+        seconds=3,
+        beats=(Beat(3, description, shot_type="wide", dialogue=lines),),
+        elements=(Element(name="Vivian Reyes"), Element(name="Daniel")),
+        max_prompt_chars=512,
+    )
+    prompt = take.multi_prompt()[0]["prompt"]
+
+    #: What went out and came back 422, measured the way this module measures.
+    refused_at = 503
+
+    assert wire_length(prompt) < refused_at, (
+        "this exact beat measured 503 against a budget of 504, was waved "
+        "through untouched, and was refused; the budget it passed is the "
+        "thing under test, so the number it has to beat is absolute"
+    )
+    assert wire_length(prompt) <= 512 - PROMPT_BUDGET_RESERVE
+    assert prompt.startswith("@Element1 is Vivian Reyes"), "the cast clause never gives"
+    assert "Sorry, I dog-eared a page near the end" in prompt, (
+        "the line is the audio; a beat that does not carry it is a beat the "
+        "take does not say"
+    )
+    assert len(description) > len(prompt) - 200, "and the shot is still described"
+
+
+def test_the_reserve_is_wide_enough_to_outlive_being_wrong_again():
+    """The margin is the point, so it is the thing worth asserting.
+
+    Every candidate explanation of the three refusals lands at or under
+    thirty characters above `len`. A reserve equal to the largest of them
+    would be another guess at a rule; a reserve that clears it by a factor
+    survives the next one being different too.
+    """
+    from interfaces.scene_take import MIN_BEAT_DESCRIPTION, PROMPT_BUDGET_RESERVE
+
+    assert PROMPT_BUDGET_RESERVE >= 60, (
+        "a reserve under thirty has already been refused twice"
+    )
+    assert 512 - PROMPT_BUDGET_RESERVE > MIN_BEAT_DESCRIPTION * 3, (
+        "and a margin that eats the description is not a margin either"
+    )
+
+
+def test_a_cut_description_still_ends_on_a_sentence():
+    """A shorter description of the shot, not a sentence that gives up.
+
+    The widened reserve means the fitting now fires on most beats rather than
+    on the rare overrunning one, so what the cut READS like stopped being a
+    detail. Measured on the first beat it ran against: "The envelope tumbles
+    from the paperback's." -- a clause that stops before it says anything.
+    """
+    from interfaces.scene_take import _trim
+
+    assert _trim("The envelope tumbles from the paperback's pages", 40) == (
+        "The envelope tumbles."
+    )
+    # Two dangling words in a row both go; the first real word ends it.
+    assert _trim("Vera crosses to the window and the", 30) == (
+        "Vera crosses to the window."
+    )
+    # A word that can end a sentence is kept, even a short one.
+    assert _trim("Silas watches her hand carefully", 26) == "Silas watches her hand."
