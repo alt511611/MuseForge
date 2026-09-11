@@ -3514,6 +3514,21 @@ class Script2VideoPipeline:
         # is untouched by this branch existing. A backend answers otherwise
         # only when it was selected for exactly this AND its declaration says
         # it can cut inside a generation -- see scene_take_backend.
+        #
+        # ON KEEPING BOTH. The per-shot route is not dead code and must not be
+        # deleted: it is the only route a backend without multi-shot has, and
+        # the declarations in interfaces/video_backend say most of them do not.
+        # It is, however, the LEGACY route now, and the difference is worth
+        # writing down because it is the reason every new feature costs twice.
+        # Per shot, a scene needs four stages the take needs none of: an image
+        # per angle, a concat, the timescale repair that concat requires, and a
+        # lip-sync pass applied afterwards because the picture arrived mute.
+        # Anything added to one has to be thought about in the other.
+        #
+        # So: new work lands on the take path first, and lands on this one only
+        # when a backend anybody actually runs still needs it. When a multishot
+        # backend becomes the default, this route stops receiving features and
+        # keeps only its bug fixes.
         take_backend = scene_take_backend(self.video_gen)
         if take_backend is not None and not self.demo:
             _check_cancel()
