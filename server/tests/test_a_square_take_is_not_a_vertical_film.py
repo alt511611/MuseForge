@@ -59,3 +59,43 @@ def test_a_ratio_that_cannot_be_read_never_looks_like_a_match():
     assert _ratio_of("9:0") == 0.0
     assert _ratio_of("vertical") == 0.0
     assert _ratio_of("9:16") == 0.5625
+
+
+def test_a_square_still_is_corrected_before_it_becomes_a_take(tmp_path):
+    """One picture cropped, so eight seconds of picture need not be.
+
+    The video endpoint reads its canvas off the start image and composes
+    inside it. Correcting the still buys a take DIRECTED for the delivered
+    shape; leaving it buys a take composed for a square and then cropped,
+    which is what removed the second actor from job a66acd59.
+    """
+    from PIL import Image
+
+    from pipelines.script2video import _conform_image_to_ratio
+
+    source = tmp_path / "frame.png"
+    Image.new("RGB", (1024, 1024), "white").save(source)
+    output = tmp_path / "frame-9x16.jpg"
+
+    _conform_image_to_ratio(str(source), str(output), "9:16")
+
+    with Image.open(output) as corrected:
+        width, height = corrected.size
+    assert abs(width / height - 9 / 16) < 0.01
+    assert height == 1024, "the binding side keeps its pixels; only the sides go"
+
+
+def test_an_unreadable_ratio_leaves_the_still_alone(tmp_path):
+    """A frame is not worth destroying over a typo in a ratio."""
+    from PIL import Image
+
+    from pipelines.script2video import _conform_image_to_ratio
+
+    source = tmp_path / "frame.png"
+    Image.new("RGB", (1024, 1024), "white").save(source)
+    output = tmp_path / "out.jpg"
+
+    _conform_image_to_ratio(str(source), str(output), "vertical")
+
+    with Image.open(output) as untouched:
+        assert untouched.size == (1024, 1024)

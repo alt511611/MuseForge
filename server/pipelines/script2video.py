@@ -1298,6 +1298,37 @@ def build_motion_prompt(
     return " ".join(parts)
 
 
+def _conform_image_to_ratio(source_path: str, output_path: str, aspect_ratio: str) -> str:
+    """Centre-crop a still to ``aspect_ratio``. Returns the path written.
+
+    The same scale-to-cover-then-crop the finished video gets, done to ONE
+    PICTURE instead of eight seconds of it -- which is the whole point. The
+    video endpoint reads its canvas off the start image and composes inside
+    it, so a frame corrected here buys a take that was DIRECTED for the
+    delivered shape: both actors staged inside 9:16, rather than a square
+    two-shot whose second actor is cropped away afterwards.
+    """
+    from PIL import Image
+
+    ratio = _ratio_of(aspect_ratio)
+    with Image.open(source_path) as image:
+        image = image.convert("RGB")
+        width, height = image.size
+        if not ratio or width <= 0 or height <= 0:
+            image.save(output_path, quality=95)
+            return output_path
+        if width / height > ratio:
+            new_width = max(1, int(round(height * ratio)))
+            left = (width - new_width) // 2
+            box = (left, 0, left + new_width, height)
+        else:
+            new_height = max(1, int(round(width / ratio)))
+            top = (height - new_height) // 2
+            box = (0, top, width, top + new_height)
+        image.crop(box).save(output_path, quality=95)
+    return output_path
+
+
 async def _image_dimensions(url: str) -> Optional[Tuple[int, int]]:
     """``(width, height)`` of a generated image, or None when it cannot be read.
 
@@ -2603,6 +2634,64 @@ class Script2VideoPipeline:
         self.video_gen = _make_video_generator(api_key, demo)
         self.storyboard_artist = StoryboardArtist(demo=demo)
 
+    async def _conform_start_image(
+        self, url: str, aspect_ratio: str, working_dir: str, scene_idx: int
+    ) -> str:
+        """The opening frame in the ORDERED shape, hosted, or "" on failure.
+
+        Why it is worth a download and an upload. The video endpoint has no
+        aspect ratio of its own -- fal's Kling v3 schema has no such field --
+        so it reads the canvas off this picture and stages the scene inside
+        it. Job a66acd59's frames came back 1024x1024 on a 9:16 order, from a
+        reference model that takes `aspect_ratio` and ignores it (the edit
+        family inherits the canvas of the picture it is editing, and the first
+        reference is a 1:1 character portrait). The takes were therefore
+        square, properly composed for square -- over-the-shoulder two-shots
+        with the second actor in the right third -- and delivery centre-cropped
+        44% of the width away, him with it.
+
+        Cropping ONE STILL costs the sides of a picture. Not cropping it costs
+        the sides of every frame of the scene, after a model has spent the
+        whole take composing for a canvas nobody ordered.
+
+        Fails open: an uncorrected frame renders the scene it always did.
+        """
+        uploader = getattr(self.video_gen, "host_image", None)
+        if uploader is None:
+            logger.warning(
+                "The opening frame is the wrong shape and this video backend "
+                "cannot host a corrected one; rendering it as it came back."
+            )
+            return ""
+        try:
+            frames_dir = os.path.join(working_dir, "frames")
+            os.makedirs(frames_dir, exist_ok=True)
+            raw = os.path.join(frames_dir, f"scene{scene_idx + 1}_opening_raw.png")
+            conformed = os.path.join(frames_dir, f"scene{scene_idx + 1}_opening.jpg")
+            async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                with open(raw, "wb") as handle:
+                    handle.write(response.content)
+            await asyncio.get_running_loop().run_in_executor(
+                None, _conform_image_to_ratio, raw, conformed, aspect_ratio
+            )
+            hosted = await uploader(conformed)
+            if hosted:
+                logger.info(
+                    "Scene %s opening frame corrected to %s and rehosted.",
+                    scene_idx + 1,
+                    aspect_ratio,
+                )
+            return hosted or ""
+        except Exception as exc:
+            logger.warning(
+                "Could not correct the opening frame's shape (%s); rendering "
+                "it as it came back.",
+                exc,
+            )
+            return ""
+
     async def _render_scene_as_one_take(
         self,
         *,
@@ -2690,13 +2779,18 @@ class Script2VideoPipeline:
             ordered = _ratio_of(aspect_ratio)
             if ordered and abs(measured[0] / measured[1] - ordered) > 0.02:
                 logger.warning(
-                    "Scene %s opening frame came back %dx%d on a %s order: the "
-                    "take will inherit that shape and be cropped to fit.",
+                    "Scene %s opening frame came back %dx%d on a %s order; "
+                    "correcting it before the take is generated from it.",
                     scene_idx + 1,
                     measured[0],
                     measured[1],
                     aspect_ratio,
                 )
+                corrected = await self._conform_start_image(
+                    start_image, aspect_ratio, working_dir, scene_idx
+                )
+                if corrected:
+                    start_image = corrected
 
         # The cast, as elements the whole take is locked to. Ordered with the
         # opening frame's anchor first for the same reason the reference set
