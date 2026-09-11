@@ -2,12 +2,23 @@
 
 /**
  * Shared helpers for low-credit warnings.
- * Plan monthly allowances must stay in sync with server PLAN_CREDITS / plan_limits.
+ *
+ * The allowances below are a COPY. The grants themselves are made by the
+ * server (stripe_integration.PLAN_CREDITS) and by the database
+ * (public.plan_limits in supabase_migration.sql); this file only needs them
+ * to decide when a balance has fallen far enough to warn about.
+ *
+ * A copy is only safe while something checks it, so something does:
+ * server/tests/test_one_allowance_in_three_places.py reads this file and
+ * fails when the three disagree. They disagreed once -- this table still said
+ * 25 and 55 after the real grants moved to 16 and 36 -- and the only visible
+ * symptom was a low-credit banner appearing at the wrong balance, which is
+ * not the kind of thing anybody reports.
  */
 export const PLAN_MONTHLY_CREDITS = {
   free: 3,
-  creator: 25,
-  pro: 55,
+  creator: 16,
+  pro: 36,
 };
 
 /** True when remaining credits are below 20% of the plan's monthly allowance. */
