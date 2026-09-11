@@ -1298,6 +1298,42 @@ def build_motion_prompt(
     return " ".join(parts)
 
 
+async def _image_dimensions(url: str) -> Optional[Tuple[int, int]]:
+    """``(width, height)`` of a generated image, or None when it cannot be read.
+
+    Reads the header bytes rather than the file: every format this pipeline
+    receives carries its size in the first few kilobytes, and a frame is a
+    megabyte or two that nothing here otherwise needs to hold.
+
+    Purely diagnostic, and fail-open for that reason -- a frame is not worth
+    failing a job over a dimension check. What it is worth is one line in the
+    log, because "the ordered shape did not come back" has two possible
+    culprits (the image endpoint, or the video endpoint that reads the image)
+    and they are indistinguishable from the finished file.
+    """
+    if not url:
+        return None
+    try:
+        import io
+
+        from PIL import Image
+
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            async with client.stream("GET", url) as response:
+                response.raise_for_status()
+                head = b""
+                async for chunk in response.aiter_bytes(16384):
+                    head += chunk
+                    try:
+                        return Image.open(io.BytesIO(head)).size
+                    except Exception:
+                        if len(head) >= 262144:
+                            return None
+    except Exception as exc:
+        logger.debug("Could not read the dimensions of %s: %s", url, exc)
+    return None
+
+
 async def download_video(url: str, path: str) -> str:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
@@ -1944,6 +1980,22 @@ def resolve_output_dimensions(
     return _even_dimension(width), _nearest_even(height)
 
 
+def _ratio_of(aspect_ratio: str) -> float:
+    """``"9:16"`` as 0.5625. Zero for anything unparseable, which no
+    comparison against a real measurement can accidentally satisfy."""
+    try:
+        width, height = (float(part) for part in str(aspect_ratio).split(":"))
+        return width / height if height else 0.0
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
+
+
+#: Below this share of the frame surviving the conform, the crop is no longer
+#: a rounding correction and is worth a line in the log. A clip in the ordered
+#: shape keeps ~100%; a square one ordered 9:16 keeps 56%.
+GEOMETRY_LOSS_WARNING = 0.9
+
+
 def build_geometry_filters(
     source_width: int, source_height: int, aspect_ratio: str
 ) -> List[str]:
@@ -1961,6 +2013,30 @@ def build_geometry_filters(
     width, height = dimensions
     if (source_width, source_height) == (width, height):
         return []
+    # How much of the frame this costs. A clip that came back in roughly the
+    # ordered shape loses a sliver to even-pixel rounding and nobody minds;
+    # one that came back in a DIFFERENT shape loses composition, and a centre
+    # crop has no way to know what was worth keeping.
+    #
+    # Job a66acd59 is the case worth naming. Its takes arrived 960x960 on a
+    # 9:16 order, so every scene was conformed by discarding 44% of its width
+    # -- and what lived in that 44% was the second character: the raw takes
+    # are properly staged over-the-shoulder two-shots, and the delivered film
+    # is one woman with a stray hand at the edge of frame. That read as a
+    # storyboard that never covered him. It was a crop.
+    kept = min(1.0, (width / height) / (source_width / source_height)) if (
+        source_width > 0 and source_height > 0 and height > 0
+    ) else 1.0
+    if kept < GEOMETRY_LOSS_WARNING:
+        logger.warning(
+            "Conforming %dx%d to %s keeps only %.0f%% of the frame's width: "
+            "the clip did not come back in the ordered shape, and a centre "
+            "crop this deep removes whatever was staged at the edges.",
+            source_width,
+            source_height,
+            aspect_ratio,
+            kept * 100,
+        )
     return [
         f"scale={width}:{height}:force_original_aspect_ratio=increase",
         f"crop={width}:{height}",
@@ -2593,6 +2669,34 @@ class Script2VideoPipeline:
             start_image = await self.image_gen.generate_image(
                 frame_prompt, aspect_ratio, is_cancelled=is_cancelled
             )
+
+        # The take is generated FROM this frame, and the video endpoint takes
+        # no aspect ratio of its own -- it reads the shape off the picture it
+        # is given. So a frame that came back the wrong shape is a whole scene
+        # the wrong shape, and by the time anyone sees the film the evidence
+        # is gone: build_geometry_filters has centre-cropped it into the
+        # ordered ratio. Job a66acd59's takes arrived square on a 9:16 order
+        # and lost 44% of their width, the second character with it. This line
+        # is what tells the next run WHICH endpoint to blame.
+        measured = await _image_dimensions(start_image)
+        if measured:
+            logger.info(
+                "Scene %s opening frame: %dx%d for a %s take",
+                scene_idx + 1,
+                measured[0],
+                measured[1],
+                aspect_ratio,
+            )
+            ordered = _ratio_of(aspect_ratio)
+            if ordered and abs(measured[0] / measured[1] - ordered) > 0.02:
+                logger.warning(
+                    "Scene %s opening frame came back %dx%d on a %s order: the "
+                    "take will inherit that shape and be cropped to fit.",
+                    scene_idx + 1,
+                    measured[0],
+                    measured[1],
+                    aspect_ratio,
+                )
 
         # The cast, as elements the whole take is locked to. Ordered with the
         # opening frame's anchor first for the same reason the reference set
