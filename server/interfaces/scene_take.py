@@ -56,6 +56,12 @@ class Element:
 
     name: str
     images: Tuple[str, ...] = ()
+    #: What this character is WEARING, in the words the character library
+    #: locked (interfaces/character.CharacterProfile.wardrobe). Carried here
+    #: for the same reason it is carried into every frame prompt: the
+    #: reference picture binds a face and never an outfit, and a take is
+    #: twelve seconds long.
+    wardrobe: str = ""
     #: A VOICE ID, not an audio file. The endpoint's element takes
     #: `voice_id`; there is nowhere to upload a sample. See the note on
     #: MUSEFORGE_VOICE_PROVIDER in .env.example -- keeping the film's cast
@@ -103,6 +109,33 @@ MIN_BEAT_DESCRIPTION = 140
 #: Held back from every declared prompt budget. See _fit_beat_prompt.
 PROMPT_BUDGET_RESERVE = 8
 
+#: What the whole cast clause -- names, outfits and the continuity sentence --
+#: may spend of the first beat's prompt.
+#:
+#: The clause never gives (see _fit_beat_prompt), so every character it costs
+#: is taken from the description and, past the description's floor, from the
+#: SPOKEN LINES. A cast clause with no ceiling is therefore a cast clause that
+#: can silence the beat it is attached to, which is a worse failure than the
+#: one it exists to prevent. At 220 the description still clears its 140-char
+#: floor and a spoken line still fits inside a 512-char budget.
+MAX_CAST_CLAUSE_CHARS = 220
+
+#: Below this an outfit has stopped being a description. "a cream cardigan" is
+#: sixteen characters and holds a costume; six characters holds a colour and
+#: invites the model to invent the garment, which is what it was going to do
+#: anyway. An outfit that cannot be said in this much room is not said.
+MIN_WARDROBE_CHARS = 16
+
+#: Said once, on the first beat, about the whole take.
+#:
+#: The beats of a take are cuts inside ONE generation, so a sentence here is
+#: read over all of them -- which is the only affordable place to put it. Per
+#: beat it would cost this much of every budget in the scene and squeeze the
+#: description of each of them to its floor.
+CONTINUITY_CLAUSE = (
+    "The same faces, clothes, hair and light hold across every cut. "
+)
+
 
 def wire_length(text: str) -> int:
     """How long this string is to the validator on the other side.
@@ -140,6 +173,52 @@ def _trim(text: str, limit: int) -> str:
     if not cut:
         return text[:limit]
     return cut if cut.endswith(".") else cut + "."
+
+
+#: Words an outfit must never be cut after. A wardrobe trimmed to its share
+#: lands mid-phrase more often than not -- "a dark green wool jacket over an"
+#: is what 40 characters of "...over an open-collar shirt" leaves -- and a
+#: prompt ending on a dangling article reads as a sentence the writer meant to
+#: finish, which invites the model to finish it.
+_DANGLING = frozenset(
+    "a an the and or of in on at to by for from with over under above behind "
+    "into onto across".split()
+)
+
+
+def _closed(text: str) -> str:
+    """``text`` with any trailing word that leaves it hanging removed."""
+    words = (text or "").strip().split()
+    while words and words[-1].lower().strip(",;:-") in _DANGLING:
+        words.pop()
+    return " ".join(words)
+
+
+def _fit_wardrobe(outfit: str, limit: int) -> str:
+    """An outfit cut to ``limit``, on a GARMENT boundary where there is one.
+
+    A wardrobe is written as a list -- "a cream wool cardigan over a pale grey
+    dress, tan leather shoulder bag" -- so the honest place to cut it is
+    between garments: the ones that survive are described in full and the ones
+    that do not are simply absent, which is what the storyboard is told to do
+    with clothing it was not given. Cutting on a word boundary instead ends
+    the sentence inside a garment ("over a pale grey"), and a half-described
+    dress is a dress the model finishes by itself.
+
+    Returns "" when not even the first garment fits. Nothing is the right
+    answer there: the continuity sentence still says the clothes hold, the
+    opening frame still shows them, and neither of those can be contradicted
+    by a description. Half a garment can.
+    """
+    if wire_length(outfit) <= limit:
+        return _closed(outfit.rstrip(",;: "))
+    kept = ""
+    for piece in outfit.split(","):
+        candidate = f"{kept},{piece}" if kept else piece
+        if wire_length(candidate.strip()) > limit:
+            break
+        kept = candidate
+    return _closed(kept.strip().rstrip(",;: "))
 
 
 def _spoken_clause(lines: Sequence[str]) -> str:
@@ -312,20 +391,71 @@ class SceneTake:
         ]
 
     def cast_clause(self) -> str:
-        """Which token is whom, said once at the top of the take.
+        """Which token is whom, what they are wearing, and that it holds.
 
-        Without it the tokens are unexplained: a model handed ``@Element1``
-        and a beat that says "she deals" has to guess which of the two people
-        in front of it that is, and guessing is how the wrong face gets the
-        line.
+        Without the names the tokens are unexplained: a model handed
+        ``@Element1`` and a beat that says "she deals" has to guess which of
+        the two people in front of it that is, and guessing is how the wrong
+        face gets the line.
+
+        WHY THE OUTFIT IS HERE TOO. A delivered 30-second drama ran as three
+        takes of 8, 10 and 12 seconds, and the lead changed at 18.083s -- the
+        seam between the second take and the third -- out of a cream cardigan
+        and a bun into a brown jacket and loose hair, with the prop in her
+        hand changing colour on the same frame. Nothing in the request was
+        wrong about WHO she was: the element carried her locked portrait and
+        her face survives the cut well enough to read as the same casting.
+        What no part of the request ever said was what she had on. This
+        pipeline has known for a while that "the identity reference image
+        binds a face, not an outfit" (interfaces/character.CharacterProfile)
+        and restates the wardrobe as text in every FRAME prompt because of it.
+        The take prompt is the one prompt that never got the same treatment,
+        and it is now the prompt that drives twelve seconds of picture instead
+        of one still.
+
+        WHAT GIVES, inside MAX_CAST_CLAUSE_CHARS. The names never give: they
+        are what the tokens mean. The continuity sentence never gives: it is
+        fixed, short, and it is the half that covers hair and light, which no
+        wardrobe string mentions. The OUTFITS give, sharing whatever room is
+        left equally, and an outfit trimmed below MIN_WARDROBE_CHARS is
+        dropped rather than reduced to a colour.
         """
         if not self.elements:
             return ""
-        parts = [
+        names = [
             f"{element.token(i)} is {element.name}"
             for i, element in enumerate(self.elements)
         ]
-        return "; ".join(parts) + ". "
+        fixed = wire_length("; ".join(names) + ". ") + wire_length(CONTINUITY_CLAUSE)
+        dressed = [
+            (i, outfit)
+            for i, element in enumerate(self.elements)
+            if (outfit := (element.wardrobe or "").strip())
+        ]
+        # Spent in CAST ORDER rather than divided equally, because the cast is
+        # already ranked: the opening frame's anchor is first (see the caller
+        # in script2video), which is the person the scene is about and the one
+        # whose costume the viewer has time to learn. An equal split gives the
+        # lead too little to describe a dress and the fourth character room it
+        # has nothing to spend on.
+        room = MAX_CAST_CLAUSE_CHARS - fixed
+        for index, outfit in dressed:
+            # ", wearing " is paid for out of the same room as the words after
+            # it, so room that only covers the preamble buys nothing.
+            share = room - len(", wearing ")
+            if share < MIN_WARDROBE_CHARS:
+                break
+            said = _fit_wardrobe(outfit, share)
+            if not said:
+                # Stop, rather than skip to the next one. Skipping spends the
+                # last of the room on whoever happens to have the shortest
+                # wardrobe -- an extra in a raincoat while the lead, whose
+                # dress would not fit, goes undescribed. The room runs out in
+                # cast order because the cast is ranked.
+                break
+            names[index] += f", wearing {said}"
+            room -= len(", wearing ") + wire_length(said)
+        return "; ".join(names) + ". " + CONTINUITY_CLAUSE
 
 
 #: A beat shorter than this is a flash rather than a shot, and no retention

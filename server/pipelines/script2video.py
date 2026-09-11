@@ -2972,6 +2972,12 @@ class Script2VideoPipeline:
                 Element(
                     name=name,
                     images=(portrait,),
+                    # The costume, in the take's own words. The portrait is
+                    # the face and the face survived; what drifted across a
+                    # take seam on a delivered drama was the outfit, which
+                    # until now no part of the take request mentioned. See
+                    # scene_take.SceneTake.cast_clause.
+                    wardrobe=str(getattr(character, "wardrobe", "") or "").strip(),
                     voice_id=(voice_ids or {}).get(name, ""),
                 )
             )

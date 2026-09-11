@@ -231,6 +231,14 @@ async def test_all_four_phases_render_one_scene_together(monkeypatch, tmp_path):
     assert by_name["Vivian Marsh"].voice_id == "kling-voice-011"
     assert by_name["Julian Voss"].voice_id == "kling-voice-042"
 
+    # ...and each element carries what that character is WEARING, which the
+    # portrait cannot: a reference image binds a face and never an outfit.
+    # Delivered drama 10e143bb changed its lead's coat, hair and the prop in
+    # her hand at a take seam with the face and the earring both holding.
+    assert by_name["Vivian Marsh"].wardrobe == "grey wool coat"
+    assert by_name["Julian Voss"].wardrobe == "dark three-piece suit"
+    assert "wearing grey wool coat" in take.multi_prompt()[0]["prompt"]
+
     # ...and the voice is lifted back out of the picture, by real ffmpeg,
     # before the join that would have dropped it.
     assert result["speaks_for_itself"] is True
