@@ -153,3 +153,54 @@ def test_a_cast_nobody_dressed_still_gets_its_names():
 
     assert clause.startswith("@Element1 is Elena Vasquez.")
     assert "wearing" not in clause
+
+
+def test_the_costume_gives_before_the_line_does():
+    """A caption nobody speaks is read long before a cardigan is noticed.
+
+    The wardrobe and the continuity sentence exist to stop a costume drifting.
+    They are still 63-plus characters of a clause that never gives, and on a
+    crowded beat that is enough to push a spoken line out of the budget --
+    which produces the mismatch the whole prompt exists to prevent: the take
+    says nothing while the subtitle burned into the same frame says the line.
+
+    So on exactly that beat, the clause comes off instead.
+    """
+    talkative = tuple(
+        f"Elena Vasquez: {'word ' * 26}" for _ in range(2)
+    )
+    take = SceneTake(
+        seconds=12,
+        beats=(Beat(seconds=12, description="X" * 400, dialogue=talkative),),
+        elements=(ELENA, TOMAS),
+        max_prompt_chars=512,
+    )
+
+    prompt = take.multi_prompt()[0]["prompt"]
+
+    assert wire_length(prompt) <= 512
+    assert "@Element1 is Elena Vasquez" in prompt, "the names never give"
+    assert "wearing" not in prompt and "hold across every cut" not in prompt
+    assert prompt.rstrip().endswith('"'), "and the line it bought is whole"
+
+
+def test_a_beat_with_room_keeps_both():
+    """The trade is only made when it has to be."""
+    take = SceneTake(
+        seconds=12,
+        beats=(
+            Beat(
+                seconds=12,
+                description="the bookseller reads the letter she wrote",
+                dialogue=("Elena Vasquez: Fifty years... and I never sent it.",),
+            ),
+        ),
+        elements=(ELENA,),
+        max_prompt_chars=512,
+    )
+
+    prompt = take.multi_prompt()[0]["prompt"]
+
+    assert "wearing a cream wool cardigan" in prompt
+    assert "hold across every cut" in prompt
+    assert 'Elena Vasquez says: "Fifty years... and I never sent it."' in prompt

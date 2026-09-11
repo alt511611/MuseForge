@@ -286,8 +286,43 @@ def _spoken_clause(lines: Sequence[str]) -> str:
 
 
 def _fit_beat_prompt(
-    cast: str, framing: str, description: str, lines: Sequence[str], limit: int
+    cast: str,
+    framing: str,
+    description: str,
+    lines: Sequence[str],
+    limit: int,
+    plain_cast: str = "",
 ) -> str:
+    """One beat's prompt, with the cast clause itself put on the scales.
+
+    ``plain_cast`` is the same clause with the costumes and the continuity
+    sentence taken off -- names only, which is what this carried before either
+    of those existed. It is used ONLY when the full clause would cost the beat
+    a spoken line, and then it is used whole: those two additions exist to
+    stop a costume drifting, and a line the take never says is a line the
+    burned-in subtitle still shows. A viewer reads a caption nobody speaks
+    long before they notice a cardigan changing.
+
+    Everything else is _assemble_beat_prompt's, unchanged.
+    """
+    full = _assemble_beat_prompt(cast, framing, description, lines, limit)
+    if not plain_cast or plain_cast == cast or full.kept == len(lines or ()):
+        return full.text
+    plain = _assemble_beat_prompt(plain_cast, framing, description, lines, limit)
+    return plain.text if plain.kept > full.kept else full.text
+
+
+@dataclass(frozen=True)
+class _Fitted:
+    """A beat's prompt and how many of its spoken lines survived the budget."""
+
+    text: str
+    kept: int
+
+
+def _assemble_beat_prompt(
+    cast: str, framing: str, description: str, lines: Sequence[str], limit: int
+) -> "_Fitted":
     """One beat's prompt, inside the endpoint's per-beat character budget.
 
     Unlike the frame prompt's ladder, an overrun here is not a degraded
@@ -325,7 +360,7 @@ def _fit_beat_prompt(
 
     whole = f"{cast}{framing}{description}{spoken}"
     if limit <= 0 or wire_length(whole) <= limit:
-        return whole.strip()
+        return _Fitted(whole.strip(), len(said))
 
     head = f"{cast}{framing}"
     room = max(0, limit - wire_length(head))
@@ -348,7 +383,9 @@ def _fit_beat_prompt(
         kept = _trim(description, room - wire_length(spoken))
 
     assembled = f"{head}{kept}{spoken}".strip()
-    return assembled if wire_length(assembled) <= limit else _trim(assembled, limit)
+    if wire_length(assembled) > limit:
+        return _Fitted(_trim(assembled, limit), 0)
+    return _Fitted(assembled, len(said))
 
 
 @dataclass(frozen=True)
@@ -362,7 +399,7 @@ class Beat:
     #: filled when the take carries its own audio -- see plan_scene_take.
     dialogue: Tuple[str, ...] = ()
 
-    def as_prompt(self, cast: str = "", limit: int = 0) -> str:
+    def as_prompt(self, cast: str = "", limit: int = 0, plain_cast: str = "") -> str:
         """What this beat SHOWS, inside ``limit`` characters.
 
         The seconds used to be written into the text as "Shot 1 (3s): ...",
@@ -385,17 +422,17 @@ class Beat:
         # hears and reads the scene, differently.
         framing = f"{self.shot_type}. " if self.shot_type else ""
         return _fit_beat_prompt(
-            cast, framing, self.description, self.dialogue, limit
+            cast, framing, self.description, self.dialogue, limit, plain_cast
         )
 
-    def as_payload(self, cast: str = "", limit: int = 0) -> dict:
+    def as_payload(self, cast: str = "", limit: int = 0, plain_cast: str = "") -> dict:
         """One entry of `multi_prompt`.
 
         `duration` is a STRING enum ("1".."15"), not an integer -- sending the
         number is a 422, and a 422 on this endpoint is the whole take.
         """
         return {
-            "prompt": self.as_prompt(cast=cast, limit=limit),
+            "prompt": self.as_prompt(cast=cast, limit=limit, plain_cast=plain_cast),
             "duration": str(self.seconds),
         }
 
@@ -438,16 +475,24 @@ class SceneTake:
         already happened, against a length that was about to change.
         """
         cast = self.cast_clause()
+        plain = self.cast_clause(dressed=False)
         return [
             beat.as_payload(
                 cast=cast if index == 0 else "",
                 limit=self.max_prompt_chars,
+                plain_cast=plain if index == 0 else "",
             )
             for index, beat in enumerate(self.beats)
         ]
 
-    def cast_clause(self) -> str:
+    def cast_clause(self, dressed: bool = True) -> str:
         """Which token is whom, what they are wearing, and that it holds.
+
+        ``dressed=False`` is the names alone -- the clause as it was before
+        costumes and the continuity sentence were added to it. It exists so
+        _fit_beat_prompt can weigh those two against a spoken line and put
+        them down.
+
 
         Without the names the tokens are unexplained: a model handed
         ``@Element1`` and a beat that says "she deals" has to guess which of
@@ -478,6 +523,11 @@ class SceneTake:
         """
         if not self.elements:
             return ""
+        if not dressed:
+            return "; ".join(
+                f"{element.token(i)} is {element.name}"
+                for i, element in enumerate(self.elements)
+            ) + ". "
         names = [
             f"{element.token(i)} is {element.name}"
             for i, element in enumerate(self.elements)
