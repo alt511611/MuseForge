@@ -16,6 +16,12 @@ from interfaces.shot_plan import (
     split_scene_seconds,
 )
 from interfaces.visual_style import resolve as resolve_visual_style
+from tools.anthropic_request import (
+    cached_system,
+    classify,
+    log_usage,
+    refusal_of,
+)
 from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
 
 logger = logging.getLogger(__name__)
@@ -135,6 +141,16 @@ no camera movement" — not a push-in. If the brief names what is in frame (a de
 notepad, a watch), name those things in "visual_desc" so they actually get rendered.
 Only where the brief is silent do the guidelines below decide.
 
+AND HONOUR WHAT IT PROMISED, not only what it listed. An idea is usually one
+sentence with one image in it — the thing the person wanted to see when they
+typed it — and that image has to get a shot. "A dock worker finds a container
+that hums with light, and the city's power dies the moment she opens it"
+promises the city going dark. A delivered drama of exactly that idea opened on
+a lit skyline, established it beautifully, and then spent its last three
+seconds on a lamp dimming beside one face: the payoff had no shot, because
+nobody had planned one. Read the brief for the moment it is named after and
+make sure a shot exists that pays it off, in the scene where it happens.
+
 CHOOSE THE RIGHT MOMENT. You only get ONE shot for this scene, so it must capture the
 scene's DRAMATIC PEAK — the single beat that carries the scene's emotional turn (the
 look that lands, the touch, the break, the decision). Do NOT storyboard set-up,
@@ -199,6 +215,37 @@ A delivered job wrote 700-800 characters a shot and lost the eyeline rule from
 every single frame: twenty-two of its thirty seconds are the same composition,
 the character centred and symmetrical and staring down the barrel of the lens.
 Name the subject, the action and the one detail that matters, and stop.
+
+WRITE FOR THE MODELS THAT READ THIS. "visual_desc" is not read by a person. It
+is pasted into a prompt for an image model, and "motion_desc" into a prompt for
+a video model, and neither reads English the way you do.
+
+Put the SUBJECT and the ACTION first. An image model weights the opening of its
+prompt hardest, which is why the render step places your sentence at the very
+top of the frame prompt. "Margit lifts the envelope from the counter" survives
+being cut short; "In a softly lit wide shot we see, at dusk, a woman..." has
+spent its strongest position on the weather.
+
+NEVER WRITE A NEGATION. Not "no hat", not "without her coat", not "the room
+empty of people". An image model has no NOT: every noun you write is a noun you
+asked for, and "no hat" is the most reliable way to get a hat. Say what IS
+there instead — "her hair loose", never "no hood".
+
+Do not restate the setting, the time of day, or the lighting. The render step
+adds the locked Setting and the locked lighting plan to every frame prompt
+already, word for word. A second copy buys nothing and is paid for twice —
+out of the same budget the eyeline and closed-cast rules come from.
+
+Drop the camera talk. "we see", "the camera shows", "this shot captures", "the
+frame is filled with" — an image model renders a picture, not a description of
+one, and the movement already has its own field. Name things, not shots.
+
+ONE CONTINUOUS ACTION IN "motion_desc". It becomes a single video generation
+with a hard budget of a few hundred characters per beat, and it is the one
+field whose overrun does not merely degrade the result — it fails the whole
+scene. One move, present tense, running from the first frame to the last: "she
+slides the envelope toward him and stops". Not a sequence, not a cut, not a
+second beat.
 
 SHOW THE EMOTION ON THE FACE. The scene's emotional beat is given to you. "expression_desc"
 must state the concrete, visible facial expression AND body language for the character(s)
@@ -1103,10 +1150,34 @@ Respond ONLY with valid JSON array containing a single shot object:
                 # Thinking and text share this budget, so the pre-thinking
                 # 2048 now leaves very little for the shot list itself.
                 max_tokens=self.MAX_SHOT_TOKENS,
-                system=system_prompt_for(self.SYSTEM_PROMPT, shots_per_scene()),
+                # Cached, because this is the one caller here that earns it:
+                # once per SCENE, four to six times a minute apart, with a
+                # prompt system_prompt_for settles from an environment
+                # variable and then does not vary within a job. See
+                # tools/anthropic_request.cached_system for why the other two
+                # do not.
+                system=cached_system(
+                    system_prompt_for(self.SYSTEM_PROMPT, shots_per_scene())
+                ),
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:
                 message = await stream.get_final_message()
+            log_usage("storyboard", "claude-sonnet-5", getattr(message, "usage", None), cached=True)
+
+            # A refusal is an HTTP 200. It arrives here as a message with no
+            # shot list in it, and without this check it reads as "the model
+            # wrote something unparseable" and falls to the template -- the
+            # third cause of the silent fallback this method's own comments
+            # record fighting twice.
+            declined = refusal_of(message)
+            if declined:
+                logger.error(
+                    "Anthropic storyboard request was DECLINED (category=%s); "
+                    "falling back to the template shot list. This is a "
+                    "property of the scene that was sent, so retrying it "
+                    "unchanged will be declined again.", declined,
+                )
+                return []
 
             if message.stop_reason == "max_tokens":
                 logger.error(
@@ -1130,16 +1201,17 @@ Respond ONLY with valid JSON array containing a single shot object:
             data = json.loads(match.group())
             return [StoryboardShot(**s) for s in data]
         except Exception as exc:
-            detail = ""
-            resp = getattr(exc, "response", None)
-            if resp is not None:
-                try:
-                    detail = f" | status={resp.status_code} body={resp.text[:500]}"
-                except Exception:
-                    pass
+            # Sorted rather than flattened: a busy minute and a key that
+            # cannot reach the model both used to log the same line, and the
+            # operator reading it at 2am cannot act on either without knowing
+            # which it is.
+            failure = classify(exc)
             logger.error(
-                f"Anthropic storyboard call failed, falling back to template: "
-                f"{type(exc).__name__}: {exc}{detail}"
+                "Anthropic storyboard call failed (%s, %s), falling back to "
+                "the template: %s",
+                failure.kind,
+                "worth retrying" if failure.retryable else "will not fix itself",
+                failure.detail,
             )
             return []
 

@@ -15,6 +15,7 @@ from interfaces.second_budget import (
     MIN_SCENE_SECONDS,
     SECONDS_PER_CREDIT,
 )
+from tools.anthropic_request import classify, log_usage
 from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
 
 logger = logging.getLogger(__name__)
@@ -229,6 +230,23 @@ the back". The render cannot spell. Asked for stencilled lettering it delivered 
 across the back of a jacket in a two-second push-in, and FICST LOU on a name patch that is
 on screen in every shot of the drama — and writing is the one thing in a frame a viewer
 tries to read, so a misspelled word costs more than the plain patch it replaced.
+
+WRITE THE WARDROBE FOR THE MODEL THAT READS IT. "description" and "wardrobe"
+are not read by a person. They are pasted into the prompt for an image model,
+once per frame, for every frame of the film -- which is why this brief already
+tells you the render cannot spell. Two more things follow from the same fact.
+
+Write what the clothes ARE, never what they are not. An image model has no
+NOT: every noun in the prompt is a noun that was asked for, so "no hat" is the
+most reliable way to get a hat, and "not a uniform" puts one in the frame.
+"bare-headed" is the exception this brief already uses, because it names a
+state of the head rather than an absent object -- follow that shape if you
+need one.
+
+Keep each field to a phrase per attribute. The frame prompt has a hard
+character budget and the wardrobe is restated inside it for every character in
+every shot; a paragraph here is paid for on every frame, out of the same
+budget that the film's eyeline and continuity rules are the first to lose.
 
 PRESET CHARACTERS in the user message already exist: do NOT redefine or rename them.
 Use their exact names and visual descriptions, and weave them into the story. You may
@@ -968,22 +986,27 @@ into a single scene rather than adding one."""
             ) as stream:
                 message = await stream.get_final_message()
         except anthropic.APIStatusError as exc:
-            # The response body is where the API states the actual cause --
-            # an expired key, an exhausted quota, a model the key can't reach.
-            body = ""
-            try:
-                body = f" body={exc.response.text[:500]}"
-            except Exception:
-                pass
+            # _failure_message already sorts what the USER is told by status.
+            # This sorts what the OPERATOR is told, which was one line for
+            # every status: the body is where the API states the actual cause
+            # -- an expired key, an exhausted quota, a model the key cannot
+            # reach -- and `retryable` is the part a log reader acts on.
+            failure = classify(exc)
             logger.error(
-                f"Anthropic screenwriter call failed: {type(exc).__name__}: "
-                f"{exc} | status={exc.status_code} type={exc.type}{body}"
+                "Anthropic screenwriter call failed (%s, %s): %s",
+                failure.kind,
+                "worth retrying" if failure.retryable else "will not fix itself",
+                failure.detail,
             )
             raise ScriptGenerationFailed(self._failure_message(exc)) from exc
-        except Exception as exc:
+        except anthropic.APIConnectionError as exc:
+            # Covers APITimeoutError. Separated from the bare handler below
+            # because "could not be reached" is TRUE here and was being said
+            # about every unexpected exception in this block as well -- an
+            # outage message printed over a bug in our own code.
             logger.error(
-                f"Anthropic screenwriter call failed: "
-                f"{type(exc).__name__}: {exc}"
+                "Anthropic screenwriter call never reached the API "
+                "(%s): %s", type(exc).__name__, exc
             )
             # Deliberately NOT the template -- see write_script step 3.
             raise ScriptGenerationFailed(
@@ -991,6 +1014,17 @@ into a single scene rather than adding one."""
                 "not be turned into a script. No credits were spent — please "
                 "try again shortly."
             ) from exc
+        except Exception as exc:
+            logger.exception(
+                "Anthropic screenwriter call raised an unexpected %s -- this "
+                "is not an API failure", type(exc).__name__
+            )
+            raise ScriptGenerationFailed(
+                "Something went wrong turning your idea into a script. No "
+                "credits were spent — please try again shortly."
+            ) from exc
+
+        log_usage("screenwriter", "claude-sonnet-5", getattr(message, "usage", None))
 
         # A truncated response is not an outage: the model answered, the
         # budget ran out mid-JSON. Saying "unavailable" here sent operators

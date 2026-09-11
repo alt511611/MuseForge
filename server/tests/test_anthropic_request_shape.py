@@ -202,3 +202,122 @@ async def test_character_qa_reads_the_verdict_with_thinking_off(wire):
     )
     assert req["max_tokens"] >= 512, "thinking + text share this budget"
     assert any(b.get("type") == "image" for b in req["messages"][0]["content"])
+
+
+# --- what each call asks the API for ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_storyboard_asks_for_its_system_prompt_to_be_cached(wire):
+    """It is the one caller here whose prompt repeats close together.
+
+    Once per SCENE, four to six times a minute apart, byte-identical within
+    a job -- which is the shape a cache is for.
+    """
+    captured = wire(lambda p: _stream_body(json.dumps(SHOTS)))
+
+    await StoryboardArtist(api_key="k")._design_with_claude(
+        script="She cuts the seal.",
+        characters=[CharacterInScene(idx=0, name="Deniz", static_features="dock worker",
+                                     dynamic_features="", is_visible=True)],
+        user_requirement="", guidance="", default_lens="50mm",
+    )
+
+    system = captured[0]["system"]
+    assert isinstance(system, list) and len(system) == 1, (
+        "a cache breakpoint needs blocks, not a bare string"
+    )
+    assert system[0]["cache_control"] == {"type": "ephemeral"}
+    assert "master storyboard artist" in system[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_the_screenwriter_does_not_ask_for_a_cache_it_would_pay_for(wire):
+    """Once per job. A cache WRITE costs more than an ordinary read, so
+    caching a prompt sent once buys a discount on a second call that may
+    never come and charges a premium for the certainty."""
+    captured = wire(lambda p: _stream_body(json.dumps(SCRIPT)))
+
+    await ScreenwriterAgent(api_key="k")._write_with_claude("x", "Noir", 3, "")
+
+    assert isinstance(captured[0]["system"], str)
+
+
+@pytest.mark.asyncio
+async def test_the_per_frame_check_asks_for_the_cheapest_answer(wire):
+    """The highest-VOLUME call in the pipeline: one per generated frame,
+    where the others are one per job and one per scene."""
+    captured = wire(lambda p: {
+        "id": "msg_3", "type": "message", "role": "assistant",
+        "model": "claude-sonnet-5",
+        "content": [{"type": "text",
+                     "text": '{"character_ok": true, "setting_ok": true, "issue": ""}'}],
+        "stop_reason": "end_turn", "stop_sequence": None,
+        "usage": {"input_tokens": 900, "output_tokens": 12},
+    })
+
+    await character_qa.verify_frame(
+        frame_url="https://example.com/frame.jpg",
+        expected_character_desc="dock worker", expected_setting="harbour",
+        anthropic_api_key="k",
+    )
+
+    config = captured[0]["output_config"]
+    assert config["effort"] == "low"
+    # And the answer's shape is the API's guarantee, not a sentence in the
+    # prompt with a regex underneath it.
+    assert config["format"]["type"] == "json_schema"
+    assert set(config["format"]["schema"]["required"]) == {
+        "character_ok", "setting_ok", "issue",
+    }
+    assert "Reply ONLY with JSON" not in json.dumps(captured[0]["messages"]), (
+        "the prompt half of the workaround goes with the regex half"
+    )
+
+
+# --- a refusal is a 200 -------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_declined_scene_is_not_a_parse_failure(wire, caplog):
+    """Both paths return [], so the log line is the whole difference between
+    an operator who knows why the film came back on the template and one who
+    goes looking for a JSON bug that is not there."""
+    wire(lambda p: _stream_body("", stop_reason="refusal"))
+
+    with caplog.at_level("ERROR"):
+        shots = await StoryboardArtist(api_key="k")._design_with_claude(
+            script="She cuts the seal.",
+            characters=[CharacterInScene(idx=0, name="Deniz",
+                                         static_features="dock worker",
+                                         dynamic_features="", is_visible=True)],
+            user_requirement="", guidance="", default_lens="50mm",
+        )
+
+    assert shots == []
+    assert "DECLINED" in caplog.text
+    assert "contained no shot list" not in caplog.text, (
+        "the model wrote nothing because it declined, not because it failed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_declined_frame_check_does_not_read_as_a_clean_pass(wire, caplog):
+    """Fail-open is right and stays. Passing SILENTLY is what was wrong: the
+    results say the frame was verified and it was never looked at."""
+    wire(lambda p: {
+        "id": "msg_4", "type": "message", "role": "assistant",
+        "model": "claude-sonnet-5", "content": [],
+        "stop_reason": "refusal", "stop_sequence": None,
+        "usage": {"input_tokens": 900, "output_tokens": 0},
+    })
+
+    with caplog.at_level("ERROR"):
+        result = await character_qa.verify_frame(
+            frame_url="https://example.com/frame.jpg",
+            expected_character_desc="dock worker", expected_setting="harbour",
+            anthropic_api_key="k",
+        )
+
+    assert result == {"character_ok": True, "setting_ok": True, "issue": ""}
+    assert "UNCHECKED" in caplog.text
