@@ -27,16 +27,23 @@ converged on, and they exist for measured reasons rather than taste:
   speaker when they are off screen or ambiguous, never as a matter of course.
   On a two-shot it is twelve characters of a forty-two character budget spent
   telling the viewer what they are looking at.
+* **A cue does not outlive its shot.** Subtitling practice holds cues inside
+  the shot they belong to, because a caption that survives a cut is read as
+  belonging to whoever the new shot is pointing at. Delivered 30-second drama
+  10e143bb: "I wrote you a letter once." came up at 22.54s over the woman who
+  says it, the picture cut to the man listening at 25.50s, and her line stayed
+  on his face for another 1.83 seconds.
 
-Pure text in, pure text out: no timing, no ffmpeg, no pipeline. What this
-module decides can be read in a test.
+Almost all of it is pure text in, pure text out -- no ffmpeg, no pipeline --
+and the one function that is not (fit_cues_to_shots) still takes numbers and
+returns numbers. What this module decides can be read in a test.
 """
 
 from __future__ import annotations
 
 import os
 import re
-from typing import List
+from typing import List, Sequence, Tuple
 
 #: Characters per line, and lines per cue. Two lines is the ceiling everywhere
 #: -- a third covers enough of a vertical frame to hide the shot.
@@ -273,3 +280,59 @@ def split_into_cues(
         if cue:
             final.append(cue)
     return final
+
+
+def fit_cues_to_shots(
+    durations: Sequence[float],
+    windows: Sequence[Tuple[float, float]],
+    gap: float = 0.0,
+    fill: bool = False,
+) -> List[Tuple[float, float]]:
+    """Each line's cue placed inside the SHOT that line is spoken in.
+
+    ``durations[i]`` is how long line i needs, ``windows[i]`` is the (start,
+    end) of the shot it is said in, and the answer is one (start, end) per
+    line in the same clock as the windows. Lines that share a shot are laid
+    out inside it in order, with ``gap`` between them, scaled down together
+    when they do not fit -- the same trade the scene-wide layout makes, made
+    against a shot instead. ``fill`` stretches them to the shot as well as
+    shrinking them to it, which is right for exactly one case and it is the
+    case this exists for: a scene voiced by its own take is speaking for its
+    whole length, so a line's shot is how long that line is being said.
+
+    WHY A SHOT AND NOT THE SCENE. Until a scene could cut inside itself
+    (interfaces/scene_take) the two were the same window, so laying a scene's
+    cues across a scene was laying them across its only shot. A one-take scene
+    is several framings of one clip, and a cue whose length is an ESTIMATE --
+    which is what a scene voiced by its own take has, there being one
+    recording and no per-line measurement in it -- lands across those framings
+    at random. Delivered drama 10e143bb: "I wrote you a letter once." came up
+    at 22.54s over the woman saying it, the picture cut to the man listening
+    at 25.50s, and her line stayed on his face for 1.83 seconds more. A reader
+    attributes a caption to whoever is on screen under it; the film therefore
+    reads as him saying he wrote her a letter, which is the opposite of the
+    scene.
+
+    The take already knows the answer -- scene_take._spread_dialogue decides
+    which beat says which line before the take is generated -- so nothing here
+    is guessed. This only spends what that decision already worked out.
+    """
+    placed: List[Tuple[float, float]] = [(0.0, 0.0)] * len(durations)
+    by_shot: dict = {}
+    for index, window in enumerate(windows):
+        if index < len(durations):
+            by_shot.setdefault((float(window[0]), float(window[1])), []).append(index)
+
+    for (start, end), members in by_shot.items():
+        span = max(0.0, end - start)
+        needed = sum(max(0.0, float(durations[i])) for i in members)
+        needed += gap * max(0, len(members) - 1)
+        if needed <= 0:
+            continue
+        scale = span / needed if (fill or needed > span) else 1.0
+        cursor = start
+        for index in members:
+            finish = min(end, cursor + max(0.0, float(durations[index])) * scale)
+            placed[index] = (cursor, finish)
+            cursor = finish + gap * scale
+    return placed

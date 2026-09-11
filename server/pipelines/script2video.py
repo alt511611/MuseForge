@@ -2972,6 +2972,12 @@ class Script2VideoPipeline:
                 Element(
                     name=name,
                     images=(portrait,),
+                    # The costume, in the take's own words. The portrait is
+                    # the face and the face survived; what drifted across a
+                    # take seam on a delivered drama was the outfit, which
+                    # until now no part of the take request mentioned. See
+                    # scene_take.SceneTake.cast_clause.
+                    wardrobe=str(getattr(character, "wardrobe", "") or "").strip(),
                     voice_id=(voice_ids or {}).get(name, ""),
                 )
             )
@@ -3051,6 +3057,13 @@ class Script2VideoPipeline:
                 "seconds": beat.seconds,
                 "shot_type": beat.shot_type,
                 "one_take": True,
+                # How many of the scene's lines are SAID in this framing.
+                # Decided at plan time by scene_take._spread_dialogue and
+                # recorded here because it is the only thing downstream that
+                # knows it: the subtitle builder is handed lines and a clip,
+                # and without this it can only guess which framing a line
+                # falls in -- see idea2video._take_line_windows.
+                "line_count": len(beat.dialogue),
             }
             for i, beat in enumerate(take.beats)
         ]
