@@ -888,6 +888,47 @@ def build_screen_direction_clause(characters) -> str:
     )
 
 
+#: Fixtures a screenwriter names when describing how a place is lit. Small on
+#: purpose: this decides whether one sentence is emitted, and a word that is
+#: only sometimes a light ("star", "screen", "flare") costs more as a false
+#: match than it earns as a true one.
+LIGHT_FIXTURES = (
+    "bulb",
+    "lamp",
+    "lamplight",
+    "lantern",
+    "floodlight",
+    "spotlight",
+    "headlight",
+    "streetlight",
+    "streetlamp",
+    "chandelier",
+    "sconce",
+    "candle",
+    "candlelight",
+    "torch",
+    "neon",
+    "fluorescent",
+    "strip light",
+    "firelight",
+    "skylight",
+)
+
+
+def names_the_same_light(setting_text: str, change_text: str) -> bool:
+    """Whether the change is about a light the setting line already named.
+
+    Both halves must name it. A setting with no light in it has nothing for
+    the veto to be wrong about, and a change that does not touch the lighting
+    leaves the setting's lamps exactly where the veto wants them.
+    """
+    setting = (setting_text or "").lower()
+    change = (change_text or "").lower()
+    if not setting or not change:
+        return False
+    return any(word in setting and word in change for word in LIGHT_FIXTURES)
+
+
 def build_frame_prompt(
     style: str,
     shot,
@@ -895,6 +936,7 @@ def build_frame_prompt(
     setting_time_of_day: str = "",
     setting_era: str = "",
     has_dialogue: bool = False,
+    picture_speaks: bool = False,
     lipsync_enabled: bool = False,
     characters=None,
     matched_char=None,
@@ -935,11 +977,37 @@ def build_frame_prompt(
             # because the continuity clause is specific, imperative and comes
             # after the shot description. The set must still not change --
             # the same architecture, now in a different state.
+            # A tight framing cannot show a room. "Plainly visible in the
+            # frame, not implied" is the right demand of a wide and an
+            # impossible one of a close-up, and a delivered close-up carried
+            # BOTH: "dark-coated men flood into the room ... must be plainly
+            # visible in the frame, not implied" alongside "Shot type:
+            # close-up" and a cast clause forbidding any other recognisable
+            # face. Three instructions, no frame that satisfies them, and a
+            # model left to pick which one to break.
+            #
+            # What a close-up can carry of an event is what the event does to
+            # this face and this light -- which is what the shot description
+            # already describes. So the demand is scaled to the framing
+            # instead of being dropped: the event still has to be legible, in
+            # the terms the frame has.
+            tight = any(
+                word in (getattr(shot, "shot_type", "") or "").lower()
+                for word in ("close-up", "closeup", "close up")
+            )
+            visibility = (
+                "show it as it reaches THIS framing -- in the light, the "
+                "shadow and what it does to the face and hands in frame. Do "
+                "not widen the shot to fit the event in, and do not add "
+                "people the shot does not name. "
+                if tight
+                else "this is the story's event and it must be plainly "
+                "visible in the frame, not implied. "
+            )
             setting_clause += (
                 f"The FIXTURES and architecture are unchanged, but their "
                 f"STATE is not: {change_now or change_before}. Render the "
-                f"location in that state -- this is the story's event and it "
-                f"must be plainly visible in the frame, not implied. "
+                f"location in that state -- {visibility}"
                 # The setting line is the screenwriter's, and a screenwriter
                 # describing a place at night describes how it is lit -- the
                 # delivered job's own locked setting reads "rain-soaked cargo
@@ -949,9 +1017,27 @@ def build_frame_prompt(
                 # their failure in the same breath, and the model resolved the
                 # contradiction the way the more concrete noun always wins:
                 # every lamp in the yard stayed on, through all three scenes.
-                f"Any light named in that setting line describes this place "
-                f"BEFORE the change; do not light the frame with it. "
             )
+            # ...but only when the change has not TAKEN OVER that fixture.
+            #
+            # The sentence exists for a real failure: a locked setting reading
+            # "stacked shipping containers under sodium floodlights", against
+            # a brief whose event is the city losing power, asked for the
+            # floodlights and for their failure in the same breath, and every
+            # lamp in the yard stayed on through all three scenes.
+            #
+            # It becomes its own version of that failure when the event is
+            # ABOUT the named light. A delivered basement prompt read "felt
+            # table under a bare hanging bulb" and "the single hanging bulb
+            # swings wildly, throwing sweeping shadows" -- and then told the
+            # model not to light the frame with the bulb whose swinging light
+            # is the shot. The same fixture cannot be both the thing to
+            # ignore and the thing to render.
+            if not names_the_same_light(", ".join(parts), change_now or change_before):
+                setting_clause += (
+                    "Any light named in that setting line describes this "
+                    "place BEFORE the change; do not light the frame with it. "
+                )
         else:
             setting_clause += (
                 "Only the time-of-day lighting may shift subtly; the room "
@@ -1007,6 +1093,25 @@ def build_frame_prompt(
     if not has_dialogue:
         dialogue_clause = ""
         dialogue_rank = OPTIONAL_DIRECTION
+    elif picture_speaks:
+        # A third case, and it is neither of the two below. The generation
+        # that makes this picture also SAYS the lines, so there is no sync
+        # pass to promise ("their lips will be animated to the dialogue" is
+        # that pass's sentence, and on this path it is simply untrue) -- and
+        # the dodge underneath is worse still, because hiding the mouth is
+        # the one thing you would never do to a model about to animate it.
+        #
+        # What is left is what actually helps: an open, readable face for the
+        # take to start speaking from. Required for the same reason the sync
+        # form is -- a tight frame has nothing above the mouth to sacrifice,
+        # so an optional rank is a clause that gets trimmed exactly when it
+        # matters.
+        dialogue_clause = (
+            "The speaking character's mouth is visible and unobscured, not "
+            "hidden behind hands, props or hair -- this scene is spoken aloud "
+            "and the face has to be free to say it. "
+        )
+        dialogue_rank = REQUIRED
     elif lipsync_enabled:
         dialogue_clause = (
             "The speaking character's mouth is fully visible, unobscured and "
@@ -1190,8 +1295,33 @@ def build_frame_prompt(
     # The expression is computed per beat by the storyboard artist and is the
     # difference between a performance and a photograph; the sentences below
     # it are identical in every film this product has ever made.
+    # READING ORDER, which is not the drop order and never has been -- see
+    # fit_image_prompt, whose own docstring says an image model weights the
+    # opening of the prompt and gives "Cinematic style. Maya walks the pier."
+    # as the shape to keep. The list below did not have that shape. The shot
+    # itself arrived sixth, about 60% of the way into a ~2,400-character
+    # prompt, behind the setting, the lighting, the identity lock and the
+    # axis: four blocks that are word-for-word identical in every frame of
+    # the film. Taken off a delivered close-up, the first thing the model read
+    # about what it was drawing was "windowless basement card room" and the
+    # first thing about WHO was a costume lock -- "Close-up on Vivian Kesler
+    # half-risen from her chair" came after both.
+    #
+    # So: this frame first, every frame second. The shot, its framing and the
+    # performance in it; then who these people are and where they stand; then
+    # the room, its light and the film's finish. Priorities are untouched, so
+    # what dies under budget pressure dies in exactly the order the ladder
+    # below already records -- only the order it READS in has changed.
     return fit_image_prompt([
         (REQUIRED, style_prefix),
+        (REQUIRED, desc_clause),
+        (REQUIRED, framing_clause),
+        (2, expression_clause),
+        (4, face_clause),
+        (dialogue_rank, dialogue_clause),
+        (REQUIRED, identity_clause),
+        (OPTIONAL_DIRECTION, direction_clause),
+        (3, cast_clause),
         # RANK, not wording -- the same distinction the mouth clause turned on
         # above. Ordinarily this clause is continuity: worth keeping, and a
         # frame is still the right frame without it, so it sits one rung above
@@ -1223,14 +1353,6 @@ def build_frame_prompt(
         # two. A shot lit slightly differently reads as a lighting change; a
         # person nobody wrote reads as a different film.
         (5, lighting_clause),
-        (REQUIRED, identity_clause),
-        (OPTIONAL_DIRECTION, direction_clause),
-        (REQUIRED, desc_clause),
-        (2, expression_clause),
-        (4, face_clause),
-        (3, cast_clause),
-        (dialogue_rank, dialogue_clause),
-        (REQUIRED, framing_clause),
         (7, resolve_visual_style(style).render_note),
     ])
 
@@ -1338,6 +1460,73 @@ def build_motion_prompt(
         f"depth of field."
     )
     return " ".join(parts)
+
+
+def _conform_image_to_ratio(source_path: str, output_path: str, aspect_ratio: str) -> str:
+    """Centre-crop a still to ``aspect_ratio``. Returns the path written.
+
+    The same scale-to-cover-then-crop the finished video gets, done to ONE
+    PICTURE instead of eight seconds of it -- which is the whole point. The
+    video endpoint reads its canvas off the start image and composes inside
+    it, so a frame corrected here buys a take that was DIRECTED for the
+    delivered shape: both actors staged inside 9:16, rather than a square
+    two-shot whose second actor is cropped away afterwards.
+    """
+    from PIL import Image
+
+    ratio = _ratio_of(aspect_ratio)
+    with Image.open(source_path) as image:
+        image = image.convert("RGB")
+        width, height = image.size
+        if not ratio or width <= 0 or height <= 0:
+            image.save(output_path, quality=95)
+            return output_path
+        if width / height > ratio:
+            new_width = max(1, int(round(height * ratio)))
+            left = (width - new_width) // 2
+            box = (left, 0, left + new_width, height)
+        else:
+            new_height = max(1, int(round(width / ratio)))
+            top = (height - new_height) // 2
+            box = (0, top, width, top + new_height)
+        image.crop(box).save(output_path, quality=95)
+    return output_path
+
+
+async def _image_dimensions(url: str) -> Optional[Tuple[int, int]]:
+    """``(width, height)`` of a generated image, or None when it cannot be read.
+
+    Reads the header bytes rather than the file: every format this pipeline
+    receives carries its size in the first few kilobytes, and a frame is a
+    megabyte or two that nothing here otherwise needs to hold.
+
+    Purely diagnostic, and fail-open for that reason -- a frame is not worth
+    failing a job over a dimension check. What it is worth is one line in the
+    log, because "the ordered shape did not come back" has two possible
+    culprits (the image endpoint, or the video endpoint that reads the image)
+    and they are indistinguishable from the finished file.
+    """
+    if not url:
+        return None
+    try:
+        import io
+
+        from PIL import Image
+
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            async with client.stream("GET", url) as response:
+                response.raise_for_status()
+                head = b""
+                async for chunk in response.aiter_bytes(16384):
+                    head += chunk
+                    try:
+                        return Image.open(io.BytesIO(head)).size
+                    except Exception:
+                        if len(head) >= 262144:
+                            return None
+    except Exception as exc:
+        logger.debug("Could not read the dimensions of %s: %s", url, exc)
+    return None
 
 
 async def download_video(url: str, path: str) -> str:
@@ -1986,6 +2175,22 @@ def resolve_output_dimensions(
     return _even_dimension(width), _nearest_even(height)
 
 
+def _ratio_of(aspect_ratio: str) -> float:
+    """``"9:16"`` as 0.5625. Zero for anything unparseable, which no
+    comparison against a real measurement can accidentally satisfy."""
+    try:
+        width, height = (float(part) for part in str(aspect_ratio).split(":"))
+        return width / height if height else 0.0
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
+
+
+#: Below this share of the frame surviving the conform, the crop is no longer
+#: a rounding correction and is worth a line in the log. A clip in the ordered
+#: shape keeps ~100%; a square one ordered 9:16 keeps 56%.
+GEOMETRY_LOSS_WARNING = 0.9
+
+
 def build_geometry_filters(
     source_width: int, source_height: int, aspect_ratio: str
 ) -> List[str]:
@@ -2003,6 +2208,30 @@ def build_geometry_filters(
     width, height = dimensions
     if (source_width, source_height) == (width, height):
         return []
+    # How much of the frame this costs. A clip that came back in roughly the
+    # ordered shape loses a sliver to even-pixel rounding and nobody minds;
+    # one that came back in a DIFFERENT shape loses composition, and a centre
+    # crop has no way to know what was worth keeping.
+    #
+    # Job a66acd59 is the case worth naming. Its takes arrived 960x960 on a
+    # 9:16 order, so every scene was conformed by discarding 44% of its width
+    # -- and what lived in that 44% was the second character: the raw takes
+    # are properly staged over-the-shoulder two-shots, and the delivered film
+    # is one woman with a stray hand at the edge of frame. That read as a
+    # storyboard that never covered him. It was a crop.
+    kept = min(1.0, (width / height) / (source_width / source_height)) if (
+        source_width > 0 and source_height > 0 and height > 0
+    ) else 1.0
+    if kept < GEOMETRY_LOSS_WARNING:
+        logger.warning(
+            "Conforming %dx%d to %s keeps only %.0f%% of the frame's width: "
+            "the clip did not come back in the ordered shape, and a centre "
+            "crop this deep removes whatever was staged at the edges.",
+            source_width,
+            source_height,
+            aspect_ratio,
+            kept * 100,
+        )
     return [
         f"scale={width}:{height}:force_original_aspect_ratio=increase",
         f"crop={width}:{height}",
@@ -2569,6 +2798,64 @@ class Script2VideoPipeline:
         self.video_gen = _make_video_generator(api_key, demo)
         self.storyboard_artist = StoryboardArtist(demo=demo)
 
+    async def _conform_start_image(
+        self, url: str, aspect_ratio: str, working_dir: str, scene_idx: int
+    ) -> str:
+        """The opening frame in the ORDERED shape, hosted, or "" on failure.
+
+        Why it is worth a download and an upload. The video endpoint has no
+        aspect ratio of its own -- fal's Kling v3 schema has no such field --
+        so it reads the canvas off this picture and stages the scene inside
+        it. Job a66acd59's frames came back 1024x1024 on a 9:16 order, from a
+        reference model that takes `aspect_ratio` and ignores it (the edit
+        family inherits the canvas of the picture it is editing, and the first
+        reference is a 1:1 character portrait). The takes were therefore
+        square, properly composed for square -- over-the-shoulder two-shots
+        with the second actor in the right third -- and delivery centre-cropped
+        44% of the width away, him with it.
+
+        Cropping ONE STILL costs the sides of a picture. Not cropping it costs
+        the sides of every frame of the scene, after a model has spent the
+        whole take composing for a canvas nobody ordered.
+
+        Fails open: an uncorrected frame renders the scene it always did.
+        """
+        uploader = getattr(self.video_gen, "host_image", None)
+        if uploader is None:
+            logger.warning(
+                "The opening frame is the wrong shape and this video backend "
+                "cannot host a corrected one; rendering it as it came back."
+            )
+            return ""
+        try:
+            frames_dir = os.path.join(working_dir, "frames")
+            os.makedirs(frames_dir, exist_ok=True)
+            raw = os.path.join(frames_dir, f"scene{scene_idx + 1}_opening_raw.png")
+            conformed = os.path.join(frames_dir, f"scene{scene_idx + 1}_opening.jpg")
+            async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                with open(raw, "wb") as handle:
+                    handle.write(response.content)
+            await asyncio.get_running_loop().run_in_executor(
+                None, _conform_image_to_ratio, raw, conformed, aspect_ratio
+            )
+            hosted = await uploader(conformed)
+            if hosted:
+                logger.info(
+                    "Scene %s opening frame corrected to %s and rehosted.",
+                    scene_idx + 1,
+                    aspect_ratio,
+                )
+            return hosted or ""
+        except Exception as exc:
+            logger.warning(
+                "Could not correct the opening frame's shape (%s); rendering "
+                "it as it came back.",
+                exc,
+            )
+            return ""
+
     async def _render_scene_as_one_take(
         self,
         *,
@@ -2635,6 +2922,39 @@ class Script2VideoPipeline:
             start_image = await self.image_gen.generate_image(
                 frame_prompt, aspect_ratio, is_cancelled=is_cancelled
             )
+
+        # The take is generated FROM this frame, and the video endpoint takes
+        # no aspect ratio of its own -- it reads the shape off the picture it
+        # is given. So a frame that came back the wrong shape is a whole scene
+        # the wrong shape, and by the time anyone sees the film the evidence
+        # is gone: build_geometry_filters has centre-cropped it into the
+        # ordered ratio. Job a66acd59's takes arrived square on a 9:16 order
+        # and lost 44% of their width, the second character with it. This line
+        # is what tells the next run WHICH endpoint to blame.
+        measured = await _image_dimensions(start_image)
+        if measured:
+            logger.info(
+                "Scene %s opening frame: %dx%d for a %s take",
+                scene_idx + 1,
+                measured[0],
+                measured[1],
+                aspect_ratio,
+            )
+            ordered = _ratio_of(aspect_ratio)
+            if ordered and abs(measured[0] / measured[1] - ordered) > 0.02:
+                logger.warning(
+                    "Scene %s opening frame came back %dx%d on a %s order; "
+                    "correcting it before the take is generated from it.",
+                    scene_idx + 1,
+                    measured[0],
+                    measured[1],
+                    aspect_ratio,
+                )
+                corrected = await self._conform_start_image(
+                    start_image, aspect_ratio, working_dir, scene_idx
+                )
+                if corrected:
+                    start_image = corrected
 
         # The cast, as elements the whole take is locked to. Ordered with the
         # opening frame's anchor first for the same reason the reference set
@@ -3123,6 +3443,16 @@ class Script2VideoPipeline:
                 "video", f"Rendering scene {scene_idx + 1} in one take", 20
             )
             opening = shots[0]
+            # The take speaks for itself only when it can speak this film's
+            # language: an endpoint with native audio in English is not an
+            # endpoint with native audio (interfaces/video_backend.speaks),
+            # and a scene rendered mute keeps the dialogue and lip-sync passes
+            # it always had.
+            #
+            # Asked once, here, because the frame prompt and the payload must
+            # not answer it differently -- a frame directed for a lip-sync
+            # pass that will never run is a frame composed for the wrong film.
+            take_speaks = bool(has_dialogue) and take_backend.speaks(language or "en")
             result = await self._render_scene_as_one_take(
                 shots=shots,
                 characters=characters,
@@ -3148,20 +3478,19 @@ class Script2VideoPipeline:
                     setting_time_of_day=setting_time_of_day,
                     setting_era=setting_era,
                     has_dialogue=has_dialogue,
-                    lipsync_enabled=lipsync_enabled,
+                    picture_speaks=take_speaks,
+                    # Never both: a scene the take speaks is a scene the sync
+                    # pass skips (idea2video._lipsync_scenes reads
+                    # `speaks_for_itself`), and telling the image model its
+                    # lips "will be animated to the dialogue" is a promise
+                    # about a stage that does not run.
+                    lipsync_enabled=lipsync_enabled and not take_speaks,
                     characters=characters,
                     matched_char=anchor,
                     world_change=world_change,
                     world_state=world_state,
                 ),
-                # The take speaks for itself only when it can speak this
-                # film's language. An endpoint that has native audio in
-                # English is not an endpoint with native audio -- see
-                # interfaces/video_backend.VideoBackend.speaks -- and a scene
-                # rendered mute keeps the dialogue and lip-sync passes it
-                # always had.
-                generate_audio=bool(has_dialogue)
-                and take_backend.speaks(language or "en"),
+                generate_audio=take_speaks,
                 voice_ids=voice_ids,
                 scene_dialogue=scene_dialogue,
                 is_cancelled=is_cancelled,

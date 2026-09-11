@@ -254,6 +254,19 @@ class FalAIVideoGenerator:
         "fal-ai/kling-video/v3/standard/image-to-video",
     )
 
+    async def host_image(self, path: str) -> str:
+        """A local still, uploaded, as a URL this endpoint can read.
+
+        The frame this pipeline hands the video model is normally a provider
+        CDN link and needs no hosting. It needs it when the frame had to be
+        CORRECTED first -- see script2video's conform of an opening frame
+        that came back in the wrong shape -- because a corrected frame only
+        exists on disk, and `start_image_url` is a URL.
+        """
+        if self.demo:
+            return ""
+        return await self.client.upload_file(path)
+
     async def generate_scene_take(
         self,
         take,

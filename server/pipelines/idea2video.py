@@ -3546,6 +3546,15 @@ CHARACTER_SHEET_DIRECTION = (
 )
 
 
+#: Said only on a photoreal look, and only for a sheet: this is the sentence
+#: that answers the word "sheet", and on a stylised film the style note is
+#: already doing that job in the opposite direction.
+SHEET_IS_PHOTOGRAPHED = (
+    "This is a PHOTOGRAPH of a real person, shot on a camera -- not a "
+    "drawing, illustration, painting, cel-shaded art or 3D render. "
+)
+
+
 class Idea2VideoPipeline:
     def __init__(self, api_key: str, demo: bool = False):
         self.api_key = api_key
@@ -3658,6 +3667,15 @@ class Idea2VideoPipeline:
                 # it without wardrobe leaves every scene to invent an outfit.
                 f"{('Wearing ' + wardrobe + '. ') if wardrobe else ''}"
                 f"{CHARACTER_SHEET_DIRECTION if sheet else 'Front-facing, neutral expression, studio lighting, high detail.'}"
+                # "Character reference sheet" is a term of art in ILLUSTRATION,
+                # and a model reading it renders the conventions that go with
+                # it. Job a66acd59's two sheets came back in different media
+                # from the same photoreal brief: the woman photographic, the
+                # man a cel-shaded 3D render in a fedora -- so half the cast's
+                # identity anchor was a drawing, and the frames drawn from it
+                # fought the film's look in every shot. The medium has to be
+                # said where the words that pull away from it are.
+                f"{SHEET_IS_PHOTOGRAPHED if sheet and look.is_photoreal else ''}"
                 # The portrait is the identity anchor every frame is matched
                 # against, so it has to be made the same way the frames are.
                 # A photographic face bound into cel-shaded scenes fights the
