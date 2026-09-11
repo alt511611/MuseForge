@@ -349,8 +349,14 @@ BACKENDS = {
     "fal-ai/kling-video/v3/standard/image-to-video": VideoBackend(
         slug="fal-ai/kling-video/v3/standard/image-to-video",
         fields=frozenset(
+            # `aspect_ratio` is not in fal's published schema for this
+            # model. It exists: a validation error echoed the whole input
+            # back with the defaults filled in and it was there, set to
+            # "16:9". Declared here so the one endpoint that has it is the
+            # one that gets told.
             {"duration", "generate_audio", "end_image_url", "elements",
-             "multi_prompt", "shot_type", "negative_prompt", "cfg_scale"}
+             "multi_prompt", "shot_type", "negative_prompt", "cfg_scale",
+             "aspect_ratio"}
         ),
         duration=KLING_DURATION,
         native_audio=frozenset({"en", "zh"}),
@@ -364,8 +370,14 @@ BACKENDS = {
     "fal-ai/kling-video/v3/pro/image-to-video": VideoBackend(
         slug="fal-ai/kling-video/v3/pro/image-to-video",
         fields=frozenset(
+            # `aspect_ratio` is not in fal's published schema for this
+            # model. It exists: a validation error echoed the whole input
+            # back with the defaults filled in and it was there, set to
+            # "16:9". Declared here so the one endpoint that has it is the
+            # one that gets told.
             {"duration", "generate_audio", "end_image_url", "elements",
-             "multi_prompt", "shot_type", "negative_prompt", "cfg_scale"}
+             "multi_prompt", "shot_type", "negative_prompt", "cfg_scale",
+             "aspect_ratio"}
         ),
         duration=KLING_DURATION,
         native_audio=frozenset({"en", "zh"}),

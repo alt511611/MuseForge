@@ -3011,7 +3011,14 @@ class Script2VideoPipeline:
         )
 
         video_url = await self.video_gen.generate_scene_take(
-            take, is_cancelled=is_cancelled, generate_audio=generate_audio
+            take,
+            is_cancelled=is_cancelled,
+            generate_audio=generate_audio,
+            # Said, not inferred. The endpoint defaults to 16:9 and reads the
+            # rest off the start image; a vertical film that says nothing is a
+            # landscape order, and what came back was conformed to 9:16 by
+            # discarding 44% of every frame.
+            aspect_ratio=aspect_ratio if backend.accepts_aspect_ratio(aspect_ratio) else "",
         )
         output_path = os.path.join(working_dir, "scene_output.mp4")
         await download_video(video_url, output_path)

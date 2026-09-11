@@ -388,7 +388,9 @@ class _FakeMultishotGenerator:
         self.multishot = True
         self.takes = []
 
-    async def generate_scene_take(self, take, is_cancelled=None, generate_audio=True):
+    async def generate_scene_take(
+        self, take, is_cancelled=None, generate_audio=True, aspect_ratio=""
+    ):
         self.takes.append({"take": take, "audio": generate_audio})
         return "https://fake.cdn/scene.mp4"
 

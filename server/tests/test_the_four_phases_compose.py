@@ -94,8 +94,12 @@ class _Multishot:
         self.clip_path = clip_path
         self.takes = []
         self.per_shot_calls = 0
+        self.aspect_ratios_asked = []
 
-    async def generate_scene_take(self, take, is_cancelled=None, generate_audio=True):
+    async def generate_scene_take(
+        self, take, is_cancelled=None, generate_audio=True, aspect_ratio=""
+    ):
+        self.aspect_ratios_asked.append(aspect_ratio)
         self.takes.append({"take": take, "audio": generate_audio})
         return "https://fake.cdn/scene.mp4"
 
@@ -217,6 +221,12 @@ async def test_all_four_phases_render_one_scene_together(monkeypatch, tmp_path):
     # falai_video_generator._element_payload for why that distinction cost a
     # 422 to learn.
     assert generator.takes[0]["audio"] is True
+    # ...and the take was ORDERED in the shape the job asked for. The endpoint
+    # has an aspect_ratio field -- undocumented, visible only because a
+    # validation error echoed the input back with its defaults filled in --
+    # and its default is 16:9. A vertical film that says nothing is ordering
+    # landscape.
+    assert generator.aspect_ratios_asked == ["9:16"]
     by_name = {e.name: e for e in take.elements}
     assert by_name["Vivian Marsh"].voice_id == "kling-voice-011"
     assert by_name["Julian Voss"].voice_id == "kling-voice-042"
