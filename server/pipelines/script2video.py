@@ -846,6 +846,47 @@ def build_screen_direction_clause(characters) -> str:
     )
 
 
+#: Fixtures a screenwriter names when describing how a place is lit. Small on
+#: purpose: this decides whether one sentence is emitted, and a word that is
+#: only sometimes a light ("star", "screen", "flare") costs more as a false
+#: match than it earns as a true one.
+LIGHT_FIXTURES = (
+    "bulb",
+    "lamp",
+    "lamplight",
+    "lantern",
+    "floodlight",
+    "spotlight",
+    "headlight",
+    "streetlight",
+    "streetlamp",
+    "chandelier",
+    "sconce",
+    "candle",
+    "candlelight",
+    "torch",
+    "neon",
+    "fluorescent",
+    "strip light",
+    "firelight",
+    "skylight",
+)
+
+
+def names_the_same_light(setting_text: str, change_text: str) -> bool:
+    """Whether the change is about a light the setting line already named.
+
+    Both halves must name it. A setting with no light in it has nothing for
+    the veto to be wrong about, and a change that does not touch the lighting
+    leaves the setting's lamps exactly where the veto wants them.
+    """
+    setting = (setting_text or "").lower()
+    change = (change_text or "").lower()
+    if not setting or not change:
+        return False
+    return any(word in setting and word in change for word in LIGHT_FIXTURES)
+
+
 def build_frame_prompt(
     style: str,
     shot,
@@ -853,6 +894,7 @@ def build_frame_prompt(
     setting_time_of_day: str = "",
     setting_era: str = "",
     has_dialogue: bool = False,
+    picture_speaks: bool = False,
     lipsync_enabled: bool = False,
     characters=None,
     matched_char=None,
@@ -893,11 +935,37 @@ def build_frame_prompt(
             # because the continuity clause is specific, imperative and comes
             # after the shot description. The set must still not change --
             # the same architecture, now in a different state.
+            # A tight framing cannot show a room. "Plainly visible in the
+            # frame, not implied" is the right demand of a wide and an
+            # impossible one of a close-up, and a delivered close-up carried
+            # BOTH: "dark-coated men flood into the room ... must be plainly
+            # visible in the frame, not implied" alongside "Shot type:
+            # close-up" and a cast clause forbidding any other recognisable
+            # face. Three instructions, no frame that satisfies them, and a
+            # model left to pick which one to break.
+            #
+            # What a close-up can carry of an event is what the event does to
+            # this face and this light -- which is what the shot description
+            # already describes. So the demand is scaled to the framing
+            # instead of being dropped: the event still has to be legible, in
+            # the terms the frame has.
+            tight = any(
+                word in (getattr(shot, "shot_type", "") or "").lower()
+                for word in ("close-up", "closeup", "close up")
+            )
+            visibility = (
+                "Show it as it reaches THIS framing -- in the light, the "
+                "shadow and what it does to the face and hands in frame. Do "
+                "not widen the shot to fit the event in, and do not add "
+                "people the shot does not name. "
+                if tight
+                else "this is the story's event and it must be plainly "
+                "visible in the frame, not implied. "
+            )
             setting_clause += (
                 f"The FIXTURES and architecture are unchanged, but their "
                 f"STATE is not: {change_now or change_before}. Render the "
-                f"location in that state -- this is the story's event and it "
-                f"must be plainly visible in the frame, not implied. "
+                f"location in that state -- {visibility}"
                 # The setting line is the screenwriter's, and a screenwriter
                 # describing a place at night describes how it is lit -- the
                 # delivered job's own locked setting reads "rain-soaked cargo
@@ -907,9 +975,27 @@ def build_frame_prompt(
                 # their failure in the same breath, and the model resolved the
                 # contradiction the way the more concrete noun always wins:
                 # every lamp in the yard stayed on, through all three scenes.
-                f"Any light named in that setting line describes this place "
-                f"BEFORE the change; do not light the frame with it. "
             )
+            # ...but only when the change has not TAKEN OVER that fixture.
+            #
+            # The sentence exists for a real failure: a locked setting reading
+            # "stacked shipping containers under sodium floodlights", against
+            # a brief whose event is the city losing power, asked for the
+            # floodlights and for their failure in the same breath, and every
+            # lamp in the yard stayed on through all three scenes.
+            #
+            # It becomes its own version of that failure when the event is
+            # ABOUT the named light. A delivered basement prompt read "felt
+            # table under a bare hanging bulb" and "the single hanging bulb
+            # swings wildly, throwing sweeping shadows" -- and then told the
+            # model not to light the frame with the bulb whose swinging light
+            # is the shot. The same fixture cannot be both the thing to
+            # ignore and the thing to render.
+            if not names_the_same_light(", ".join(parts), change_now or change_before):
+                setting_clause += (
+                    "Any light named in that setting line describes this "
+                    "place BEFORE the change; do not light the frame with it. "
+                )
         else:
             setting_clause += (
                 "Only the time-of-day lighting may shift subtly; the room "
@@ -965,6 +1051,25 @@ def build_frame_prompt(
     if not has_dialogue:
         dialogue_clause = ""
         dialogue_rank = OPTIONAL_DIRECTION
+    elif picture_speaks:
+        # A third case, and it is neither of the two below. The generation
+        # that makes this picture also SAYS the lines, so there is no sync
+        # pass to promise ("their lips will be animated to the dialogue" is
+        # that pass's sentence, and on this path it is simply untrue) -- and
+        # the dodge underneath is worse still, because hiding the mouth is
+        # the one thing you would never do to a model about to animate it.
+        #
+        # What is left is what actually helps: an open, readable face for the
+        # take to start speaking from. Required for the same reason the sync
+        # form is -- a tight frame has nothing above the mouth to sacrifice,
+        # so an optional rank is a clause that gets trimmed exactly when it
+        # matters.
+        dialogue_clause = (
+            "The speaking character's mouth is visible and unobscured, not "
+            "hidden behind hands, props or hair -- this scene is spoken aloud "
+            "and the face has to be free to say it. "
+        )
+        dialogue_rank = REQUIRED
     elif lipsync_enabled:
         dialogue_clause = (
             "The speaking character's mouth is fully visible, unobscured and "
@@ -3279,6 +3384,16 @@ class Script2VideoPipeline:
                 "video", f"Rendering scene {scene_idx + 1} in one take", 20
             )
             opening = shots[0]
+            # The take speaks for itself only when it can speak this film's
+            # language: an endpoint with native audio in English is not an
+            # endpoint with native audio (interfaces/video_backend.speaks),
+            # and a scene rendered mute keeps the dialogue and lip-sync passes
+            # it always had.
+            #
+            # Asked once, here, because the frame prompt and the payload must
+            # not answer it differently -- a frame directed for a lip-sync
+            # pass that will never run is a frame composed for the wrong film.
+            take_speaks = bool(has_dialogue) and take_backend.speaks(language or "en")
             result = await self._render_scene_as_one_take(
                 shots=shots,
                 characters=characters,
@@ -3304,20 +3419,19 @@ class Script2VideoPipeline:
                     setting_time_of_day=setting_time_of_day,
                     setting_era=setting_era,
                     has_dialogue=has_dialogue,
-                    lipsync_enabled=lipsync_enabled,
+                    picture_speaks=take_speaks,
+                    # Never both: a scene the take speaks is a scene the sync
+                    # pass skips (idea2video._lipsync_scenes reads
+                    # `speaks_for_itself`), and telling the image model its
+                    # lips "will be animated to the dialogue" is a promise
+                    # about a stage that does not run.
+                    lipsync_enabled=lipsync_enabled and not take_speaks,
                     characters=characters,
                     matched_char=anchor,
                     world_change=world_change,
                     world_state=world_state,
                 ),
-                # The take speaks for itself only when it can speak this
-                # film's language. An endpoint that has native audio in
-                # English is not an endpoint with native audio -- see
-                # interfaces/video_backend.VideoBackend.speaks -- and a scene
-                # rendered mute keeps the dialogue and lip-sync passes it
-                # always had.
-                generate_audio=bool(has_dialogue)
-                and take_backend.speaks(language or "en"),
+                generate_audio=take_speaks,
                 voice_ids=voice_ids,
                 scene_dialogue=scene_dialogue,
                 is_cancelled=is_cancelled,
