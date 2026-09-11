@@ -153,6 +153,13 @@ class VideoBackend:
     #: reason a delivered 30-second film only ever had six shots -- each extra
     #: angle being a whole extra generation -- stops applying.
     max_beats: int = 1
+    #: Characters one beat's prompt may carry. 0 means unmeasured, which is
+    #: read as "no limit" -- every endpoint here was unmeasured until one of
+    #: them answered 422: "Prompt must not exceed 512 characters", per entry
+    #: of `multi_prompt`, and a 422 on a multi-shot endpoint is the whole
+    #: scene. This is the ONE budget in the pipeline whose overrun is not a
+    #: degraded frame but a failed render.
+    max_prompt_chars: int = 0
     billing: str = FLAT
     #: USD per generation when billing is FLAT, per second when PER_SECOND.
     rate: float = 0.0
@@ -349,6 +356,7 @@ BACKENDS = {
         native_audio=frozenset({"en", "zh"}),
         max_elements=7,
         max_beats=5,
+        max_prompt_chars=512,
         billing=PER_SECOND,
         rate=0.126,
         note="per second with audio on; $0.084 silent, $0.154 with voice binding",
@@ -363,6 +371,7 @@ BACKENDS = {
         native_audio=frozenset({"en", "zh"}),
         max_elements=7,
         max_beats=5,
+        max_prompt_chars=512,
         billing=PER_SECOND,
         rate=0.168,
         note="per second with audio on; $0.112 silent, $0.196 with voice binding",
