@@ -21,9 +21,13 @@ Idea → Screenwriter → Storyboard Artist → Frame Generator → Video Genera
 
 ## Key Features
 
+- **Series** — the unit the market buys. A series carries the locked cast, the production locks, the story so far and the question the last episode's final frame left open, so episode two is a *sequel* rather than a second pilot. Ordering the next episode needs no idea: the cliffhanger already said what it is about.
 - **Character Consistency Lock** — one portrait per character, generated once and reused across every scene.
 - **Continuity Edits** — "put her in a red coat" moves the locked portrait itself, then re-renders only the scenes she appears in.
 - **Timeline Re-cut** — reorder, trim and drop scenes from a finished drama. Uses the clips you already paid for, so it costs nothing.
+- **Beat Retake** — re-shoot one framing of a scene instead of the whole scene. The rest of the take is kept, the beat is shot again from its own brief, and the earlier version stays restorable.
+- **Subject-aware Reframing** — vertical crops and 9:16 exports are pointed at the face rather than at the middle of the frame, using the 180° axis the film's own frame prompts locked.
+- **Delivery Tiers** — every master lands on a standard resolution (720p…4K). 4K is an explicit, recorded upscale: no video model renders 4K, and the job says so.
 - **Per-shot Model Routing** — dialogue, action and establishing shots each get their own MuAPI model, with an automatic fallback chain when an endpoint is unavailable. Each endpoint is sent only the fields its schema declares.
 - **Single Provider** — video, images, voice, music and lip sync all run on MuAPI; no second vendor key is required.
 - **Director Style Presets** — Slow Cinematic, Balanced, Dynamic Action, Intimate, Noir Mystery, Anime.

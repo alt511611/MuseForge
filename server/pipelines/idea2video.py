@@ -14,7 +14,9 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from agents.screenwriter import ScreenwriterAgent, ScriptGenerationFailed
 from interfaces import ass_captions
 from interfaces import subtitles
+from interfaces import beat as beat_of
 from interfaces.character import CharacterInScene, DramaScript
+from interfaces.shot import StoryboardShot
 from interfaces.film_look import build_film_look_filters
 from interfaces import gender as gender_of
 from interfaces import micro_drama
@@ -39,6 +41,7 @@ from pipelines.script2video import (
     _make_image_generator,
     apply_color_grade,
     build_delivery_filters,
+    resolve_delivery,
     concatenate_videos,
     concatenate_videos_with_transitions,
     download_video,
@@ -47,6 +50,13 @@ from pipelines.script2video import (
     moviepy_encode_kwargs,
     video_encode_args,
 )
+from interfaces.delivery import describe as describe_delivery
+from interfaces.delivery import resolve_tier
+from interfaces.reframe import Anchor
+from interfaces.reframe import crop_filter as build_crop_filter
+from interfaces.reframe import describe as describe_reframe
+from interfaces.reframe import anchors_in_cut_order
+from interfaces.reframe import spans_from_durations as reframe_spans_from_durations
 from tools.muapi_client import is_account_locked
 from tools.muapi_lipsync import is_lipsync_enabled, make_lipsync
 from tools.muapi_sfx_generator import is_foley_enabled, make_sfx_generator
@@ -431,6 +441,45 @@ async def _split_off_tail(
     # play the scene twice.
     if head == source_path or tail == source_path:
         return source_path, None
+    return head, tail
+
+
+async def _cut_out_window(
+    source_path: str,
+    head_path: str,
+    tail_path: str,
+    start: float,
+    end: float,
+) -> Tuple[Optional[str], Optional[str]]:
+    """The clip either side of one beat, as ``(head, tail)``.
+
+    What a beat-level retake keeps. The head runs up to the beat and the tail
+    from the end of it, and either can legitimately be None: a beat that opens
+    its scene has no head, one that closes it has no tail.
+
+    A sliver thinner than MIN_TRIMMED_SECONDS is dropped rather than joined.
+    That is the same floor every other cut in this pipeline works to -- under
+    it a piece has stopped being a shot -- and it costs the scene at most half
+    a second of runtime at one end of one beat.
+
+    Fails closed on the piece it cannot make, never on the scene: trim_clip
+    hands back its own source when a trim will not apply, and joining THAT to
+    the new beat would play the whole scene twice around it.
+    """
+    duration = await _probe_video_duration_async(source_path)
+    if duration <= 0:
+        return None, None
+
+    head: Optional[str] = None
+    if start >= MIN_TRIMMED_SECONDS:
+        candidate = await trim_clip(source_path, head_path, 0.0, duration - start)
+        head = None if candidate == source_path else candidate
+
+    tail: Optional[str] = None
+    if duration - end >= MIN_TRIMMED_SECONDS:
+        candidate = await trim_clip(source_path, tail_path, end, 0.0)
+        tail = None if candidate == source_path else candidate
+
     return head, tail
 
 
@@ -3243,6 +3292,66 @@ async def add_watermark(video_path: str, output_path: str) -> str:
     return output_path
 
 
+def _beat_storyboard(record: Dict[str, Any], window: Any) -> StoryboardShot:
+    """One beat's own record, back as the storyboard for its retake.
+
+    Deliberately deterministic. Every field the first render used is read off
+    the record the first render wrote -- the description, the framing, the
+    lens, the expression it was meant to land on -- so a retake is the same
+    shot again rather than a fresh interpretation of the same seconds. The
+    director's note travels separately, through the binding requirement line
+    that _rerender_scenes already appends, which is where a note belongs: it
+    changes how the beat is played, not which beat it is.
+    """
+    description = window.description or str(record.get("visual_desc") or "")
+    return StoryboardShot(
+        idx=0,
+        visual_desc=description,
+        motion_desc=str(record.get("motion_desc") or "") or description,
+        expression_desc=str(record.get("expression_desc") or ""),
+        expression_peak_desc=str(record.get("expression_peak_desc") or ""),
+        audio_desc=str(record.get("audio_desc") or ""),
+        shot_type=window.shot_type or "medium shot",
+        camera_movement=str(record.get("camera_movement") or "static"),
+        lens=str(record.get("lens") or "50mm"),
+        duration_seconds=window.seconds,
+        # A beat retake buys one generation. The second-angle machinery
+        # (interfaces/shot_plan) is about covering a scene, and this beat is
+        # already one of that coverage's angles.
+        role="master",
+    )
+
+
+def _anchors_by_path(
+    scenes: Sequence[Any],
+    scene_paths: Sequence[str],
+    characters: Sequence[Any],
+) -> Dict[str, Any]:
+    """``clip path -> Anchor`` for the scenes that made it into the cut.
+
+    Keyed by PATH because every consumer of it works on a list of clips that
+    has been through something first: the cold open prepends two of its own, a
+    re-cut reorders and drops, a failed scene never produced a file at all. A
+    path is the one identity that survives all three, and a clip this cannot
+    place simply keeps the centre crop.
+
+    Returns {} for a film with no locked screen-direction axis -- the crop has
+    nothing to point at, which is the case this has always handled by pointing
+    at the middle.
+    """
+    in_cut = [scene for scene in (scenes or []) if isinstance(scene, dict)]
+    if any(scene.get("clip_index") is None for scene in in_cut):
+        # A scene that produced no clip is not in scene_paths, so it must not
+        # take a position in the pairing either.
+        in_cut = [scene for scene in in_cut if scene.get("clip_index") is not None]
+    anchors = anchors_in_cut_order(in_cut, characters)
+    return {
+        path: anchor
+        for path, anchor in zip(scene_paths, anchors)
+        if anchor.confidence > 0
+    }
+
+
 def _parse_aspect_ratio(ratio: str) -> tuple:
     """Parse '9:16' / '1:1' into (w, h) floats. Raises ValueError if invalid."""
     parts = (ratio or "").strip().split(":")
@@ -3254,21 +3363,134 @@ def _parse_aspect_ratio(ratio: str) -> tuple:
     return w, h
 
 
+async def _export_reframed(
+    source_path: str,
+    output_path: str,
+    target: float,
+    spans: Sequence[Any],
+) -> Optional[str]:
+    """One ffmpeg pass: crop to ``target``, pointed by ``spans``.
+
+    Returns None on any failure, which sends the caller back to the moviepy
+    centre crop that has always been here -- an export that comes out centred
+    is a worse export, and an export that does not come out at all is a bug
+    report.
+    """
+    source_width, source_height = _probe_video_size(source_path)
+    if source_width <= 0 or source_height <= 0:
+        return None
+    source_ratio = source_width / source_height
+    if abs(source_ratio - target) < 1e-3:
+        return None  # Nothing to crop; the ordinary path re-encodes it.
+    if source_ratio > target:
+        width, height = _even(source_height * target), _even(source_height)
+    else:
+        width, height = _even(source_width), _even(source_width / target)
+
+    crop = build_crop_filter(
+        source_width, source_height, width, height, spans=spans
+    )
+    logger.info(
+        "Exporting %dx%d as %s: %s",
+        source_width,
+        source_height,
+        f"{width}x{height}",
+        describe_reframe(spans),
+    )
+
+    process = await asyncio.create_subprocess_exec(
+        resolve_ffmpeg_binary(),
+        "-y",
+        "-i",
+        source_path,
+        "-vf",
+        f"{crop},setsar=1",
+        *video_encode_args(),
+        "-c:a",
+        "aac",
+        "-b:a",
+        DELIVERY_AUDIO_BITRATE,
+        output_path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await process.communicate()
+    if process.returncode == 0 and os.path.isfile(output_path):
+        return output_path
+    logger.warning(
+        "Reframed export ffmpeg failed (exit=%s): %s",
+        process.returncode,
+        stderr.decode("utf-8", errors="replace")[-800:],
+    )
+    try:
+        os.unlink(output_path)
+    except OSError:
+        pass
+    return None
+
+
+def reframe_spans_from_record(record: Optional[Sequence[Dict[str, Any]]]):
+    """The stored reframing plan, back as ``(start, end, Anchor)``.
+
+    Written by the assembly (see ``_reframe`` on the job result) because the
+    scene timings it encodes cannot be recovered from the master alone. A job
+    made before it existed, or one with no locked screen-direction axis, has
+    nothing here and exports centred exactly as it always did.
+    """
+    spans = []
+    for entry in record or []:
+        try:
+            spans.append(
+                (
+                    float(entry.get("start") or 0.0),
+                    float(entry.get("end") or 0.0),
+                    Anchor(
+                        x=float(entry.get("x", 0.5)),
+                        y=float(entry.get("y", 0.5)),
+                        confidence=float(entry.get("confidence", 0.0)),
+                        reason=str(entry.get("reason") or ""),
+                    ),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    return spans
+
+
 async def export_alternate_format(
     source_path: str,
     output_path: str,
     target_ratio: str,
+    spans: Optional[Sequence[Any]] = None,
 ) -> str:
-    """Center-crop ``source_path`` to ``target_ratio`` and write ``output_path``.
+    """Crop ``source_path`` to ``target_ratio`` and write ``output_path``.
 
-    IMPORTANT LIMITATION: this is a *naive center crop*, not smart subject-
-    aware reframing. Content near the edges of the original frame may be
-    lost. Suitable for quick 9:16 / 1:1 exports from a finished 16:9 master
-    without another MuAPI render.
+    This is the deepest crop the product performs -- a 9:16 export of a
+    finished 16:9 drama keeps 32% of every frame's width -- and for most of
+    this pipeline's life it took that 32% from the middle of the frame
+    regardless of who was standing where.
+
+    ``spans`` points it instead: scene by scene, at the side of frame the
+    film's own locked 180-degree axis put the speaker on (see
+    interfaces/reframe). It is one ffmpeg crop whose offset changes at the
+    cuts, so it costs exactly what the centre crop cost. With no spans -- an
+    older job, a single-hander, an ensemble -- this is the centre crop it has
+    always been.
     """
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     target_w, target_h = _parse_aspect_ratio(target_ratio)
     target = target_w / target_h
+
+    if spans:
+        reframed = await _export_reframed(
+            source_path, output_path, target, spans
+        )
+        if reframed:
+            return reframed
+        logger.warning(
+            "Pointed export failed, falling back to the centre crop for %s",
+            source_path,
+        )
 
     # moviepy is sync/CPU-bound — run in a worker thread so the event loop
     # stays responsive during the export.
@@ -4456,6 +4678,7 @@ class Idea2VideoPipeline:
         portraits_override: Optional[Dict[str, str]] = None,
         location_plate_override: Optional[str] = None,
         script_override: Optional[Dict[str, Any]] = None,
+        beat_index: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Re-render the named scenes and splice them into the finished drama.
 
@@ -4473,6 +4696,14 @@ class Idea2VideoPipeline:
         from a retake: a changed portrait, set plate or script is threaded
         through every re-rendered scene, so "put her in the red coat" moves the
         lock itself instead of hoping each scene's prompt drifts the same way.
+
+        ``beat_index`` narrows the job from a scene to ONE OF ITS BEATS (see
+        interfaces/beat): the scene's own clip is kept either side of that
+        beat and only the beat is shot again. Everything after the render is
+        deliberately shared with the scene retake -- the splice back into the
+        cut, the re-sync, the archive, the re-master -- because that tail is
+        where a retake is actually delicate, and a second copy of it would
+        drift from this one.
         """
         os.makedirs(working_dir, exist_ok=True)
 
@@ -4580,6 +4811,17 @@ class Idea2VideoPipeline:
             takes[index] = take
             scene_dir = os.path.join(working_dir, f"scene_{index}_take{take}")
             story_so_far, not_yet = _format_story_state(script.scenes, index)
+            # A beat retake re-shoots ONE framing into the clip that already
+            # exists. Same arguments, same locks, same budget slice -- the
+            # only difference is that the storyboard is the beat's own record
+            # rather than a fresh design, and that what comes back is spliced
+            # into the take instead of replacing it.
+            windows = beat_of.windows_of(target.get("shots") or [])
+            window = (
+                windows[beat_index]
+                if beat_index is not None and 0 <= beat_index < len(windows)
+                else None
+            )
             async with semaphore:
                 _check_cancel()
                 scene_result = await self.script2video.run(
@@ -4617,10 +4859,6 @@ class Idea2VideoPipeline:
                     story_so_far=story_so_far,
                     not_yet=not_yet,
                     scene_tension=_scene_tension(scene_script),
-                    # Same slice of the second budget as the take it replaces,
-                    # so a retake can never quietly lengthen (or shorten) the
-                    # paid runtime.
-                    scene_duration=durations[index] if index < len(durations) else 0.0,
                     character_direction=_format_character_direction(script),
                     theme=getattr(script, "theme", "") or "",
                     visual_motif=getattr(script, "visual_motif", "") or "",
@@ -4629,7 +4867,27 @@ class Idea2VideoPipeline:
                     # cannot quietly hand this scene the setup its neighbour
                     # already has.
                     scene_shot_scale=(
-                        retake_scales[index] if index < len(retake_scales) else ""
+                        window.shot_type
+                        if window is not None
+                        else (retake_scales[index] if index < len(retake_scales) else "")
+                    ),
+                    # The beat, again -- not a new design of it. A re-shoot
+                    # that re-writes the shot comes back as a different
+                    # picture in a different framing, which is a new scene
+                    # with an old scene's number on it.
+                    storyboard_override=(
+                        [_beat_storyboard(target["shots"][beat_index], window)]
+                        if window is not None
+                        else None
+                    ),
+                    # The same slice of the second budget as the take it
+                    # replaces, so a retake can never quietly lengthen (or
+                    # shorten) the paid runtime -- a beat's slice of it when
+                    # only a beat is being replaced.
+                    scene_duration=(
+                        window.seconds
+                        if window is not None
+                        else (durations[index] if index < len(durations) else 0.0)
                     ),
                 )
             if not scene_result.get("path"):
@@ -4637,6 +4895,13 @@ class Idea2VideoPipeline:
                     "The retake did not produce a usable clip. Your credit has "
                     "been refunded — please try again."
                 )
+            if window is not None:
+                spliced = await self._splice_beat_into_scene(
+                    target, window, scene_result, scene_dir
+                )
+                new_paths[index] = spliced["path"]
+                new_shots[index] = spliced["shots"]
+                return
             new_paths[index] = scene_result["path"]
             new_shots[index] = scene_result.get("shots", [])
 
@@ -4717,6 +4982,7 @@ class Idea2VideoPipeline:
         # the right clips and travel as they are. The hook is rebuilt rather
         # than reused: the scene it is taken from may be the one just retaken.
         sfx_tracks = [dict(t) for t in (state.get("sfx_tracks") or [])]
+        reframe_plan: List[Dict[str, Any]] = []
         assembly_paths, assembly_dialogue, assembly_sfx = await self._with_cold_open(
             scene_paths,
             [
@@ -4742,6 +5008,14 @@ class Idea2VideoPipeline:
             transitions=plan_transitions([s["script"] for s in ordered]),
             aspect_ratio=previous_result.get("aspect_ratio", "16:9"),
             sfx_tracks=assembly_sfx,
+            # A re-cut of a 4K drama is still a 4K drama. Read off the result
+            # rather than re-resolved from the environment, which would
+            # silently re-master an old job at whatever today's default is.
+            delivery_tier=previous_result.get("delivery_tier", ""),
+            scene_anchors=_anchors_by_path(
+                ordered, scene_paths, previous_result.get("characters") or []
+            ),
+            reframe_out=reframe_plan,
         )
 
         # Update just the re-rendered scenes' records, then re-archive them so
@@ -4754,7 +5028,7 @@ class Idea2VideoPipeline:
             target.pop("clip_path", None)
         await self._archive_scene_clips(targets, scene_paths, working_dir)
 
-        result = {**previous_result, "scenes": scenes}
+        result = {**previous_result, "scenes": scenes, "_reframe": reframe_plan}
         result["portraits"] = portraits
         result["location_plate"] = location_plate
         result["_render_state"] = {
@@ -4812,6 +5086,117 @@ class Idea2VideoPipeline:
         result["video_url"] = video_url or f"/api/jobs/{job_id}/video"
         if actual_duration_seconds is not None:
             result["duration_estimate"] = round(actual_duration_seconds)
+
+    async def _scene_clip(self, scene: Dict[str, Any], working_dir: str) -> str:
+        """The scene's own clip, pulled back down if it only exists remotely.
+
+        The same two-step every splice in this pipeline makes: the local file
+        while the working directory survives, the archived upload afterwards.
+        """
+        local = scene.get("clip_path")
+        if local and os.path.isfile(local):
+            return local
+        restored = os.path.join(
+            working_dir, f"scene_{scene.get('index', 0)}_for_beat.mp4"
+        )
+        await download_video(scene["clip_url"], restored)
+        return restored
+
+    async def _splice_beat_into_scene(
+        self,
+        scene: Dict[str, Any],
+        window: Any,
+        rendered: Dict[str, Any],
+        scene_dir: str,
+    ) -> Dict[str, Any]:
+        """Put a newly shot beat back into the take it belongs to.
+
+        Head, new beat, tail -- joined at boundaries that are already cuts in
+        the picture, because that is what a beat boundary IS in both
+        renderers: the model cuts there inside a take, and the assembly cut
+        there between separate shots.
+
+        The new beat is trimmed to the window it is replacing first. A
+        provider that returns more than it was asked for (measured: scenes
+        budgeted 8/10/12 seconds came back 16/20/24) would otherwise make the
+        scene longer than the budget that was paid for, and push every
+        subtitle after it out of sync.
+        """
+        source = await self._scene_clip(scene, scene_dir)
+        beat_clip = await trim_to_duration(
+            rendered["path"],
+            os.path.join(scene_dir, "beat_delivered.mp4"),
+            window.seconds,
+        )
+        head, tail = await _cut_out_window(
+            source,
+            os.path.join(scene_dir, "scene_head.mp4"),
+            os.path.join(scene_dir, "scene_tail.mp4"),
+            window.start,
+            window.end,
+        )
+        parts = [part for part in (head, beat_clip, tail) if part]
+        if len(parts) == 1:
+            spliced = parts[0]
+        else:
+            spliced = os.path.join(scene_dir, "scene_respliced.mp4")
+            await concatenate_videos(parts, spliced)
+
+        rendered_shots = rendered.get("shots") or []
+        return {
+            "path": spliced,
+            "shots": beat_of.replace(
+                scene.get("shots") or [],
+                window.index,
+                rendered_shots[0] if rendered_shots else None,
+            ),
+        }
+
+    async def regenerate_beat(
+        self,
+        previous_result: Dict[str, Any],
+        scene_index: int,
+        beat_index: int,
+        working_dir: str,
+        director_note: str = "",
+        progress_callback: Optional[Callable] = None,
+        is_cancelled: Optional[Callable[[], bool]] = None,
+    ) -> Dict[str, Any]:
+        """Re-shoot ONE beat of one scene, keeping the rest of its take.
+
+        The editor-shaped hole in this product: a scene is covered in several
+        framings and what a director says is "the second one, again". Until
+        now the smallest thing that could be re-rolled was the whole scene, so
+        the two framings that were right went back in the bin with the one
+        that was not.
+
+        Refused, with a sentence explaining why and pointing at the scene
+        retake, whenever a beat cannot honestly be replaced on its own -- see
+        interfaces/beat.refusal.
+        """
+        scenes = list(previous_result.get("scenes") or [])
+        scene = next(
+            (s for s in scenes if int(s.get("index", -1)) == scene_index), None
+        )
+        if scene is None:
+            raise SceneRegenerationUnavailable(
+                f"Scene {scene_index + 1} is not part of this video."
+            )
+        refused = beat_of.refusal(
+            scene, beat_index, previous_result.get("lipsynced_scenes") or []
+        )
+        if refused:
+            raise SceneRegenerationUnavailable(refused)
+
+        return await self._rerender_scenes(
+            previous_result=previous_result,
+            scene_indices=[scene_index],
+            working_dir=working_dir,
+            director_note=director_note,
+            progress_callback=progress_callback,
+            is_cancelled=is_cancelled,
+            beat_index=beat_index,
+        )
 
     async def regenerate_scene(
         self,
@@ -5207,6 +5592,12 @@ class Idea2VideoPipeline:
                 if int(track.get("scene_index", -1)) == origin:
                     sfx_tracks.append({**track, "scene_index": position})
 
+        scene_anchor_map = _anchors_by_path(
+            [entry["scene"] for entry in entries],
+            scene_paths,
+            previous_result.get("characters") or [],
+        )
+        reframe_plan: List[Dict[str, Any]] = []
         scene_paths, dialogue_tracks, sfx_tracks = await self._with_cold_open(
             scene_paths,
             [
@@ -5233,11 +5624,18 @@ class Idea2VideoPipeline:
             transitions=plan_transitions([e["scene"]["script"] for e in entries]),
             aspect_ratio=previous_result.get("aspect_ratio", "16:9"),
             sfx_tracks=sfx_tracks,
+            delivery_tier=previous_result.get("delivery_tier", ""),
+            scene_anchors=scene_anchor_map,
+            reframe_out=reframe_plan,
         )
 
         # The source scenes are kept intact (with their original clips) so the
         # cut can be revised again, or reverted, without re-rendering anything.
         result = {**previous_result}
+        # The cut changed, so the old plan describes a film that no longer
+        # exists: a later 9:16 export driven by it would point each scene's
+        # crop at whoever used to be in that second of the master.
+        result["_reframe"] = reframe_plan
         result["timeline"] = [
             {
                 "scene_index": e["index"],
@@ -5521,6 +5919,10 @@ class Idea2VideoPipeline:
         transitions: Optional[List[float]] = None,
         aspect_ratio: str = "16:9",
         sfx_tracks: Optional[List[Dict[str, Any]]] = None,
+        delivery_tier: str = "",
+        delivery_out: Optional[Dict[str, Any]] = None,
+        scene_anchors: Optional[Dict[str, Any]] = None,
+        reframe_out: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Concatenate all scene videos, add background music, then master
         the result — colour grade, delivery conform, film look, captions,
@@ -5575,11 +5977,72 @@ class Idea2VideoPipeline:
         finishing = is_finishing_enabled()
         grade_filter, delivered_size = "", None
         graded_path = concatenated_path
+
+        # What this master will ship at, decided once, off the assembled
+        # picture, before anything re-encodes it. Recorded through
+        # ``delivery_out`` because the delivered size is a FACT ABOUT THE
+        # PRODUCT -- which tier was sold, and whether the pixels above the
+        # render came from a model or from a scaler (see interfaces/delivery).
+        # A caller that does not care passes nothing and behaves as before.
+        rendered_size = _probe_video_size(concatenated_path)
+        delivery = resolve_delivery(*rendered_size, aspect_ratio, delivery_tier)
+        if delivery_out is not None and delivery:
+            delivery_out.update(delivery.as_dict())
+        logger.info("Delivering master: %s", describe_delivery(delivery))
+
+        # Where the crop should point, scene by scene. Only computed when the
+        # conform is actually going to cut something off -- the normal case is
+        # frames generated in the ordered shape, where there is no crop to aim
+        # and nothing here runs. Keyed by CLIP PATH so a re-cut's reordering,
+        # a dropped scene and the cold open's extra clips all resolve
+        # correctly; anything unrecognised stays centred.
+        reframe_spans = None
+        anchors_by_clip = {
+            index: scene_anchors[path]
+            for index, path in enumerate(scene_paths)
+            if path in (scene_anchors or {})
+        }
+        if anchors_by_clip:
+            durations = await _probe_video_durations_async(scene_paths)
+            # Whether the crop will take from the sides or from the top and
+            # bottom, which decides whether the headroom rule applies. A
+            # target relatively WIDER than the source loses its top and bottom.
+            vertical = bool(
+                delivery
+                and delivery.width > 0
+                and rendered_size[0] > 0
+                and delivery.height / delivery.width
+                < rendered_size[1] / rendered_size[0]
+            )
+            reframe_spans = reframe_spans_from_durations(
+                durations, anchors_by_clip, vertical=vertical
+            )
+            logger.info("Reframing plan: %s", describe_reframe(reframe_spans))
+            if reframe_out is not None:
+                # Recorded on the result even when THIS master needs no crop:
+                # the 9:16 export of a finished 16:9 drama is the deepest crop
+                # this product performs, it happens days later in a different
+                # process, and the scene timings it needs cannot be measured
+                # off the master alone once the clips are gone.
+                reframe_out.extend(
+                    {
+                        "start": round(start, 3),
+                        "end": round(end, 3),
+                        "x": round(anchor.x, 4),
+                        "y": round(anchor.y, 4),
+                        "confidence": round(anchor.confidence, 4),
+                        "reason": anchor.reason,
+                    }
+                    for start, end, anchor in reframe_spans
+                )
+
         if finishing:
             filters, delivered_size = build_delivery_filters(
-                *_probe_video_size(concatenated_path),
+                *rendered_size,
                 director_style=director_style,
                 aspect_ratio=aspect_ratio,
+                tier=delivery_tier,
+                reframe=reframe_spans,
             )
             grade_filter = ",".join(filters)
         if not grade_filter:
@@ -5592,6 +6055,8 @@ class Idea2VideoPipeline:
                 graded_path,
                 director_style=director_style,
                 aspect_ratio=aspect_ratio,
+                tier=delivery_tier,
+                reframe=reframe_spans,
             )
 
         # Before music mix
@@ -5741,6 +6206,7 @@ class Idea2VideoPipeline:
         language: str = DEFAULT_LANGUAGE,
         dialogue_enabled: bool = False,
         narrative_mode: str = "",
+        series_brief: str = "",
     ) -> DramaScript:
         """Phase A: screenwriting only — no portraits / frames / video."""
 
@@ -5770,6 +6236,11 @@ class Idea2VideoPipeline:
             # Cinematic or micro-drama: two different dramatic curves, not one
             # curve at two lengths (see interfaces/micro_drama).
             narrative_mode=narrative_mode,
+            # What has already happened, when this is an episode of a series
+            # rather than a film on its own (see interfaces/series). Empty for
+            # every standalone drama, which is every drama this made before
+            # series existed.
+            series_brief=series_brief,
         )
 
     async def continue_from_script(
@@ -5792,9 +6263,18 @@ class Idea2VideoPipeline:
         location_image_override: Optional[str] = None,
         language: str = DEFAULT_LANGUAGE,
         narrative_mode: str = "",
+        delivery_tier: str = "",
     ) -> dict:
         """Phase B: everything after screenwriting (portraits → scenes → assemble)."""
         os.makedirs(working_dir, exist_ok=True)
+
+        # Resolved here rather than at the encode, so the tier this drama is
+        # delivered at is decided once, under the plan that paid for it, and
+        # is on the result even when the assembly could not measure a size
+        # (demo runs produce no master to probe).
+        delivery = resolve_tier(delivery_tier, plan)
+        delivered: Dict[str, Any] = {}
+        reframe_plan: List[Dict[str, Any]] = []
 
         def _check_cancel():
             if is_cancelled and is_cancelled():
@@ -6658,6 +7138,13 @@ class Idea2VideoPipeline:
             # of the climax, a card, and only then scene 1. Prepended to the
             # CLIP LIST rather than spliced in afterwards, so the duration
             # check, the captions and the mix all see the same film.
+            # Captured BEFORE the hook is put in front of the film: the cold
+            # open prepends clips of its own, so a mapping by position would
+            # be one film out of date. Keyed by path, which survives it.
+            scene_anchor_map = _anchors_by_path(
+                scene_results, scene_paths, characters
+            )
+
             scene_paths, dialogue_tracks, sfx_tracks = await self._with_cold_open(
                 scene_paths,
                 scene_results,
@@ -6684,6 +7171,15 @@ class Idea2VideoPipeline:
                 ),
                 aspect_ratio=aspect_ratio,
                 sfx_tracks=sfx_tracks,
+                delivery_tier=delivery,
+                delivery_out=delivered,
+                # Where each scene's crop should point IF the conform has to
+                # cut anything off. Built here because this is where the
+                # scenes, their beats and the film's cast are all still in
+                # scope; keyed by clip path so the cold open's extra clips
+                # (which are copies, not scenes) simply do not match.
+                scene_anchors=scene_anchor_map,
+                reframe_out=reframe_plan,
             )
             # Measure the real assembled length before upload/cleanup — the
             # screenwriter's estimated_duration_seconds is a pre-generation
@@ -6816,6 +7312,19 @@ class Idea2VideoPipeline:
             "director_style": director_style,
             "style": style,
             "aspect_ratio": aspect_ratio,
+            # The tier this master was delivered at, and what it measures --
+            # including whether anything above the render came from a scaler
+            # (see interfaces/delivery). Carried on the result so a retake or
+            # a re-cut of a 4K drama stays a 4K drama, and so "we shipped 4K"
+            # is a record rather than a claim.
+            "delivery_tier": delivery,
+            "delivery": delivered or None,
+            # Where the subject stands, scene by scene, with the timings the
+            # assembled master really has (see interfaces/reframe). Written
+            # for the crop that happens LATER: a 9:16 export of this 16:9
+            # drama throws away 68% of every frame's width, and by then the
+            # scene clips it would have to be measured off are gone.
+            "_reframe": reframe_plan,
             # Recorded rather than persisted on the job row: the drama's
             # language is a property of what was MADE, and the result already
             # survives the Supabase round-trip that a new jobs column would
@@ -6860,6 +7369,8 @@ class Idea2VideoPipeline:
         location_image_override: Optional[str] = None,
         language: str = DEFAULT_LANGUAGE,
         narrative_mode: str = "",
+        delivery_tier: str = "",
+        series_brief: str = "",
     ) -> dict:
         """Full end-to-end run (script + production). Default path unchanged."""
         script = await self.write_script_only(
@@ -6873,6 +7384,7 @@ class Idea2VideoPipeline:
             language=language,
             dialogue_enabled=dialogue_enabled,
             narrative_mode=narrative_mode,
+            series_brief=series_brief,
         )
         return await self.continue_from_script(
             script=script,
@@ -6893,4 +7405,5 @@ class Idea2VideoPipeline:
             location_image_override=location_image_override,
             language=language,
             narrative_mode=narrative_mode,
+            delivery_tier=delivery_tier,
         )
