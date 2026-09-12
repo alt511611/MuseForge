@@ -3081,6 +3081,13 @@ class Script2VideoPipeline:
                 # and without this it can only guess which framing a line
                 # falls in -- see idea2video._take_line_windows.
                 "line_count": len(beat.dialogue),
+                # The words this beat was shot from. Recorded because a
+                # BEAT-LEVEL retake re-shoots this beat rather than designing
+                # a new one -- without the description it was given, the only
+                # way back to one bad beat of a good take is to re-roll the
+                # whole scene. Everything else about the beat (its framing,
+                # its length) is already here; this is the part that was not.
+                "description": beat.description,
             }
             for i, beat in enumerate(take.beats)
         ]
@@ -3349,6 +3356,15 @@ class Script2VideoPipeline:
         #: something maps this film's cast onto that library, and empty is a
         #: working take with voices the model chose.
         voice_ids: Optional[Dict[str, str]] = None,
+        #: Shoot exactly these shots instead of designing a storyboard.
+        #:
+        #: A beat-level retake re-shoots ONE framing of a scene that already
+        #: exists, and the whole point is that it is the same beat again: a
+        #: re-designed shot would come back as a different picture in a
+        #: different framing, which is a new scene with an old scene's number
+        #: on it. So the beat's own record -- the description the model was
+        #: given, its framing, its length -- is handed straight back here.
+        storyboard_override: Optional[List[Any]] = None,
     ) -> Dict[str, Any]:
         os.makedirs(working_dir, exist_ok=True)
         portraits = character_portraits or {}
@@ -3377,36 +3393,46 @@ class Script2VideoPipeline:
                 await progress_callback(stage, message, pct, data)
 
         _check_cancel()
-        await progress("storyboard", f"Designing storyboard for scene {scene_idx + 1}", 10)
-        shots = await self.storyboard_artist.design_storyboard(
-            script,
-            characters,
-            user_requirement,
-            director_style,
-            # Same style string the frame prompt gets, so the shot is
-            # DESIGNED for the look it will be rendered in.
-            style=style,
-            setting_location=setting_location,
-            setting_time_of_day=setting_time_of_day,
-            setting_era=setting_era,
-            is_finale=(scene_idx == total_scenes - 1),
-            scene_emotion=scene_emotion,
-            scene_dialogue=scene_dialogue,
-            scene_direction=scene_direction,
-            scene_tension=scene_tension,
-            scene_duration=scene_duration,
-            character_direction=character_direction,
-            theme=theme,
-            visual_motif=visual_motif,
-            user_brief=user_brief,
-            story_so_far=story_so_far,
-            not_yet=not_yet,
-            scene_shot_scale=scene_shot_scale,
-            # Not a prompt input: it decides whether this scene may buy a
-            # second angle at all, since the lip-sync pass cannot carry a
-            # mouth across a cut it never sees.
-            lipsync_enabled=lipsync_enabled,
-        )
+        if storyboard_override:
+            await progress(
+                "storyboard",
+                f"Re-shooting a beat of scene {scene_idx + 1}",
+                10,
+            )
+            shots = list(storyboard_override)
+        else:
+            await progress(
+                "storyboard", f"Designing storyboard for scene {scene_idx + 1}", 10
+            )
+            shots = await self.storyboard_artist.design_storyboard(
+                script,
+                characters,
+                user_requirement,
+                director_style,
+                # Same style string the frame prompt gets, so the shot is
+                # DESIGNED for the look it will be rendered in.
+                style=style,
+                setting_location=setting_location,
+                setting_time_of_day=setting_time_of_day,
+                setting_era=setting_era,
+                is_finale=(scene_idx == total_scenes - 1),
+                scene_emotion=scene_emotion,
+                scene_dialogue=scene_dialogue,
+                scene_direction=scene_direction,
+                scene_tension=scene_tension,
+                scene_duration=scene_duration,
+                character_direction=character_direction,
+                theme=theme,
+                visual_motif=visual_motif,
+                user_brief=user_brief,
+                story_so_far=story_so_far,
+                not_yet=not_yet,
+                scene_shot_scale=scene_shot_scale,
+                # Not a prompt input: it decides whether this scene may buy a
+                # second angle at all, since the lip-sync pass cannot carry a
+                # mouth across a cut it never sees.
+                lipsync_enabled=lipsync_enabled,
+            )
 
         # Which angles the words actually reach. A dialogue scene used to hand
         # the SAME "this character is speaking" direction to every angle it

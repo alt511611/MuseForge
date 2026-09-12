@@ -14,7 +14,9 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from agents.screenwriter import ScreenwriterAgent, ScriptGenerationFailed
 from interfaces import ass_captions
 from interfaces import subtitles
+from interfaces import beat as beat_of
 from interfaces.character import CharacterInScene, DramaScript
+from interfaces.shot import StoryboardShot
 from interfaces.film_look import build_film_look_filters
 from interfaces import gender as gender_of
 from interfaces import micro_drama
@@ -439,6 +441,45 @@ async def _split_off_tail(
     # play the scene twice.
     if head == source_path or tail == source_path:
         return source_path, None
+    return head, tail
+
+
+async def _cut_out_window(
+    source_path: str,
+    head_path: str,
+    tail_path: str,
+    start: float,
+    end: float,
+) -> Tuple[Optional[str], Optional[str]]:
+    """The clip either side of one beat, as ``(head, tail)``.
+
+    What a beat-level retake keeps. The head runs up to the beat and the tail
+    from the end of it, and either can legitimately be None: a beat that opens
+    its scene has no head, one that closes it has no tail.
+
+    A sliver thinner than MIN_TRIMMED_SECONDS is dropped rather than joined.
+    That is the same floor every other cut in this pipeline works to -- under
+    it a piece has stopped being a shot -- and it costs the scene at most half
+    a second of runtime at one end of one beat.
+
+    Fails closed on the piece it cannot make, never on the scene: trim_clip
+    hands back its own source when a trim will not apply, and joining THAT to
+    the new beat would play the whole scene twice around it.
+    """
+    duration = await _probe_video_duration_async(source_path)
+    if duration <= 0:
+        return None, None
+
+    head: Optional[str] = None
+    if start >= MIN_TRIMMED_SECONDS:
+        candidate = await trim_clip(source_path, head_path, 0.0, duration - start)
+        head = None if candidate == source_path else candidate
+
+    tail: Optional[str] = None
+    if duration - end >= MIN_TRIMMED_SECONDS:
+        candidate = await trim_clip(source_path, tail_path, end, 0.0)
+        tail = None if candidate == source_path else candidate
+
     return head, tail
 
 
@@ -3251,6 +3292,36 @@ async def add_watermark(video_path: str, output_path: str) -> str:
     return output_path
 
 
+def _beat_storyboard(record: Dict[str, Any], window: Any) -> StoryboardShot:
+    """One beat's own record, back as the storyboard for its retake.
+
+    Deliberately deterministic. Every field the first render used is read off
+    the record the first render wrote -- the description, the framing, the
+    lens, the expression it was meant to land on -- so a retake is the same
+    shot again rather than a fresh interpretation of the same seconds. The
+    director's note travels separately, through the binding requirement line
+    that _rerender_scenes already appends, which is where a note belongs: it
+    changes how the beat is played, not which beat it is.
+    """
+    description = window.description or str(record.get("visual_desc") or "")
+    return StoryboardShot(
+        idx=0,
+        visual_desc=description,
+        motion_desc=str(record.get("motion_desc") or "") or description,
+        expression_desc=str(record.get("expression_desc") or ""),
+        expression_peak_desc=str(record.get("expression_peak_desc") or ""),
+        audio_desc=str(record.get("audio_desc") or ""),
+        shot_type=window.shot_type or "medium shot",
+        camera_movement=str(record.get("camera_movement") or "static"),
+        lens=str(record.get("lens") or "50mm"),
+        duration_seconds=window.seconds,
+        # A beat retake buys one generation. The second-angle machinery
+        # (interfaces/shot_plan) is about covering a scene, and this beat is
+        # already one of that coverage's angles.
+        role="master",
+    )
+
+
 def _anchors_by_path(
     scenes: Sequence[Any],
     scene_paths: Sequence[str],
@@ -4607,6 +4678,7 @@ class Idea2VideoPipeline:
         portraits_override: Optional[Dict[str, str]] = None,
         location_plate_override: Optional[str] = None,
         script_override: Optional[Dict[str, Any]] = None,
+        beat_index: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Re-render the named scenes and splice them into the finished drama.
 
@@ -4624,6 +4696,14 @@ class Idea2VideoPipeline:
         from a retake: a changed portrait, set plate or script is threaded
         through every re-rendered scene, so "put her in the red coat" moves the
         lock itself instead of hoping each scene's prompt drifts the same way.
+
+        ``beat_index`` narrows the job from a scene to ONE OF ITS BEATS (see
+        interfaces/beat): the scene's own clip is kept either side of that
+        beat and only the beat is shot again. Everything after the render is
+        deliberately shared with the scene retake -- the splice back into the
+        cut, the re-sync, the archive, the re-master -- because that tail is
+        where a retake is actually delicate, and a second copy of it would
+        drift from this one.
         """
         os.makedirs(working_dir, exist_ok=True)
 
@@ -4731,6 +4811,17 @@ class Idea2VideoPipeline:
             takes[index] = take
             scene_dir = os.path.join(working_dir, f"scene_{index}_take{take}")
             story_so_far, not_yet = _format_story_state(script.scenes, index)
+            # A beat retake re-shoots ONE framing into the clip that already
+            # exists. Same arguments, same locks, same budget slice -- the
+            # only difference is that the storyboard is the beat's own record
+            # rather than a fresh design, and that what comes back is spliced
+            # into the take instead of replacing it.
+            windows = beat_of.windows_of(target.get("shots") or [])
+            window = (
+                windows[beat_index]
+                if beat_index is not None and 0 <= beat_index < len(windows)
+                else None
+            )
             async with semaphore:
                 _check_cancel()
                 scene_result = await self.script2video.run(
@@ -4768,10 +4859,6 @@ class Idea2VideoPipeline:
                     story_so_far=story_so_far,
                     not_yet=not_yet,
                     scene_tension=_scene_tension(scene_script),
-                    # Same slice of the second budget as the take it replaces,
-                    # so a retake can never quietly lengthen (or shorten) the
-                    # paid runtime.
-                    scene_duration=durations[index] if index < len(durations) else 0.0,
                     character_direction=_format_character_direction(script),
                     theme=getattr(script, "theme", "") or "",
                     visual_motif=getattr(script, "visual_motif", "") or "",
@@ -4780,7 +4867,27 @@ class Idea2VideoPipeline:
                     # cannot quietly hand this scene the setup its neighbour
                     # already has.
                     scene_shot_scale=(
-                        retake_scales[index] if index < len(retake_scales) else ""
+                        window.shot_type
+                        if window is not None
+                        else (retake_scales[index] if index < len(retake_scales) else "")
+                    ),
+                    # The beat, again -- not a new design of it. A re-shoot
+                    # that re-writes the shot comes back as a different
+                    # picture in a different framing, which is a new scene
+                    # with an old scene's number on it.
+                    storyboard_override=(
+                        [_beat_storyboard(target["shots"][beat_index], window)]
+                        if window is not None
+                        else None
+                    ),
+                    # The same slice of the second budget as the take it
+                    # replaces, so a retake can never quietly lengthen (or
+                    # shorten) the paid runtime -- a beat's slice of it when
+                    # only a beat is being replaced.
+                    scene_duration=(
+                        window.seconds
+                        if window is not None
+                        else (durations[index] if index < len(durations) else 0.0)
                     ),
                 )
             if not scene_result.get("path"):
@@ -4788,6 +4895,13 @@ class Idea2VideoPipeline:
                     "The retake did not produce a usable clip. Your credit has "
                     "been refunded — please try again."
                 )
+            if window is not None:
+                spliced = await self._splice_beat_into_scene(
+                    target, window, scene_result, scene_dir
+                )
+                new_paths[index] = spliced["path"]
+                new_shots[index] = spliced["shots"]
+                return
             new_paths[index] = scene_result["path"]
             new_shots[index] = scene_result.get("shots", [])
 
@@ -4972,6 +5086,117 @@ class Idea2VideoPipeline:
         result["video_url"] = video_url or f"/api/jobs/{job_id}/video"
         if actual_duration_seconds is not None:
             result["duration_estimate"] = round(actual_duration_seconds)
+
+    async def _scene_clip(self, scene: Dict[str, Any], working_dir: str) -> str:
+        """The scene's own clip, pulled back down if it only exists remotely.
+
+        The same two-step every splice in this pipeline makes: the local file
+        while the working directory survives, the archived upload afterwards.
+        """
+        local = scene.get("clip_path")
+        if local and os.path.isfile(local):
+            return local
+        restored = os.path.join(
+            working_dir, f"scene_{scene.get('index', 0)}_for_beat.mp4"
+        )
+        await download_video(scene["clip_url"], restored)
+        return restored
+
+    async def _splice_beat_into_scene(
+        self,
+        scene: Dict[str, Any],
+        window: Any,
+        rendered: Dict[str, Any],
+        scene_dir: str,
+    ) -> Dict[str, Any]:
+        """Put a newly shot beat back into the take it belongs to.
+
+        Head, new beat, tail -- joined at boundaries that are already cuts in
+        the picture, because that is what a beat boundary IS in both
+        renderers: the model cuts there inside a take, and the assembly cut
+        there between separate shots.
+
+        The new beat is trimmed to the window it is replacing first. A
+        provider that returns more than it was asked for (measured: scenes
+        budgeted 8/10/12 seconds came back 16/20/24) would otherwise make the
+        scene longer than the budget that was paid for, and push every
+        subtitle after it out of sync.
+        """
+        source = await self._scene_clip(scene, scene_dir)
+        beat_clip = await trim_to_duration(
+            rendered["path"],
+            os.path.join(scene_dir, "beat_delivered.mp4"),
+            window.seconds,
+        )
+        head, tail = await _cut_out_window(
+            source,
+            os.path.join(scene_dir, "scene_head.mp4"),
+            os.path.join(scene_dir, "scene_tail.mp4"),
+            window.start,
+            window.end,
+        )
+        parts = [part for part in (head, beat_clip, tail) if part]
+        if len(parts) == 1:
+            spliced = parts[0]
+        else:
+            spliced = os.path.join(scene_dir, "scene_respliced.mp4")
+            await concatenate_videos(parts, spliced)
+
+        rendered_shots = rendered.get("shots") or []
+        return {
+            "path": spliced,
+            "shots": beat_of.replace(
+                scene.get("shots") or [],
+                window.index,
+                rendered_shots[0] if rendered_shots else None,
+            ),
+        }
+
+    async def regenerate_beat(
+        self,
+        previous_result: Dict[str, Any],
+        scene_index: int,
+        beat_index: int,
+        working_dir: str,
+        director_note: str = "",
+        progress_callback: Optional[Callable] = None,
+        is_cancelled: Optional[Callable[[], bool]] = None,
+    ) -> Dict[str, Any]:
+        """Re-shoot ONE beat of one scene, keeping the rest of its take.
+
+        The editor-shaped hole in this product: a scene is covered in several
+        framings and what a director says is "the second one, again". Until
+        now the smallest thing that could be re-rolled was the whole scene, so
+        the two framings that were right went back in the bin with the one
+        that was not.
+
+        Refused, with a sentence explaining why and pointing at the scene
+        retake, whenever a beat cannot honestly be replaced on its own -- see
+        interfaces/beat.refusal.
+        """
+        scenes = list(previous_result.get("scenes") or [])
+        scene = next(
+            (s for s in scenes if int(s.get("index", -1)) == scene_index), None
+        )
+        if scene is None:
+            raise SceneRegenerationUnavailable(
+                f"Scene {scene_index + 1} is not part of this video."
+            )
+        refused = beat_of.refusal(
+            scene, beat_index, previous_result.get("lipsynced_scenes") or []
+        )
+        if refused:
+            raise SceneRegenerationUnavailable(refused)
+
+        return await self._rerender_scenes(
+            previous_result=previous_result,
+            scene_indices=[scene_index],
+            working_dir=working_dir,
+            director_note=director_note,
+            progress_callback=progress_callback,
+            is_cancelled=is_cancelled,
+            beat_index=beat_index,
+        )
 
     async def regenerate_scene(
         self,

@@ -1257,6 +1257,7 @@ async def run_regenerate_scene_job(
     api_key: str,
     scene_index: int,
     director_note: str = "",
+    beat_index: Optional[int] = None,
 ):
     """Re-shoot one scene of a finished job and splice it back in.
 
@@ -1264,6 +1265,11 @@ async def run_regenerate_scene_job(
     a failed retake leaves the customer with the video they already had rather
     than nothing. On failure the single retake credit is refunded — the
     original job's credits are untouched either way.
+
+    ``beat_index`` narrows it to one BEAT of that scene (see interfaces/beat):
+    the rest of the scene's take is kept, and everything about the failure
+    contract is identical, which is why it runs through this function rather
+    than a copy of it.
     """
     from pipelines.idea2video import Idea2VideoPipeline, SceneRegenerationUnavailable
     from pipelines.script2video import PipelineCancelled
@@ -1296,17 +1302,26 @@ async def run_regenerate_scene_job(
 
     try:
         pipeline = Idea2VideoPipeline(api_key=api_key, demo=job.demo)
-        result = await asyncio.wait_for(
-            pipeline.regenerate_scene(
+        if beat_index is None:
+            retake = pipeline.regenerate_scene(
                 previous_result=previous_result,
                 scene_index=scene_index,
                 working_dir=working_dir,
                 director_note=director_note,
                 progress_callback=progress_callback,
                 is_cancelled=is_cancelled,
-            ),
-            timeout=PIPELINE_HARD_TIMEOUT_SECONDS,
-        )
+            )
+        else:
+            retake = pipeline.regenerate_beat(
+                previous_result=previous_result,
+                scene_index=scene_index,
+                beat_index=beat_index,
+                working_dir=working_dir,
+                director_note=director_note,
+                progress_callback=progress_callback,
+                is_cancelled=is_cancelled,
+            )
+        result = await asyncio.wait_for(retake, timeout=PIPELINE_HARD_TIMEOUT_SECONDS)
         if is_cancelled():
             _restore_previous()
             await job_store.persist(job)

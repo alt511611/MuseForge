@@ -92,6 +92,7 @@ from auth import (
     get_current_user,
     get_optional_user,
 )
+from interfaces.beat import refusal as beat_refusal
 from interfaces.camera import DIRECTOR_STYLES
 from interfaces.delivery import resolve_tier as resolve_delivery_tier
 from interfaces.language import normalize as normalize_language
@@ -1435,6 +1436,88 @@ async def regenerate_scene(
         run_regenerate_scene_job, job, api_key, scene_index, req.director_note
     )
     return {"job_id": job.id, "scene_index": scene_index, "status": JobStatus.RUNNING.value}
+
+
+@app.post("/api/jobs/{job_id}/scenes/{scene_index}/shots/{shot_index}/retake")
+async def retake_shot(
+    job_id: str,
+    scene_index: int,
+    shot_index: int,
+    req: RegenerateSceneRequest,
+    background_tasks: BackgroundTasks,
+    current_user: Optional[AuthUser] = Depends(get_optional_user),
+):
+    """Re-shoot ONE beat of a scene, keeping the rest of that scene's take.
+
+    The smallest thing this product could re-roll was a whole scene, and a
+    scene is covered in several framings: the two that were right went back in
+    the bin with the one that was not. The scene's own record already says
+    where each beat starts and how long it holds (that is what the pacing,
+    subtitle and lip-sync passes read), so the clip is kept either side of the
+    beat and only the beat is shot again -- see interfaces/beat.
+
+    Costs the same single credit as a scene retake, because one generation is
+    the smallest thing anyone can buy. What it saves is the take.
+    """
+    job = await job_store.get_or_restore(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.user_id and (not current_user or job.user_id != current_user.user_id):
+        if not (current_user and current_user.is_admin):
+            raise HTTPException(status_code=403, detail="Access denied")
+
+    if job.status != JobStatus.COMPLETED or not job.result:
+        raise HTTPException(status_code=400, detail="Job is not completed")
+
+    scenes = (job.result or {}).get("scenes") or []
+    scene = next(
+        (s for s in scenes if int(s.get("index", -1)) == scene_index), None
+    )
+    if scene is None:
+        raise HTTPException(
+            status_code=404, detail=f"Scene {scene_index + 1} is not part of this video."
+        )
+
+    # Answered here, before anything is charged, and answered in a sentence:
+    # every refusal is a case where the scene retake is the right button and
+    # the user has no way of knowing that unless they are told.
+    refused = beat_refusal(
+        scene, shot_index, (job.result or {}).get("lipsynced_scenes") or []
+    )
+    if refused:
+        raise HTTPException(
+            status_code=400,
+            detail=refused,
+            headers={"X-Retake-Scope": "scene"},
+        )
+
+    demo = job.demo or _is_demo()
+    if current_user and not demo and job.user_id:
+        ok = await _deduct_credits(
+            current_user.user_id, SCENE_RETAKE_CREDIT_COST, "shot_retake", job_id=job.id
+        )
+        if not ok:
+            raise HTTPException(
+                status_code=402,
+                detail=f"Insufficient credits. A retake costs {SCENE_RETAKE_CREDIT_COST} credit.",
+            )
+
+    api_key = os.environ.get("MUAPI_KEY", "")
+    background_tasks.add_task(
+        run_regenerate_scene_job,
+        job,
+        api_key,
+        scene_index,
+        req.director_note,
+        shot_index,
+    )
+    return {
+        "job_id": job.id,
+        "scene_index": scene_index,
+        "shot_index": shot_index,
+        "status": JobStatus.RUNNING.value,
+    }
 
 
 @app.post("/api/jobs/{job_id}/global-edit")
