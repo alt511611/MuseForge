@@ -92,7 +92,9 @@ from auth import (
     get_current_user,
     get_optional_user,
 )
+import series_store
 from interfaces.beat import refusal as beat_refusal
+from interfaces.series import Series, SeriesCharacter, continuity_brief
 from interfaces.camera import DIRECTOR_STYLES
 from interfaces.delivery import resolve_tier as resolve_delivery_tier
 from interfaces.language import normalize as normalize_language
@@ -372,6 +374,11 @@ class LibraryCharacterIn(BaseModel):
     # Optional: entries saved before the column existed simply have none, and
     # are re-cast from the name hash exactly as they were before.
     voice_id: str = Field("", max_length=200)
+    # ...and what they were wearing. The portrait binds a FACE and never an
+    # outfit (see CharacterProfile.wardrobe), so a reused character whose
+    # wardrobe is dropped on the way in comes back with the same face, the
+    # same voice, and whatever the screenwriter dressed them in this morning.
+    wardrobe: str = Field("", max_length=2000)
 
 
 class GenerateRequest(BaseModel):
@@ -437,6 +444,44 @@ class CharacterCreateRequest(BaseModel):
     # stores the face and forgets the clothes returns the same person in
     # episode two dressed by whatever the screenwriter invented that morning.
     wardrobe: str = Field("", max_length=2000)
+
+
+class SeriesCreateRequest(BaseModel):
+    """A series is created empty and then commissions episodes.
+
+    Everything here is a LOCK, not a preference: every episode of a series is
+    made the same way, and a season that changes language or aspect ratio
+    halfway through is not a season. The per-episode request may add an idea
+    for what happens next; it may not argue with these.
+    """
+
+    title: str = Field(..., min_length=1, max_length=200)
+    premise: str = Field(..., min_length=3, max_length=2000)
+    language: str = "en"
+    aspect_ratio: str = Field(default="9:16", pattern=r"^(16:9|9:16|1:1)$")
+    narrative_mode: str = Field(
+        default="micro_drama", pattern=r"^(cinematic|micro_drama)$"
+    )
+    director_style: str = "cinematic_balanced"
+    style: str = "Cinematic"
+    num_scenes: int = Field(default=3, ge=2, le=24)
+    delivery_tier: str = Field(default="", pattern=r"^(|480p|720p|1080p|1440p|4k)$")
+    # Optional opening cast, in ORDER: the order decides which side of frame
+    # each character lives on for the whole series (see interfaces/series.Series
+    # .cast). Characters the first episode invents join it afterwards.
+    cast: List[LibraryCharacterIn] = Field(default_factory=list)
+
+
+class EpisodeRequest(BaseModel):
+    # What this episode is about, in the user's words. Optional on purpose:
+    # the point of a series is that the previous episode's last frame already
+    # says what happens next, so "" commissions exactly that.
+    idea: str = Field(default="", max_length=2000)
+    user_requirement: str = ""
+    music_enabled: bool = False
+    dialogue_enabled: bool = False
+    lipsync_enabled: bool = False
+    require_script_approval: bool = False
 
 
 class GenerateResponse(BaseModel):
@@ -1065,6 +1110,7 @@ async def generate(
                 "static_features": c.static_features.strip(),
                 "portrait_url": c.portrait_url.strip(),
                 "voice_id": (c.voice_id or "").strip(),
+                "wardrobe": (c.wardrobe or "").strip(),
             }
             for c in req.library_characters
             if c.name.strip() and c.static_features.strip() and c.portrait_url.strip()
@@ -1951,6 +1997,199 @@ async def delete_character(
     if not ok:
         raise HTTPException(status_code=404, detail="Character not found")
     return {"ok": True}
+
+
+# ── Series (Pro) ──────────────────────────────────────────────────────────────
+#
+# The unit the market buys is sixty to ninety episodes of one story, and until
+# this existed every episode was a pilot: the cast was relockable, the room was
+# relockable, and the thing that makes episode two a SEQUEL -- what happened,
+# who knows it, what the last frame left open -- was written to the result and
+# read by nobody. See interfaces/series.
+
+
+@app.post("/api/series")
+async def create_series(
+    req: SeriesCreateRequest,
+    current_user: AuthUser = Depends(get_current_user),
+):
+    """Start a series. Free: nothing is generated until an episode is ordered."""
+    plan = await _get_user_plan(current_user.user_id)
+    if plan != "pro":
+        raise HTTPException(
+            status_code=403, detail="Series are available on the Pro plan only."
+        )
+    _enforce_plan_scene_limit(plan, req.num_scenes)
+
+    series = Series(
+        title=req.title.strip(),
+        premise=req.premise.strip(),
+        language=normalize_language(req.language),
+        aspect_ratio=req.aspect_ratio,
+        narrative_mode=req.narrative_mode,
+        director_style=req.director_style,
+        style=req.style,
+        num_scenes=req.num_scenes,
+        delivery_tier=resolve_delivery_tier(req.delivery_tier, plan),
+        cast=[
+            SeriesCharacter(
+                name=c.name.strip(),
+                description=c.static_features.strip(),
+                wardrobe=(c.wardrobe or "").strip(),
+                portrait_url=c.portrait_url.strip(),
+                voice_id=(c.voice_id or "").strip(),
+            )
+            for c in req.cast
+        ],
+    )
+    if req.director_style not in DIRECTOR_STYLES:
+        raise HTTPException(status_code=400, detail="Unknown director style")
+
+    stored = await series_store.create(current_user.user_id, series)
+    return stored.as_dict()
+
+
+@app.get("/api/series")
+async def list_series(current_user: AuthUser = Depends(get_current_user)):
+    plan = await _get_user_plan(current_user.user_id)
+    if plan != "pro":
+        # Hidden rather than refused, exactly like the character library.
+        return {"series": []}
+    return {
+        "series": [s.as_dict() for s in await series_store.list_for(current_user.user_id)]
+    }
+
+
+@app.get("/api/series/{series_id}")
+async def get_series(
+    series_id: str, current_user: AuthUser = Depends(get_current_user)
+):
+    series = await series_store.get(current_user.user_id, series_id)
+    if not series:
+        raise HTTPException(status_code=404, detail="Series not found")
+    return series.as_dict()
+
+
+@app.delete("/api/series/{series_id}")
+async def delete_series(
+    series_id: str, current_user: AuthUser = Depends(get_current_user)
+):
+    """Forget the series. The episodes are finished videos and are not touched:
+    they were paid for, they still play, and they still live under their own
+    job ids."""
+    if not await series_store.delete(current_user.user_id, series_id):
+        raise HTTPException(status_code=404, detail="Series not found")
+    return {"ok": True}
+
+
+@app.post("/api/series/{series_id}/episodes")
+async def commission_episode(
+    series_id: str,
+    req: EpisodeRequest,
+    background_tasks: BackgroundTasks,
+    current_user: AuthUser = Depends(get_current_user),
+):
+    """Order the next episode of a series.
+
+    Costs exactly what the same drama would cost on its own -- a series is a
+    memory, not a surcharge. What it changes is what the screenwriter is
+    given: the locked cast, the production locks, the story so far and the
+    question the last episode's final frame left open.
+
+    The episode NUMBER is claimed before the render starts, because it is part
+    of the brief the script is written against ("THIS IS EPISODE 7"), and two
+    episodes ordered a second apart must not both be seven.
+    """
+    plan = await _get_user_plan(current_user.user_id)
+    if plan != "pro":
+        raise HTTPException(
+            status_code=403, detail="Series are available on the Pro plan only."
+        )
+    series = await series_store.get(current_user.user_id, series_id)
+    if not series:
+        raise HTTPException(status_code=404, detail="Series not found")
+
+    demo = _is_demo()
+    music_enabled = bool(req.music_enabled)
+    dialogue_enabled = bool(req.dialogue_enabled) and is_dialogue_enabled()
+    lipsync_enabled = (
+        dialogue_enabled and bool(req.lipsync_enabled) and _lipsync_configured()
+    )
+    if not req.require_script_approval and not demo:
+        credit_cost = build_credit_breakdown(
+            series.num_scenes,
+            music_enabled=music_enabled,
+            dialogue_enabled=dialogue_enabled,
+            lipsync_enabled=lipsync_enabled,
+            plan=plan,
+            language=series.language,
+        )["total_credits"]
+        ok = await _deduct_credits(
+            current_user.user_id, credit_cost, "series_episode"
+        )
+        if not ok:
+            raise HTTPException(
+                status_code=402,
+                detail=(
+                    f"Insufficient credits. You need {credit_cost} credits for "
+                    "this episode. Please top up your balance."
+                ),
+            )
+
+    # Built BEFORE the number is claimed: the brief describes the series as it
+    # stands, and next_number is what the placeholder then takes.
+    brief = continuity_brief(series)
+    job = await job_store.create(
+        # An episode of a running series does not need an idea, and the
+        # default says so in the only words that matter to a screenwriter:
+        # what the last frame left open is the idea.
+        idea=(req.idea or "").strip() or _next_episode_idea(series),
+        style=series.style,
+        director_style=series.director_style,
+        aspect_ratio=series.aspect_ratio,
+        num_scenes=series.num_scenes,
+        user_requirement=req.user_requirement,
+        language=series.language,
+        narrative_mode=series.narrative_mode,
+        delivery_tier=series.delivery_tier,
+        demo=demo,
+        user_id=current_user.user_id,
+        user_email=current_user.email,
+        music_enabled=music_enabled,
+        dialogue_enabled=dialogue_enabled,
+        lipsync_enabled=lipsync_enabled,
+        plan=plan,
+        require_script_approval=bool(req.require_script_approval),
+        library_characters=series.preset_characters(),
+        series_id=series.id,
+        series_brief=brief,
+    )
+    job.episode_number = series_store.reserve_episode(series, job.id)
+    await series_store.save(current_user.user_id, series)
+
+    background_tasks.add_task(run_generation_job, job, os.environ.get("MUAPI_KEY", ""))
+    return {
+        "job_id": job.id,
+        "series_id": series.id,
+        "episode_number": job.episode_number,
+        "demo": demo,
+    }
+
+
+def _next_episode_idea(series: Series) -> str:
+    """What to write when the user says nothing.
+
+    A series that has left a question open has already said what the next
+    episode is about, and asking the user to retype it is asking them to
+    summarise their own cliffhanger. Episode one with no idea falls back to
+    the premise, which is the only thing that exists yet.
+    """
+    if series.open_question:
+        return (
+            f"Answer what happens next: {series.open_question}. "
+            f"{series.premise}".strip()
+        )
+    return series.premise
 
 
 # ── Auth helper ───────────────────────────────────────────────────────────────

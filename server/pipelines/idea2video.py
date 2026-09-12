@@ -6206,6 +6206,7 @@ class Idea2VideoPipeline:
         language: str = DEFAULT_LANGUAGE,
         dialogue_enabled: bool = False,
         narrative_mode: str = "",
+        series_brief: str = "",
     ) -> DramaScript:
         """Phase A: screenwriting only — no portraits / frames / video."""
 
@@ -6235,6 +6236,11 @@ class Idea2VideoPipeline:
             # Cinematic or micro-drama: two different dramatic curves, not one
             # curve at two lengths (see interfaces/micro_drama).
             narrative_mode=narrative_mode,
+            # What has already happened, when this is an episode of a series
+            # rather than a film on its own (see interfaces/series). Empty for
+            # every standalone drama, which is every drama this made before
+            # series existed.
+            series_brief=series_brief,
         )
 
     async def continue_from_script(
@@ -7364,6 +7370,7 @@ class Idea2VideoPipeline:
         language: str = DEFAULT_LANGUAGE,
         narrative_mode: str = "",
         delivery_tier: str = "",
+        series_brief: str = "",
     ) -> dict:
         """Full end-to-end run (script + production). Default path unchanged."""
         script = await self.write_script_only(
@@ -7377,6 +7384,7 @@ class Idea2VideoPipeline:
             language=language,
             dialogue_enabled=dialogue_enabled,
             narrative_mode=narrative_mode,
+            series_brief=series_brief,
         )
         return await self.continue_from_script(
             script=script,

@@ -10,6 +10,7 @@ from interfaces import gender as gender_of
 from interfaces.character import CharacterProfile, DramaScript, ScriptScene
 from interfaces.language import DEFAULT_LANGUAGE, is_default, name_of
 from interfaces.micro_drama import SCREENWRITER_CLAUSE, is_micro_drama
+from interfaces.series import SCREENWRITER_CLAUSE as SERIES_CLAUSE
 from interfaces.second_budget import (
     MAX_SCENE_SECONDS,
     MIN_SCENE_SECONDS,
@@ -101,6 +102,19 @@ def _preset_line(name: str, features: str, wardrobe: Optional[str] = None) -> st
         f"- {name}: {features} | WARDROBE (locked, use verbatim in this "
         f"character's \"wardrobe\" field and do not restyle it): {outfit}"
     )
+
+
+def _series_block(series_brief: str) -> str:
+    """The continuity brief, as the writer of episode N reads it.
+
+    FIRST in the prompt, ahead of the preset cast and the idea. An episode's
+    idea is a suggestion for what happens next; what has already happened is
+    not, and a model weights the opening of its prompt hardest.
+    """
+    brief = str(series_brief or "").strip()
+    if not brief:
+        return ""
+    return f"SERIES CONTINUITY (binding — this episode continues it):\n{brief}\n\n"
 
 
 class ScriptGenerationFailed(Exception):
@@ -441,6 +455,7 @@ into a single scene rather than adding one."""
         require_dialogue: bool = False,
         narrative_mode: str = "",
         num_scenes: int = 0,
+        is_episode: bool = False,
     ) -> str:
         """The system prompt for this drama's language, audio mode and length.
 
@@ -475,6 +490,13 @@ into a single scene rather than adding one."""
         # that is neither (see interfaces/micro_drama).
         if is_micro_drama(narrative_mode):
             prompt += SCREENWRITER_CLAUSE
+        # After the micro-drama clause and last of all, for the same reason it
+        # is late: an episode of a running series has to contradict the
+        # instinct every fresh prompt produces -- introduce these people,
+        # establish this place -- and the viewer of episode nine has met them
+        # eight times (see interfaces/series).
+        if is_episode:
+            prompt += SERIES_CLAUSE
         return prompt
 
     async def write_script(
@@ -487,6 +509,11 @@ into a single scene rather than adding one."""
         language: str = DEFAULT_LANGUAGE,
         require_dialogue: bool = False,
         narrative_mode: str = "",
+        #: What has already happened in this series, if this is an episode of
+        #: one (interfaces/series.continuity_brief). Facts, not rules: the
+        #: rules ride in the system prompt, where a model reads them as
+        #: instruction rather than as material.
+        series_brief: str = "",
     ) -> DramaScript:
         # Demo mode must stay fast and free of real network calls --
         # matches MuAPIImageGenerator/MuAPIVideoGenerator's demo behavior.
@@ -511,6 +538,7 @@ into a single scene rather than adding one."""
                 )
 
         prompt = (
+            f"{_series_block(series_brief)}"
             f"{preset_block}"
             f"Idea: {idea}\nStyle: {style}\nScenes: {num_scenes}\n"
             f"Additional requirements: {user_requirement or 'none'}"
@@ -524,7 +552,11 @@ into a single scene rather than adding one."""
             try:
                 content = await complete_via_muapi(
                     self._system_prompt(
-                        language, require_dialogue, narrative_mode, num_scenes
+                        language,
+                        require_dialogue,
+                        narrative_mode,
+                        num_scenes,
+                        bool(series_brief),
                     ),
                     prompt,
                     max_tokens=self.MAX_SCRIPT_TOKENS,
@@ -557,6 +589,7 @@ into a single scene rather than adding one."""
                 language,
                 require_dialogue,
                 narrative_mode,
+                series_brief,
             )
 
         # 3) No provider answered. The deterministic template is NOT an
@@ -947,6 +980,7 @@ into a single scene rather than adding one."""
         language: str = DEFAULT_LANGUAGE,
         require_dialogue: bool = False,
         narrative_mode: str = "",
+        series_brief: str = "",
     ) -> DramaScript:
         import anthropic
 
@@ -966,6 +1000,7 @@ into a single scene rather than adding one."""
                     + "\n"
                 )
         prompt = (
+            f"{_series_block(series_brief)}"
             f"{preset_block}"
             f"Idea: {idea}\nStyle: {style}\nScenes: {num_scenes}\n"
             f"Additional requirements: {user_requirement or 'none'}"
@@ -993,7 +1028,11 @@ into a single scene rather than adding one."""
                 model="claude-sonnet-5",
                 max_tokens=self.MAX_SCRIPT_TOKENS,
                 system=self._system_prompt(
-                    language, require_dialogue, narrative_mode, num_scenes
+                    language,
+                    require_dialogue,
+                    narrative_mode,
+                    num_scenes,
+                    bool(series_brief),
                 ),
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:

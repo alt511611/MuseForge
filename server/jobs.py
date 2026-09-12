@@ -165,6 +165,11 @@ def _sb_row_to_dict(row: dict) -> dict:
         # written on the result (see interfaces/delivery). A job stored before
         # tiers existed reports "", which is what every one of them shipped at.
         "delivery_tier": result.get("delivery_tier") or "",
+        # Not columns either, and recovered the same way: an episode records
+        # which series it belongs to on its own result, so a job replayed from
+        # storage still knows it is episode seven of something.
+        "series_id": result.get("series_id") or "",
+        "episode_number": int(result.get("episode_number") or 0),
         "demo": row.get("demo", False),
         "music_enabled": row.get("music_enabled", False),
         "dialogue_enabled": row.get("dialogue_enabled", False),
@@ -414,6 +419,17 @@ class Job:
     # "cinematic" or "micro_drama" -- the dramatic shape the script is written
     # to, and whether the finished cut gets a cold-open hook.
     narrative_mode: str = "cinematic"
+    # Which series this job is an episode of, and which episode it is. Both
+    # absent from _sb_row, like language and delivery_tier: they are needed
+    # while the run is in flight and are recorded on the series itself
+    # afterwards, which is the object that actually remembers them.
+    series_id: str = ""
+    episode_number: int = 0
+    # What has already happened in that series, as the screenwriter reads it
+    # (interfaces/series.continuity_brief). Built when the episode is
+    # commissioned rather than when it renders, so the episode is written
+    # against the series as it stood when the user pressed the button.
+    series_brief: str = ""
     # The size the finished master is delivered at (see interfaces/delivery).
     # Absent from _sb_row for the same reason `language` is -- it matters
     # while the run is in flight and is recorded on the result afterwards,
@@ -486,6 +502,8 @@ class Job:
             "language": self.language,
             "narrative_mode": self.narrative_mode,
             "delivery_tier": self.delivery_tier,
+            "series_id": self.series_id,
+            "episode_number": self.episode_number,
             "demo": self.demo,
             "user_id": self.user_id,
             "user_email": self.user_email,
@@ -997,6 +1015,44 @@ async def _refund_undelivered_extras(job: Job, result: Dict[str, Any]) -> None:
     await _sb_refund_credits(job.user_id, amount, job.id)
 
 
+async def _record_series_episode(job: Job, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Fold a finished episode into the series that commissioned it.
+
+    Stamps the result first, so the episode knows what it is even if the
+    series is gone, and then updates the series: its cast picks up whatever
+    this episode locked, its rolling summary advances, and its open question
+    becomes this episode's cliffhanger -- the field that has been written by
+    every micro-drama and read by nothing (see interfaces/series).
+
+    Never raises. A series is a memory wrapped around jobs that are stored
+    independently; losing the bookkeeping must not lose a delivered episode.
+    """
+    if not (job.series_id and job.episode_number):
+        return result
+    result = {
+        **result,
+        "series_id": job.series_id,
+        "episode_number": job.episode_number,
+    }
+    if not job.user_id:
+        return result
+    try:
+        from series_store import record_episode
+
+        await record_episode(
+            job.user_id, job.series_id, job.episode_number, job.id, result
+        )
+    except Exception as exc:
+        logger.warning(
+            "Episode %s of series %s was delivered but not recorded on the "
+            "series: %s",
+            job.episode_number,
+            job.series_id,
+            exc,
+        )
+    return result
+
+
 async def run_generation_job(job: Job, api_key: str):
     """Start a job. If require_script_approval, stop after screenwriting."""
     logger.info("run_generation_job ENTERED for job %s", job.id)
@@ -1113,6 +1169,7 @@ async def run_generation_job(job: Job, api_key: str):
                         # approved.
                         dialogue_enabled=job.dialogue_enabled,
                         narrative_mode=job.narrative_mode,
+                        series_brief=job.series_brief,
                     ),
                     timeout=PIPELINE_HARD_TIMEOUT_SECONDS,
                 )
@@ -1161,6 +1218,7 @@ async def run_generation_job(job: Job, api_key: str):
                     language=job.language,
                     narrative_mode=job.narrative_mode,
                     delivery_tier=job.delivery_tier,
+                    series_brief=job.series_brief,
                     working_dir=working_dir,
                     progress_callback=progress_callback,
                     is_cancelled=is_cancelled,
@@ -1179,6 +1237,7 @@ async def run_generation_job(job: Job, api_key: str):
                 await job_store.emit(job, "cancelled", "Generation cancelled", 100)
                 await job_store.persist(job)
                 return
+            result = await _record_series_episode(job, result)
             job.result = result
             # Before COMPLETED is persisted, so the balance the user sees when
             # the job lands is already the corrected one.
@@ -1656,7 +1715,7 @@ async def run_continue_from_script_job(job: Job, api_key: str, script_data: Dict
             cleanup_working_dir(working_dir)
             return
         # Keep approved script alongside final result for the UI.
-        result = {**result, "script": script_data}
+        result = await _record_series_episode(job, {**result, "script": script_data})
         job.result = result
         job.status = JobStatus.COMPLETED
         await job_store.persist(job)

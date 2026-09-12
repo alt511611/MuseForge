@@ -528,3 +528,49 @@ union all
 select 'creator',          16, 16, false
 union all
 select 'pro',              36, 24, true;
+
+-- ── Series: the unit the market actually buys ────────────────────────────────
+--
+-- A single drama is a demo; what distributors and platforms commission is
+-- sixty to ninety episodes of one story. Every piece of that was already here
+-- (the character library locks a face, a wardrobe and a voice; the setting and
+-- the look are locked per drama) except the one that makes episode two a
+-- SEQUEL rather than a second pilot: what has happened, who knows it, and the
+-- question the last frame left open. The screenwriter has been writing that
+-- last one into every micro-drama's `cliffhanger` since the format existed,
+-- and nothing has ever read it.
+--
+-- One row per series holding the whole bible as JSON, because every read of
+-- this object is a read of all of it: commissioning episode forty needs the
+-- cast, the production locks, the rolling summary and the last cliffhanger in
+-- the same breath. `title` and `episode_count` are columns as well so a
+-- listing can order and count without parsing documents it did not ask for.
+-- Code: server/interfaces/series.py, server/series_store.py
+create table if not exists public.series (
+  id            uuid primary key default gen_random_uuid(),
+  user_id       uuid not null references auth.users(id) on delete cascade,
+  title         text not null,
+  premise       text not null default '',
+  episode_count int  not null default 0,
+  bible         jsonb not null default '{}'::jsonb,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()
+);
+
+create index if not exists series_user_idx on public.series (user_id, created_at desc);
+
+drop trigger if exists series_updated_at on public.series;
+create trigger series_updated_at
+  before update on public.series
+  for each row execute procedure public.set_updated_at();
+
+alter table public.series enable row level security;
+
+create policy "users manage own series"
+  on public.series
+  for all
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+grant select, insert, update, delete on public.series to authenticated;
+grant all on public.series to service_role;
