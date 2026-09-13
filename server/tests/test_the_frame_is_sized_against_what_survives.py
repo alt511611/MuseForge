@@ -164,13 +164,35 @@ def test_the_one_hander_still_keeps_its_wardrobe():
 
 
 def test_both_faces_are_locked_whatever_else_is_paid():
-    """The line none of this crosses. The budget comes out of wardrobe prose,
-    which the costume lock still covers -- never out of a described face."""
+    """Both people are still named and still described -- and so are their
+    clothes.
+
+    This test used to read "the budget comes out of wardrobe prose, which the
+    costume lock still covers -- never out of a described face", and asserted
+    every clause of both descriptions down to a scar and a broken nose. The
+    first half of that sentence was wrong about what the costume lock covers.
+    With the wardrobe gone the lock falls back to "everyone wears the EXACT
+    outfit from the reference image", and the reference image is a face:
+    interfaces/character.wardrobe says so outright, and job 8b8fce47-445 shows
+    what it is worth -- one face, consistent across six shots, in a slicker
+    that buttoned then zipped then hung open, went matte then glossy, and put
+    its reflective band on the chest, then the sleeves, then nowhere.
+
+    The two halves of an entry are not equal, but not in the direction this
+    assumed. A face is carried by the locked portrait every frame is drawn
+    from; a costume is carried by nothing but these words. So the entry is
+    compacted from the tail on BOTH sides now -- each description keeps the
+    clauses it opens with, which is where a face is identified (gender, age,
+    the primary feature), and gives up the ones a reference picture is
+    already holding.
+    """
     prompt = _prompt()
 
-    for face in (
-        "Mara Vance", "sharp cheekbones", "thin scar through one eyebrow",
-        "Tomas Rye", "shadowed jaw", "crooked nose broken once",
-    ):
+    for face in ("Mara Vance", "sharp cheekbones", "Tomas Rye", "lean build"):
         assert face in prompt, face
+    for garment in ("black tailored jacket", "dark three-piece suit"):
+        assert garment in prompt, garment
     assert "Costume is LOCKED" in prompt
+    # Named, not deferred to the reference image -- which is the whole point
+    # of keeping the words.
+    assert "each wears the outfit named above" in prompt

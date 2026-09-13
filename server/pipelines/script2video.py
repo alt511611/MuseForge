@@ -262,24 +262,44 @@ def fit_visual_desc(text: str, limit: int = MAX_VISUAL_DESC_CHARS) -> str:
 def _describe_characters(visible, limit=None) -> list:
     """One "Name (looks)" entry per visible character, compacted to fit.
 
-    Three levels, applied only as far as needed: full detail; drop wardrobe
-    (the global "clothing is FIXED" sentence still covers costume drift);
-    then trim each description to its opening clauses, which is where a face
-    is actually described.
+    Compacted, never amputated. Both halves of an entry are anchors, and they
+    are not anchors of equal standing. Every frame is drawn from a reference
+    portrait, and the models that read it bind IDENTITY from it -- flux-pulid
+    is an identity model outright -- so a face that loses half its words still
+    has a picture holding it, while a garment in the same picture is only ever
+    evidence the model may or may not carry across.
+
+    The ladder used to drop the whole wardrobe at its first step, on the
+    reasoning that the global "clothing is FIXED" sentence still covers
+    costume drift. It does not: that sentence fixes nothing a model can draw,
+    because it names no garment. Delivered job 1ac6d945-b53 is the proof and
+    reads as its own diagnosis -- one face, consistent in all six shots, in
+    four different yellow jackets in thirty seconds (a matte field jacket, a
+    belted coverall with reflective stripes, a single-stripe jacket, a glossy
+    PVC bomber). An anchored face and an unanchored costume is exactly the
+    signature of a prompt that spent the costume to keep the face.
+
+    So each level shortens both, and the wardrobe only goes when trimming has
+    run out -- the floor that keeps a very large cast inside the budget at
+    all.
     """
 
-    def render(with_wardrobe=True, feature_chars=None):
+    def render(wardrobe_chars=None, feature_chars=None, with_wardrobe=True):
         out = []
         for c in visible:
-            features = (getattr(c, "static_features", "") or "").strip()
+            features = _shorten(
+                (getattr(c, "static_features", "") or "").strip(), feature_chars
+            )
             if not features:
                 continue
-            if feature_chars and len(features) > feature_chars:
-                features = features[:feature_chars].rsplit(",", 1)[0].rstrip(" ,")
             # Wardrobe is stated alongside the face: the reference image
             # fixes identity but not costume, so an unstated outfit drifts
             # scene to scene.
-            wardrobe = (getattr(c, "wardrobe", "") or "").strip() if with_wardrobe else ""
+            wardrobe = (
+                _shorten((getattr(c, "wardrobe", "") or "").strip(), wardrobe_chars)
+                if with_wardrobe
+                else ""
+            )
             detail = f"{features}, wearing {wardrobe}" if wardrobe else features
             out.append(f"{c.name} ({detail})")
         return out
@@ -289,14 +309,56 @@ def _describe_characters(visible, limit=None) -> list:
         return described
 
     for attempt in (
-        lambda: render(with_wardrobe=False),
-        lambda: render(with_wardrobe=False, feature_chars=90),
-        lambda: render(with_wardrobe=False, feature_chars=45),
+        # The face first, because the face is the half with a picture behind
+        # it. A description opens with gender and age and spends its tail on
+        # detail no reference model needs told twice.
+        lambda: render(feature_chars=90),
+        lambda: render(feature_chars=90, wardrobe_chars=90),
+        lambda: render(feature_chars=45, wardrobe_chars=60),
+        # Who they are and what they have on, and not one word more.
+        # build_frame_prompt floors the identity budget at 200 characters,
+        # which a crowded two-hander reaches, and inside that floor a pair of
+        # entries can hold an opening clause and a garment each. Measured
+        # rather than guessed at: it is the wardrobe that gets the larger
+        # share here, because "woman in her fifties" is the whole of what a
+        # description has to say once a portrait is carrying the face, while
+        # "matte yellow hooded rain" without its noun is not a garment.
+        lambda: render(feature_chars=30, wardrobe_chars=45),
+        # Only here, and only because something has to fit: an entry with no
+        # clothes in it still names a face, and a prompt that overruns is
+        # truncated by the provider at whatever word it happens to reach.
+        lambda: render(feature_chars=45, with_wardrobe=False),
     ):
         if sum(len(d) + 2 for d in described) <= limit:
             break
         described = attempt()
     return described
+
+
+def _shorten(text: str, chars) -> str:
+    """``text`` cut back to whole clauses, at most ``chars`` long.
+
+    Cut at a comma so a trimmed description ends on something a model can
+    read, rather than mid-phrase: "a woman in her fifties, weathered face"
+    and never "a woman in her fifties, weathe".
+
+    But only a comma in the second half of the budget. A wardrobe is written
+    head DOWN -- the screenwriter prompt demands it, so that the same worker
+    does not end up in a beanie, then a hard hat, then neither -- which puts
+    the headwear in the first clause and the garment in the second. Taking
+    the last comma wherever it falls then trims "hood up, matte yellow hooded
+    rain slicker, zipped to the throat, ..." down to "hood up": a hood, no
+    coat, and a prompt that reads as though the character were told to wear
+    nothing else. A ragged word boundary keeps the garment, and the garment is
+    the whole point of the field.
+    """
+    if not chars or len(text) <= chars:
+        return text
+    head = text[:chars]
+    cut = head.rfind(",")
+    if cut >= chars // 2:
+        return head[:cut].rstrip(" ,")
+    return head.rsplit(" ", 1)[0].rstrip(" ,") or head.rstrip(" ,")
 
 
 #: The fixed sentences build_character_identity_clause wraps around the
