@@ -9,6 +9,7 @@ from typing import List, Optional
 from interfaces import gender as gender_of
 from interfaces.character import CharacterProfile, DramaScript, ScriptScene
 from interfaces.language import DEFAULT_LANGUAGE, is_default, name_of
+from interfaces.lighting import GOES_DARK_PATTERNS
 from interfaces.micro_drama import SCREENWRITER_CLAUSE, is_micro_drama
 from interfaces.series import SCREENWRITER_CLAUSE as SERIES_CLAUSE
 from interfaces.second_budget import (
@@ -705,13 +706,19 @@ into a single scene rather than adding one."""
         )
         script.scenes = scenes
 
-    #: Unmistakable, world-SCALE changes of state, matched against the brief.
-    #: Deliberately short and blunt: this list decides whether a scene gets to
-    #: break the drama's locked lighting, so a false positive is expensive and
-    #: a miss costs only what the product already does today. Ambiguous verbs
-    #: are left out on purpose -- "burns" is as often a candle as a warehouse,
-    #: and "stops" is usually a person.
-    #: The event cues, grouped by the CHANGE they describe.
+    #: A flood is WATER arriving. Without that subject the word is ordinary
+    #: weather and ordinary metaphor: the same delivered script has Mara
+    #: crossing "the flooded aisle" and the container's "light floods out
+    #: across the flooded dock" -- three uses, none of them an event, and
+    #: between them enough matches to make the real climax unreadable.
+    _WATER = r"(?:water|seawater|sea|river|tide|waves?|surge|storm ?surge)"
+
+    #: Unmistakable, world-SCALE changes of state, matched against the brief,
+    #: grouped by the CHANGE they describe. Deliberately short and blunt: this
+    #: list decides whether a scene gets to break the drama's locked lighting,
+    #: so a false positive is expensive and a miss costs only what the product
+    #: already does today. Ambiguous verbs are left out on purpose -- "burns"
+    #: is as often a candle as a warehouse, and "stops" is usually a person.
     #:
     #: The grouping is what lets "has the film already got the brief's event?"
     #: be a real question rather than "is the field filled?". A script that
@@ -720,46 +727,13 @@ into a single scene rather than adding one."""
     #: declare the container's own glow. The brief's blackout is then never
     #: restored, the locked lighting is broken for a spill of blue instead, and
     #: the film's whole reason for existing stays off screen.
-    #: What can stop carrying light, and the verbs for stopping. Composed
-    #: rather than listed one phrasing at a time because the noun is the part
-    #: a writer varies: the brief says "the city's power dies" and the script
-    #: says "every lamp on the quay goes out at once", which is the same event
-    #: and shares not one word of its phrasing.
-    _LIGHT_SOURCE = (
-        r"(?:power|grid|electricity|lights?|lamps?|streetlights?|floodlights?)"
-    )
-    _GOES_OUT = (
-        r"(?:dies|die|goes? out|go out|fails?|fail|cuts? out|is cut|goes? down)"
-    )
-    #: Going dark, as a writer actually writes it. The delivered script's
-    #: climax reads "every sodium lamp on the harbour and every light across
-    #: the distant city skyline SNAPS TO BLACK" -- the film's whole event, in
-    #: the plainest words available, and "goes dark" was the only shape this
-    #: recognised.
-    _TO_BLACK = (
-        r"(?:go(?:es)?|went|snaps?|snapped|cuts?|drops?|falls?|plunge[sd]?)\s+"
-        r"(?:to|into)?\s*(?:black|dark|darkness)"
-    )
-    #: A flood is WATER arriving. Without that subject the word is ordinary
-    #: weather and ordinary metaphor: the same delivered script has Mara
-    #: crossing "the flooded aisle" and the container's "light floods out
-    #: across the flooded dock" -- three uses, none of them an event, and
-    #: between them enough matches to make the real climax unreadable.
-    _WATER = r"(?:water|seawater|sea|river|tide|waves?|surge|storm ?surge)"
-
     _WORLD_EVENT_FAMILIES = {
-        "blackout": (
-            # A short gap only: enough for "every lamp ON THE QUAY goes out",
-            # not enough to marry a light in one clause to a verb in the next.
-            rf"\b{_LIGHT_SOURCE}\b[^.;]{{0,30}}?\b{_GOES_OUT}\b",
-            _TO_BLACK,
-            r"black(?:s)? out",
-            r"blackout",
-            r"elektri(?:k|ği|kler)\w* (?:kesil\w+|gider|gidiyor)",
-            r"ışıklar\w* sön\w+",
-            r"karanlığa göm\w+",
-            r"kararır|kararıyor",
-        ),
+        # Imported, not restated. The frame prompt asks the same question of
+        # the same words -- "does this event put the lights out?" -- to decide
+        # whether the setting line's own lamps may still light the frame, and
+        # two copies of this list were never going to stay in step. See
+        # interfaces.lighting.extinguishes_light.
+        "blackout": GOES_DARK_PATTERNS,
         "flood": (
             rf"\b{_WATER}\b[^.;]{{0,40}}?\bfloods?\b",
             rf"\bfloods?\b[^.;]{{0,40}}?\b{_WATER}\b",

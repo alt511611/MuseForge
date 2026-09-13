@@ -168,6 +168,13 @@ async def test_global_edit_moves_the_lock_then_re_renders_every_affected_scene(
     assert edited["portraits"]["Kemal"] != original_portrait
     assert any("red coat" in p for p in fake_providers["edit_prompts"])
 
+    # And the new lock is a picture of the coat. This path exists to change
+    # clothes, so a portrait cropped at the collar would answer a request
+    # about a coat with a photograph that does not show one -- and the
+    # portrait it replaces is framed to carry the costume (see
+    # COSTUME_IS_IN_THE_PORTRAIT), so cropping here would also lose it.
+    assert any("Framed from the hips up" in p for p in fake_providers["edit_prompts"])
+
     # Kemal is in all three scenes, so all three are re-rendered — and no more.
     assert fake_providers["videos"] == videos_after_render + 3
     spliced = json.load(open(edited["video_path"]))

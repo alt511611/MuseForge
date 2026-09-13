@@ -226,15 +226,31 @@ def test_a_two_shot_spends_its_settled_wardrobes_on_the_axis():
     assert "The cast is closed" in prompt
 
 
-def test_and_it_never_spends_a_face_to_pay_for_them():
-    """The line the compaction is not allowed to cross. Wardrobe prose is the
-    covered loss; a face is not covered by anything, and both of them are
-    still described in full alongside the axis the garments paid for."""
+def test_and_it_pays_for_them_from_the_half_that_has_a_picture():
+    """What the compaction gives up, and from which half.
+
+    This test used to require both descriptions in full, on the reasoning
+    that "wardrobe prose is the covered loss; a face is not covered by
+    anything". The second clause is the one that does not survive contact
+    with this file's own evidence: the frame is drawn from a locked portrait,
+    so the face is covered by a picture, and job 8b8fce47-445's six shots are
+    what an uncovered costume looks like beside a covered face.
+
+    So both halves are trimmed from the tail instead, and each keeps what it
+    opens with -- a description opens with gender and age because the
+    screenwriter prompt demands it, and a wardrobe opens with the head for the
+    same reason. What goes is the detail at the end of each: a mole, a pair of
+    earrings, the fourth thing said about a jacket.
+    """
     prompt = _prompt(_yara(), _reyes(), visual_desc=TWO_SHOT)
 
-    for face in (
-        "Yara", "oval face", "long dark hair", "small mole",
-        "Reyes", "weathered brown skin", "greying beard", "tired brown eyes",
-    ):
+    for face in ("Yara", "oval face", "Reyes", "weathered brown skin"):
         assert face in prompt, face
     assert "Costume is LOCKED" in prompt, "the drifting garment still has a lock"
+    # And the lock names garments rather than pointing at a photograph of a
+    # face: with the wardrobe dropped it could only say "the EXACT outfit from
+    # the reference image", which is the sentence job 8b8fce47-445 was
+    # rendered under.
+    assert "each wears the outfit named above" in prompt
+    for garment in ("matte yellow PVC slicker", "dark green oilskin coat"):
+        assert garment in prompt, garment

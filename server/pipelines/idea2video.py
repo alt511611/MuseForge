@@ -3876,6 +3876,43 @@ CHARACTER_SHEET_DIRECTION = (
 )
 
 
+#: How a portrait is framed when it has an outfit to carry.
+#:
+#: The identity lock and the costume lock are the same picture, and only one
+#: of them was being photographed. "Front-facing, neutral expression, studio
+#: lighting, high detail" is a head-and-shoulders portrait, so every property
+#: of a garment below the collar -- how it fastens, its pockets, where its
+#: markings sit, what is on the back -- was named in the prompt and then
+#: absent from the one reference the frames are drawn from. Job 8b8fce47-445
+#: is what that costs: six shots of one consistent face in a slicker that
+#: buttoned, then zipped, then hung open, went matte then glossy, grew flap
+#: pockets then patch pockets then none, and moved its reflective band from
+#: the chest to the sleeves to nowhere. Every one of those is a property a
+#: head-and-shoulders reference cannot hold and text alone has to spell out.
+#:
+#: Emitted only when there IS a wardrobe -- an undressed character has nothing
+#: to widen the frame for, and the shipped portrait prompt stays exactly as it
+#: was for them.
+#:
+#: The face pays a little for this: a hips-up subject in a 1:1 frame is a
+#: smaller face than a head-and-shoulders one, and flux-pulid reads a face.
+#: It is still a large, front-lit, front-facing face -- far past what an
+#: identity embedding needs -- and it is the only reference picture in the
+#: pipeline, so it is also the only place the costume can be locked at all.
+#: Hence "sharp and clearly readable": the trade is bounded on purpose.
+#:
+#: Not applied to the reference SHEET. Four panels of a hips-up figure is four
+#: small faces, and the sheet is a flag-gated path whose whole value is the
+#: angles; a sheet that should also carry the costume is its own change.
+COSTUME_IS_IN_THE_PORTRAIT = (
+    " Framed from the hips up, arms at the sides and hands in frame, so the "
+    "whole of what this character is wearing is visible in the picture -- its "
+    "fastening, its pockets, its markings and whatever is on the head. The "
+    "face stays sharp and clearly readable. This portrait is the costume "
+    "reference as well as the face reference."
+)
+
+
 #: Said only on a photoreal look, and only for a sheet: this is the sentence
 #: that answers the word "sheet", and on a stylised film the style note is
 #: already doing that job in the opposite direction.
@@ -3942,12 +3979,14 @@ class Idea2VideoPipeline:
         async def _portrait(char) -> tuple:
             wardrobe = (getattr(char, "wardrobe", "") or "").strip()
             if not wardrobe:
-                # The one costume anchor this pipeline has is TEXT: a
-                # front-facing portrait binds a face and cannot bind a
-                # garment (interfaces/character.wardrobe says so), and the
+                # With this field empty the character has NO costume anchor of
+                # any kind. There is nothing to dress the portrait in -- so the
+                # costume framing below is not emitted either, and the
+                # reference picture has no outfit in it to carry -- and the
                 # global "clothing is FIXED" sentence in the identity clause
-                # fixes nothing a model can draw. With this field empty every
-                # shot invents an outfit from the brief's adjectives.
+                # fixes nothing a model can draw, because it names no garment.
+                # Every shot then invents an outfit from the brief's
+                # adjectives.
                 #
                 # Delivered job 1ac6d945-b53 wore four different yellow
                 # jackets in thirty seconds -- a matte field jacket, a belted
@@ -3997,6 +4036,10 @@ class Idea2VideoPipeline:
                 # it without wardrobe leaves every scene to invent an outfit.
                 f"{('Wearing ' + wardrobe + '. ') if wardrobe else ''}"
                 f"{CHARACTER_SHEET_DIRECTION if sheet else 'Front-facing, neutral expression, studio lighting, high detail.'}"
+                # The costume half of the same lock. A portrait that stops at
+                # the collar cannot hold a garment, and this portrait is the
+                # only picture any frame of the film is drawn from.
+                f"{COSTUME_IS_IN_THE_PORTRAIT if wardrobe and not sheet else ''}"
                 # "Character reference sheet" is a term of art in ILLUSTRATION,
                 # and a model reading it renders the conventions that go with
                 # it. Job a66acd59's two sheets came back in different media
@@ -5346,6 +5389,12 @@ class Idea2VideoPipeline:
                 "Same person, same face, same age, same hair colour and length, "
                 "same build — change only what the instruction names. "
                 "Front-facing, neutral expression, studio lighting, high detail."
+                # Framed like the portrait it is replacing. This is the
+                # continuity-edit path -- "put her in a red coat" -- so the
+                # picture it produces is a COSTUME reference above all, and a
+                # re-crop to head-and-shoulders here would answer a request
+                # about a coat with a photograph that does not show one.
+                + COSTUME_IS_IN_THE_PORTRAIT
             )
             portraits_override = {
                 name: await self.image_gen.generate_image_with_reference(
