@@ -14,6 +14,7 @@ is the entire point. A vision model asked per shot would answer slightly
 differently each time, which is the problem, not the fix.
 """
 
+import re
 from dataclasses import dataclass
 from typing import Dict, Optional
 
@@ -225,3 +226,71 @@ def resolve_lighting(setting_time_of_day: str = "") -> LightingPlan:
         if key in text:
             return LIGHTING_PLANS[key]
     return DEFAULT_PLAN
+
+
+# ── Going dark ──────────────────────────────────────────────────────────────
+#
+# The plans above answer "how is this place lit?". This answers the one
+# question that overrules them: does the story's event put the lights OUT?
+#
+# It lives here, next to the plans, because two callers need the same answer
+# and were never going to keep two word lists in step. The screenwriter reads
+# it to decide whether a brief's stated event is a blackout (and to restore it
+# onto the climax when the script dropped it); the frame prompt reads it to
+# decide whether the setting line's own lamps may still light the frame.
+
+#: What can stop carrying light, and the verbs for stopping. Composed rather
+#: than listed one phrasing at a time because the noun is the part a writer
+#: varies: the brief says "the city's power dies" and the script says "every
+#: lamp on the quay goes out at once", which is the same event and shares not
+#: one word of its phrasing.
+_LIGHT_SOURCE = (
+    r"(?:power|grid|electricity|lights?|lamps?|streetlights?|floodlights?)"
+)
+_GOES_OUT = (
+    r"(?:dies|die|goes? out|go out|fails?|fail|cuts? out|is cut|goes? down)"
+)
+#: Going dark, as a writer actually writes it. A delivered script's climax
+#: reads "every sodium lamp on the harbour and every light across the distant
+#: city skyline SNAPS TO BLACK" -- the film's whole event, in the plainest
+#: words available, and "goes dark" was the only shape this recognised.
+_TO_BLACK = (
+    r"(?:go(?:es)?|went|snaps?|snapped|cuts?|drops?|falls?|plunge[sd]?)\s+"
+    r"(?:to|into)?\s*(?:black|dark|darkness)"
+)
+
+#: The blackout cues, as regex sources. Deliberately narrow: every caller
+#: treats "no match" as "this is not a blackout", which is the behaviour the
+#: product already had, while a false match either invents an event or turns
+#: a film's own key light off. Ambiguous verbs are left out on purpose --
+#: "burns" is as often a candle as a warehouse, and "stops" is usually a
+#: person.
+GOES_DARK_PATTERNS = (
+    # A short gap only: enough for "every lamp ON THE QUAY goes out", not
+    # enough to marry a light in one clause to a verb in the next.
+    rf"\b{_LIGHT_SOURCE}\b[^.;]{{0,30}}?\b{_GOES_OUT}\b",
+    _TO_BLACK,
+    r"black(?:s)? out",
+    r"blackout",
+    r"elektri(?:k|ği|kler)\w* (?:kesil\w+|gider|gidiyor)",
+    r"ışıklar\w* sön\w+",
+    r"karanlığa göm\w+",
+    r"kararır|kararıyor",
+)
+
+_GOES_DARK_RE = re.compile("|".join(GOES_DARK_PATTERNS), re.IGNORECASE)
+
+
+def extinguishes_light(text: str) -> bool:
+    """Whether ``text`` describes a light going OUT, rather than coming on.
+
+    The distinction is not cosmetic. A change that makes a named fixture the
+    scene's light ("the single hanging bulb swings wildly") and a change that
+    kills it ("every floodlight on the quay goes out") read almost identically
+    to a substring match, and they want opposite things from the prompt: the
+    first needs the setting's lamp to keep lighting the frame, the second
+    needs it gone. Asking only "do both name the same fixture?" answers the
+    first correctly and the second backwards -- which is how a brief whose
+    event was the city losing power was rendered under every lamp in the yard.
+    """
+    return bool(_GOES_DARK_RE.search(text or ""))

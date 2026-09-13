@@ -25,7 +25,7 @@ from interfaces.delivery import (
     scale_suffix,
     tier_size,
 )
-from interfaces.lighting import is_interior, resolve_lighting
+from interfaces.lighting import extinguishes_light, is_interior, resolve_lighting
 from interfaces.reframe import CENTRE as CENTRE_ANCHOR
 from interfaces.reframe import Anchor
 from interfaces.reframe import crop_filter as build_crop_filter
@@ -933,10 +933,33 @@ def names_the_same_light(setting_text: str, change_text: str) -> bool:
     Both halves must name it. A setting with no light in it has nothing for
     the veto to be wrong about, and a change that does not touch the lighting
     leaves the setting's lamps exactly where the veto wants them.
+
+    Naming it is not enough on its own, because two opposite events name a
+    fixture the same way. "The single hanging bulb swings wildly" makes that
+    bulb the light of the shot, and vetoing it leaves the frame with nothing
+    to be lit by -- the case this function was written for. "Every floodlight
+    on the quay goes out" names the fixture in order to KILL it, and there the
+    veto is the only sentence standing between the setting line and a lit
+    harbour.
+
+    Delivered against the brief "...and the city's power dies the moment she
+    opens it": the locked setting read "rain-soaked cargo harbour, stacked
+    shipping containers under sodium floodlights", the climax declared the
+    blackout in the setting's own vocabulary -- which is the phrasing the
+    screenwriter prompt asks for, "every light in the city and on the docks
+    goes out" -- and this returned True on the shared word. The veto was
+    dropped, the prompt asked for the floodlights and their failure in the
+    same breath, and every lamp in the yard burned through the blackout and
+    the three shots after it.
+
+    So a change that puts the light out is never "the same light": there is
+    no fixture left for the frame to be lit by.
     """
     setting = (setting_text or "").lower()
     change = (change_text or "").lower()
     if not setting or not change:
+        return False
+    if extinguishes_light(change):
         return False
     return any(word in setting and word in change for word in LIGHT_FIXTURES)
 
