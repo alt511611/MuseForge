@@ -204,6 +204,14 @@ def _citations(elements: Sequence["Element"]) -> List[Tuple[Any, str]]:
     same question asked from the other end.
 
     A spelling shared by two characters is dropped rather than guessed. Two
+    CASE-SENSITIVE, deliberately. A character called Will, Rose, Mark or
+    Grace shares a spelling with a word a storyboard uses constantly -- "she
+    will deal", "a rose on the baize" -- and a case-insensitive citation
+    rewrites those into "@Element1", which is not a tighter prompt, it is a
+    prompt that has stopped meaning anything. Names reach a beat capitalised,
+    from a screenwriter; a lowercase match is the common word, not the person.
+
+    A part shared by two characters is dropped rather than guessed. Two
     Kesslers in one scene mean "Kessler" cites nobody in particular, and
     citing the wrong element is worse than citing none: the take then holds
     one face where the script wrote two.
@@ -243,6 +251,15 @@ def _citations(elements: Sequence["Element"]) -> List[Tuple[Any, str]]:
             alternatives = "|".join(re.escape(form) for form in forms)
             patterns.append((re.compile(rf"\b(?:{alternatives})\b"), token))
     return patterns
+            # None is the marker for "claimed by more than one character".
+            # Recorded rather than deleted, so a third character carrying the
+            # same part cannot un-ambiguate it by arriving last.
+            seen[spelling] = token if seen.get(spelling, token) == token else None
+    return [
+        (re.compile(rf"\b{re.escape(spelling)}\b"), token)
+        for spelling, token in sorted(seen.items(), key=lambda kv: -len(kv[0]))
+        if token
+    ]
 
 
 def _cite(text: str, citations: Sequence[Tuple[Any, str]]) -> str:

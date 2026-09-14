@@ -1,7 +1,7 @@
 // MuseForge — Spanish (es).
 //
 // Holds only what is actually translated into Spanish: 343 of the
-// 447 keys in en.js. The remaining 104 fall back to English at
+// 463 keys in en.js. The remaining 120 fall back to English at
 // merge time (lib/i18n/dictionary.getDictionary), so an untranslated string
 // reads as English rather than as a key name -- and stays visible as missing
 // here instead of being hidden behind a copied English value.

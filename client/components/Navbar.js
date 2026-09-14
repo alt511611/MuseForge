@@ -177,6 +177,12 @@ export default function Navbar() {
       <div className="flex items-center gap-2 sm:gap-3">
         <SolutionsDropdown />
 
+        <Link href="/blog"
+          className="hidden sm:inline-flex items-center text-sm transition-colors hover:text-violet-soft"
+          style={{ color: "var(--mf-ink-3)" }}>
+          {t("nav_guides")}
+        </Link>
+
         <Link href="/pricing"
           className="hidden sm:inline-flex items-center text-sm transition-colors hover:text-violet-soft"
           style={{ color: "var(--mf-ink-3)" }}>
@@ -301,6 +307,10 @@ export default function Navbar() {
           <Link href="/pricing" onClick={() => setMobileOpen(false)}
             className="block px-3 py-2.5 rounded-lg text-sm" style={{ color: "var(--mf-ink-2)" }}>
             {t("nav_pricing")}
+          </Link>
+          <Link href="/blog" onClick={() => setMobileOpen(false)}
+            className="block px-3 py-2.5 rounded-lg text-sm" style={{ color: "var(--mf-ink-2)" }}>
+            {t("nav_guides")}
           </Link>
           <p className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide" style={{ color: "var(--mf-ink-4)" }}>{t("nav_solutions")}</p>
           {[

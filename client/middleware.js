@@ -102,6 +102,6 @@ export async function middleware(request) {
 export const config = {
   // Metadata routes and static assets must never be rewritten into /[locale].
   matcher: [
-    "/((?!_next/static|_next/image|api/|auth/|favicon.ico|icon-\\d+\\.png|icon\\.svg|apple-touch-icon\\.png|robots\\.txt|sitemap\\.xml|manifest\\.webmanifest|opengraph-image).*)",
+    "/((?!_next/static|_next/image|api/|auth/|md/|favicon.ico|icon-\\d+\\.png|icon\\.svg|apple-touch-icon\\.png|robots\\.txt|sitemap\\.xml|llms\\.txt|llms-full\\.txt|manifest\\.webmanifest|opengraph-image).*)",
   ],
 };

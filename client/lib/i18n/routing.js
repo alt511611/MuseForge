@@ -14,8 +14,10 @@ import { LOCALE_CODES, DEFAULT_LOCALE, LOCALES } from "./locales";
 
 export { LOCALE_CODES, DEFAULT_LOCALE, LOCALES };
 
-/** Paths that are never localized — auth callbacks, API proxy, assets. */
-export const UNLOCALIZED_PREFIXES = ["/auth", "/api", "/_next"];
+/** Paths that are never localized — auth callbacks, API proxy, assets, and the
+    plain-text article editions under /md (which carry their language in a query
+    parameter instead of a prefix). */
+export const UNLOCALIZED_PREFIXES = ["/auth", "/api", "/_next", "/md"];
 
 export function isLocale(value) {
   return LOCALE_CODES.includes(value);

@@ -1,7 +1,7 @@
 // MuseForge — Vietnamese (vi).
 //
 // Holds only what is actually translated into Vietnamese: 348 of the
-// 447 keys in en.js. The remaining 99 fall back to English at
+// 463 keys in en.js. The remaining 115 fall back to English at
 // merge time (lib/i18n/dictionary.getDictionary), so an untranslated string
 // reads as English rather than as a key name -- and stays visible as missing
 // here instead of being hidden behind a copied English value.

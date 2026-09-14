@@ -1,8 +1,15 @@
-/* Canonical host, e.g. "museforge.ai". Everything else (www, preview aliases
-   pointed at the same app) gets 301'd here so link equity lands on one origin.
-   Kept in sync with NEXT_PUBLIC_SITE_URL, which lib/seo.js also reads. */
+/* Canonical host. Everything else (the apex or www counterpart, preview
+   aliases pointed at the same app) gets 301'd here so link equity lands on one
+   origin. Kept in sync with NEXT_PUBLIC_SITE_URL, which lib/seo.js also reads.
+
+   The value INCLUDES the www, because that is what the host actually serves:
+   museforge.studio 308s to www.museforge.studio. Setting the apex here would
+   add a www -> apex redirect on top of the host's apex -> www one, which is a
+   loop, not a canonicalisation. The `startsWith("www.")` guard in redirects()
+   below is what keeps that from happening -- it emits no rule when the
+   canonical host is already the www one. */
 const SITE_URL = (
-  process.env.NEXT_PUBLIC_SITE_URL || "https://museforge.ai"
+  process.env.NEXT_PUBLIC_SITE_URL || "https://www.museforge.studio"
 ).replace(/\/$/, "");
 const CANONICAL_HOST = new URL(SITE_URL).host;
 

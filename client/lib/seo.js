@@ -12,8 +12,15 @@ import {
   ogLocale,
 } from "./i18n/routing";
 
+/* The fallback is the REAL production origin, not a placeholder.
+   It used to be museforge.ai -- a different, parked domain -- and because
+   NEXT_PUBLIC_SITE_URL was unset on the host, every canonical tag, every
+   hreflang annotation and all 169 sitemap entries pointed at it. Google was
+   being told, on every page, that the real copy lived somewhere else; the
+   somewhere else was an empty page, so nothing on this site was indexed.
+   A fallback that is wrong in production is not a fallback. */
 export const SITE_URL = (
-  process.env.NEXT_PUBLIC_SITE_URL || "https://museforge.ai"
+  process.env.NEXT_PUBLIC_SITE_URL || "https://www.museforge.studio"
 ).replace(/\/$/, "");
 
 export const SITE_NAME = "MuseForge";
@@ -34,9 +41,14 @@ export function absoluteUrl(path = "/") {
  * @param {string} path    unprefixed route, e.g. "/pricing"
  * @param {string} locale  the locale this page is being rendered for
  */
-export function canonical(path = "/", locale = DEFAULT_LOCALE) {
+export function canonical(path = "/", locale = DEFAULT_LOCALE, available = LOCALE_CODES) {
+  /* `available` narrows the cluster for pages that do not exist in every
+     language -- an article written in English and Turkish must not advertise
+     eighteen hreflang targets that 404. x-default stays on the English URL,
+     which every such page has by construction. */
+  const codes = available.length ? available : LOCALE_CODES;
   const languages = Object.fromEntries(
-    LOCALE_CODES.map((code) => [code, withLocale(path, code)])
+    codes.map((code) => [code, withLocale(path, code)])
   );
   return {
     canonical: withLocale(path, locale),
@@ -51,15 +63,27 @@ export function canonical(path = "/", locale = DEFAULT_LOCALE) {
  * into it, so og:locale and og:locale:alternate have to be restated here or
  * every page below the root would lose them.
  */
-export function openGraphFor({ title, description, path = "/", locale = DEFAULT_LOCALE }) {
+export function openGraphFor({
+  title,
+  description,
+  path = "/",
+  locale = DEFAULT_LOCALE,
+  type = "website",
+  available = LOCALE_CODES,
+  article,
+}) {
+  const codes = available.length ? available : LOCALE_CODES;
   return {
-    type: "website",
+    type,
     siteName: SITE_NAME,
     title,
     description,
     url: withLocale(path, locale),
     locale: ogLocale(locale),
-    alternateLocale: LOCALE_CODES.filter((c) => c !== locale).map(ogLocale),
+    alternateLocale: codes.filter((c) => c !== locale).map(ogLocale),
+    /* og:article:* is only meaningful when type is "article"; Facebook ignores
+       the keys otherwise but validators complain about them. */
+    ...(type === "article" && article ? article : {}),
   };
 }
 
@@ -161,4 +185,128 @@ export function JsonLd({ graph }) {
       dangerouslySetInnerHTML={{ __html: JSON.stringify(payload) }}
     />
   );
+}
+
+/* ── Editorial schema ──────────────────────────────────────────────────── */
+
+/**
+ * The Blog node every article hangs off.
+ *
+ * One @id for the collection across all locales, matching how @id is handled
+ * for the organization and the product above: /tr/blog is the Turkish view of
+ * the same publication, not a second one.
+ */
+export function blogSchema(locale = DEFAULT_LOCALE) {
+  return {
+    "@type": "Blog",
+    "@id": `${SITE_URL}/blog/#blog`,
+    url: absoluteUrl(withLocale("/blog", locale)),
+    name: `${SITE_NAME} Guides`,
+    description:
+      "Practical guides to AI filmmaking: character consistency, prompting, shot design, and shipping a series.",
+    publisher: { "@id": `${SITE_URL}/#organization` },
+    inLanguage: LOCALE_CODES.includes(locale) ? locale : DEFAULT_LOCALE,
+  };
+}
+
+/**
+ * BlogPosting for one article.
+ *
+ * `headline` is capped at 110 characters because Google drops the rich result
+ * above that rather than truncating it. `speakable` points at the summary and
+ * the h1 — the two selectors on the page that answer the query on their own,
+ * which is also what an answer engine lifts when it quotes the article.
+ */
+export function articleSchema({
+  path,
+  locale = DEFAULT_LOCALE,
+  headline,
+  description,
+  published,
+  updated,
+  section,
+  keywords = [],
+  wordCount,
+  summary,
+}) {
+  const url = absoluteUrl(withLocale(path, locale));
+  return {
+    "@type": "BlogPosting",
+    "@id": `${url}#article`,
+    isPartOf: { "@id": `${SITE_URL}/blog/#blog` },
+    mainEntityOfPage: { "@type": "WebPage", "@id": url },
+    url,
+    headline: String(headline).slice(0, 110),
+    description,
+    abstract: summary || description,
+    datePublished: published,
+    dateModified: updated || published,
+    inLanguage: LOCALE_CODES.includes(locale) ? locale : DEFAULT_LOCALE,
+    author: { "@id": `${SITE_URL}/#organization` },
+    publisher: { "@id": `${SITE_URL}/#organization` },
+    image: [absoluteUrl("/icon-512.png")],
+    ...(section ? { articleSection: section } : {}),
+    ...(keywords.length ? { keywords: keywords.join(", ") } : {}),
+    ...(wordCount ? { wordCount } : {}),
+    about: { "@id": `${SITE_URL}/#software` },
+    speakable: {
+      "@type": "SpeakableSpecification",
+      cssSelector: ["h1", "[data-speakable]"],
+    },
+  };
+}
+
+/**
+ * HowTo for a `steps` block.
+ *
+ * Emitted only when the steps are genuinely a procedure someone performs.
+ * A HowTo whose steps are really a list of features is the fastest way to a
+ * structured-data manual action, so the block type is the gate: authors opt in
+ * by writing `steps`, not by writing an ordered list.
+ */
+export function howToSchema({ path, locale = DEFAULT_LOCALE, name, description, totalTime, steps }) {
+  const url = absoluteUrl(withLocale(path, locale));
+  return {
+    "@type": "HowTo",
+    "@id": `${url}#howto-${slugId(name)}`,
+    name,
+    ...(description ? { description } : {}),
+    ...(totalTime ? { totalTime } : {}),
+    inLanguage: LOCALE_CODES.includes(locale) ? locale : DEFAULT_LOCALE,
+    step: steps.map((s, i) => ({
+      "@type": "HowToStep",
+      position: i + 1,
+      name: s.name,
+      text: s.text,
+      url: `${url}#${slugId(s.name)}`,
+    })),
+  };
+}
+
+/** ItemList for the index page — tells Google the collection's order and size. */
+export function itemListSchema({ path, locale = DEFAULT_LOCALE, items }) {
+  return {
+    "@type": "ItemList",
+    "@id": `${absoluteUrl(withLocale(path, locale))}#list`,
+    itemListOrder: "https://schema.org/ItemListOrderDescending",
+    numberOfItems: items.length,
+    itemListElement: items.map((it, i) => ({
+      "@type": "ListItem",
+      position: i + 1,
+      url: absoluteUrl(withLocale(it.href, locale)),
+      name: it.title,
+    })),
+  };
+}
+
+/* Local to this module: @id fragments must be URL-safe and stable. */
+function slugId(text = "") {
+  return String(text)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s-]/g, "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .slice(0, 60);
 }

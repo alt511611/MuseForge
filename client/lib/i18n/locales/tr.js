@@ -1,7 +1,7 @@
 // MuseForge — Turkish (tr).
 //
-// Holds only what is actually translated into Turkish: 447 of the
-// 447 keys in en.js.
+// Holds only what is actually translated into Turkish: 463 of the
+// 463 keys in en.js.
 export default {
   pricing_credits_per_month: "{credits} kredi / ay",
   pricing_annual: "Yıllık",
@@ -218,7 +218,7 @@ export default {
   pricing_faq_2_q: "İstediğim zaman iptal edebilir miyim?",
   pricing_faq_2_a: "Evet. Aboneliğinizi istediğiniz zaman iptal edebilirsiniz. İptal, bir sonraki fatura döneminden itibaren geçerlidir.",
   pricing_faq_3_q: "Hangi ödeme yöntemleri kabul ediliyor?",
-  pricing_faq_3_a: "Visa, Mastercard ve diğer yaygın kartlar Stripe altyapısı üzerinden güvenle işlenir.",
+  pricing_faq_3_a: "Visa, Mastercard ve diğer yaygın kartlar, kayıtlı satıcımız (merchant of record) Whop altyapısı üzerinden güvenle işlenir.",
   pricing_faq_4_q: "Üretilen videolar bana mı ait?",
   pricing_faq_4_a: "Evet. Platformda ürettiğiniz videolar size lisanslanır ve kişisel/ticari kullanım için serbesttir.",
   pricing_legal_terms: "Kullanım Koşulları",
@@ -486,4 +486,22 @@ export default {
   form_location_label: "Mekân Fotoğrafı",
   form_location_desc: "Yüklerseniz her sahne bu mekânda geçer. Yüklemezseniz senaryonun mekânı bir kez üretilip tüm sahnelerde aynı kalır.",
   form_location_upload_btn: "Mekân fotoğrafı yükle",
+  /* Blog / rehberler */
+  nav_guides: "Rehberler",
+  blog_title: "Rehberler",
+  blog_tagline: "Yapay zekâ ile film yapmanın pratiği",
+  blog_desc:
+    "Karakterleri nasıl sabit tutarsınız, işe yarayan planı nasıl yazarsınız, tek seferlik bir video yerine nasıl dizi çıkarırsınız. MuseForge'u kuran ekip yazıyor.",
+  blog_tldr: "Kısa cevap",
+  blog_contents: "İçindekiler",
+  blog_related: "Devamı",
+  blog_read_more: "Oku",
+  blog_all_articles: "Bütün rehberler",
+  blog_minutes: "{n} dk okuma",
+  blog_published: "Yayım",
+  blog_updated: "Güncelleme",
+  blog_empty: "İlk rehberler yazılıyor. Bu arada İngilizce sürümleri aşağıda.",
+  blog_cat_guide: "Rehber",
+  blog_cat_playbook: "Oyun kitabı",
+  blog_cat_comparison: "Satın alma rehberi",
 };
