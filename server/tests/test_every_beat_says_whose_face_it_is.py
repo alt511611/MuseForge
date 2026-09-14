@@ -121,6 +121,50 @@ def test_a_name_that_is_also_a_word_is_left_alone():
     assert "she will deal in a moment" in description
 
 
+#: Job 09414b97-a54's storyboard, verbatim -- one capital T, one lower case,
+#: in a cast whose names are descriptions rather than names.
+_GENERIC = "The Dealer deals cards across the felt toward the Man in the windowless room."
+
+
+def test_a_cast_of_descriptions_is_still_a_cast():
+    """"The Dealer" and "The Man" are what a screenwriter names a two-hander.
+
+    And a screenwriter does not capitalise them consistently: the beat above
+    wrote "The Dealer" and "the Man" in one sentence. Matched case-sensitively
+    the man stayed prose, and prose is what redraws him.
+    """
+    take = _take(
+        [Beat(4, _GENERIC)],
+        elements=(Element(name="The Dealer"), Element(name="The Man")),
+    )
+
+    assert take.cited(take.beats[0]).description == (
+        "@Element1 deals cards across the felt toward @Element2 in the "
+        "windowless room."
+    )
+
+
+def test_an_article_in_a_name_never_becomes_the_name():
+    """A cast named "dealer" and "the man" hands "the" to the second element.
+
+    Measured before this was fixed, on the same beat: "deals cards across
+    @Element2 felt toward @Element2 Man in @Element2 windowless room." Three
+    citations, none of them a person, in a prompt that no longer parses.
+    """
+    take = _take(
+        [Beat(4, _GENERIC)],
+        elements=(Element(name="dealer"), Element(name="the man")),
+    )
+
+    description = take.cited(take.beats[0]).description
+
+    assert "@Element2 felt" not in description
+    assert description.count("@Element2") == 1, "the man is cited once: as the man"
+    assert "@Element1 deals" in description, (
+        "a lower-case cast name still cites where the prose capitalises it"
+    )
+
+
 def test_a_surname_two_characters_share_cites_neither():
     """Citing the wrong element holds one face where the script wrote two."""
     take = _take(
