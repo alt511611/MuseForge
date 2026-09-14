@@ -10,8 +10,15 @@ class CharacterInScene(BaseModel):
     static_features: str
     dynamic_features: str = ""
     # Costume, carried separately from static_features (face/build/age) so it
-    # can be restated in every frame prompt. The identity reference image
-    # binds a face, not an outfit.
+    # can be restated in every frame prompt.
+    #
+    # Both anchors matter and they are not interchangeable. The reference
+    # image is generated wearing this outfit and framed to show it
+    # (idea2video.COSTUME_IS_IN_THE_PORTRAIT), but the models that read it
+    # bind IDENTITY from it -- flux-pulid is an identity model outright -- so
+    # a picture is what keeps a garment's look consistent and these words are
+    # what say the garment is there at all. Left empty, every shot invents an
+    # outfit from the brief's adjectives.
     wardrobe: str = ""
     is_visible: bool = True
     portrait_url: Optional[str] = None
@@ -21,10 +28,12 @@ class CharacterProfile(BaseModel):
     name: str
     description: str
     role: str = "supporting"
-    # Wardrobe kept SEPARATE from `description` (face/build/age). The identity
-    # reference image binds a face, not an outfit, so wardrobe has to be
-    # restated as text in every frame prompt or the costume changes between
-    # scenes even when the face holds.
+    # Wardrobe kept SEPARATE from `description` (face/build/age), because the
+    # two are locked by different things and are restated in different places.
+    # The reference portrait is photographed in this outfit, and the text is
+    # restated in every frame prompt; a costume that has neither changes
+    # between scenes even when the face holds (job 8b8fce47-445: one face,
+    # six shots, a slicker that buttoned then zipped then hung open).
     wardrobe: str = ""
     # Performance direction. want = the external goal the character pursues on
     # screen; need = the internal truth they're avoiding; arc = how they change
