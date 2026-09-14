@@ -7,6 +7,7 @@ import {
   openGraphFor,
   breadcrumbSchema,
   blogSchema,
+  organizationSchema,
   articleSchema,
   howToSchema,
   faqSchema,
@@ -99,6 +100,11 @@ export default function ArticlePage({ params: { locale, slug } }) {
     <>
       <JsonLd
         graph={[
+          /* The Organization node ships with every page that points at it.
+             Structured data is evaluated one page at a time, so the author,
+             publisher and brand references below resolve to nothing unless the
+             node they name is in this page's own graph. */
+          organizationSchema(),
           blogSchema(locale),
           breadcrumbSchema(TRAIL),
           articleSchema({
