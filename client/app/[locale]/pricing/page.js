@@ -1,7 +1,15 @@
 import PricingContent from "./PricingContent";
 import { t } from "../../../lib/i18n/index";
 import { isLocale, DEFAULT_LOCALE } from "../../../lib/i18n/routing";
-import { JsonLd, SITE_URL, absoluteUrl, canonical, faqSchema, openGraphFor } from "../../../lib/seo";
+import {
+  JsonLd,
+  SITE_URL,
+  absoluteUrl,
+  canonical,
+  faqSchema,
+  openGraphFor,
+  organizationSchema,
+} from "../../../lib/seo";
 
 const PATH = "/pricing";
 
@@ -51,6 +59,11 @@ export default function PricingPage({ params: { locale } }) {
     name: "MuseForge",
     description:
       "Agentic AI video studio that turns a text idea into a cinematic micro-drama.",
+    /* Required, not optional: Search Console rejects a Product without an
+       image as a critical error and drops the whole node, taking the price
+       offers with it. The social card is the only 1200x630 image the site
+       generates, and it is generated at build time, so it costs nothing. */
+    image: [absoluteUrl("/opengraph-image")],
     brand: { "@id": `${SITE_URL}/#organization` },
     offers: PLAN_OFFERS.map((p) => ({
       "@type": "Offer",
@@ -79,7 +92,12 @@ export default function PricingPage({ params: { locale } }) {
      trail to back the markup up. Breadcrumbs live on /solutions/*. */
   return (
     <>
-      <JsonLd graph={[product, faqSchema(faq)]} />
+      {/* organizationSchema travels with the product rather than being assumed:
+          structured data is read one page at a time, so `brand` pointing at
+          /#organization resolved to nothing here and Search Console reported
+          the brand as having no name. A cross-page @id is not a reference, it
+          is a dangling pointer. */}
+      <JsonLd graph={[organizationSchema(), product, faqSchema(faq)]} />
       <PricingContent />
     </>
   );

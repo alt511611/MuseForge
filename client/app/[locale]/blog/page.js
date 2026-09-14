@@ -6,6 +6,7 @@ import {
   openGraphFor,
   breadcrumbSchema,
   blogSchema,
+  organizationSchema,
   itemListSchema,
 } from "../../../lib/seo";
 import { t } from "../../../lib/i18n/index";
@@ -63,6 +64,9 @@ export default function BlogIndexPage({ params: { locale } }) {
     <>
       <JsonLd
         graph={[
+          /* See the note on the article page: a cross-page @id resolves to
+             nothing, so the publisher this Blog names travels with it. */
+          organizationSchema(),
           blogSchema(locale),
           breadcrumbSchema(TRAIL),
           itemListSchema({ path: PATH, locale, items: cards }),
