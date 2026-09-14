@@ -180,6 +180,30 @@ def _citations(elements: Sequence["Element"]) -> List[Tuple[Any, str]]:
     Longest spelling first, so "Vera Kessler" is replaced as one citation
     rather than leaving "@Element1 Kessler" behind.
 
+    CASE, answered twice. A ONE-WORD spelling is matched case-sensitively: a
+    character called Will, Rose, Mark or Grace shares a spelling with a word
+    a storyboard uses constantly -- "she will deal", "a rose on the baize" --
+    and citing those rewrites the prompt into something that has stopped
+    meaning anything. Its capitalised form is matched alongside it, so a cast
+    list that spells a name in lower case still cites where prose capitalises.
+
+    A spelling of TWO OR MORE words is matched case-INsensitively. It cannot
+    collide with ordinary prose, and a screenwriter does not capitalise a
+    described character consistently: job 09414b97-a54's cast is "The Dealer"
+    and "The Man", and its storyboard wrote "The Dealer deals cards across
+    the felt toward the Man" -- one capital T, one lower case. Matched
+    case-sensitively, that beat cited the woman and left the man as prose,
+    which is the drift this whole mechanism exists to stop.
+
+    A spelling that is a FUNCTION WORD never cites, whoever owns it, and this
+    is not a nicety. A cast named "dealer" and "the man" hands "the" to the
+    second element outright, and then every "the" in the beat is that man.
+    Measured, on the description above: "deals cards across @Element2 felt
+    toward @Element2 Man in @Element2 windowless room." _DANGLING is already
+    the list of words that cannot carry a clause on their own, which is the
+    same question asked from the other end.
+
+    A spelling shared by two characters is dropped rather than guessed. Two
     CASE-SENSITIVE, deliberately. A character called Will, Rose, Mark or
     Grace shares a spelling with a word a storyboard uses constantly -- "she
     will deal", "a rose on the baize" -- and a case-insensitive citation
@@ -202,6 +226,31 @@ def _citations(elements: Sequence["Element"]) -> List[Tuple[Any, str]]:
             part for part in name.split() if len(part) >= MIN_CITED_NAME
         ]
         for spelling in spellings:
+            if spelling.casefold() in _DANGLING:
+                continue
+            # Keyed case-insensitively, because "Will" and "will" naming two
+            # different characters is an ambiguity rather than two citations.
+            # None is the marker for "claimed by more than one character",
+            # recorded rather than deleted so that a third character carrying
+            # the same part cannot un-ambiguate it by arriving last.
+            key = spelling.casefold()
+            if key in seen and seen[key][1] != token:
+                seen[key] = (seen[key][0], None)
+            else:
+                seen.setdefault(key, (spelling, token))
+    patterns: List[Tuple[Any, str]] = []
+    for spelling, token in sorted(seen.values(), key=lambda pair: -len(pair[0])):
+        if not token:
+            continue
+        if " " in spelling:
+            patterns.append(
+                (re.compile(rf"\b{re.escape(spelling)}\b", re.IGNORECASE), token)
+            )
+        else:
+            forms = sorted({spelling, spelling[:1].upper() + spelling[1:]})
+            alternatives = "|".join(re.escape(form) for form in forms)
+            patterns.append((re.compile(rf"\b(?:{alternatives})\b"), token))
+    return patterns
             # None is the marker for "claimed by more than one character".
             # Recorded rather than deleted, so a third character carrying the
             # same part cannot un-ambiguate it by arriving last.
