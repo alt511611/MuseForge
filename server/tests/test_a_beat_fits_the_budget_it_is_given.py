@@ -60,12 +60,21 @@ def test_the_beat_that_was_refused_now_fits():
 
 
 def test_the_cast_clause_is_counted_because_it_is_applied_here():
-    """The caller cannot prepend it: by then the fitting has already happened."""
+    """The caller cannot prepend it: by then the fitting has already happened.
+
+    What is said once is the DICTIONARY -- which token is whom, and what they
+    have on. What is said on every beat is the citation itself. This test
+    used to assert the second one away ("said once, at the top of the take")
+    and that assertion is what job 921ee1df-40d delivered: a take whose
+    second beat named a character the endpoint had never been told to draw
+    from the element attached to the request.
+    """
     with_cast = _take().multi_prompt()[0]["prompt"]
     solo = _take(second_beat=True).multi_prompt()[1]["prompt"]
 
-    assert with_cast.startswith("@Element1")
-    assert "@Element" not in solo, "said once, at the top of the take"
+    assert with_cast.startswith("@Element1 is Vera Kessler")
+    assert "is Vera Kessler" not in solo, "the dictionary is read once"
+    assert "@Element1" in solo, "the binding is not"
 
 
 def test_the_speech_outlives_the_description():
@@ -96,7 +105,13 @@ def test_an_unmeasured_backend_is_not_a_backend_with_a_zero_budget():
     started -- not "the prompt may be empty"."""
     prompt = _take(limit=0).multi_prompt()[0]["prompt"]
 
-    assert _DESCRIPTION in prompt
+    # The description arrives whole, with its characters cited -- the beat is
+    # not truncated. Compared against the cited form rather than the raw one
+    # because a beat reaches the endpoint citing its cast; see
+    # test_every_beat_says_whose_face_it_is.
+    assert _DESCRIPTION.replace("Vera Kessler", "@Element1").replace(
+        "Silas Voss", "@Element2"
+    ).replace("Vera", "@Element1").replace("Silas", "@Element2") in prompt
     assert len(prompt) > 512
 
 
@@ -248,3 +263,40 @@ def test_a_cut_description_still_ends_on_a_sentence():
     )
     # A word that can end a sentence is kept, even a short one.
     assert _trim("Silas watches her hand carefully", 26) == "Silas watches her hand."
+
+
+def test_the_verbs_in_the_dangling_list_are_the_list_the_trim_actually_reads():
+    """Two constants shared one name, and the later one won.
+
+    `_DANGLING` was defined twice at module level -- once here for the
+    description trim, once below it for the wardrobe trim -- and Python binds
+    the second over the first without a word. So every verb and possessive
+    this function's docstring argues about lived only in the dead list, and a
+    beat could be delivered ending "...the chip stack is."
+
+    These four words appear in no wardrobe list and are the whole evidence
+    that the trim is reading the right one.
+    """
+    from interfaces.scene_take import _DANGLING, _trim
+
+    for word in ("is", "was", "their", "those"):
+        assert word in _DANGLING
+
+    # The length cut lands inside "huge", the word boundary gives back "is",
+    # and only the list decides whether "is" may end the sentence. On the
+    # wardrobe list -- the one this ran against -- it may, and the beat went
+    # out saying "the pot is."
+    assert _trim("Silas counts the chips the pot is huge", 37) == (
+        "Silas counts the chips the pot."
+    )
+
+
+def test_the_wardrobe_words_survived_the_merge():
+    """The union is not a rename: the outfit list's own words are still in it."""
+    from interfaces.scene_take import _DANGLING, _closed
+
+    for word in ("across", "above", "behind"):
+        assert word in _DANGLING
+
+    assert _closed("a wool coat over an") == "a wool coat"
+    assert _closed("a scarf tucked behind") == "a scarf tucked"

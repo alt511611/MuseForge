@@ -30,7 +30,8 @@ is what makes them affordable.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from typing import Any, List, Optional, Sequence, Tuple
 
 
@@ -163,6 +164,79 @@ CONTINUITY_CLAUSE = (
 )
 
 
+#: The shortest part of a name that may stand in for the whole of it.
+#:
+#: A beat writes "Vera" far more often than "Vera Kessler", so citations that
+#: only matched full names would leave most mentions of a character uncited.
+#: Matching PARTS brings a collision risk with it, and this floor is where
+#: that risk is paid for: two characters are routinely one word apart, and a
+#: part shorter than this is not a name being used, it is an initial.
+MIN_CITED_NAME = 3
+
+
+def _citations(elements: Sequence["Element"]) -> List[Tuple[Any, str]]:
+    """``(pattern, token)`` for every way a beat might name a character.
+
+    Longest spelling first, so "Vera Kessler" is replaced as one citation
+    rather than leaving "@Element1 Kessler" behind.
+
+    CASE-SENSITIVE, deliberately. A character called Will, Rose, Mark or
+    Grace shares a spelling with a word a storyboard uses constantly -- "she
+    will deal", "a rose on the baize" -- and a case-insensitive citation
+    rewrites those into "@Element1", which is not a tighter prompt, it is a
+    prompt that has stopped meaning anything. Names reach a beat capitalised,
+    from a screenwriter; a lowercase match is the common word, not the person.
+
+    A part shared by two characters is dropped rather than guessed. Two
+    Kesslers in one scene mean "Kessler" cites nobody in particular, and
+    citing the wrong element is worse than citing none: the take then holds
+    one face where the script wrote two.
+    """
+    seen: dict = {}
+    for index, element in enumerate(elements):
+        name = (element.name or "").strip()
+        if not name:
+            continue
+        token = element.token(index)
+        spellings = [name] + [
+            part for part in name.split() if len(part) >= MIN_CITED_NAME
+        ]
+        for spelling in spellings:
+            # None is the marker for "claimed by more than one character".
+            # Recorded rather than deleted, so a third character carrying the
+            # same part cannot un-ambiguate it by arriving last.
+            seen[spelling] = token if seen.get(spelling, token) == token else None
+    return [
+        (re.compile(rf"\b{re.escape(spelling)}\b"), token)
+        for spelling, token in sorted(seen.items(), key=lambda kv: -len(kv[0]))
+        if token
+    ]
+
+
+def _cite(text: str, citations: Sequence[Tuple[Any, str]]) -> str:
+    """``text`` with every character it names replaced by their token."""
+    for pattern, token in citations:
+        text = pattern.sub(token, text)
+    return text
+
+
+def _cite_speaker(line: str, citations: Sequence[Tuple[Any, str]]) -> str:
+    """The name in FRONT of a spoken line, cited -- and not a word after it.
+
+    "Vera Kessler: Patience is a tell too, Vera." has the same name on both
+    sides of the colon and they are two different things. In front of it, the
+    name says which element is speaking, which is the one place the take can
+    be told that a line belongs to a face rather than to whoever the model
+    decides is talking. Behind it, the name is SPEECH: this endpoint says
+    what it is given, so a citation there is a take that pronounces
+    "at element one" out loud, over a burned-in subtitle that reads "Vera".
+    """
+    name, separator, said = line.partition(":")
+    if not separator or not said.strip():
+        return line
+    return f"{_cite(name, citations)}:{said}"
+
+
 def wire_length(text: str) -> int:
     """How long this string is to the validator on the other side.
 
@@ -187,10 +261,26 @@ def wire_length(text: str) -> int:
 #: video model -- holding an unfinished thought. A possessive is the same
 #: shape ("the paperback's."), and is caught by the apostrophe rather than by
 #: this list, which no list could enumerate.
+#:
+#: ONE list, for both cuts this module makes, and it was two. A second
+#: `_DANGLING` was defined ninety lines below this one, for the wardrobe
+#: trim, and Python does not warn about a module-level name being bound
+#: twice: the later binding simply replaced this one, and `_trim` -- whose
+#: whole docstring is about the verbs and possessives below -- ran against a
+#: list holding none of them. A description trimmed to its floor could end
+#: "...the dealer is." for as long as both existed, which is precisely the
+#: sentence the first list was written to prevent.
+#:
+#: They were never two rules. Both cuts land mid-phrase in a prompt, and the
+#: evidence behind each reads the same: "The envelope tumbles from the
+#: paperback's." from the description trim, "a dark green wool jacket over
+#: an" from the wardrobe one. So the list is the union, which is strictly
+#: better for both callers -- an outfit has no more business ending on "was"
+#: than a description has ending on "across".
 _DANGLING = frozenset(
     """a an the of in on at to for from with without into onto over under by
-    as and or but so nor its his her their our your my this that these those
-    is are was were be been being has have had"""
+    above behind across as and or but so nor its his her their our your my
+    this that these those is are was were be been being has have had"""
     .split()
 )
 
@@ -231,19 +321,16 @@ def _trim(text: str, limit: int) -> str:
     return cut if cut.endswith(".") else cut + "."
 
 
-#: Words an outfit must never be cut after. A wardrobe trimmed to its share
-#: lands mid-phrase more often than not -- "a dark green wool jacket over an"
-#: is what 40 characters of "...over an open-collar shirt" leaves -- and a
-#: prompt ending on a dangling article reads as a sentence the writer meant to
-#: finish, which invites the model to finish it.
-_DANGLING = frozenset(
-    "a an the and or of in on at to by for from with over under above behind "
-    "into onto across".split()
-)
-
-
 def _closed(text: str) -> str:
-    """``text`` with any trailing word that leaves it hanging removed."""
+    """``text`` with any trailing word that leaves it hanging removed.
+
+    An outfit trimmed to its share lands mid-phrase more often than not -- "a
+    dark green wool jacket over an" is what 40 characters of "...over an
+    open-collar shirt" leaves -- and a prompt ending on a dangling article
+    reads as a sentence the writer meant to finish, which invites the model
+    to finish it. Same rule as the description trim, same list: see _DANGLING,
+    which used to be two lists with one name.
+    """
     words = (text or "").strip().split()
     while words and words[-1].lower().strip(",;:-") in _DANGLING:
         words.pop()
@@ -420,6 +507,19 @@ class SceneTake:
     #: read as no limit, which is what every backend was until one answered
     #: 422 over eighteen characters.
     max_prompt_chars: int = 0
+    #: Shots the storyboard designed for this scene that reached the planner
+    #: with nothing written in them, and were therefore not planned as beats.
+    #:
+    #: Carried rather than logged because this module decides and never
+    #: speaks -- nothing under interfaces/ holds a logger. It is carried at
+    #: all because dropping a shot is otherwise INVISIBLE: job 921ee1df-40d's
+    #: third scene arrived with three shots and was planned as two beats of
+    #: 9s and 3s, and the only record of the missing angle is an arithmetic
+    #: gap between what the storyboard wrote and what the take requested. A
+    #: nine-second beat is also twice the length this module argues a beat
+    #: should be ("a new visual beat every 5-7 seconds"), which is what the
+    #: scene's seconds do when there is one fewer beat to spend them on.
+    undescribed_shots: int = 0
 
     @property
     def beat_count(self) -> int:
@@ -436,15 +536,58 @@ class SceneTake:
         caller afterwards. Prepending it afterwards is how a beat reached the
         endpoint 18 characters over its 512-character budget: the fitting had
         already happened, against a length that was about to change.
+
+        EVERY beat is cited, and that is a correction. The cast clause is
+        still said once -- it is the dictionary, and a dictionary is read
+        once -- but until now it was also the only place any element was ever
+        mentioned, which left beats two onward carrying no binding at all.
+        Job 921ee1df-40d is the whole argument: three takes, two elements
+        attached to each, no 422 and nothing else wrong with the request. Its
+        third scene was planned as two beats, 9s and 3s, so its second beat
+        opened at 27.083s -- and the man at the table, forty-five years old
+        for the first twenty-seven seconds of the film, is seventy years old
+        from 27.125s. The same break sits on scene two's second beat, at
+        11.04s, where the dealer becomes a different woman. An element the
+        prompt never names is a picture the endpoint was sent and had no
+        reason to use, so each uncited beat drew its people out of prose --
+        and prose produces somebody who matches the description and is not
+        the same person twice.
         """
         cast = self.cast_clause()
         return [
-            beat.as_payload(
+            self.cited(beat).as_payload(
                 cast=cast if index == 0 else "",
                 limit=self.max_prompt_chars,
             )
             for index, beat in enumerate(self.beats)
         ]
+
+    def cited(self, beat: Beat) -> Beat:
+        """``beat`` with the characters it names replaced by their tokens.
+
+        Applied BEFORE the fitting, for the same reason the cast clause is
+        assembled inside `Beat.as_prompt` rather than around it: a citation
+        is about five characters longer than the name it replaces, and a
+        budget measured against a string that is about to change is the
+        mistake this module has already made once.
+
+        A beat that names nobody -- an insert, a pair of eyes, a hand over a
+        card -- is prefixed with the FIRST element's token instead. The first
+        element is the scene's anchor (the caller orders the cast with the
+        opening frame's subject in front), so this says the body in the shot
+        belongs to the person the scene is about, which is the one fact an
+        insert has no other way of carrying. The alternative reads worse in
+        the delivered picture than it does here: an uncited hand is a
+        stranger's hand, and job 921ee1df-40d has three seconds of one.
+        """
+        citations = _citations(self.elements)
+        if not citations:
+            return beat
+        description = _cite(beat.description, citations)
+        dialogue = tuple(_cite_speaker(line, citations) for line in beat.dialogue)
+        if "@Element" not in description and not any("@Element" in l for l in dialogue):
+            description = f"{self.elements[0].token(0)}. {description}"
+        return replace(beat, description=description, dialogue=dialogue)
 
     def cast_clause(self) -> str:
         """Which token is whom, what they are wearing, and that it holds.
@@ -717,4 +860,5 @@ def plan_scene_take(
         start_image=start_image,
         end_image=end_image,
         max_prompt_chars=int(getattr(backend, "max_prompt_chars", 0) or 0),
+        undescribed_shots=max(0, len(list(shots or [])) - len(usable)),
     )

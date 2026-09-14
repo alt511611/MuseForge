@@ -3021,6 +3021,24 @@ class Script2VideoPipeline:
                 "job was not configured for."
             )
 
+        if take.undescribed_shots:
+            # The planner drops a shot with nothing written in it, which is
+            # the right thing to do with one and the wrong thing to do
+            # silently: the scene's seconds are then spread over fewer beats,
+            # and a scene that was storyboarded in three angles is delivered
+            # in two long ones with no record of the third ever existing.
+            # Job 921ee1df-40d's third scene went out as a 9-second beat and
+            # a 3-second one this way.
+            logger.warning(
+                "Scene %s: %d of %d storyboarded shot(s) reached the take "
+                "with no description and were not planned as beats; its %ss "
+                "are spread over the %d that remain.",
+                scene_idx + 1,
+                take.undescribed_shots,
+                len(shots),
+                take.seconds,
+                take.beat_count,
+            )
         logger.info(
             "Scene %s as one take on %s: %ss in %d beat(s) %s, %d element(s), "
             "audio %s",

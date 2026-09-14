@@ -120,7 +120,9 @@ def test_the_line_survives_the_wardrobe():
 
     prompt = take.multi_prompt()[0]["prompt"]
 
-    assert 'Elena says: "Fifty years... and I never sent it."' in prompt
+    # The speaker is cited, the speech is not: the endpoint says what is
+    # inside the quotes out loud. See test_every_beat_says_whose_face_it_is.
+    assert '@Element1 says: "Fifty years... and I never sent it."' in prompt
     assert wire_length(prompt) <= 512
 
 
