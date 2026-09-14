@@ -248,7 +248,11 @@ export function articleSchema({
     ...(section ? { articleSection: section } : {}),
     ...(keywords.length ? { keywords: keywords.join(", ") } : {}),
     ...(wordCount ? { wordCount } : {}),
-    about: { "@id": `${SITE_URL}/#software` },
+    /* No `about: /#software` here. That node is only emitted on the home page,
+       and a reference to an @id that is absent from this page's graph is a
+       dangling pointer, not an association -- the same mistake /pricing's
+       `brand` was making. Shipping the full SoftwareApplication node on every
+       article to fix it would cost more than the association is worth. */
     speakable: {
       "@type": "SpeakableSpecification",
       cssSelector: ["h1", "[data-speakable]"],
