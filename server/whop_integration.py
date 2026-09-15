@@ -411,6 +411,8 @@ def membership_id_of(data: dict, allow_self: bool = False) -> str:
     if not value and allow_self:
         value = data.get("id")
     return value or ""
+def membership_id_of(data: dict) -> str:
+    return _first(data, ("membership", "id"), "membership_id", "id") or ""
 
 
 def whop_user_id_of(data: dict) -> str:
@@ -542,6 +544,7 @@ async def _dispatch_event(event_type: str, data: dict) -> dict:
     elif event_type in CANCELLATION_EVENTS:
         # `data` IS the membership here, so its own id is the one to match.
         membership_id = membership_id_of(data, allow_self=True)
+        membership_id = membership_id_of(data)
         if membership_id:
             row = await billing.find_profile("whop_membership_id", membership_id, select="id")
             await billing.end_subscription(
