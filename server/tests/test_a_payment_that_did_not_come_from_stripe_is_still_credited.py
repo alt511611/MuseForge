@@ -205,3 +205,35 @@ def test_the_two_processors_quote_the_same_allowances():
     assert si.PLAN_CREDITS is billing.PLAN_CREDITS
     assert si.CREDIT_PACKAGES is billing.CREDIT_PACKAGES
     assert si.allowance_for("pro", annual=True) == wi.allowance_for("pro", annual=True)
+
+
+@pytest.mark.asyncio
+async def test_a_pack_with_no_membership_does_not_overwrite_the_one_on_file(granted, monkeypatch):
+    """The first live sale (pay_3RXVcqOFwoQ1Bo) came back from Whop's own API
+    with `membership: null` -- a one-off pack belongs to no membership. Read
+    naively, the payment's own id is sitting right there in `id`, and writing
+    `pay_...` into whop_membership_id would replace a subscriber's real
+    `mem_...` with the id of the pack they bought on top of their plan. Every
+    renewal after that looks for a membership nobody has."""
+    written: dict = {}
+
+    async def _grant(user_id, credits_delta, **kwargs):
+        written.update(kwargs.get("profile_fields") or {})
+
+    monkeypatch.setattr(billing, "grant_credits", _grant)
+
+    await wi._dispatch_event(
+        "payment.succeeded",
+        {
+            "id": "pay_3RXVcqOFwoQ1Bo",
+            "billing_reason": "one_time",
+            "metadata": {"user_id": "user-1", "credit_package": "MEDIUM"},
+            "membership": None,
+            "user": {"id": "user_whop_1"},
+        },
+    )
+
+    assert written.get("whop_membership_id") in (None, ""), (
+        "a payment id is not a membership id"
+    )
+    assert written.get("whop_user_id") == "user_whop_1"

@@ -394,8 +394,23 @@ def plan_id_of(data: dict) -> str:
     return _first(data, ("plan", "id"), "plan_id") or ""
 
 
-def membership_id_of(data: dict) -> str:
-    return _first(data, ("membership", "id"), "membership_id", "id") or ""
+def membership_id_of(data: dict, allow_self: bool = False) -> str:
+    """The membership this event is about, or "".
+
+    ``allow_self`` is for the events whose `data` IS the membership -- a
+    cancellation carries the membership object itself, so its `id` is the
+    answer. It is OFF for payments, and that is the whole point of the flag.
+    Whop's own payments API returns `membership: null` for a one-off pack
+    (pay_3RXVcqOFwoQ1Bo, the first live sale, is exactly this shape), so a
+    blanket `id` fallback would read the PAYMENT id as a membership id and
+    write `pay_...` into `profiles.whop_membership_id` -- overwriting a
+    subscriber's real `mem_...` with the id of the pack they bought on top of
+    their plan, and breaking the lookup every future renewal depends on.
+    """
+    value = _first(data, ("membership", "id"), "membership_id")
+    if not value and allow_self:
+        value = data.get("id")
+    return value or ""
 
 
 def whop_user_id_of(data: dict) -> str:
@@ -525,7 +540,8 @@ async def _dispatch_event(event_type: str, data: dict) -> dict:
             return {"received": True, "type": event_type, "plan": plan, "credits": credits}
 
     elif event_type in CANCELLATION_EVENTS:
-        membership_id = membership_id_of(data)
+        # `data` IS the membership here, so its own id is the one to match.
+        membership_id = membership_id_of(data, allow_self=True)
         if membership_id:
             row = await billing.find_profile("whop_membership_id", membership_id, select="id")
             await billing.end_subscription(

@@ -335,9 +335,27 @@ def event_key(provider: str, event_id: str) -> str:
 async def mark_event_processed(provider: str, event_id: str) -> bool:
     """Claim this event. True if we claimed it, False if it was already done.
 
-    Fails OPEN on a Supabase problem: a webhook that cannot reach the
-    idempotency table is still a payment that has to be credited, and the
-    duplicate it risks is recoverable in a way an uncredited purchase is not.
+    The claim is a PLAIN INSERT, and the duplicate is detected by the primary
+    key REFUSING it (PostgREST answers 409). It used to send
+    `Prefer: resolution=ignore-duplicates` and read 201 as "inserted" -- and
+    that combination cannot tell the two apart at all: PostgREST skips the
+    conflicting row and STILL answers 201, so every redelivery was read as a
+    new event.
+
+    Measured, with money: Whop replayed `msg_MwxfZCT1U9G1nZKm65Lh...` with its
+    original webhook-id on 15 Sep 2026. `processed_stripe_events` still held
+    exactly one row -- the mark from the first delivery, untouched -- and the
+    customer was granted the same 4 credits a second time. Every unit test
+    passed throughout, because they patch this function and assert on what the
+    dispatcher does with True and False; nothing exercised what Supabase
+    actually replies. The same helper serves Stripe, which had carried the
+    defect since the idempotency table was added and had simply never had an
+    event redelivered.
+
+    Fails OPEN on anything that is not a clear 201 or 409: a webhook that
+    cannot reach the idempotency table is still a payment that has to be
+    credited, and a duplicate grant is recoverable in a way an uncredited
+    purchase is not.
     """
     if not sb_configured():
         return True  # dev mode: always proceed
@@ -350,11 +368,23 @@ async def mark_event_processed(provider: str, event_id: str) -> bool:
                     "apikey": SUPABASE_SERVICE_KEY,
                     "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
                     "Content-Type": "application/json",
-                    "Prefer": "resolution=ignore-duplicates,return=minimal",
+                    "Prefer": "return=minimal",
                 },
             )
-            # 201 = inserted (new event); 200/204 with ignore-duplicates = already existed
-            return resp.status_code == 201
+            if resp.status_code == 409:
+                # Primary key refused it: this event has been handled already.
+                return False
+            if resp.status_code >= 400:
+                logger.error(
+                    "Could not claim %s event %s in processed_stripe_events "
+                    "(%s): %s. Processing it anyway -- an uncredited payment "
+                    "is the worse failure -- so a redelivery may double-grant.",
+                    provider,
+                    event_id,
+                    resp.status_code,
+                    resp.text[:200],
+                )
+            return True
     except Exception:
         return True  # fail-open on Supabase issues
 
