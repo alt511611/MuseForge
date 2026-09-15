@@ -52,7 +52,7 @@ export default function PrivacyContent() {
           </Section>
 
           <Section title="7. Contact">
-            <p>Privacy questions: <a href="mailto:privacy@museforge.ai" className="underline" style={{ color: "var(--mf-violet-soft)" }}>privacy@museforge.ai</a></p>
+            <p>Privacy questions: <a href="mailto:privacy@museforge.studio" className="underline" style={{ color: "var(--mf-violet-soft)" }}>privacy@museforge.studio</a></p>
           </Section>
         </div>
 

@@ -96,7 +96,7 @@ export default function EducationPage({ params: { locale } }) {
         title: "Need a Campus-Wide Licence?",
         desc: "We offer custom pricing, SSO, and onboarding for universities and school networks. Let's talk.",
         btnText: "Contact Enterprise Sales",
-        btnHref: "mailto:enterprise@museforge.ai",
+        btnHref: "mailto:enterprise@museforge.studio",
       }}
     />
     </>

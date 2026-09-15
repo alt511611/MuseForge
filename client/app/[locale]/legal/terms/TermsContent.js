@@ -72,7 +72,7 @@ export default function TermsContent() {
           </Section>
 
           <Section title="9. Contact">
-            <p>Questions about these terms: <a href="mailto:legal@museforge.ai" className="underline" style={{ color: "var(--mf-violet-soft)" }}>legal@museforge.ai</a></p>
+            <p>Questions about these terms: <a href="mailto:legal@museforge.studio" className="underline" style={{ color: "var(--mf-violet-soft)" }}>legal@museforge.studio</a></p>
           </Section>
         </div>
 

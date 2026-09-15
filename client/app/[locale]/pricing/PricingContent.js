@@ -424,7 +424,7 @@ function PricingContent() {
                 </ul>
 
                 {plan.isEnterprise ? (
-                  <Link href="mailto:enterprise@museforge.ai"
+                  <Link href="mailto:enterprise@museforge.studio"
                     className="mf-btn-ghost w-full py-3 rounded-xl text-sm font-semibold text-center block">
                     {plan.cta}
                   </Link>
