@@ -21,6 +21,8 @@ from interfaces.film_look import build_film_look_filters
 from interfaces import gender as gender_of
 from interfaces import micro_drama
 from interfaces.language import DEFAULT_LANGUAGE
+from interfaces import take_voices
+from interfaces.scene_take import estimated_speech_seconds
 from interfaces.second_budget import (
     billable_seconds,
     distribute_budget,
@@ -220,10 +222,20 @@ def picture_carries_dialogue(video_gen, language: str) -> bool:
     keeps every stage it always had: the voice generator, the lip-sync pass,
     and the mixer laying speech over a silent picture.
 
-    When it IS true, three things stop happening. No per-scene TTS request
-    (one short sample per CHARACTER is made instead, to bind the take's voice
-    to the cast). No lip-sync pass, because the mouth was never out of sync.
-    And no second dialogue track laid over a picture that is already speaking.
+    When it IS true, three things stop happening. No per-scene TTS request --
+    and no casting either, which is not the same thing and was the part that
+    kept running: the ensemble was still gender-matched to ElevenLabs ids, a
+    verify_cast round trip still confirmed them with the provider, and the
+    result still carried them to the character library, all for voices no
+    scene ever spoke in. No lip-sync pass, because the mouth was never out of
+    sync -- and, since api.build_credit_breakdown knows this before the job
+    exists, no lip-sync surcharge to refund later either. And no second
+    dialogue track laid over a picture that is already speaking.
+
+    What it does NOT buy is the cast's voices. The take picks its own from the
+    backend's library, so a character can sound like a different person
+    between scenes; the block that would close that is described where the
+    casting used to happen.
     """
     try:
         from pipelines.script2video import scene_take_backend
@@ -6476,9 +6488,28 @@ class Idea2VideoPipeline:
                 "Spoken dialogue is switched off on this server, so the video "
                 "was rendered without voices."
             )
+        # WHO SPEAKS THIS FILM: the video model, or us.
+        #
+        # Asked once, here, because every stage of the soundtrack below turns
+        # on it -- and a job in which the picture speaks and the mixer also
+        # lays down a voice track is a film in which every line is heard
+        # twice, slightly out of phase.
+        #
+        # Asked HERE, above the cast, rather than further down with the stages
+        # it switches off. Below the cast it was already too late for the one
+        # thing it most needed to stop: job 6f857aa0-903 logged
+        # `Cast: mara voss=FGY2WhTYpPnrIDTdsKH5`, spent a verify_cast round
+        # trip at ElevenLabs confirming that id, wrote it onto the result for
+        # the character library -- and then, one line later, warned that the
+        # take would choose its own voices. Every one of those is work done
+        # for a voice that never said a word.
+        picture_speaks = not self.demo and picture_carries_dialogue(
+            self.script2video.video_gen, language
+        )
+
         voice_gen = (
             _make_voice_generator(self.api_key, self.demo, working_dir)
-            if dialogue_requested
+            if dialogue_requested and not picture_speaks
             else None
         )
         character_voices: Dict[str, str] = {}
@@ -6554,41 +6585,52 @@ class Idea2VideoPipeline:
         # the render has now already paid for its voices. That is a few cents
         # against a scene of video, and it buys every shot in the drama a
         # measured answer instead of a guessed one.
-        # WHO SPEAKS THIS FILM: the video model, or us.
+        # THE CAST'S VOICES, through a picture that speaks its own lines.
         #
-        # Asked once, here, because every stage of the soundtrack below turns
-        # on it -- and a job in which the picture speaks and the mixer also
-        # lays down a voice track is a film in which every line is heard
-        # twice, slightly out of phase.
-        picture_speaks = not self.demo and picture_carries_dialogue(
-            self.script2video.video_gen, language
-        )
-
-        # THE CAST'S VOICES: not bound yet, and the reason is worth writing
-        # down because the plan this was built from said otherwise.
+        # The plan this was built from wanted one clean speech sample per
+        # character, attached to their element, so the take spoke them in the
+        # voice THIS FILM cast. The endpoint does not work that way: its
+        # element takes a `voice_id` from the backend's own library and there
+        # is nowhere to upload a clip. So the cast is kept the only way the
+        # endpoint allows -- by choosing one of ITS voices per character and
+        # binding the same one every time (interfaces/take_voices).
         #
-        # The intent was one clean speech sample per speaking character,
-        # attached to that character's element, so a native-audio take spoke
-        # them in the voice this film cast. The endpoint does not work that
-        # way: its element takes a `voice_id` from the BACKEND'S OWN voice
-        # library and there is nowhere to upload a clip. Generating samples
-        # anyway is a TTS call per character that produces a file nothing can
-        # read, so it is not done.
-        #
-        # What that costs, plainly: a take renders with native, lip-synced
-        # audio in voices the MODEL chose, and a character can sound like a
-        # different person between scenes -- the failure the cast exists to
-        # prevent, moved from the face to the voice. Closing it means mapping
-        # each character onto one of the backend's voices, which is its own
-        # piece of work.
+        # The ids come from the deployment, never from this file. The provider
+        # does not publish them, a wrong one is substituted in silence rather
+        # than refused, and an empty catalogue is the honest default: nothing
+        # is bound, the model chooses as it did before, and the warning below
+        # says so. See tools/probe_take_voices for how the list is filled.
         voice_ids: Dict[str, str] = {}
         if picture_speaks:
-            logger.warning(
-                "The picture speaks this film (%r), but no voice ids are "
-                "mapped: the take will choose its own voices, so a character "
-                "may not sound the same in every scene.",
-                language,
+            voice_ids = take_voices.cast(
+                characters,
+                # A returning character's voice, carried on their library
+                # entry. Validated against the catalogue inside cast(),
+                # because that field holds whichever provider's id was current
+                # when they were saved -- and an ElevenLabs id bound to a
+                # Kling element is an unknown voice, not a wrong one.
+                locked={
+                    str(lib.get("name") or ""): str(lib.get("voice_id") or "")
+                    for lib in (library_characters or [])
+                },
             )
+            if voice_ids:
+                logger.info(
+                    "Take cast (%r): %s",
+                    language,
+                    ", ".join(
+                        f"{name}={voice}" for name, voice in sorted(voice_ids.items())
+                    ),
+                )
+            else:
+                logger.warning(
+                    "The picture speaks this film (%r), but no voice ids are "
+                    "mapped: the take will choose its own voices, so a "
+                    "character may not sound the same in every scene. Fill "
+                    "%s to close this (tools/probe_take_voices).",
+                    language,
+                    take_voices.SHARED_ENV,
+                )
 
         speech_tasks: Dict[int, "asyncio.Task"] = {}
         if voice_gen is not None and not picture_speaks:
@@ -6643,9 +6685,23 @@ class Idea2VideoPipeline:
         # concurrently, so the cost is the slowest single voice -- seconds of
         # work, against the minutes of video it is about to size -- and the
         # storyboard step below awaited most of them anyway.
+        #
+        # A film the PICTURE speaks has no recording to measure: no TTS runs,
+        # so there is no task here to await and every entry came back 0.0 --
+        # which distribute_budget reads as "this scene says nothing" and sizes
+        # on tension alone. Job 6f857aa0-903 logged exactly that
+        # (`measured speech [0.0, 0.0, 0.0]`) while shipping three speaking
+        # scenes. The estimate below is the same one interfaces/scene_take
+        # will use a moment later to decide which beat each line falls in, so
+        # the scene is sized by the arithmetic that has to fit the lines into
+        # it -- weaker than a measurement, and not a guess made twice.
         measured_speech = [
-            (await _measured_speech_length(speech_tasks.get(index))) or 0.0
-            for index in range(len(script.scenes))
+            (
+                estimated_speech_seconds(_scene_dialogue(scene))
+                if picture_speaks
+                else (await _measured_speech_length(speech_tasks.get(index))) or 0.0
+            )
+            for index, scene in enumerate(script.scenes)
         ]
 
         # Fixed second budget for the whole drama, split by tension and by how
@@ -6660,10 +6716,14 @@ class Idea2VideoPipeline:
         )
         logger.info(
             "Second budget for job: %s (total %ss across %s scenes); "
-            "measured speech %s",
+            "%s speech %s",
             scene_durations,
             billable_seconds(scene_durations),
             len(script.scenes),
+            # Named, because the two are not equally trustworthy and a log
+            # that calls an estimate a measurement is the reason nobody
+            # questioned [0.0, 0.0, 0.0].
+            "estimated" if picture_speaks else "measured",
             [round(seconds, 2) for seconds in measured_speech],
         )
 
@@ -7333,7 +7393,14 @@ class Idea2VideoPipeline:
             # this drama carries the voice this drama gave them: without it the
             # first episode's casting is thrown away and episode two re-derives
             # it from a different ensemble (see VoiceGenerator.lock_voices).
-            "character_voices": {
+            #
+            # On a film the PICTURE speaks these are the take's voices rather
+            # than the TTS cast's -- different library, same promise, and the
+            # one the drama was actually spoken in. `voice_ids` is already
+            # keyed by display name; the TTS path casefolds, which is why only
+            # one of the two needs the lookup.
+            "character_voices": voice_ids
+            or {
                 c.name: character_voices[c.name.casefold()]
                 for c in characters
                 if c.name.casefold() in character_voices
