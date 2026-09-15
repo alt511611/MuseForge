@@ -136,6 +136,15 @@ MIN_BEAT_DESCRIPTION = 140
 #: a 422 on a multi-shot endpoint is not a poorer picture, it is no picture.
 PROMPT_BUDGET_RESERVE = 64
 
+#: How short the description may be cut to keep ONE spoken line in the beat.
+#: Below MIN_BEAT_DESCRIPTION deliberately: the two floors answer different
+#: questions. MIN_BEAT_DESCRIPTION is what a shot needs to be a shot at all,
+#: and it holds for every beat that has room for it. This one applies in the
+#: single case where the alternative is a beat that says nothing while the
+#: subtitle over it says a whole line -- a picture described in fewer words
+#: is a worse picture, a take contradicting its own subtitle is a worse film.
+MIN_DESCRIPTION_BESIDE_SPEECH = 70
+
 #: What the whole cast clause -- names, outfits and the continuity sentence --
 #: may spend of the first beat's prompt.
 #:
@@ -462,17 +471,47 @@ def _fit_beat_prompt(
     kept = _trim(description, max(MIN_BEAT_DESCRIPTION, room - wire_length(spoken)))
 
     # Still over with the description at its floor: whole lines come off the
-    # end of the speech until it fits.
+    # end of the speech until it fits. The LAST line is held back from this
+    # loop -- see below.
     dropped_a_line = False
-    while said and wire_length(kept) + wire_length(spoken) > room:
+    while len(said) > 1 and wire_length(kept) + wire_length(spoken) > room:
         said.pop()
         spoken = _spoken_clause(said)
         dropped_a_line = True
-    if dropped_a_line:
+
+    # One line left and it still does not fit beside a floored description.
+    # Here the DESCRIPTION gives again, below MIN_BEAT_DESCRIPTION, because a
+    # beat that says nothing at all is a different failure from a beat
+    # described in fewer words: the subtitle burned into the frame still
+    # carries the line, so a silent take contradicts its own picture, which
+    # is the mismatch this whole function exists to prevent.
+    #
+    # This is not a hypothetical trade. When the budget was the endpoint's
+    # full 512 the first line always fitted; PROMPT_BUDGET_RESERVE (added
+    # after a 503-character beat was refused by a budget of 504) took 64
+    # characters out of it, and a beat with four long lines went from saying
+    # its first line to saying nothing -- silently, with no test failing that
+    # anyone had to read, because the prompt was still valid and still under
+    # the limit. A budget guard is allowed to shorten the picture. It is not
+    # allowed to decide what the film says.
+    if said and wire_length(kept) + wire_length(spoken) > room:
+        kept = _trim(description, max(MIN_DESCRIPTION_BESIDE_SPEECH,
+                                      room - wire_length(spoken)))
+        dropped_a_line = True
+
+    # Even the floor under the floor is not enough: there is nothing left to
+    # give but the line itself, so the beat goes silent and takes its
+    # description back up to the normal floor.
+    if said and wire_length(kept) + wire_length(spoken) > room:
+        said = []
+        spoken = ""
+        kept = _trim(description, max(MIN_BEAT_DESCRIPTION, room))
+    elif dropped_a_line:
         # Dropping by whole lines overshoots -- it has to, a half sentence is
         # worse than a missing one -- so the description takes back what the
         # speech gave up rather than leaving the budget unspent.
-        kept = _trim(description, room - wire_length(spoken))
+        kept = _trim(description, max(MIN_DESCRIPTION_BESIDE_SPEECH,
+                                      room - wire_length(spoken)))
 
     assembled = f"{head}{kept}{spoken}".strip()
     return assembled if wire_length(assembled) <= limit else _trim(assembled, limit)
