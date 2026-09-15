@@ -2367,7 +2367,12 @@ async def get_credits(current_user: AuthUser = Depends(get_current_user)):
     }
 
 
-# ── Stripe endpoints ──────────────────────────────────────────────────────────
+# ── Payment endpoints ─────────────────────────────────────────────────────────
+# One set of endpoints, either processor behind them. The client sends the same
+# request and gets back the same `{"url": ...}` whether the money is going
+# through Stripe or through Whop, which is what lets PAYMENT_PROVIDER be
+# flipped without shipping a frontend. See billing.resolve_payment_provider and
+# the docstring of whop_integration for why there are two at all.
 
 class CheckoutRequest(BaseModel):
     plan: str
@@ -2388,6 +2393,34 @@ async def create_checkout_session(
     req: CheckoutRequest,
     current_user: AuthUser = Depends(get_current_user),
 ):
+    from billing import resolve_payment_provider
+
+    provider = resolve_payment_provider()
+
+    if provider == "whop":
+        from whop_integration import create_checkout_session as _create, get_plan_id
+
+        plan_id = get_plan_id(req.plan, req.interval)
+        if not plan_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"No Whop plan configured for '{req.plan}' "
+                    f"({req.interval} billing). Set WHOP_PLAN_{req.plan.upper()}"
+                    f"{'_ANNUAL' if req.interval == 'annual' else ''}."
+                ),
+            )
+        try:
+            url = await _create(
+                plan_id=plan_id,
+                user_id=current_user.user_id,
+                user_email=current_user.email,
+                success_url=req.success_url,
+            )
+            return {"url": url}
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
     from stripe_integration import create_checkout_session as _create, get_price_id
 
     price_id = get_price_id(req.plan, req.interval)
@@ -2423,12 +2456,40 @@ async def buy_credits(
     req: BuyCreditsRequest,
     current_user: AuthUser = Depends(get_current_user),
 ):
-    """Create a one-time Stripe Checkout session for a credit package."""
-    from stripe_integration import create_checkout_session as _create, get_credit_price_id, CREDIT_PACKAGES
+    """Create a one-time checkout session for a credit package."""
+    from billing import CREDIT_PACKAGES, resolve_payment_provider
+    from stripe_integration import create_checkout_session as _create, get_credit_price_id
 
     pkg_key = req.package.upper()
     if pkg_key not in CREDIT_PACKAGES:
         raise HTTPException(status_code=400, detail=f"Unknown credit package: {req.package}")
+
+    if resolve_payment_provider() == "whop":
+        from whop_integration import create_checkout_session as _whop, get_credit_plan_id
+
+        plan_id = get_credit_plan_id(pkg_key)
+        if not plan_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"No Whop plan configured for credit package '{req.package}'. "
+                    f"Set WHOP_PLAN_CREDITS_{pkg_key}."
+                ),
+            )
+        try:
+            url = await _whop(
+                plan_id=plan_id,
+                user_id=current_user.user_id,
+                user_email=current_user.email,
+                success_url=req.success_url,
+                # The pack key rides along in metadata so the webhook knows how
+                # many credits were bought without having to reverse the plan
+                # id -- the same thing `credit_package` does on Stripe.
+                metadata={"credit_package": pkg_key},
+            )
+            return {"url": url, "package": pkg_key, "credits": CREDIT_PACKAGES[pkg_key]["credits"]}
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
 
     price_id = get_credit_price_id(pkg_key)
     if not price_id:
@@ -2456,7 +2517,31 @@ async def stripe_portal(
     req: PortalRequest,
     current_user: AuthUser = Depends(get_current_user),
 ):
-    """Create a Stripe Billing Portal session for the authenticated user."""
+    """Where the authenticated user manages their own subscription.
+
+    Stripe hands back a signed, single-use Billing Portal URL; Whop has no
+    such thing and the answer is the customer's own orders page. Both come
+    back as `{"url": ...}`, so the dashboard button does not care which
+    processor took the money.
+    """
+    from billing import resolve_payment_provider
+
+    if resolve_payment_provider() == "whop":
+        from whop_integration import manage_url
+
+        membership_id = ""
+        if SUPABASE_URL and SUPABASE_SERVICE_KEY:
+            try:
+                from billing import find_profile
+
+                row = await find_profile(
+                    "id", current_user.user_id, select="whop_membership_id"
+                )
+                membership_id = (row or {}).get("whop_membership_id") or ""
+            except Exception as exc:
+                logger.warning("Could not look up the Whop membership id: %s", exc)
+        return {"url": manage_url(membership_id)}
+
     from stripe_integration import create_portal_session
 
     customer_id: Optional[str] = None
@@ -2517,6 +2602,37 @@ async def stripe_webhook(request: Request):
         # customer is never credited. The handler releases its idempotency
         # mark on the way out so the retry is allowed to do the work.
         logger.exception("Stripe webhook failed while handling the event.")
+        raise HTTPException(
+            status_code=500, detail="Webhook handler failed; retry expected."
+        )
+
+
+@app.post("/api/whop-webhook")
+async def whop_webhook(request: Request):
+    """Whop's side of `/api/stripe-webhook`, with the same failure contract.
+
+    The RAW body is what was signed, so it is what gets passed on -- reading
+    it as JSON here and re-serialising it would change the bytes and fail
+    every signature check. The headers go along whole because Whop signs
+    `{webhook-id}.{webhook-timestamp}.{body}`, not the body alone.
+    """
+    from whop_integration import handle_webhook
+
+    payload = await request.body()
+    try:
+        return await handle_webhook(payload, dict(request.headers))
+    except ValueError as exc:
+        # `handle_webhook` has already logged WHY -- missing secret, stale
+        # timestamp, or a digest that did not match; this ties it to the
+        # request in the access log.
+        logger.warning("Whop webhook returned 400: %s", exc)
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        # Ours, not Whop's, so it has to be a 5xx: Whop retries those for
+        # about three days. A 200 here would claim the payment was handled
+        # and the customer would never be credited. The handler releases its
+        # idempotency mark on the way out so the retry can do the work.
+        logger.exception("Whop webhook failed while handling the event.")
         raise HTTPException(
             status_code=500, detail="Webhook handler failed; retry expected."
         )

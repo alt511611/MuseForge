@@ -28,7 +28,7 @@ export default function PrivacyContent() {
 
         <div className="glass rounded-2xl p-8">
           <Section title="1. Data We Collect">
-            <p>Account email, authentication identifiers, generation job metadata, billing records via Stripe, and basic usage analytics.</p>
+            <p>Account email, authentication identifiers, generation job metadata, billing records via Whop, and basic usage analytics.</p>
           </Section>
 
           <Section title="2. How We Use Data">
@@ -36,7 +36,7 @@ export default function PrivacyContent() {
           </Section>
 
           <Section title="3. Sharing">
-            <p>We share data with processors such as Supabase (auth/database/storage), Stripe (payments), and hosting providers as needed to run MuseForge. We do not sell personal data.</p>
+            <p>We share data with processors such as Supabase (auth/database/storage), Whop (payments), and hosting providers as needed to run MuseForge. We do not sell personal data.</p>
           </Section>
 
           <Section title="4. Retention">
