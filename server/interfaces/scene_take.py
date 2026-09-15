@@ -836,6 +836,39 @@ def _apportion(total: int, weights: Sequence[float]) -> List[int]:
 WORDS_PER_SECOND = 2.5
 
 
+def _line_seconds(line: str) -> float:
+    """How long this one line takes to say, at WORDS_PER_SECOND.
+
+    The floor is a second because the rate alone answers "hm." in 0.4s, and a
+    line is a breath before it is a word count.
+    """
+    _, _, said = line.partition(":")
+    words = len((said or line).split())
+    return max(1.0, words / WORDS_PER_SECOND)
+
+
+def estimated_speech_seconds(dialogue: Sequence[str]) -> float:
+    """How long this scene speaks for, from text alone.
+
+    The same arithmetic _spread_dialogue lays the lines out with, exported so
+    that the caller who SIZES the scene and the caller who fills its beats
+    cannot answer differently. That is not a tidiness argument. The second
+    budget is split before any provider call and cannot be revisited
+    (idea2video: "the split is the one decision that cannot be revisited
+    later"), and on a film the picture speaks there is no recording to
+    measure -- no TTS runs -- so that split used to be handed
+    ``speech_seconds=[0.0, 0.0, 0.0]`` and fall back to tension alone. Job
+    6f857aa0-903 sized its three scenes 8/10/12s knowing nothing about the
+    lines they had to fit, and _spread_dialogue then packed those lines into
+    whatever beats the guess had bought.
+
+    An estimate is weaker than a measurement and this does not pretend
+    otherwise; it is the same estimate the beats are built on, which makes the
+    two consistent where they were merely both approximate.
+    """
+    return sum(_line_seconds(line) for line in dialogue)
+
+
 def _spread_dialogue(
     dialogue: Sequence[str], beats: Sequence[Beat]
 ) -> List[Tuple[str, ...]]:
@@ -859,13 +892,11 @@ def _spread_dialogue(
 
     at = 0.0
     for line in dialogue:
-        _, _, said = line.partition(":")
-        words = len((said or line).split())
         index = next(
             (i for i, edge in enumerate(edges) if at < edge), len(per_beat) - 1
         )
         per_beat[index].append(line)
-        at += max(1.0, words / WORDS_PER_SECOND)
+        at += _line_seconds(line)
     return [tuple(lines) for lines in per_beat]
 
 
