@@ -186,6 +186,32 @@ def sb_configured() -> bool:
 # purchase in the user's history.
 
 
+def _must_have_granted(resp, user_id: str, credits_delta: int) -> None:
+    """Raise unless Supabase actually granted the credits.
+
+    This used to be `await client.post(...)` with the response thrown away,
+    and that silence is what makes it worth a function of its own. A database
+    that has not had `supabase_migration.sql` applied answers the RPC with
+    404 `Could not find the function public.grant_credits`. The old code read
+    that as success: the webhook returned 200, the processor's dashboard
+    showed a green delivery, the customer had paid, and nobody -- not the
+    customer, not the log, not the processor -- was told the credits never
+    landed. It was found on the live database on 15 Sep 2026, where every one
+    of `grant_credits`, `deduct_credits`, `credit_balance` and
+    `revoke_subscription_credits` was missing.
+
+    Raising instead turns that into the failure the retry machinery is built
+    for: the webhook handler releases its idempotency mark, answers 5xx, and
+    the processor redelivers -- so the moment the migration IS applied, every
+    payment that failed this way is credited by a retry rather than by hand.
+    """
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"Supabase refused to grant {credits_delta} credits to {user_id} "
+            f"({resp.status_code}): {resp.text[:300]}"
+        )
+
+
 async def grant_credits(
     user_id: str,
     credits_delta: int,
@@ -213,7 +239,7 @@ async def grant_credits(
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         if credits_delta > 0:
-            await client.post(
+            resp = await client.post(
                 f"{SUPABASE_URL}/rest/v1/rpc/grant_credits",
                 json={
                     "p_user_id": user_id,
@@ -223,6 +249,7 @@ async def grant_credits(
                 },
                 headers=sb_headers(),
             )
+            _must_have_granted(resp, user_id, credits_delta)
 
         # Plan / processor identifiers are profile-level, not lot-level.
         patch_body: dict = {k: v for k, v in (profile_fields or {}).items() if v}
