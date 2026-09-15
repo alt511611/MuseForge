@@ -21,7 +21,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Awaitable, Callable, Iterable, List, Optional, Set
 
 import httpx
 
@@ -170,6 +170,53 @@ async def upload_video(local_path: str, job_id: str) -> str:
         return local_path
 
 
+async def sign_video(job_id: str, ttl_seconds: Optional[int] = None) -> Optional[str]:
+    """Mint a FRESH signed URL for a job's master, or None.
+
+    A share page outlives its link. `result.video_url` was signed once, when
+    the job finished, for MUSEFORGE_SIGNED_URL_TTL (seven days by default) --
+    which is fine for the customer watching their own render that afternoon and
+    useless for a public page that Google indexed last month. Rather than widen
+    that TTL for every job, the share video endpoint re-signs on each request:
+    the object is still private, every URL handed out is short-lived, and the
+    page keeps working for as long as the object exists.
+    """
+    if _is_demo() or not _storage_configured():
+        return None
+
+    object_path = f"{job_id}.mp4"
+    ttl = int(ttl_seconds or SIGNED_URL_TTL_SECONDS)
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{SUPABASE_URL}/storage/v1/object/sign/{STORAGE_BUCKET}/{object_path}",
+                json={"expiresIn": ttl},
+                headers=_headers("application/json"),
+            )
+            if resp.status_code >= 400:
+                # A 404 here is the normal end of a shared video's life: the
+                # object is gone (retention, or a manual bucket clean). Said at
+                # info, not error, so it does not read as a fault.
+                logger.info(
+                    "sign_video: %s not signable (%s)", object_path, resp.status_code
+                )
+                return None
+            data = resp.json()
+            signed = data.get("signedURL") or data.get("signedUrl") or ""
+            if not signed:
+                return None
+            if signed.startswith("http"):
+                return signed
+            if not signed.startswith("/"):
+                signed = "/" + signed
+            if signed.startswith("/storage/v1"):
+                return f"{SUPABASE_URL}{signed}"
+            return f"{SUPABASE_URL}/storage/v1{signed}"
+    except Exception as exc:
+        logger.warning("sign_video failed for %s: %s", object_path, exc)
+        return None
+
+
 # ── Retention ─────────────────────────────────────────────────────────────────
 
 
@@ -274,10 +321,26 @@ async def _delete_objects(client: httpx.AsyncClient, names: List[str]) -> int:
     return removed
 
 
-async def delete_expired_videos() -> int:
+def _job_id_of(object_name: str) -> str:
+    """The job id an object belongs to. upload_video writes `{job_id}.mp4`."""
+    return object_name[:-4] if object_name.endswith(".mp4") else object_name
+
+
+async def delete_expired_videos(
+    protected: Optional[Iterable[str]] = None,
+) -> int:
     """Drop bucket objects whose signed URL has certainly expired.
 
     Returns how many were removed; 0 whenever it cannot or should not run.
+
+    ``protected`` is a set of job ids whose objects must survive regardless of
+    age. Publicly shared jobs go in it: a share page is a URL the owner has
+    handed to other people and that search engines index, and the age-based
+    rule below would take its video away on day eight -- turning every link
+    ever pasted, and every indexed page, into a dead player. The rule's own
+    justification ("the objects it removes cannot be opened by anyone anyway")
+    is exactly what stops being true once /api/share/{slug}/video re-signs on
+    demand.
 
     Deliberately leaves public.jobs alone. The row is the customer's history of
     what they made and what it cost them, and it was already pointing at a URL
@@ -288,10 +351,13 @@ async def delete_expired_videos() -> int:
         return 0
 
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=retention_seconds())
+    keep: Set[str] = {str(j) for j in (protected or ())}
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             names = await _expired_object_names(client, cutoff)
+            if keep:
+                names = [n for n in names if _job_id_of(n) not in keep]
             if not names:
                 return 0
             removed = await _delete_objects(client, names)
@@ -308,11 +374,26 @@ async def delete_expired_videos() -> int:
     return removed
 
 
-async def storage_retention_loop() -> None:
-    """Background task: hold the videos bucket to its retention window."""
+async def storage_retention_loop(
+    protected_provider: Optional[Callable[[], Awaitable[Iterable[str]]]] = None,
+) -> None:
+    """Background task: hold the videos bucket to its retention window.
+
+    ``protected_provider`` is awaited once per sweep rather than captured once
+    at startup, because the set it returns is the list of currently shared jobs
+    and that changes while the process runs. It is injected rather than
+    imported so this module keeps knowing nothing about sharing; a provider
+    that raises is treated as "no exemptions known", and the sweep is SKIPPED
+    for that round instead of proceeding -- an empty exemption list read from a
+    failed lookup is indistinguishable from "nothing is shared", and acting on
+    it would delete the shared videos this argument exists to protect.
+    """
     while True:
         try:
-            await delete_expired_videos()
+            if protected_provider is None:
+                await delete_expired_videos()
+            else:
+                await delete_expired_videos(await protected_provider())
         except Exception as exc:
             logger.error("Storage retention loop error: %s", exc)
         await asyncio.sleep(RETENTION_INTERVAL_SECONDS)

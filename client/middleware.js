@@ -100,8 +100,11 @@ export async function middleware(request) {
 }
 
 export const config = {
-  // Metadata routes and static assets must never be rewritten into /[locale].
+  // Metadata routes, static assets and the unlocalized share routes must never
+  // be rewritten into /[locale]. `s/` and `embed/` live outside app/[locale]
+  // on purpose (see UNLOCALIZED_PREFIXES): a rewrite would send /s/x to
+  // /en/s/x, which is a route that does not exist.
   matcher: [
-    "/((?!_next/static|_next/image|api/|auth/|md/|favicon.ico|icon-\\d+\\.png|icon\\.svg|apple-touch-icon\\.png|robots\\.txt|sitemap\\.xml|llms\\.txt|llms-full\\.txt|manifest\\.webmanifest|opengraph-image).*)",
+    "/((?!_next/static|_next/image|api/|auth/|md/|s/|embed/|favicon.ico|icon-\\d+\\.png|icon\\.svg|apple-touch-icon\\.png|robots\\.txt|sitemap\\.xml|llms\\.txt|llms-full\\.txt|manifest\\.webmanifest|opengraph-image).*)",
   ],
 };

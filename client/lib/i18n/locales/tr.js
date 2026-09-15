@@ -504,4 +504,20 @@ export default {
   blog_cat_guide: "Rehber",
   blog_cat_playbook: "Oyun kitabı",
   blog_cat_comparison: "Satın alma rehberi",
+
+  // ── Paylaşım sayfaları (/s/{slug}) ────────────────────────────────────────
+  share_published: "Yayında",
+  share_unpublish: "Yayından kaldır",
+  share_copied: "Kopyalandı",
+  share_copy_link: "Bağlantı",
+  share_copy_embed: "Yerleştirme kodu",
+  share_needs_account: "Paylaşım sayfası yayınlamak için giriş yapın.",
+  share_failed: "Bu video yayınlanamadı.",
+  share_revoke_failed: "Bu video yayından kaldırılamadı.",
+  share_scene_count: "{n} sahne",
+  share_video_gone: "Bu video artık kullanılamıyor.",
+  share_cta_title: "MuseForge ile yapıldı",
+  share_cta_desc:
+    "Tek cümle girin, bitmiş bir sinematik sahne çıksın. Ücretsiz deneyin — API anahtarı gerekmez.",
+  share_cta_button: "Kendinizinkini yapın",
 };

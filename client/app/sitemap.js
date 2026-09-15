@@ -1,6 +1,13 @@
 import { SITE_URL } from "../lib/seo";
 import { lastModified } from "../lib/routeMtime";
 import { LOCALE_CODES, withLocale } from "../lib/i18n/routing";
+import { getRecentShares, SHARE_REVALIDATE } from "../lib/share";
+
+/* The share list is read from the API, so this file is no longer a pure
+   function of the repo. Revalidated on the same hour as the pages themselves:
+   a sitemap that promised a URL Google then found revoked is worse than one
+   that names it an hour late. */
+export const revalidate = SHARE_REVALIDATE;
 import { ARTICLES, BLOG_PATH, articlePath, localesOf, articleSourceFiles } from "../lib/content";
 
 /* Only publicly indexable routes belong here. /login, /dashboard, /admin,
@@ -67,7 +74,37 @@ const ROUTES = [
 
 const abs = (path) => (path === "/" ? SITE_URL : `${SITE_URL}${path}`);
 
-export default function sitemap() {
+export default async function sitemap() {
+  return [...staticEntries(), ...(await shareEntries())];
+}
+
+/**
+ * The published share pages.
+ *
+ * One entry each, no hreflang cluster and no locale variants: a share exists
+ * at exactly one URL (see UNLOCALIZED_PREFIXES). `lastModified` is when it was
+ * published rather than when a file changed, because no file ever does.
+ *
+ * Fails open to an empty list (see lib/share.js). A sitemap that throws takes
+ * every static route down with it, and the static routes are the ones actually
+ * carrying rankings.
+ */
+async function shareEntries() {
+  const shares = await getRecentShares(500);
+  return shares
+    .filter((s) => s?.slug)
+    .map((s) => ({
+      url: `${SITE_URL}/s/${s.slug}`,
+      lastModified: s.shared_at || s.created_at || undefined,
+      changeFrequency: "monthly",
+      /* Below every hand-written route on purpose. These pages are numerous
+         and user-generated; the landing page and /pricing are what the site is
+         trying to rank, and a thousand 0.8s would drown them out. */
+      priority: 0.5,
+    }));
+}
+
+function staticEntries() {
   return ROUTES.flatMap(({ path, files, locales, changeFrequency, priority }) => {
     const when = lastModified(files);
     const codes = locales?.length ? locales : LOCALE_CODES;

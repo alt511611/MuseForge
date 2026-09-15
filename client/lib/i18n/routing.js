@@ -14,10 +14,17 @@ import { LOCALE_CODES, DEFAULT_LOCALE, LOCALES } from "./locales";
 
 export { LOCALE_CODES, DEFAULT_LOCALE, LOCALES };
 
-/** Paths that are never localized — auth callbacks, API proxy, assets, and the
+/** Paths that are never localized — auth callbacks, API proxy, assets, the
     plain-text article editions under /md (which carry their language in a query
-    parameter instead of a prefix). */
-export const UNLOCALIZED_PREFIXES = ["/auth", "/api", "/_next", "/md"];
+    parameter instead of a prefix), and the share routes.
+
+    A share page is one film, and the only text on it that a reader is there for
+    (its title and its logline) is in whatever language the film was written in.
+    Prefixing it would mint twenty URLs per share whose unique content is
+    identical and whose chrome is the only thing that differs — near-duplicates
+    of each other, at the scale of every video anyone ever publishes. One
+    canonical URL per share instead, the way every video host does it. */
+export const UNLOCALIZED_PREFIXES = ["/auth", "/api", "/_next", "/md", "/s", "/embed"];
 
 export function isLocale(value) {
   return LOCALE_CODES.includes(value);

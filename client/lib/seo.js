@@ -89,6 +89,29 @@ export function openGraphFor({
 
 /* ── JSON-LD builders ──────────────────────────────────────────────────── */
 
+/**
+ * The profiles that are the SAME entity as this organization.
+ *
+ * `sameAs` is not a link list and it is not marketing. It is the claim "the
+ * thing at this URL and the thing at that URL are one organization", and it is
+ * how a search engine or an assistant corroborates that MuseForge is a real
+ * entity rather than one unverifiable website asserting things about itself.
+ * One entry, as this has, is about as thin as that claim gets.
+ *
+ * THE RULE FOR ADDING ONE: the URL must resolve to a profile that is actually
+ * MuseForge's, and that profile should link back here. Nothing else. A
+ * plausible-looking URL for a profile that does not exist is worse than an
+ * absent one — it either gets ignored, or it binds this organization to
+ * whoever really holds that handle, and the second outcome is not something
+ * you notice from inside your own site.
+ *
+ * Likely candidates when they exist, strongest first: the LinkedIn company
+ * page, a GitHub organization, the YouTube channel, Crunchbase, Product Hunt.
+ */
+const PROFILES = [
+  "https://twitter.com/museforge_ai",
+];
+
 export function organizationSchema() {
   return {
     "@type": "Organization",
@@ -103,7 +126,7 @@ export function organizationSchema() {
     },
     description:
       "MuseForge is an agentic AI video studio that turns a single text idea into a complete cinematic micro-drama.",
-    sameAs: ["https://twitter.com/museforge_ai"],
+    sameAs: PROFILES,
   };
 }
 
@@ -313,4 +336,54 @@ function slugId(text = "") {
     .trim()
     .replace(/\s+/g, "-")
     .slice(0, 60);
+}
+
+/* ── Share pages ───────────────────────────────────────────────────────────── */
+
+/**
+ * VideoObject for one published share.
+ *
+ * `uploadDate`, `name`, `description` and `thumbnailUrl` are the four Google
+ * treats as required for a video rich result, and a share is missing exactly
+ * one of them often enough to matter: a film whose every shot failed to record
+ * a frame has no thumbnail. The node is emitted without it rather than with a
+ * placeholder — an invented thumbnail is a wrong answer to a crawler, and the
+ * page is still a valid VideoObject without the rich result.
+ *
+ * `contentUrl` points at /api/share/{slug}/video, which re-signs on every
+ * request. The signed Storage URL the job finished with expires in seven days;
+ * a URL in structured data has to still resolve months later.
+ */
+export function videoObjectSchema({
+  slug,
+  name,
+  description,
+  thumbnailUrl,
+  contentUrl,
+  embedUrl,
+  uploadDate,
+  duration,
+  inLanguage,
+}) {
+  const url = absoluteUrl(`/s/${slug}`);
+  return {
+    "@type": "VideoObject",
+    "@id": `${url}#video`,
+    url,
+    name,
+    description,
+    ...(thumbnailUrl ? { thumbnailUrl: [thumbnailUrl] } : {}),
+    ...(contentUrl ? { contentUrl } : {}),
+    ...(embedUrl ? { embedUrl } : {}),
+    ...(uploadDate ? { uploadDate } : {}),
+    ...(duration ? { duration } : {}),
+    ...(inLanguage ? { inLanguage } : {}),
+    isFamilyFriendly: true,
+    publisher: { "@id": `${SITE_URL}/#organization` },
+    /* Not `author`. The person who generated the film is deliberately absent
+       from the payload this page is built from (see server/sharing.py), and
+       naming MuseForge as the author of someone else's work would be a claim
+       the product is not entitled to make. Publisher is what it actually is. */
+    creativeWorkStatus: "Published",
+  };
 }

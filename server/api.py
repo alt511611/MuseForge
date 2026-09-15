@@ -93,6 +93,7 @@ from auth import (
     get_optional_user,
 )
 import series_store
+import sharing
 from interfaces.beat import refusal as beat_refusal
 from interfaces.series import Series, SeriesCharacter, continuity_brief
 from interfaces.camera import DIRECTOR_STYLES
@@ -293,7 +294,11 @@ async def lifespan(app: FastAPI):
 
     cleanup_task = asyncio.create_task(orphan_cleanup_loop())
     reaper_task = asyncio.create_task(stale_job_reaper_loop())
-    retention_task = asyncio.create_task(storage_retention_loop())
+    # The sweep must not take the video out from under a page the owner
+    # published and Google indexed -- see delete_expired_videos(protected).
+    retention_task = asyncio.create_task(
+        storage_retention_loop(protected_provider=sharing.shared_job_ids)
+    )
     tasks = (cleanup_task, reaper_task, retention_task)
     try:
         yield
@@ -1209,6 +1214,157 @@ async def get_job_video(job_id: str, format: Optional[str] = None):
         return RedirectResponse(url)
 
     raise HTTPException(status_code=404, detail="Video not available")
+
+
+# ── Public share pages ────────────────────────────────────────────────────────
+#
+# The Share button used to copy the address bar, which on the results page is
+# /generate/{job_id} -- a route behind the auth middleware and marked noindex.
+# Everyone who has ever shared a MuseForge link shared a sign-in wall. These
+# four endpoints are the public half: an owner publishes one finished job, and
+# anybody (including a crawler) can then read a narrow projection of it and
+# play the video. See server/sharing.py for what that projection contains and
+# why the raw idea is not in it.
+
+
+class ShareResponse(BaseModel):
+    slug: str
+    #: Site-relative on purpose. The API has no idea which origin serves the
+    #: front end (there is no SITE_URL here, only an allow-list of several),
+    #: and a guess would be pasted into Twitter by the client.
+    path: str
+
+
+def _share_row_from_job(data: Dict[str, Any]) -> Dict[str, Any]:
+    """A jobs-table-shaped row built from a job dict.
+
+    Only used to seed sharing's in-memory fallback, which has no table to read
+    back from. Keys match public.jobs so `sharing.public_payload` cannot tell
+    the two paths apart.
+    """
+    return {
+        "id": data.get("id"),
+        "status": data.get("status"),
+        "style": data.get("style"),
+        "director_style": data.get("director_style"),
+        "aspect_ratio": data.get("aspect_ratio"),
+        "num_scenes": data.get("num_scenes"),
+        "demo": data.get("demo"),
+        "created_at": data.get("created_at"),
+        "result": data.get("result"),
+    }
+
+
+async def _job_the_caller_may_publish(
+    job_id: str, current_user: AuthUser
+) -> Dict[str, Any]:
+    """The caller's own finished job, or the HTTPException that explains why not."""
+    job = job_store.get(job_id)
+    data = job.to_dict(include_events=False) if job else await job_store.get_or_fetch_dict(job_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    owner = data.get("user_id")
+    if not owner:
+        # A job made without an account -- the landing page's demo run. Nobody
+        # can prove they made it, so nobody may publish it under this product's
+        # name. Signing in and generating again is the path, and it is also the
+        # only point at which someone agrees to anything.
+        raise HTTPException(
+            status_code=403,
+            detail="Sign in and generate a video to publish a share page.",
+        )
+    if owner != current_user.user_id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if data.get("status") != JobStatus.COMPLETED.value:
+        raise HTTPException(
+            status_code=409, detail="Only a finished video can be shared."
+        )
+    return data
+
+
+@app.post("/api/jobs/{job_id}/share", response_model=ShareResponse)
+async def publish_share(
+    job_id: str,
+    current_user: AuthUser = Depends(get_current_user),
+):
+    data = await _job_the_caller_may_publish(job_id, current_user)
+    result = data.get("result") or {}
+    row = await sharing.share(
+        job_id,
+        title=result.get("title") or data.get("idea") or "",
+        seed_row=_share_row_from_job(data),
+    )
+    slug = (row or {}).get("share_slug")
+    if not slug:
+        raise HTTPException(
+            status_code=503, detail="Could not publish this video right now."
+        )
+    logger.info("Share published for job %s as %s", job_id, slug)
+    return ShareResponse(slug=slug, path=f"/s/{slug}")
+
+
+@app.delete("/api/jobs/{job_id}/share")
+async def revoke_share(
+    job_id: str,
+    current_user: AuthUser = Depends(get_current_user),
+):
+    await _job_the_caller_may_publish(job_id, current_user)
+    if not await sharing.revoke(job_id):
+        raise HTTPException(
+            status_code=503, detail="Could not unpublish this video right now."
+        )
+    logger.info("Share revoked for job %s", job_id)
+    return {"ok": True}
+
+
+@app.get("/api/share/{slug}")
+async def read_share(slug: str):
+    """The public page's data. No auth, by definition -- this is the product."""
+    row = await sharing.get_by_slug(slug)
+    if not row:
+        raise HTTPException(status_code=404, detail="Share not found")
+    return sharing.public_payload(row)
+
+
+@app.get("/api/shares")
+async def list_shares(limit: int = 60):
+    """Most recently published first: the gallery, and the sitemap's source."""
+    rows = await sharing.recent(limit)
+    return {"items": [sharing.public_payload(r) for r in rows]}
+
+
+@app.get("/api/share/{slug}/video")
+async def read_share_video(slug: str):
+    """Play a shared video without knowing its job id.
+
+    Re-signs on every request rather than redirecting to the URL stored on the
+    result: that one was signed when the job finished and is dead a week later,
+    which is well inside the life of a page someone has linked to.
+    """
+    row = await sharing.get_by_slug(slug)
+    if not row:
+        raise HTTPException(status_code=404, detail="Share not found")
+
+    job_id = row.get("id")
+    from tools.supabase_storage import sign_video
+
+    signed = await sign_video(str(job_id)) if job_id else None
+    if signed:
+        return RedirectResponse(signed)
+
+    # No Storage (demo, local dev) or the object is gone. Fall back to whatever
+    # the job itself can still serve, which is the same path the owner's own
+    # results page uses.
+    result = row.get("result") if isinstance(row.get("result"), dict) else {}
+    path = result.get("video_path")
+    if path and os.path.exists(path):
+        return FileResponse(path, media_type="video/mp4", filename=f"museforge_{slug}.mp4")
+    url = result.get("video_url")
+    if url and isinstance(url, str) and url.startswith(("http://", "https://")):
+        return RedirectResponse(url)
+
+    raise HTTPException(status_code=404, detail="Video no longer available")
 
 
 async def _resolve_job_source_video(job) -> str:
