@@ -215,10 +215,17 @@ def _pricing_page():
         return f.read()
 
 
-def _pricing_route():
+def _plan_offers():
+    """PLAN_OFFERS -- the JSON-LD's mirror of the plan table.
+
+    It used to sit inside the pricing route's page.js. It moved to
+    client/lib/pricing.js when the Markdown edition at /md/<locale>/pricing
+    became its second reader; the assertions below are unchanged, only the file
+    they read. Unlike _solution_pages, this one cannot pass vacuously if it is
+    ever pointed at the wrong file again -- it asserts that strings ARE present,
+    so an empty read fails."""
     path = os.path.join(
-        os.path.dirname(__file__), "..", "..",
-        "client", "app", "[locale]", "pricing", "page.js",
+        os.path.dirname(__file__), "..", "..", "client", "lib", "pricing.js",
     )
     with open(path, encoding="utf-8") as f:
         return f.read()
@@ -306,22 +313,40 @@ def test_annual_totals_in_env_example_match_the_discount():
 
 def test_pricing_jsonld_mirrors_the_plan_table():
     """PLAN_OFFERS is hand-kept in sync with the component. When it drifts,
-    search engines quote a price the checkout will not honour."""
-    route = _pricing_route()
+    search engines quote a price the checkout will not honour -- and now the
+    Markdown edition an assistant reads quotes it too."""
+    route = _plan_offers()
     for plan in PLAN_CREDITS:
         assert f'price: "{PLAN_PRICES[plan]}"' in route, plan
         assert f'{PLAN_CREDITS[plan]} credits per month' in route, plan
 
 
 def _solution_pages():
+    """Every source file behind a /solutions/* page, segment by segment.
+
+    Both page.js AND content.js: the copy was moved into content.js so the
+    Markdown edition could render the same words, and this reader followed it.
+    It reads BOTH rather than switching, because a price can legitimately be
+    written in either -- and a reader pointed at the wrong one does not fail,
+    it finds nothing and passes. Which is exactly what happened the moment the
+    copy moved: the regexes below matched zero strings in page.js and the test
+    went green while checking nothing at all. Hence the guard in the test.
+    """
     root = os.path.join(
         os.path.dirname(__file__), "..", "..", "client", "app", "[locale]", "solutions"
     )
     for name in sorted(os.listdir(root)):
-        path = os.path.join(root, name, "page.js")
-        if os.path.isfile(path):
-            with open(path, encoding="utf-8") as f:
-                yield name, f.read()
+        seg_dir = os.path.join(root, name)
+        if not os.path.isdir(seg_dir):
+            continue
+        source = ""
+        for filename in ("page.js", "content.js"):
+            path = os.path.join(seg_dir, filename)
+            if os.path.isfile(path):
+                with open(path, encoding="utf-8") as f:
+                    source += f.read() + "\n"
+        if source:
+            yield name, source
 
 
 def test_solution_pages_quote_real_plans():
@@ -332,13 +357,31 @@ def test_solution_pages_quote_real_plans():
     }
     credits = set(PLAN_CREDITS.values())
 
+    segments = 0
     for name, page in _solution_pages():
+        segments += 1
+        found = 0
         for quoted in re.findall(r'price:\s*"(?:From )?(\$\d+)"', page):
             assert quoted in prices, f"{name}: {quoted} is not a price we charge"
+            found += 1
         for quoted in re.findall(r"credits:\s*(\d+)", page):
             assert int(quoted) in credits, f"{name}: no plan grants {quoted} credits"
+            found += 1
         for quoted in re.findall(r"(\d+) credits/mo", page):
             assert int(quoted) in credits, f"{name}: no plan grants {quoted} credits"
+            found += 1
+        # The guard, and the reason it is per segment rather than a total.
+        # This test asserts things about strings it FINDS, so finding none is
+        # indistinguishable from everything being correct -- when the segment
+        # copy moved from page.js to content.js, it kept passing over an empty
+        # match list. A total would also catch that, but only by fixing a
+        # number that legitimately differs per page: three segments quote a
+        # price, a credit count and a "N credits/mo" feature, while filmmakers
+        # pitches credit packs instead and has `credits: null`, so it quotes
+        # one figure. "Every page quotes at least one" is the real invariant.
+        assert found, f"{name}: no plan figures found -- has the copy moved again?"
+
+    assert segments == 4, f"expected four segment pages, read {segments}"
 
 
 def test_dashboard_buy_modal_charges_the_advertised_price():

@@ -1,6 +1,7 @@
 import { SITE_URL } from "../../lib/seo";
 import { ARTICLES, articlePath, localesOf } from "../../lib/content";
 import { DEFAULT_LOCALE } from "../../lib/i18n/routing";
+import { mdPath } from "../../lib/content/pages";
 
 /**
  * /llms.txt — the site, described for a language model rather than a crawler.
@@ -25,6 +26,23 @@ export const dynamic = "force-static";
 
 const abs = (p) => (p === "/" ? SITE_URL : `${SITE_URL}${p}`);
 
+/* The pages an assistant is actually asked about, in the order the answer
+   usually needs them. Each one links to its Markdown edition rather than the
+   rendered page: the HTML says the same things, but a model reading it spends
+   most of its context on navigation and markup before reaching a sentence. */
+const PRODUCT_PAGES = [
+  {
+    key: "home",
+    label: "What MuseForge is",
+    gloss: "the product, the pipeline, and how a generation runs, with the FAQ.",
+  },
+  { key: "pricing", label: "Pricing", gloss: "every plan, its price and its credit allowance." },
+  { key: "creators", label: "For content creators", gloss: "micro-drama series and social story arcs." },
+  { key: "agencies", label: "For ad agencies", gloss: "concept work and client-facing pitch films." },
+  { key: "filmmakers", label: "For filmmakers", gloss: "previsualisation and short-form production." },
+  { key: "education", label: "For education", gloss: "teaching film language and story structure." },
+];
+
 export function GET() {
   const articles = ARTICLES.filter((a) => a.locales?.[DEFAULT_LOCALE]);
 
@@ -45,12 +63,14 @@ export function GET() {
     "",
     "## Product",
     "",
-    `- [Home](${abs("/")}): what MuseForge is, with a demo that runs the full pipeline without an API key.`,
-    `- [Pricing](${abs("/pricing")}): plans and credit allowances.`,
-    `- [For content creators](${abs("/solutions/creators")}): micro-drama series and social story arcs.`,
-    `- [For ad agencies](${abs("/solutions/agencies")}): concept work and client-facing pitch films.`,
-    `- [For filmmakers](${abs("/solutions/filmmakers")}): previsualisation and short-form production.`,
-    `- [For education](${abs("/solutions/education")}): teaching film language and story structure.`,
+    "Each link is the plain-text edition of the page; the rendered page is the",
+    "same path with the /md/<language> prefix removed. The home page and pricing",
+    "exist in every language MuseForge is served in — swap the code in the URL.",
+    "The four segment pages are written in English only.",
+    "",
+    ...PRODUCT_PAGES.map(
+      ({ key, label, gloss }) => `- [${label}](${abs(mdPath(key, DEFAULT_LOCALE))}): ${gloss}`
+    ),
     "",
     "## Guides",
     "",
