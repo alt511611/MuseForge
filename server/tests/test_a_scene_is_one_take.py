@@ -265,14 +265,25 @@ async def test_a_single_beat_take_is_not_a_multi_shot_request():
 
 
 @pytest.mark.asyncio
-async def test_a_voice_id_rides_the_element_when_one_is_mapped():
-    """Bound by ID, not by uploaded sample.
+async def test_a_voice_id_never_rides_an_element_this_endpoint_cannot_read():
+    """The element has no voice field, and an unknown key fails the take.
 
-    The plan this was built from assumed a 5-30 second clip could be attached
-    to the element. The endpoint takes `voice_id` from its own voice library
-    and has nowhere to put a clip -- so keeping a film's cast through a
-    native-audio take means MAPPING characters onto that library, which is a
-    different job and is not done yet. This pins the plumbing for when it is.
+    This test asserted the opposite, and passed, because it asserted what the
+    code did rather than what the endpoint accepts. fal's published schema for
+    v3 standard and v3 pro (read 2026-09-15) gives KlingV3ComboElementInput a
+    frontal image, reference images, or a video -- and nothing else. No voice,
+    on the element or on the request.
+
+    Nothing had broken because nothing ever set Element.voice_id. The moment
+    casting was built it would have: a 422 on every scene of every drama,
+    from a field this repo told itself was real. The Element field is gone
+    too -- a port with nothing on the other side is how the wrong belief got
+    written down in the first place.
+
+    Kling's voice control lives on v2.6 pro, as a request-level `voice_ids`
+    of at most two, with ids from fal-ai/kling-video/create-voice -- an
+    endpoint with neither multi_prompt nor elements. So it is not reachable
+    from here without giving up the multi-shot take and the character lock.
     """
     generator = _generator()
     sent = {}
@@ -287,16 +298,17 @@ async def test_a_voice_id_rides_the_element_when_one_is_mapped():
         _three_shots(),
         backend_for(MULTISHOT),
         elements=[
-            Element(
-                name="Julian Voss",
-                images=("j1.png",),
-                voice_id="kling-voice-042",
-            )
+            Element(name="Julian Voss", images=("j1.png",))
         ],
     )
     await generator.generate_scene_take(take)
 
-    assert sent["elements"][0]["voice_id"] == "kling-voice-042"
+    assert "voice_id" not in sent["elements"][0]
+    assert "voice_ids" not in sent
+    assert sent["elements"][0] == {
+        "frontal_image_url": "j1.png",
+        "reference_image_urls": ["j1.png"],
+    }
 
 
 @pytest.mark.asyncio
@@ -466,7 +478,6 @@ async def test_a_scene_becomes_one_generation_with_its_cuts_inside(monkeypatch, 
         scene_duration=12,
         has_dialogue=True,
         scene_dialogue="Play your cards, Mr. Voss.",
-        voice_ids={"Julian Voss": "kling-voice-042"},
     )
 
     assert len(generator.takes) == 1, "One generation for the whole scene."
@@ -522,9 +533,17 @@ async def test_the_opening_frame_is_drawn_from_the_same_faces_as_a_per_shot_rend
 
 
 @pytest.mark.asyncio
-async def test_the_cast_reaches_the_take_as_elements_with_their_voices(
+async def test_the_cast_reaches_the_take_as_elements_in_anchor_order(
     monkeypatch, tmp_path
 ):
+    """Faces, and only faces.
+
+    This test used to pass voice ids in and assert they landed on the
+    elements. They did -- into a field the endpoint has never had, which is
+    why the plumbing is gone rather than dormant. What an element carries is
+    who is in the scene and what they look like; who they SOUND like is not a
+    question this endpoint can be asked (interfaces/who_speaks).
+    """
     from pipelines.script2video import Script2VideoPipeline
 
     characters = _two_hander()
@@ -545,16 +564,11 @@ async def test_the_cast_reaches_the_take_as_elements_with_their_voices(
             "Julian Voss": "https://cdn/julian.png",
         },
         scene_duration=12,
-        voice_ids={
-            "Vivian Marsh": "kling-voice-011",
-            "Julian Voss": "kling-voice-042",
-        },
     )
 
     take = generator.takes[0]["take"]
     names = [e.name for e in take.elements]
     assert names == ["Vivian Marsh", "Julian Voss"], "Anchor first."
-    assert take.elements[0].voice_id == "kling-voice-011"
 
 
 @pytest.mark.asyncio
@@ -567,7 +581,13 @@ async def test_a_language_the_backend_cannot_speak_keeps_the_old_audio_path(
     come back mute and keep the dialogue and lip-sync passes it always had --
     silently accepting the model's own voice would ship a Turkish drama spoken
     in translated English.
+
+    Opted in explicitly: the speaking path is off by default now
+    (interfaces/who_speaks.NATIVE_AUDIO_ENV), and with it off BOTH languages
+    would come back mute -- which would make this test pass while testing
+    nothing about language.
     """
+    monkeypatch.setenv("MUSEFORGE_TAKE_NATIVE_AUDIO", "1")
     from pipelines.script2video import Script2VideoPipeline
 
     characters = _two_hander()

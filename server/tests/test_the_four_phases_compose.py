@@ -121,6 +121,9 @@ async def test_all_four_phases_render_one_scene_together(monkeypatch, tmp_path):
 
     # Phase 1: a reference model that reads the whole set.
     monkeypatch.setenv("MUAPI_KONTEXT_MODEL", "flux-kontext-pro-i2i")
+    # Phase 4 is the take speaking its own lines, which is opt-in now
+    # (interfaces/who_speaks): this composes all four, so it asks for it.
+    monkeypatch.setenv("MUSEFORGE_TAKE_NATIVE_AUDIO", "1")
 
     clip = tmp_path / "take.mp4"
     if not await _real_clip_with_sound(str(clip)):
@@ -168,10 +171,6 @@ async def test_all_four_phases_render_one_scene_together(monkeypatch, tmp_path):
         has_dialogue=True,
         scene_dialogue="Play your cards, Mr. Voss.",
         language="en",
-        voice_ids={
-            "Vivian Marsh": "kling-voice-011",
-            "Julian Voss": "kling-voice-042",
-        },
         aspect_ratio="9:16",
     )
 
@@ -228,8 +227,12 @@ async def test_all_four_phases_render_one_scene_together(monkeypatch, tmp_path):
     # landscape.
     assert generator.aspect_ratios_asked == ["9:16"]
     by_name = {e.name: e for e in take.elements}
-    assert by_name["Vivian Marsh"].voice_id == "kling-voice-011"
-    assert by_name["Julian Voss"].voice_id == "kling-voice-042"
+    # No voice on any of them, because an Element no longer has one to carry.
+    # The two lines that used to assert one here were asserting what the code
+    # did rather than what fal accepts. A speaking take is voiced by the
+    # model, per generation -- the price of the free lip sync above, and the
+    # reason it is off by default (interfaces/who_speaks).
+    assert not any(hasattr(e, "voice_id") for e in take.elements)
 
     # ...and each element carries what that character is WEARING, which the
     # portrait cannot: a reference image binds a face and never an outfit.

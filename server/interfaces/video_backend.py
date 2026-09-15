@@ -163,15 +163,15 @@ class VideoBackend:
     billing: str = FLAT
     #: USD per generation when billing is FLAT, per second when PER_SECOND.
     rate: float = 0.0
-    #: What a second costs once an element carries a `voice_id`.
+    #: What a second costs with `generate_audio` off.
     #:
-    #: Binding a voice is a priced feature, not a free field: on Kling v3
-    #: standard a second goes $0.126 -> $0.154, which is 22% on the largest
-    #: line of the bill. It lived in `note` as prose while nothing set the
-    #: field; now that interfaces/take_voices can, the number is declared
-    #: where tests/test_pricing_coherence can read it. 0.0 means the endpoint
-    #: does not price voices separately -- which is every silent one.
-    voice_bound_rate: float = 0.0
+    #: Not a footnote any more: MUSEFORGE_TAKE_NATIVE_AUDIO defaults off
+    #: (interfaces/who_speaks), so a silent take is the mode this product
+    #: actually runs in and $0.084 is the rate it actually pays. `rate` above
+    #: is the audio-on figure, kept because the trade is one env var away and
+    #: a margin computed from the wrong side of it is the reason this field
+    #: exists at all. 0.0 means the endpoint does not price audio separately.
+    silent_rate: float = 0.0
     #: Free-text, for the log line an operator reads at 2am.
     note: str = ""
 
@@ -189,16 +189,18 @@ class VideoBackend:
         """Whether this endpoint can carry dialogue in ``language`` itself."""
         return (language or "").strip().lower()[:2] in self.native_audio
 
-    def cost(self, seconds: float, voice_bound: bool = False) -> float:
+    def cost(self, seconds: float, audio: bool = True) -> float:
         """What one generation of ``seconds`` costs on this endpoint.
 
-        ``voice_bound`` is the take carrying a chosen voice per character
-        (interfaces/take_voices). It is a separate, dearer rate rather than a
-        surcharge on this one, because that is how the vendor quotes it.
+        ``audio`` is whether the take is asked to speak its own lines. It is a
+        separate, cheaper rate rather than a discount on this one, because
+        that is how the vendor quotes it -- and because the default is now
+        off, a caller that forgets it OVERSTATES the bill, which is the
+        direction that does not surprise anybody.
         """
         rate = self.rate
-        if voice_bound and self.voice_bound_rate:
-            rate = self.voice_bound_rate
+        if not audio and self.silent_rate:
+            rate = self.silent_rate
         if self.billing == PER_SECOND:
             return rate * max(0.0, float(seconds))
         return rate
@@ -382,7 +384,7 @@ BACKENDS = {
         max_prompt_chars=512,
         billing=PER_SECOND,
         rate=0.126,
-        voice_bound_rate=0.154,
+        silent_rate=0.084,
         note="per second with audio on; $0.084 silent, $0.154 with voice binding",
     ),
     "fal-ai/kling-video/v3/pro/image-to-video": VideoBackend(
@@ -404,7 +406,7 @@ BACKENDS = {
         max_prompt_chars=512,
         billing=PER_SECOND,
         rate=0.168,
-        voice_bound_rate=0.196,
+        silent_rate=0.112,
         note="per second with audio on; $0.112 silent, $0.196 with voice binding",
     ),
 }
