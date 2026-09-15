@@ -1691,6 +1691,9 @@ def _ffmpeg_binary() -> str:
 #: Timescale every clip is rewritten to before a retried stream-copy join.
 #: 90000 is the MPEG convention and divides evenly by the frame rates this
 #: pipeline actually produces (24, 25, 30), so normalising costs no accuracy.
+#: It is also the timebase MPEG-TS fixes by specification, which is how
+#: `_normalise_timebases` reaches it without asking any ffmpeg build to
+#: honour an option -- see that function.
 CONCAT_TIMESCALE = 90000
 
 
@@ -1713,6 +1716,22 @@ async def _normalise_timebases(
     Measured on the same synthetic clips, both broken directions come back to
     10.0s and 9.96s -- inside `CONCAT_DURATION_TOLERANCE`.
 
+    The rewrite goes through MPEG-TS rather than asking MP4 for a timescale.
+    `-video_track_timescale` writes a NUMBER IN THE MP4 HEADER, and whether
+    the concat demuxer then reads the packets on that timebase is a matter of
+    the ffmpeg build: on 9.0.1 (this laptop) it does, and on 6.1 (the CI
+    runner, and every Debian image this server has shipped on) it does not --
+    the join still came out as 137.58s of two half-second clips, `_concat_is_
+    intact` rejected it, and the whole master went down the moviepy tier and
+    was RE-ENCODED. That is the exact cost this function exists to avoid, and
+    it was being paid on every deployment while the test that guards it
+    passed on the developer's machine.
+
+    MPEG-TS fixes its timebase at 90kHz by specification, so remuxing each
+    clip into it makes the inputs agree by construction rather than by
+    request. Nothing is decoded: the packets are copied, and the join that
+    follows is still a copy.
+
     Returns ``(paths_to_join, temporary_files_to_clean_up)``, failing open to
     the original paths so a remux that does not work leaves the caller with
     the behaviour it had.
@@ -1721,9 +1740,10 @@ async def _normalise_timebases(
     normalised: List[str] = []
     temporaries: List[str] = []
     for index, path in enumerate(paths):
+        stem = os.path.splitext(os.path.basename(path))[0]
         rewritten = os.path.join(
             os.path.dirname(out_path) or ".",
-            f"museforge_tb_{os.getpid()}_{index}_{os.path.basename(path)}",
+            f"museforge_tb_{os.getpid()}_{index}_{stem}.ts",
         )
         process = await asyncio.create_subprocess_exec(
             ffmpeg_binary,
@@ -1733,8 +1753,10 @@ async def _normalise_timebases(
             "-c",
             "copy",
             "-an",
-            "-video_track_timescale",
-            str(CONCAT_TIMESCALE),
+            # MPEG-TS carries its own 90kHz timebase; the bitstream filter
+            # h264/hevc needs on the way in is applied by the muxer itself.
+            "-f",
+            "mpegts",
             rewritten,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
