@@ -54,6 +54,19 @@ class _NotSelected:
 # The decision
 # --------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _native_audio_opted_in(monkeypatch):
+    """These tests are about the SPEAKING path, which is now opt-in.
+
+    MUSEFORGE_TAKE_NATIVE_AUDIO defaults off (interfaces/who_speaks): the
+    picture can speak and this product declines, because the voice it would
+    speak in is chosen per generation and the endpoint has nowhere to say
+    otherwise. Everything below still describes what happens when a
+    deployment takes the other side of that trade.
+    """
+    monkeypatch.setenv("MUSEFORGE_TAKE_NATIVE_AUDIO", "1")
+
+
 def test_the_picture_speaks_only_when_it_can_speak_this_films_language():
     """"Has native audio" is not a property an endpoint has; a LANGUAGE is.
 

@@ -76,13 +76,27 @@ def _duration_str(seconds) -> str:
 #: cast clause in the prompt is not decoration: it is the only place the model
 #: learns that @Element1 is Vera Kessler.
 #:
-#: And the voice is a `voice_id` -- an id from the backend's own voice library
-#: -- not an uploaded sample. That is a real correction to the plan this was
-#: built from, which assumed a 5-30 second clip could be attached: keeping a
-#: film's cast through a native-audio take means MAPPING each character to one
-#: of the backend's voices, which is a different job from generating speech
-#: and is not done here yet. Without it the take still speaks; the model
-#: chooses the voice.
+#: THE ELEMENT HAS NO VOICE FIELD. Read off fal's published schema for
+#: v3 standard and v3 pro image-to-video on 2026-09-15: a
+#: KlingV3ComboElementInput is "either an image set (frontal + reference
+#: images) or a video", and the request carries prompt / multi_prompt /
+#: start_image_url / duration / generate_audio / end_image_url / elements /
+#: shot_type / negative_prompt / cfg_scale. There is no voice anywhere in it.
+#:
+#: This file used to say the element took a `voice_id` from the backend's
+#: library, and sent one when an element carried it. Nothing broke only
+#: because nothing ever set the field. An unknown key is a 422 here (see the
+#: registry's note in interfaces/video_backend), so the first caller to fill
+#: it would have failed every take -- and this comment would have been the
+#: reason they believed it should work.
+#:
+#: Kling's voice control is real, but it is somewhere else: v2.6 PRO
+#: image-to-video takes a request-level `voice_ids` list, at most two per
+#: task, cited in the prompt as <<<voice_1>>>, and the ids come from
+#: fal-ai/kling-video/create-voice, which DOES take a 5-30 second sample.
+#: That endpoint has neither multi_prompt nor elements, so reaching the voices
+#: costs the multi-shot take and the character element lock -- the face, to
+#: buy the voice. See interfaces/who_speaks for what that leaves.
 def _element_payload(element) -> dict:
     frontal = (getattr(element, "frontal", "") or "").strip()
     if not frontal:
@@ -107,9 +121,10 @@ def _element_payload(element) -> dict:
         "frontal_image_url": frontal,
         "reference_image_urls": references or [frontal],
     }
-    voice_id = (getattr(element, "voice_id", "") or "").strip()
-    if voice_id:
-        payload["voice_id"] = voice_id
+    # Deliberately not sending element.voice_id: this endpoint has no such
+    # field, and an unknown key fails the whole take. The attribute is kept on
+    # Element because the field is real on other endpoints in the family; it
+    # is this one's payload that cannot carry it.
     return payload
 
 

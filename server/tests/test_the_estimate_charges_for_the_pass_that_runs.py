@@ -40,6 +40,19 @@ import api as api_mod  # noqa: E402
 SPEAKS = ("en", "zh")  # Kling v3's native audio -- interfaces/video_backend
 
 
+@pytest.fixture(autouse=True)
+def _native_audio_opted_in(monkeypatch):
+    """This file is about what a SPEAKING picture should not be charged for.
+
+    That path is opt-in now: MUSEFORGE_TAKE_NATIVE_AUDIO defaults off
+    (interfaces/who_speaks), because a take that picks its own voice per
+    generation cannot keep a character sounding like themselves. The billing
+    question below is unchanged for the deployments that take that trade, and
+    the tests that assert the picture does NOT speak still hold either way.
+    """
+    monkeypatch.setenv("MUSEFORGE_TAKE_NATIVE_AUDIO", "1")
+
+
 @pytest.fixture
 def pro_job_with_lipsync_on(monkeypatch):
     """A Pro deployment where every existing gate on the surcharge is open.

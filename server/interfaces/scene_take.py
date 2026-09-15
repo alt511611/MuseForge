@@ -50,9 +50,11 @@ class Element:
     `frontal_image_url` and `reference_image_urls` happens at the payload,
     because it is that endpoint's spelling rather than a fact about the film.
 
-    ``voice_id`` is the other half of the lock: an id from the backend's own
-    voice library, bound to this element, so a take with native audio speaks
-    this character in a chosen voice rather than one the model picked.
+    ``voice_id`` was meant to be the other half of the lock and is not one
+    yet: the v3 endpoints this renders on have no voice field at all (see
+    tools/falai_video_generator). It is carried because the field is real
+    elsewhere in the Kling family and because the CASTING that fills it is
+    built (interfaces/who_speaks); today nothing puts it in a payload.
     """
 
     name: str
@@ -63,12 +65,6 @@ class Element:
     #: reference picture binds a face and never an outfit, and a take is
     #: twelve seconds long.
     wardrobe: str = ""
-    #: A VOICE ID, not an audio file. The endpoint's element takes
-    #: `voice_id`; there is nowhere to upload a sample. See the note on
-    #: MUSEFORGE_VOICE_PROVIDER in .env.example -- keeping the film's cast
-    #: through a native-audio take means mapping each character to one of the
-    #: backend's voices, which is a different job from generating speech.
-    voice_id: str = ""
 
     #: The endpoint takes 1-3 additional angles beside the frontal view.
     MAX_REFERENCE_IMAGES = 3

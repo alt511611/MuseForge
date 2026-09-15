@@ -13,6 +13,7 @@ import httpx
 
 from agents.storyboard_artist import StoryboardArtist
 from interfaces import acting
+from interfaces import who_speaks
 from interfaces.camera import get_director_style
 from interfaces.character import CharacterInScene
 from interfaces.color_grade import get_color_grade
@@ -2998,7 +2999,6 @@ class Script2VideoPipeline:
         scene_idx: int,
         frame_prompt_for,
         generate_audio: bool,
-        voice_ids,
         scene_dialogue: str = "",
         is_cancelled=None,
     ) -> Dict[str, Any]:
@@ -3103,7 +3103,6 @@ class Script2VideoPipeline:
                     # until now no part of the take request mentioned. See
                     # scene_take.SceneTake.cast_clause.
                     wardrobe=str(getattr(character, "wardrobe", "") or "").strip(),
-                    voice_id=(voice_ids or {}).get(name, ""),
                 )
             )
 
@@ -3472,16 +3471,6 @@ class Script2VideoPipeline:
         #: caller that never passes it gets the answer that is true for every
         #: backend declared here.
         language: str = "en",
-        #: Character name -> a voice id from the VIDEO backend's own voice
-        #: library, bound to that character's element so a native-audio take
-        #: speaks them in a chosen voice rather than one the model picked.
-        #:
-        #: Ids, not audio. The plan this was built from assumed a speech
-        #: SAMPLE could be attached and it cannot: the endpoint's element
-        #: takes `voice_id` and there is nowhere to upload a clip. Empty until
-        #: something maps this film's cast onto that library, and empty is a
-        #: working take with voices the model chose.
-        voice_ids: Optional[Dict[str, str]] = None,
         #: Shoot exactly these shots instead of designing a storyboard.
         #:
         #: A beat-level retake re-shoots ONE framing of a scene that already
@@ -3641,7 +3630,9 @@ class Script2VideoPipeline:
             # Asked once, here, because the frame prompt and the payload must
             # not answer it differently -- a frame directed for a lip-sync
             # pass that will never run is a frame composed for the wrong film.
-            take_speaks = bool(has_dialogue) and take_backend.speaks(language or "en")
+            take_speaks = bool(has_dialogue) and who_speaks.picture_carries_dialogue(
+                take_backend, language or "en"
+            )
             result = await self._render_scene_as_one_take(
                 shots=shots,
                 characters=characters,
@@ -3680,7 +3671,6 @@ class Script2VideoPipeline:
                     world_state=world_state,
                 ),
                 generate_audio=take_speaks,
-                voice_ids=voice_ids,
                 scene_dialogue=scene_dialogue,
                 is_cancelled=is_cancelled,
             )
