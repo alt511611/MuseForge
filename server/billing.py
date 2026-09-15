@@ -356,9 +356,6 @@ async def mark_event_processed(provider: str, event_id: str) -> bool:
     cannot reach the idempotency table is still a payment that has to be
     credited, and a duplicate grant is recoverable in a way an uncredited
     purchase is not.
-    Fails OPEN on a Supabase problem: a webhook that cannot reach the
-    idempotency table is still a payment that has to be credited, and the
-    duplicate it risks is recoverable in a way an uncredited purchase is not.
     """
     if not sb_configured():
         return True  # dev mode: always proceed
@@ -388,11 +385,6 @@ async def mark_event_processed(provider: str, event_id: str) -> bool:
                     resp.text[:200],
                 )
             return True
-                    "Prefer": "resolution=ignore-duplicates,return=minimal",
-                },
-            )
-            # 201 = inserted (new event); 200/204 with ignore-duplicates = already existed
-            return resp.status_code == 201
     except Exception:
         return True  # fail-open on Supabase issues
 
