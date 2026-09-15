@@ -1,6 +1,7 @@
 import PricingContent from "./PricingContent";
 import { t } from "../../../lib/i18n/index";
 import { isLocale, DEFAULT_LOCALE } from "../../../lib/i18n/routing";
+import { PLAN_OFFERS } from "../../../lib/pricing";
 import {
   JsonLd,
   SITE_URL,
@@ -12,19 +13,6 @@ import {
 } from "../../../lib/seo";
 
 const PATH = "/pricing";
-
-/* Mirrors the plan table in PricingContent. Kept in sync manually — the
-   component builds its plans from client-side translations. */
-/* The page leads with annual, so the structured data does too: `price` is the
-   annual monthly-equivalent (10% off) that a rich result would show, and the
-   monthly rate rides along as a second Offer rather than being the headline. */
-const PLAN_OFFERS = [
-  { name: "Free", price: "0", desc: "Demo mode with placeholder assets — no API key required.", period: null },
-  { name: "Creator (annual)", price: "53", desc: "16 credits per month for creators and educators, billed yearly.", period: "P1Y" },
-  { name: "Creator (monthly)", price: "59", desc: "16 credits per month for creators and educators.", period: "P1M" },
-  { name: "Pro (annual)", price: "116", desc: "36 credits per month for agencies and corporate teams, billed yearly.", period: "P1Y" },
-  { name: "Pro (monthly)", price: "129", desc: "36 credits per month for agencies and corporate teams.", period: "P1M" },
-];
 
 const FAQ_KEYS = [1, 2, 3, 4];
 
