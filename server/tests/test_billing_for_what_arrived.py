@@ -104,6 +104,101 @@ async def test_a_missing_result_is_read_as_nothing_delivered(refunds):
     assert refunds == [("user-1", 3 * LIPSYNC_EXTRA_CREDIT_COST, "930f11de-4b0")]
 
 
+# --- ...and a refund for a surcharge that was never taken ------------------
+#
+# The other direction, found on job 6f857aa0-903. api.build_credit_breakdown
+# stopped charging for lip sync on a film the picture speaks -- the mouths
+# arrive already driven -- and left the row in the quote at zero credits. Both
+# refund paths here still read `job.lipsync_enabled`, which records what the
+# user ASKED for, not what they paid for. So that job was quoted 0, charged 0,
+# and refunded 3, while its log announced "Lip sync was charged (3 credit(s))".
+#
+# _job_refund_amount is the same hole and the worse one: it pays out on every
+# FAILED job, not only on the ones that reach the end.
+
+
+@pytest.fixture
+def picture_speaks(monkeypatch):
+    """A deployment whose video backend speaks the film's language."""
+    import api as api_mod
+
+    monkeypatch.setattr(api_mod, "_picture_will_carry_dialogue", lambda lang: True)
+
+
+@pytest.mark.asyncio
+async def test_a_surcharge_the_quote_waived_is_not_refunded_as_if_paid(
+    refunds, picture_speaks
+):
+    """Job 6f857aa0-903: lip sync on, nothing charged for it, nothing owed."""
+    await _refund_undelivered_extras(_job(), {"lipsynced_scenes": []})
+
+    assert refunds == []
+
+
+def test_a_failed_speaking_film_is_not_refunded_more_than_it_cost(picture_speaks):
+    """The failure path pays out on every dead job, so it leaked the widest."""
+    from jobs import _job_refund_amount
+
+    job = _job()
+
+    assert _job_refund_amount(job) == job.num_scenes
+
+
+def test_a_failed_film_the_picture_does_not_speak_still_gets_the_surcharge_back(
+    monkeypatch,
+):
+    """The other half of the same expression, so this reads as a CHOICE."""
+    import api as api_mod
+    from jobs import _job_refund_amount
+
+    monkeypatch.setattr(api_mod, "_picture_will_carry_dialogue", lambda lang: False)
+    job = _job()
+
+    assert _job_refund_amount(job) == job.num_scenes + (
+        job.num_scenes * LIPSYNC_EXTRA_CREDIT_COST
+    )
+
+
+def test_the_refund_matches_what_generate_would_have_deducted(
+    monkeypatch, picture_speaks
+):
+    """Read off /api/generate's own function rather than restated here.
+
+    The two live in different modules and drifted apart once already; the only
+    way this stays true is by asking the one that takes the money.
+    """
+    import api as api_mod
+    from jobs import _job_refund_amount
+
+    monkeypatch.setattr(api_mod, "is_dialogue_enabled", lambda: True)
+    monkeypatch.setattr(api_mod, "_lipsync_configured", lambda: True)
+    job = _job(dialogue_enabled=True)
+
+    charged = api_mod.build_credit_breakdown(
+        job.num_scenes,
+        music_enabled=job.music_enabled,
+        dialogue_enabled=job.dialogue_enabled,
+        lipsync_enabled=job.lipsync_enabled,
+        plan="pro",
+        language=job.language,
+    )["total_credits"]
+
+    assert _job_refund_amount(job) == charged
+
+
+def test_a_backend_that_cannot_be_asked_refunds_nothing_extra(monkeypatch):
+    """Fail-closed. Refunding nothing is fixable by hand; minting is not."""
+    import api as api_mod
+    import jobs as mod
+
+    def _boom(_lang):
+        raise RuntimeError("no video backend installed")
+
+    monkeypatch.setattr(api_mod, "_picture_will_carry_dialogue", _boom)
+
+    assert mod._lipsync_was_charged(_job()) is False
+
+
 def test_the_refund_never_exceeds_what_the_job_was_charged():
     """Read off the two expressions rather than trusted to stay in step."""
     from jobs import _job_refund_amount

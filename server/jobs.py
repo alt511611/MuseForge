@@ -965,6 +965,38 @@ def arm_job_eta(job: Job, *, scenes: Optional[int] = None, prologue: bool = True
     )
 
 
+def _lipsync_was_charged(job: Job) -> bool:
+    """Whether this job's credits actually included the lip-sync surcharge.
+
+    NOT `job.lipsync_enabled`, which records what the user ASKED for. The
+    quote stopped charging for the pass on a film the picture speaks --
+    api.build_credit_breakdown zeroes the row, because the mouths arrive
+    already driven by the generation that made the picture -- and the two
+    refund paths below were never taught the same term. They still read the
+    toggle, so both handed back a credit per scene that was never taken.
+
+    Job 6f857aa0-903 is the receipt: three scenes, lip sync on, rendered on
+    falai_multishot in English, quoted 0 credits for lip sync, and refunded 3.
+    The log line even says so in the wrong direction -- "Lip sync was charged
+    (3 credit(s)) and ran on no scene; refunding it" -- while the ledger shows
+    no such charge. A refund on the failure path (_job_refund_amount) is the
+    same hole and the larger one: it pays out on every failed job, not only on
+    the ones that finish.
+
+    Asked through api, so this cannot drift from the function that took the
+    money. Fail-closed on an import error: refunding nothing is recoverable by
+    hand, minting credits is not.
+    """
+    if not job.lipsync_enabled:
+        return False
+    try:
+        from api import _picture_will_carry_dialogue
+
+        return not _picture_will_carry_dialogue(job.language)
+    except Exception:  # pragma: no cover -- api not importable
+        return False
+
+
 def _job_refund_amount(job: Job) -> int:
     return (
         job.num_scenes
@@ -976,7 +1008,7 @@ def _job_refund_amount(job: Job) -> int:
         )
         + (
             job.num_scenes * LIPSYNC_EXTRA_CREDIT_COST
-            if job.lipsync_enabled
+            if _lipsync_was_charged(job)
             else 0
         )
     )
@@ -997,9 +1029,11 @@ async def _refund_undelivered_extras(job: Job, result: Dict[str, Any]) -> None:
     charge the user more, not less. This bills for what arrived.
 
     The condition mirrors the lip-sync term of _job_refund_amount exactly, so
-    this can never hand back credits that were never taken.
+    this can never hand back credits that were never taken -- which it did for
+    as long as both read the toggle rather than the charge. See
+    _lipsync_was_charged.
     """
-    if job.demo or not job.user_id or not job.lipsync_enabled:
+    if job.demo or not job.user_id or not _lipsync_was_charged(job):
         return
     if (result or {}).get("lipsynced_scenes"):
         return
