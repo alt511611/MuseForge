@@ -49,7 +49,7 @@ export default function TermsContent() {
 
           <Section title="4. Credits and Billing">
             <ul className="list-disc list-inside space-y-1">
-              <li>Paid plans and credit packages are billed via Stripe.</li>
+              <li>Paid plans and credit packages are billed via Whop, which acts as merchant of record for the sale.</li>
               <li>Free plan credits reset monthly based on plan terms.</li>
               <li>Unused subscription credits do not roll over unless stated otherwise.</li>
             </ul>

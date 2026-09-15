@@ -55,6 +55,18 @@ _LEAKY_ENV = (
     "ANTHROPIC_API_KEY",
     "STRIPE_SECRET_KEY",
     "STRIPE_WEBHOOK_SECRET",
+    "WHOP_API_KEY",
+    "WHOP_WEBHOOK_SECRET",
+    # The processor selector belongs with the vendor selectors above, for the
+    # same reason: a laptop set to PAYMENT_PROVIDER=whop would otherwise make
+    # the suite assert about Whop's checkout while CI asserts about Stripe's.
+    "PAYMENT_PROVIDER",
+    "WHOP_API_KEY",
+    "WHOP_WEBHOOK_SECRET",
+    # The processor selector belongs with the vendor selectors above, for the
+    # same reason: a laptop set to PAYMENT_PROVIDER=whop would otherwise make
+    # the suite assert about Whop's checkout while CI asserts about Stripe's.
+    "PAYMENT_PROVIDER",
     "SUPABASE_URL",
     "SUPABASE_SERVICE_KEY",
     # Model and behaviour overrides. A leak is the quietest of the three: the

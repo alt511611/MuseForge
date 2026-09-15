@@ -145,10 +145,30 @@ renders run.
    generation.
 2. Create the private `videos` Storage bucket before the first non-demo
    production render.
-3. Set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` and every `STRIPE_PRICE_*`
-   in Coolify. Without them `stripe.api_key` is empty, so `/api/checkout`
-   raises and **every webhook delivery answers 400** — a customer who somehow
-   paid is never credited, and the only visible symptom is a 400 in the access
-   log.
+3. Set the payment processor's variables in Coolify. `PAYMENT_PROVIDER`
+   chooses which set is read (`whop` or `stripe`; unset means `stripe`), and
+   the server logs which one it resolved to on every checkout.
+
+   - **Whop** (the live path until the company exists): `WHOP_API_KEY`,
+     `WHOP_WEBHOOK_SECRET` and every `WHOP_PLAN_*`. Point the Whop webhook at
+     `https://<backend>/api/whop-webhook` and subscribe it to
+     `payment.succeeded` and `membership.went_invalid` — the first grants both
+     the opening cycle and every renewal, the second ends a subscription.
+     The signing secret is shown **once**, when the webhook is created.
+   - **Stripe**: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` and every
+     `STRIPE_PRICE_*`, with the endpoint at `/api/stripe-webhook`.
+
+   Without them the checkout endpoint raises and **every webhook delivery
+   answers 400** — a customer who somehow paid is never credited, and the only
+   visible symptom is a 400 in the access log.
+
+   Step-by-step Whop dashboard setup (plans, prices, API key, webhook, the
+   end-to-end test, and a paste-ready brief for Whop's own assistant) is in
+   [WHOP_SETUP.md](WHOP_SETUP.md).
+
+   Whop is the merchant of record, so it can sell without a registered
+   company; it charges roughly 3% on top of card fees. Switching back to
+   Stripe is one variable and no data migration — the `whop_*` and `stripe_*`
+   columns sit side by side on `public.profiles`.
 4. Rebuild/redeploy the backend image after this change so the Dockerfile's
    `fonts-dejavu-core` install takes effect (see watermark section above).

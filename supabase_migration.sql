@@ -1,6 +1,22 @@
 -- MuseForge — Supabase Migration v2
 -- Supabase Dashboard → SQL Editor'de çalıştırın.
 
+-- ── Bu dosya yeniden çalıştırılabilir olmalı ─────────────────────────────────
+-- 15 Eyl 2026: değildi. PostgreSQL'de `create policy if not exists` yok, ve
+-- dosya ikinci kez çalıştırıldığında ilk mevcut policy'de
+-- (`42710: policy "users_read_own_profile" ... already exists`) duruyordu.
+-- Bu bir stil kusuru değil: HATA NOKTASINDAN SONRAKİ HİÇBİR ŞEY ÇALIŞMIYOR.
+-- Canlı veritabanında bulunan tablo `profiles`, `credit_ledger`,
+-- `processed_stripe_events` vardı ama `credit_lots` ve `grant_credits`,
+-- `deduct_credits`, `credit_balance`, `revoke_subscription_credits`
+-- fonksiyonlarının hiçbiri yoktu -- yani ödeme alan bir sistemin krediyi
+-- yazacak fonksiyonu yoktu, ve bunu kimse fark etmemişti çünkü SQL Editor'de
+-- görülen tek şey en üstteki kırmızı satırdı.
+--
+-- Her policy artık kendi `drop policy if exists`'i ile geliyor. Tablolar
+-- `create table if not exists`, fonksiyonlar `create or replace`, kolonlar
+-- `add column if not exists` -- dosyanın geri kalanı zaten böyleydi.
+
 -- ── Profiller tablosu ─────────────────────────────────────────────────────────
 create table if not exists public.profiles (
   id              uuid references auth.users on delete cascade primary key,
@@ -13,6 +29,20 @@ create table if not exists public.profiles (
   created_at      timestamptz default now(),
   updated_at      timestamptz default now()
 );
+
+-- ── Whop kolonları ───────────────────────────────────────────────────────────
+-- MuseForge önce Whop üzerinden satılıyor (Whop merchant of record; Stripe
+-- şirket istiyor, Whop istemiyor). Stripe kolonları yerinde kalıyor: şirket
+-- kurulduğunda geri dönüş tek bir PAYMENT_PROVIDER değişkeni olmalı, veri
+-- taşıma olmamalı.
+--
+-- whop_membership_id, stripe_customer_id'nin karşılığı: yenileme ve iptal
+-- webhook'ları profili bununla buluyor.
+alter table public.profiles add column if not exists whop_user_id text;
+alter table public.profiles add column if not exists whop_membership_id text;
+
+create index if not exists profiles_whop_membership_id_idx
+  on public.profiles (whop_membership_id);
 
 -- Yeni kullanıcı kaydında otomatik profil oluştur
 create or replace function public.handle_new_user()
@@ -73,13 +103,16 @@ alter table public.profiles enable row level security;
 alter table public.jobs     enable row level security;
 
 -- Kullanıcılar kendi profilini okur/günceller
+drop policy if exists "users_read_own_profile" on public.profiles;
 create policy "users_read_own_profile"
   on public.profiles for select using (auth.uid() = id);
 
+drop policy if exists "users_update_own_profile" on public.profiles;
 create policy "users_update_own_profile"
   on public.profiles for update using (auth.uid() = id);
 
 -- Kullanıcılar kendi job'larını görür
+drop policy if exists "users_read_own_jobs" on public.jobs;
 create policy "users_read_own_jobs"
   on public.jobs for select using (auth.uid() = user_id);
 
@@ -93,10 +126,12 @@ create policy "users_read_own_jobs"
 -- time. Reading the role out of the JWT avoids the self-reference entirely.
 -- This requires setting the role in auth.users.raw_app_meta_data (see the
 -- "Admin atama" section below), not just in the profiles table.
+drop policy if exists "admins_all_profiles" on public.profiles;
 create policy "admins_all_profiles"
   on public.profiles for all
   using (coalesce(auth.jwt() -> 'app_metadata' ->> 'role', '') = 'admin');
 
+drop policy if exists "admins_all_jobs" on public.jobs;
 create policy "admins_all_jobs"
   on public.jobs for all
   using (coalesce(auth.jwt() -> 'app_metadata' ->> 'role', '') = 'admin');
@@ -122,9 +157,11 @@ create table if not exists public.credit_ledger (
 
 alter table public.credit_ledger enable row level security;
 
+drop policy if exists "users_read_own_ledger" on public.credit_ledger;
 create policy "users_read_own_ledger"
   on public.credit_ledger for select using (auth.uid() = user_id);
 
+drop policy if exists "service_insert_ledger" on public.credit_ledger;
 create policy "service_insert_ledger"
   on public.credit_ledger for insert
   with check (true);   -- service key ile insert, RLS bypass için service role kullanılır
@@ -194,8 +231,13 @@ begin
 end;
 $$;
 
--- ── Stripe event idempotency table ───────────────────────────────────────────
--- Prevents duplicate credit allocation if Stripe retries the same webhook event.
+-- ── Payment event idempotency table ──────────────────────────────────────────
+-- Prevents duplicate credit allocation if a processor retries the same webhook
+-- event. Despite the name it now holds BOTH processors' ids: Stripe's stay
+-- bare (`evt_...`) so the rows already written here keep matching, and Whop's
+-- are prefixed (`whop:msg_...`) so two id namespaces cannot collide in one
+-- primary key. The key is built by billing.event_key(); the table is not
+-- renamed because renaming it would orphan every Stripe id already in it.
 create table if not exists public.processed_stripe_events (
   event_id    text primary key,
   processed_at timestamptz default now()
@@ -204,6 +246,7 @@ create table if not exists public.processed_stripe_events (
 -- Only the service role needs to read/write this table
 alter table public.processed_stripe_events enable row level security;
 
+drop policy if exists "service_manage_stripe_events" on public.processed_stripe_events;
 create policy "service_manage_stripe_events"
   on public.processed_stripe_events for all
   using (false)     -- no direct user access
@@ -286,6 +329,7 @@ alter table public.character_library
 
 alter table public.character_library enable row level security;
 
+drop policy if exists "users manage own characters" on public.character_library;
 create policy "users manage own characters"
   on public.character_library
   for all
@@ -325,6 +369,7 @@ create index if not exists credit_lots_spendable_idx
 
 alter table public.credit_lots enable row level security;
 
+drop policy if exists "users_read_own_lots" on public.credit_lots;
 create policy "users_read_own_lots"
   on public.credit_lots for select using (auth.uid() = user_id);
 
@@ -566,6 +611,7 @@ create trigger series_updated_at
 
 alter table public.series enable row level security;
 
+drop policy if exists "users manage own series" on public.series;
 create policy "users manage own series"
   on public.series
   for all

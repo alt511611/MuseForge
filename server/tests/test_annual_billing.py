@@ -15,6 +15,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("MUAPI_KEY", "test-key-not-real")
 
+import billing  # noqa: E402
 import stripe_integration as si  # noqa: E402
 
 
@@ -130,8 +131,8 @@ def _renewal_event(price_id):
 
 
 async def _run_renewal(monkeypatch, price_id):
-    monkeypatch.setattr(si, "SUPABASE_URL", "https://sb.test")
-    monkeypatch.setattr(si, "SUPABASE_SERVICE_KEY", "service-key")
+    monkeypatch.setattr(billing, "SUPABASE_URL", "https://sb.test")
+    monkeypatch.setattr(billing, "SUPABASE_SERVICE_KEY", "service-key")
     monkeypatch.setattr(si.httpx, "AsyncClient", lambda *a, **k: _ProfileClient())
 
     granted: list = []
