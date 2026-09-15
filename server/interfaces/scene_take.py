@@ -251,15 +251,6 @@ def _citations(elements: Sequence["Element"]) -> List[Tuple[Any, str]]:
             alternatives = "|".join(re.escape(form) for form in forms)
             patterns.append((re.compile(rf"\b(?:{alternatives})\b"), token))
     return patterns
-            # None is the marker for "claimed by more than one character".
-            # Recorded rather than deleted, so a third character carrying the
-            # same part cannot un-ambiguate it by arriving last.
-            seen[spelling] = token if seen.get(spelling, token) == token else None
-    return [
-        (re.compile(rf"\b{re.escape(spelling)}\b"), token)
-        for spelling, token in sorted(seen.items(), key=lambda kv: -len(kv[0]))
-        if token
-    ]
 
 
 def _cite(text: str, citations: Sequence[Tuple[Any, str]]) -> str:
