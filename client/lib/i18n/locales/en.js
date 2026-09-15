@@ -510,4 +510,23 @@ export default {
   blog_cat_guide: "Guide",
   blog_cat_playbook: "Playbook",
   blog_cat_comparison: "Buyer's guide",
+
+  // ── Share pages (/s/{slug}) ───────────────────────────────────────────────
+  // The /s page itself is served in English only and is not localized (see
+  // UNLOCALIZED_PREFIXES); these keys still live here because the share BUTTON
+  // sits on the results page, which is.
+  share_published: "Published",
+  share_unpublish: "Unpublish",
+  share_copied: "Copied",
+  share_copy_link: "Link",
+  share_copy_embed: "Embed",
+  share_needs_account: "Sign in to publish a share page.",
+  share_failed: "Could not publish this video.",
+  share_revoke_failed: "Could not unpublish this video.",
+  share_scene_count: "{n} scenes",
+  share_video_gone: "This video is no longer available.",
+  share_cta_title: "Made with MuseForge",
+  share_cta_desc:
+    "One sentence in, one finished cinematic scene out. Try it free — no API key needed.",
+  share_cta_button: "Make your own",
 };

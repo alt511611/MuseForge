@@ -2,8 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "./LocaleLink";
-import { Download, Share2, Plus, ExternalLink, Layout, ChevronDown, ChevronUp, Loader2, BookmarkPlus, Check, RefreshCw, Wand2, Scissors, ArrowUp, ArrowDown, Eye, EyeOff, AlertTriangle } from "lucide-react";
+import { Download, Plus, ExternalLink, Layout, ChevronDown, ChevronUp, Loader2, BookmarkPlus, Check, RefreshCw, Wand2, Scissors, ArrowUp, ArrowDown, Eye, EyeOff, AlertTriangle } from "lucide-react";
 import Confetti from "./Confetti";
+import ShareButton from "./ShareButton";
 import { useLanguage } from "../contexts/LanguageContext";
 import { useAuth } from "../contexts/AuthContext";
 import { API_BASE, resolveJobVideoUrl } from "../lib/apiBase";
@@ -109,15 +110,9 @@ function NextSteps({ jobId, videoUrl }) {
   const { t } = useLanguage();
   const openUrl = resolveJobVideoUrl(videoUrl, jobId);
 
-  const handleShare = async () => {
-    const url = typeof window !== "undefined" ? window.location.href : "";
-    if (navigator.share) {
-      try { await navigator.share({ title: t("result_share_title"), url }); } catch { /* cancelled */ }
-    } else {
-      await navigator.clipboard.writeText(url);
-      alert(t("result_link_copied"));
-    }
-  };
+  /* The share handler that used to live here copied window.location.href --
+     i.e. /generate/{job_id}, which is auth-gated and noindexed. See
+     components/ShareButton.js for what the button does now and why. */
 
   return (
     <div className="glass rounded-2xl p-6">
@@ -135,12 +130,7 @@ function NextSteps({ jobId, videoUrl }) {
           <ExternalLink size={16} />
           {t("result_open_video")}
         </a>
-        <button onClick={handleShare}
-          className="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all hover:scale-[1.02]"
-          style={{ backgroundColor: "var(--mf-panel)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink-2)" }}>
-          <Share2 size={16} />
-          {t("result_share")}
-        </button>
+        <ShareButton jobId={jobId} />
       </div>
     </div>
   );

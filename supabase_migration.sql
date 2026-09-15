@@ -620,3 +620,30 @@ create policy "users manage own series"
 
 grant select, insert, update, delete on public.series to authenticated;
 grant all on public.series to service_role;
+
+-- ── Public share links ────────────────────────────────────────────────────────
+--
+-- A finished job becomes a public page at /s/{share_slug} only when its owner
+-- says so. Three columns rather than a separate table: the thing being shared
+-- IS the job, and a side table would have to be joined on every read of a page
+-- that exists to be crawled quickly.
+--
+-- `share_slug` is null for every job ever made until someone presses Share, so
+-- the unique index is partial -- a plain unique constraint would let exactly
+-- one row hold the null and reject the rest.
+alter table public.jobs add column if not exists share_slug text;
+alter table public.jobs add column if not exists shared_at  timestamptz;
+
+create unique index if not exists jobs_share_slug_key
+  on public.jobs (share_slug) where share_slug is not null;
+
+-- The gallery and the sitemap both read "most recently shared first", and both
+-- are anonymous traffic that must not table-scan a job history.
+create index if not exists jobs_shared_at_idx
+  on public.jobs (shared_at desc) where share_slug is not null;
+
+-- No anon RLS policy, deliberately. Share pages are served by the API with the
+-- service key, which selects only the public projection (see server/sharing.py:
+-- PUBLIC_FIELDS). Opening public.jobs to the anon role would publish the whole
+-- row -- user_email, the raw idea, _render_state -- to anyone who guessed the
+-- REST URL, and the page needs none of it.

@@ -31,11 +31,35 @@ const nextConfig = {
   async headers() {
     return [
       {
-        source: "/:path*",
+        // Everything EXCEPT /embed/*. Next emits every matching rule's headers,
+        // so a later rule cannot relax X-Frame-Options — two conflicting values
+        // for one header is undefined behaviour across browsers, and the strict
+        // one is the one that wins in practice. The embed player exists to be
+        // put in somebody else's page, so it is carved out of the match here
+        // and given its own headers below.
+        source: "/((?!embed/).*)",
         headers: [
           { key: "X-Content-Type-Options", value: "nosniff" },
           { key: "X-Frame-Options", value: "DENY" },
           { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+        ],
+      },
+      {
+        // The one framable route. `frame-ancestors *` is the modern header and
+        // is deliberately open: an embed nobody may frame is not an embed, and
+        // the page holds one public video and no session — there is nothing on
+        // it for a clickjacked click to reach. No X-Frame-Options at all, since
+        // its ALLOW-FROM is dead in every current browser and DENY here would
+        // defeat the route.
+        source: "/embed/:path*",
+        headers: [
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          { key: "Content-Security-Policy", value: "frame-ancestors *" },
+          { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+          // The embed is the same film as /s/{slug} with the page stripped off.
+          // Indexing both is asking Google to pick a canonical between a full
+          // page and a bare player.
+          { key: "X-Robots-Tag", value: "noindex, follow" },
         ],
       },
       // Private / thin routes: keep them out of the index even if a crawler
