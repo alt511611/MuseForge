@@ -121,7 +121,7 @@ export default function ArticleLayout({ article, related = [], labels = {}, brea
             <h2 className="text-xl font-black mb-5" style={{ color: "var(--mf-ink)" }}>
               {labels.related || "Keep reading"}
             </h2>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {related.map((r) => (
                 <Link
                   key={r.slug}
