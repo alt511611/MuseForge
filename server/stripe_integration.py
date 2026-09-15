@@ -1,80 +1,48 @@
-"""Stripe payment integration for MuseForge subscriptions + credit packages."""
+"""Stripe payment integration for MuseForge subscriptions + credit packages.
+
+What a credit is worth, how long it lives, and how a grant reaches Supabase
+now live in `billing.py`, because they are the same whether the money arrived
+through Stripe or through Whop (see that module's docstring for why a second
+copy of those numbers is a payment bug rather than a style one). What stays
+here is everything that is TRUE OF STRIPE AND NOTHING ELSE: Prices, Checkout
+Sessions, the Billing Portal, signature verification, and the shape of the
+five events this deployment acts on.
+
+The economics constants are re-exported below under the names they have always
+had -- `stripe_integration.PLAN_CREDITS` is imported by the pricing-coherence
+test and by the API -- so that this split is invisible to every caller.
+"""
 
 import asyncio
 import logging
 import os
 from typing import Optional
 
-import httpx
+import httpx  # noqa: F401  (tests patch httpx.AsyncClient through this module)
 import stripe
+
+import billing
+from billing import (  # noqa: F401  (re-exported: callers import these from here)
+    ANNUAL_ALLOWANCE_MONTHS,
+    ANNUAL_CREDIT_VALIDITY_DAYS,
+    ANNUAL_DISCOUNT_PERCENT,
+    BILLING_INTERVALS,
+    CREDIT_PACKAGES,
+    CREDIT_VALIDITY_DAYS,
+    DEFAULT_BILLING_INTERVAL,
+    PACK_CREDIT_VALIDITY_DAYS,
+    PLAN_CREDITS,
+    allowance_for,
+)
 
 logger = logging.getLogger(__name__)
 
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
-
-# Plan definitions: plan name → credits granted per renewal cycle
-# Credits included with each subscription tier.
-#
-# Priced against real unit economics: one credit buys SECONDS_PER_CREDIT
-# seconds of finished video (see interfaces/second_budget), which costs
-# ~$0.95 at the provider's linear per-second rate. These allocations put
-# both tiers near a 74% gross margin. Every tier must include at least
-# PLAN_MAX_SCENES credits, otherwise the plan cannot render one
-# full-length drama -- api.PLAN_MAX_SCENES is the constraint to check
-# when changing these.
-PLAN_CREDITS = {
-    "creator": 16,
-    "pro": 36,
-}
-
-# One-time credit packages: env var suffix → credit amount
-# One-off packs carry a premium over subscriptions -- they buy flexibility,
-# not commitment -- so their per-credit price is deliberately higher.
-CREDIT_PACKAGES = {
-    "SMALL":  {"credits": 4,  "label": "4 Credits"},
-    "MEDIUM": {"credits": 12, "label": "12 Credits"},
-    "LARGE":  {"credits": 26, "label": "26 Credits"},
-}
-
-# How long a granted credit stays spendable. Every grant lands immediately and
-# lapses after its own window, whether or not it was used. The DATABASE is the
-# enforcer (public.grant_credits takes p_days); these constants are what the
-# server passes and what the UI quotes.
-#
-# A monthly allowance is rented: it is sized to one month of work and lapses
-# with the month, which is what stops it being hoarded across renewals.
-#: Must match public.credit_validity_days() in supabase_migration.sql, which is
-#: the fallback used when a caller passes no p_days.
-CREDIT_VALIDITY_DAYS = 30
-
-# A credit PACK was bought outright, not rented, and it is bought precisely by
-# the people whose work is lumpy -- an agency with one shoot this quarter. A
-# 30-day fuse on money already taken is the kind of term customers discover at
-# renewal and leave over, so packs (and the prepaid annual allowance) live a
-# year.
-PACK_CREDIT_VALIDITY_DAYS = 365
-ANNUAL_CREDIT_VALIDITY_DAYS = 365
-
-#: Billing intervals a subscription can be sold on. Annual is the default
-#: offer: it is cheaper for the customer and prepaid for us.
-BILLING_INTERVALS = ("annual", "monthly")
-DEFAULT_BILLING_INTERVAL = "annual"
-
-#: Discount applied to the annual price, quoted to the customer on the pricing
-#: page. The authoritative number is whatever the Stripe annual Price says --
-#: this constant only has to agree with it.
-ANNUAL_DISCOUNT_PERCENT = 10
-
-#: Months of allowance handed over when an annual subscription starts or
-#: renews. The whole year lands at once (with a year to spend it) because the
-#: customer has already paid for the whole year: metering it out monthly would
-#: need a scheduler we do not run, and would silently expire allowance they
-#: are not getting a refund for.
-ANNUAL_ALLOWANCE_MONTHS = 12
+#: Which processor this module is. Everything it writes to the idempotency
+#: table is keyed with it.
+PROVIDER = "stripe"
 
 stripe.api_key = STRIPE_SECRET_KEY
 
@@ -117,35 +85,14 @@ def is_annual_price(price_id: str) -> bool:
     return any(get_price_id(plan, "annual") == price_id for plan in PLAN_CREDITS)
 
 
-def allowance_for(plan: str, annual: bool) -> tuple:
-    """(credits, validity_days) granted for one billing cycle of this plan."""
-    monthly = PLAN_CREDITS.get(plan, PLAN_CREDITS["creator"])
-    if annual:
-        return monthly * ANNUAL_ALLOWANCE_MONTHS, ANNUAL_CREDIT_VALIDITY_DAYS
-    return monthly, CREDIT_VALIDITY_DAYS
-
-
 def get_credit_price_id(package: str) -> Optional[str]:
     """Return Stripe price ID for a one-time credit package (SMALL/MEDIUM/LARGE)."""
     return os.environ.get(f"STRIPE_PRICE_CREDITS_{package.upper()}")
 
 
 # ── Supabase helpers ──────────────────────────────────────────────────────────
-
-def _sb_headers() -> dict:
-    return {
-        "apikey": SUPABASE_SERVICE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=minimal",
-    }
-
-
-# NOTE: there is deliberately no _add_ledger_entry helper here. Every credit
-# movement in this file goes through the grant_credits/deduct_credits RPCs,
-# which write their own credit_ledger row -- a second writer would double-count
-# every purchase in the user's history.
-
+# Thin wrappers over `billing`, kept under their original names because they
+# are the seam the webhook tests patch.
 
 async def _add_credits_to_profile(
     user_id: str,
@@ -156,45 +103,28 @@ async def _add_credits_to_profile(
     reason: str = "subscription_renewal",
     validity_days: int = CREDIT_VALIDITY_DAYS,
 ):
-    """Grant credits as a new lot and update the profile's Stripe fields.
+    """Grant credits as a new lot and record the Stripe ids on the profile."""
+    await billing.grant_credits(
+        user_id,
+        credits_delta,
+        plan=plan,
+        profile_fields={
+            "stripe_customer_id": stripe_customer_id,
+            "stripe_subscription_id": stripe_subscription_id,
+        },
+        reason=reason,
+        validity_days=validity_days,
+    )
 
-    The grant is spendable the moment this returns and lapses
-    ``validity_days`` later -- 30 for a monthly allowance, a year for a pack or
-    a prepaid annual allowance. grant_credits() also writes the ledger entry
-    and refreshes profiles.credits, so this no longer does the read-then-write
-    dance that could lose a concurrent grant.
-    """
-    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-        return
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        if credits_delta > 0:
-            await client.post(
-                f"{SUPABASE_URL}/rest/v1/rpc/grant_credits",
-                json={
-                    "p_user_id": user_id,
-                    "p_amount": credits_delta,
-                    "p_reason": reason,
-                    "p_days": validity_days,
-                },
-                headers=_sb_headers(),
-            )
+async def _mark_event_processed(event_id: str) -> bool:
+    """Claim this Stripe event; False if it was already handled."""
+    return await billing.mark_event_processed(PROVIDER, event_id)
 
-        # Plan / Stripe identifiers are profile-level, not lot-level.
-        patch_body: dict = {}
-        if plan:
-            patch_body["plan"] = plan
-        if stripe_customer_id:
-            patch_body["stripe_customer_id"] = stripe_customer_id
-        if stripe_subscription_id:
-            patch_body["stripe_subscription_id"] = stripe_subscription_id
 
-        if patch_body:
-            await client.patch(
-                f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{user_id}",
-                json=patch_body,
-                headers=_sb_headers(),
-            )
+async def _release_event_mark(event_id: str) -> None:
+    """Give the claim back so Stripe's retry is allowed to do the work."""
+    await billing.release_event_mark(PROVIDER, event_id)
 
 
 async def create_portal_session(customer_id: str, return_url: str) -> str:
@@ -234,65 +164,6 @@ async def create_checkout_session(
     )
     session = await asyncio.to_thread(stripe.checkout.Session.create, **kwargs)
     return session.url
-
-
-async def _mark_event_processed(event_id: str) -> bool:
-    """Insert event_id into processed_stripe_events. Returns True if newly inserted,
-    False if it already existed (duplicate event — skip processing)."""
-    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-        return True  # dev mode: always proceed
-    try:
-        async with httpx.AsyncClient(timeout=6.0) as client:
-            resp = await client.post(
-                f"{SUPABASE_URL}/rest/v1/processed_stripe_events",
-                json={"event_id": event_id},
-                headers={
-                    "apikey": SUPABASE_SERVICE_KEY,
-                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                    "Content-Type": "application/json",
-                    "Prefer": "resolution=ignore-duplicates,return=minimal",
-                },
-            )
-            # 201 = inserted (new event); 200/204 with ignore-duplicates = already existed
-            return resp.status_code == 201
-    except Exception:
-        return True  # fail-open on Supabase issues
-
-
-async def _release_event_mark(event_id: str) -> None:
-    """Undo `_mark_event_processed`, so Stripe's retry is allowed to work.
-
-    The mark is taken BEFORE the event is handled, which is the right order --
-    it is what stops two concurrent deliveries of the same event from granting
-    the credits twice. It is also why a handler that raises must give the mark
-    back. See `handle_webhook`.
-
-    Fails quietly. If this delete does not land, the event stays marked and
-    the credits stay ungranted, which is exactly the state we were already in;
-    raising here would replace one lost event with a lost event AND a
-    misleading traceback about the delete rather than the cause.
-    """
-    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-        return
-    try:
-        async with httpx.AsyncClient(timeout=6.0) as client:
-            await client.delete(
-                f"{SUPABASE_URL}/rest/v1/processed_stripe_events",
-                params={"event_id": f"eq.{event_id}"},
-                headers={
-                    "apikey": SUPABASE_SERVICE_KEY,
-                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                    "Prefer": "return=minimal",
-                },
-            )
-    except Exception as exc:
-        logger.error(
-            "Stripe event %s failed AND its idempotency mark could not be "
-            "released (%s). Stripe's retry will be treated as a duplicate and "
-            "this payment will not be credited without manual repair.",
-            event_id,
-            exc,
-        )
 
 
 async def handle_webhook(payload: bytes, sig_header: str) -> dict:
@@ -369,8 +240,7 @@ async def _dispatch_event(event_type: str, data: dict) -> dict:
         if payment_mode == "payment":
             # One-time credit package purchase
             pkg_key = (data.get("metadata") or {}).get("credit_package", "")
-            pkg = CREDIT_PACKAGES.get(pkg_key.upper(), {})
-            credits = pkg.get("credits", 0)
+            credits = billing.credits_in_package(pkg_key)
             if user_id and credits:
                 await _add_credits_to_profile(
                     user_id,
@@ -408,17 +278,11 @@ async def _dispatch_event(event_type: str, data: dict) -> dict:
             customer_id = data.get("customer")
             # Resolve user_id via Supabase profiles
             user_id = None
-            if customer_id and SUPABASE_URL and SUPABASE_SERVICE_KEY:
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    resp = await client.get(
-                        f"{SUPABASE_URL}/rest/v1/profiles",
-                        params={"stripe_customer_id": f"eq.{customer_id}", "select": "id,plan", "limit": "1"},
-                        headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
-                    )
-                    rows = resp.json()
-                    if isinstance(rows, list) and rows:
-                        user_id = rows[0].get("id")
-                        plan = rows[0].get("plan", "creator")
+            plan = "creator"
+            row = await billing.find_profile("stripe_customer_id", customer_id or "")
+            if row:
+                user_id = row.get("id")
+                plan = row.get("plan", "creator")
 
             if user_id:
                 # Which interval renewed decides both the size of the grant and
@@ -453,32 +317,14 @@ async def _dispatch_event(event_type: str, data: dict) -> dict:
     # ── Subscription cancelled ────────────────────────────────────────────────
     elif event_type == "customer.subscription.deleted":
         customer_id = data.get("customer")
-        if customer_id and SUPABASE_URL and SUPABASE_SERVICE_KEY:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(
-                    f"{SUPABASE_URL}/rest/v1/profiles",
-                    params={"stripe_customer_id": f"eq.{customer_id}", "select": "id", "limit": "1"},
-                    headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
-                )
-                rows = resp.json()
-                user_id = rows[0].get("id") if isinstance(rows, list) and rows else None
-
-                await client.patch(
-                    f"{SUPABASE_URL}/rest/v1/profiles?stripe_customer_id=eq.{customer_id}",
-                    json={"plan": "free", "stripe_subscription_id": None},
-                    headers=_sb_headers(),
-                )
-
-                # Drop the unused part of the subscription allowance -- it was
-                # rented, not bought. Credit PACKS survive: they were paid for
-                # separately and run out their own 30 days. The old code set
-                # credits to a flat 3, which destroyed both.
-                if user_id:
-                    await client.post(
-                        f"{SUPABASE_URL}/rest/v1/rpc/revoke_subscription_credits",
-                        json={"p_user_id": user_id},
-                        headers=_sb_headers(),
-                    )
+        if customer_id:
+            row = await billing.find_profile("stripe_customer_id", customer_id, select="id")
+            await billing.end_subscription(
+                (row or {}).get("id"),
+                "stripe_customer_id",
+                customer_id,
+                clear_fields={"stripe_subscription_id": None},
+            )
 
     elif event_type == "invoice.payment_failed":
         pass  # TODO: notify user

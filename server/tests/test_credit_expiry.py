@@ -22,6 +22,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("MUAPI_KEY", "test-key-not-real")
 
+import billing  # noqa: E402
 import stripe_integration as si  # noqa: E402
 
 
@@ -120,8 +121,8 @@ class _FakeClient:
 def _install_fake_client(monkeypatch):
     client = _FakeClient()
     monkeypatch.setattr(si.httpx, "AsyncClient", lambda *a, **k: client)
-    monkeypatch.setattr(si, "SUPABASE_URL", "https://sb.test")
-    monkeypatch.setattr(si, "SUPABASE_SERVICE_KEY", "service-key")
+    monkeypatch.setattr(billing, "SUPABASE_URL", "https://sb.test")
+    monkeypatch.setattr(billing, "SUPABASE_SERVICE_KEY", "service-key")
     return client
 
 
@@ -175,8 +176,8 @@ async def test_renewal_grants_a_new_lot_instead_of_resetting(monkeypatch):
     """A renewal must ADD the month's allowance. The old code overwrote the
     balance, so a user who bought a 26-credit pack mid-month lost it at the
     next invoice."""
-    monkeypatch.setattr(si, "SUPABASE_URL", "https://sb.test")
-    monkeypatch.setattr(si, "SUPABASE_SERVICE_KEY", "service-key")
+    monkeypatch.setattr(billing, "SUPABASE_URL", "https://sb.test")
+    monkeypatch.setattr(billing, "SUPABASE_SERVICE_KEY", "service-key")
 
     granted: list = []
     patched: list = []
@@ -225,8 +226,8 @@ async def test_cancellation_revokes_only_subscription_credits(monkeypatch):
     """Unused allowance is rented and goes back. A pack was bought outright
     and runs out its own 30 days. The old code set credits to a flat 3,
     which destroyed both."""
-    monkeypatch.setattr(si, "SUPABASE_URL", "https://sb.test")
-    monkeypatch.setattr(si, "SUPABASE_SERVICE_KEY", "service-key")
+    monkeypatch.setattr(billing, "SUPABASE_URL", "https://sb.test")
+    monkeypatch.setattr(billing, "SUPABASE_SERVICE_KEY", "service-key")
 
     client = _FakeClient()
 
