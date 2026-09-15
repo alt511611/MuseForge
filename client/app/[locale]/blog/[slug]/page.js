@@ -19,8 +19,8 @@ import {
   loadArticle,
   articleCard,
   articlePath,
-  findArticle,
   articlesIn,
+  relatedTo,
 } from "../../../../lib/content";
 import { articleLabels } from "../../../../lib/content/labels";
 import { faqItems, howToBlocks, readingMinutes } from "../../../../lib/content/blocks";
@@ -77,16 +77,10 @@ export default function ArticlePage({ params: { locale, slug } }) {
     { name: article.title, path: withLocale(path, locale) },
   ];
 
-  /* Related posts are named by the article and filtered to this locale, so a
-     Turkish reader is never handed a card that leads to a 404. Anything left
-     over is filled from the rest of the catalogue in this language. */
-  const named = (article.related || [])
-    .map(findArticle)
-    .filter((a) => a && a.locales?.[locale]);
-  const fill = articlesIn(locale).filter(
-    (a) => a.slug !== slug && !named.some((n) => n.slug === a.slug)
-  );
-  const related = [...named, ...fill].slice(0, 2).map((a) => articleCard(a, locale));
+  /* The related list comes from the graph in lib/content rather than straight
+     off `related`: the declared list is one-directional, and an article nobody
+     names ends up with no inbound link at all. See buildRelatedGraph. */
+  const related = relatedTo(slug, locale).map((a) => articleCard(a, locale));
 
   /* The structured data is derived from the same blocks the reader sees --
      every FAQPage question and every HowTo step is text that is visibly on the
