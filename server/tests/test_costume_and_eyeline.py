@@ -12,6 +12,7 @@ Both seen in one delivered harbour drama:
 """
 
 import os
+import re
 import sys
 from types import SimpleNamespace
 
@@ -49,7 +50,10 @@ def test_unnamed_headwear_is_forbidden_even_with_a_named_outfit():
 
     assert "Costume is LOCKED" in clause
     assert "hard hat" in clause and "beanie" in clause
-    assert "unless the outfit names one" in clause
+    # The exemption is no longer a subordinate clause asking to be honoured;
+    # it is applied to the list before the list is written. This outfit names
+    # no headwear, so every one of them is still forbidden by name.
+    assert "and nothing else unnamed" in clause
 
 
 def test_the_no_additions_rule_also_covers_an_undescribed_outfit():
@@ -70,7 +74,13 @@ def test_a_named_hat_is_kept_rather_than_banned():
     )
 
     assert "yellow hard hat" in clause
-    assert "in every scene, never removed" in clause
+    # ...and the ban no longer argues with it. The outfit names a hard hat,
+    # so the enumeration does not say "no hard hat" (nor "no hat", which the
+    # same two words also answer to) three sentences further down.
+    assert "hard hat, hood" not in clause
+    assert not re.search(r"no hat\b|, hat,|\bor hat\b", clause)
+    # The rest of the list is untouched: this is a filter, not an off switch.
+    assert "beanie" in clause and "goggles" in clause
 
 
 def test_the_shot_designer_is_told_what_the_cast_has_on():

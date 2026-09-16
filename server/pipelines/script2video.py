@@ -146,6 +146,45 @@ IMAGE_QUALITY_SUFFIX = PHOTOREAL_RENDER
 #: whose one undescribed "Alex" produced a short prompt every time.
 MAX_IMAGE_PROMPT_CHARS = 3000
 
+#: The OTHER budget, and the one that actually decides what the model reads.
+#:
+#: MAX_IMAGE_PROMPT_CHARS above is MuAPI's validator. It is a gate, and a
+#: prompt that clears it has proved only that the request will be accepted.
+#: FLUX conditions on T5, which truncates by TOKENS at this cap, and it does
+#: so SILENTLY: no error, no log line, no failed render. The frame comes back,
+#: bills normally, and looks fine -- it was simply drawn from a prompt whose
+#: last third was never read.
+#:
+#: Delivered job 01a0a502, the harbour drama, is what that looks like from the
+#: outside. Three frames, 2761 / 2798 / 2883 characters, every one of them
+#: comfortably inside 3000 and every one of them roughly 700-800 tokens. What
+#: fell past the cap was the same block each time, because the ladder reads in
+#: a fixed order: the closed-cast rule, the setting lock and the lighting
+#: lock. And that is exactly what the delivered frames show -- two hard-hatted
+#: strangers standing in the third frame's background, and a set that moves
+#: from a narrow container lane to an open quayside to the inside of the
+#: container across three consecutive shots.
+#:
+#: Those three clauses were in every prompt. None of them was ever read.
+MAX_IMAGE_PROMPT_TOKENS = 512
+
+#: Characters per token for T5's sentencepiece on this module's prose, taken
+#: from the frame-prompt-audit skill, which measured it on this repo's own
+#: delivered prompts. Cinematic direction sits at the LOW end -- hyphenated
+#: compounds ("blue-white", "180-degree"), em dashes and proper nouns all
+#: split -- so 3.5 is the conservative end of a 3.5-4.0 range and the right
+#: one to budget against.
+#:
+#: It is an ESTIMATE, and the repo has no T5 tokenizer to make it a
+#: measurement. That is why it drives a WARNING and a reading order rather
+#: than a hard cut: a prompt sized against a guessed tokenizer and truncated
+#: on it would trade a silent overrun for a silent amputation.
+IMAGE_PROMPT_CHARS_PER_TOKEN = 3.5
+
+#: How many characters of an assembled prompt are reliably read. Everything
+#: past it is at risk, in the order it was written.
+IMAGE_PROMPT_TOKEN_WINDOW = int(MAX_IMAGE_PROMPT_TOKENS * IMAGE_PROMPT_CHARS_PER_TOKEN)
+
 #: Ranks for `fit_image_prompt`. REQUIRED survives every squeeze; everything
 #: above it is direction the frame is better with and still legible without.
 #: Named rather than spelled as bare integers at the call site, because the
@@ -154,6 +193,7 @@ MAX_IMAGE_PROMPT_CHARS = 3000
 #: literal.
 REQUIRED = 0
 OPTIONAL_DIRECTION = 6
+
 
 #: What one shot's own description may spend of the frame prompt.
 #:
@@ -184,6 +224,27 @@ MAX_VISUAL_DESC_CHARS = 320
 MIN_VISUAL_DESC_CHARS = 200
 
 
+def _drop_to(kept: list, limit: int, why: str) -> list:
+    """Drop whole clauses, worst priority first, until they fit `limit`.
+
+    Stops at the required ones rather than cutting into them: a prompt that
+    is all REQUIRED and still too long is a different problem, and the caller
+    decides what to do about it.
+    """
+    while sum(len(t) for _, t in kept) > limit:
+        droppable = [p for p, _ in kept if p > 0]
+        if not droppable:
+            break
+        worst = max(droppable)
+        idx = next(i for i, (p, _) in enumerate(kept) if p == worst)
+        _, dropped = kept.pop(idx)
+        logger.warning(
+            "Frame prompt over %s (%d chars) — dropping %d chars of "
+            "lower-priority direction (%.60s...)", why, limit, len(dropped), dropped,
+        )
+    return kept
+
+
 def fit_image_prompt(segments: list, limit: int = MAX_IMAGE_PROMPT_CHARS) -> str:
     """Assemble a prompt that respects the provider's character budget.
 
@@ -199,17 +260,7 @@ def fit_image_prompt(segments: list, limit: int = MAX_IMAGE_PROMPT_CHARS) -> str
     render, just of somebody else.
     """
     kept = [(prio, text) for prio, text in segments if text]
-    while sum(len(t) for _, t in kept) > limit:
-        droppable = [p for p, _ in kept if p > 0]
-        if not droppable:
-            break
-        worst = max(droppable)
-        idx = next(i for i, (p, _) in enumerate(kept) if p == worst)
-        _, dropped = kept.pop(idx)
-        logger.warning(
-            "Frame prompt over %d chars — dropping %d chars of lower-priority "
-            "direction (%.60s...)", limit, len(dropped), dropped,
-        )
+    kept = _drop_to(kept, limit, "the %d-char provider budget" % limit)
     prompt = "".join(t for _, t in kept)
     if len(prompt) > limit:
         # Even the required segments are too long, which in practice means one
@@ -424,11 +475,79 @@ _COSTUME_LOCK_REFERENCED = (
 # as a different person. "Wear NOTHING not named above" already forbade it
 # categorically; the enumeration is what the model actually attends to, and
 # nothing in it was a bag.
-_NO_UNNAMED_ITEMS = (
-    "Wear NOTHING not named above — no hat, cap, beanie, helmet, hard hat, "
-    "hood, mask, goggles, glasses, headset, scarf, badge, backpack, bag, "
-    "strap or harness — unless the outfit names one, and then in every "
-    "scene, never removed. "
+#: The enumeration, as nouns, so the clause can be built against a costume
+#: rather than pasted in whole. Order is the order they are said in.
+_UNNAMED_ITEM_NOUNS = (
+    "hat", "cap", "beanie", "helmet", "hard hat", "hood", "mask", "goggles",
+    "glasses", "headset", "scarf", "badge", "backpack", "bag", "strap",
+    "harness",
+)
+
+#: What a wardrobe calls one of those nouns when it does not use the noun.
+#: A costume reading "a satchel over one shoulder" has named the bag; the
+#: list below still says "no bag", and the model reads both.
+_ITEM_SYNONYMS = {
+    "hat": ("beret", "fedora", "trilby", "bonnet", "headscarf"),
+    "cap": ("peaked cap", "flat cap", "baseball cap"),
+    "hood": ("hooded", "cowl"),
+    "mask": ("respirator", "balaclava"),
+    "glasses": ("spectacles", "eyeglasses", "pince-nez"),
+    "scarf": ("shawl", "muffler"),
+    "badge": ("name patch", "insignia"),
+    "backpack": ("rucksack", "knapsack", "pack"),
+    "bag": ("satchel", "holdall", "tote", "purse", "duffel"),
+    "strap": ("sling", "slung", "bandolier"),
+    "harness": ("webbing",),
+}
+
+
+def _costume_names(worn: str, noun: str) -> bool:
+    """Whether this wardrobe text has already named `noun`, by any of its words."""
+    text = (worn or "").lower()
+    for word in (noun,) + _ITEM_SYNONYMS.get(noun, ()):
+        if re.search(rf"\b{re.escape(word)}\b", text):
+            return True
+    return False
+
+
+def build_no_unnamed_items_clause(worn: str = "") -> str:
+    """The costume lock's enumeration, minus whatever the outfit already wears.
+
+    THE LIST AND THE OUTFIT WERE ARGUING IN THE SAME PROMPT. The sentence
+    forbids sixteen things and then exempts "unless the outfit names one" --
+    which is a legal reading of a sentence, and the conditioning is not a
+    lawyer. Both nouns are in the text, a few hundred characters apart, and
+    the model attends to the enumeration: that is the whole reason the
+    enumeration exists rather than the categorical sentence alone (see the
+    note above it).
+
+    Delivered job 01a0a502, the harbour drama. Its costume reads "hood up on
+    a yellow rain slicker ... a handheld radio clipped to her left shoulder
+    STRAP", and the prompt beneath it said "no ... hood ... strap or
+    harness". Two of the three garments the outfit is built from were on the
+    forbidden list. Across the film's three frames the hood is up, then up,
+    then pushed back, and the shoulder strap carries a pack in one frame that
+    the costume never named and the list did forbid -- the one item the list
+    should have caught is the one it did not, while it spent its authority
+    arguing with the outfit.
+
+    So the exemption is applied HERE, where it can be applied to the text,
+    instead of being asserted in a subordinate clause the reader has to
+    honour. What the outfit names is simply not said.
+    """
+    kept = [n for n in _UNNAMED_ITEM_NOUNS if not _costume_names(worn, n)]
+    if not kept:
+        # Every listed item is in the outfit. Nothing left to enumerate, and
+        # the categorical sentence still stands on its own -- it is the half
+        # that was always true; the list is only what the model attends to.
+        return "Wear NOTHING not named above. " + _MARKINGS_NOTE
+    return (
+        f"Wear NOTHING not named above — no {', '.join(kept[:-1])} or "
+        f"{kept[-1]} — and nothing else unnamed, in every scene. "
+    ) + _MARKINGS_NOTE
+
+
+_MARKINGS_NOTE = (
     # Folded in here rather than given a sentence of its own: it is about the
     # same thing this list is about, and shares a word with it.
     #
@@ -463,8 +582,12 @@ _NO_UNNAMED_ITEMS = (
 # the portrait's staging, which is what dragged the cast into staring down
 # the lens.
 _REFERENCE_NOTE = (
-    "The reference image is {name}: match that face exactly and wear the "
-    "exact outfit worn in it, down to colour and material. Take NOTHING else "
+    # "The FIRST", not "The". The singular was true when the anchor was the
+    # whole reference set and stopped being true when build_frame_references
+    # started sending the other faces and the location plate behind it -- see
+    # _PLATE_REFERENCE_NOTE below, which is the other half of this fix.
+    "The first reference image is {name}: match that face exactly and wear "
+    "the exact outfit worn in it, down to colour and material. Take NOTHING else "
     # This says what to do with the REFERENCE, and it used to carry the
     # eyeline as well -- the whole rule, folded in here because this block is
     # never dropped. Two delivered dramas later the faces were still looking
@@ -481,12 +604,53 @@ _REFERENCE_NOTE = (
     "from its own description. "
 )
 
+#: The sentence that tells the model what the LAST reference image is.
+#:
+#: NOTHING IN THE PROMPT SAID. `build_frame_references` sends an ordered set
+#: -- the anchor's portrait, then the other faces in the shot, then the
+#: location plate -- and the prompt described exactly one of them, in the
+#: singular, and then said "Take NOTHING else from it". Read against a set,
+#: that sentence covers the plate too: the one image that carries the film's
+#: architecture arrived with an instruction not to take anything from it.
+#:
+#: Delivered job 01a0a502 is what that costs. Two references went to
+#: flux-kontext-pro-i2i on all three frames -- the character sheet and the
+#: harbour plate -- and the set changes in every one of them: a narrow
+#: container lane, then an open quayside, then the inside of the container
+#: looking out. The setting clause promising "the EXACT SAME physical
+#: location" was in the prompt each time, unbacked by the picture that was
+#: sitting in the payload beside it.
+#:
+#: It also says what the plate is NOT. The plate is generated deliberately
+#: empty ("no people, no figures, no characters" -- see the location-plate
+#: prompt), but empty is not the same as understood: a model handed an
+#: unlabelled second photograph of a place full of gantries and distant
+#: figures has no reason to read it as the set rather than as the shot.
+#: Kept tight on purpose. It is measured into the identity reserve like every
+#: other clause that outranks the cast description, so every character it
+#: spends is a character of somebody's face -- and at this length it also
+#: leaves the acted expression inside the read window, which it did not at
+#: 188. "light" carries more than its share here: the lighting plan is ranked
+#: below the window floor and clears out on a crowded frame, so on those
+#: frames this sentence is the only thing pointing at where the key comes
+#: from, and it points at a photograph rather than at prose.
+_PLATE_REFERENCE_NOTE = (
+    "The last reference image is this film's set, photographed empty: take "
+    "its architecture, materials and light from it. No one in it is a "
+    "character. "
+)
+
 #: What the identity clause costs before a single character is described.
 #: Measured, not guessed, so the reserve tracks the sentences automatically.
 IDENTITY_CLAUSE_OVERHEAD = (
     len(_APPEARANCE_LOCK)
     + max(len(_COSTUME_LOCK_NAMED), len(_COSTUME_LOCK_REFERENCED))
-    + len(_NO_UNNAMED_ITEMS)
+    # The WIDEST the enumeration gets -- a costume that names none of the
+    # sixteen. Filtering can only shorten it, so the reserve is still an
+    # over-estimate rather than an under-one, which is the direction this
+    # constant has to err in: it is subtracted from the identity clause's
+    # budget, and a reserve that is too small is a clause that overruns.
+    + len(build_no_unnamed_items_clause(""))
     + len(_REFERENCE_NOTE.format(name="X" * 40))
 )
 
@@ -741,9 +905,21 @@ def build_character_identity_clause(characters, matched_char=None, limit=None) -
         (getattr(c, "wardrobe", "") or "").strip() for c in visible
     )
     clause += _COSTUME_LOCK_NAMED if wardrobe_named else _COSTUME_LOCK_REFERENCED
-    clause += _NO_UNNAMED_ITEMS
+    # Built against the costume that was actually written above, not pasted
+    # in whole: the entries in `described` are this clause's own text, so
+    # anything the enumeration would contradict is already in them.
+    clause += build_no_unnamed_items_clause(" ".join(described))
     if matched_char is not None and getattr(matched_char, "name", ""):
         clause += _REFERENCE_NOTE.format(name=matched_char.name)
+    # The PLATE note is deliberately not here, though it is a sentence about
+    # a reference image and this is the block that describes them. It belongs
+    # to the setting -- it is the picture the setting clause's promise is
+    # carried by -- and it is ranked with it in build_frame_prompt. Kept out
+    # of this block because this block is never dropped, and every character
+    # in it is subtracted from the cast's own description by
+    # IDENTITY_CLAUSE_OVERHEAD: folding it in here cost 153 characters of
+    # face and wardrobe on every frame, including the frames that have no
+    # plate to talk about.
     return clause
 
 
@@ -1041,6 +1217,7 @@ def build_frame_prompt(
     matched_char=None,
     world_change: str = "",
     world_state: str = "",
+    has_location_plate: bool = False,
 ) -> str:
     """Build the image prompt for a shot, injecting locked setting when present.
 
@@ -1315,6 +1492,16 @@ def build_frame_prompt(
     )
 
     cast_clause = build_cast_closure_clause(characters)
+    # Ranked with the setting below, because it is the setting's evidence: the
+    # setting clause promises the room does not change, and this names the
+    # photograph of that room sitting in the same payload. They stand or fall
+    # together -- a promise with no carrier is a sentence, and a carrier the
+    # model was never told the purpose of is a stray photograph. Measured into
+    # the identity reserve here, like every other clause that outranks it,
+    # rather than folded into the identity block itself: there it would have
+    # been subtracted from the cast's own description on every frame,
+    # including the frames that have no plate to talk about.
+    plate_clause = _PLATE_REFERENCE_NOTE if has_location_plate else ""
     style_prefix = f"{style} style. "
     framing_clause = f"Shot type: {shot.shot_type}. Lens: {shot.lens}. "
     desc_clause = f"{visual_desc}. "
@@ -1346,6 +1533,19 @@ def build_frame_prompt(
     # Guessing at any of this instead of measuring it is the same mistake that
     # once pushed the setting out of the prompt; there is now nothing left in
     # the reserve that is not a len().
+    # Sized against the PROVIDER'S budget, not the read window, and that is a
+    # measured choice rather than an oversight.
+    #
+    # Sizing it against the window instead is the obvious move and it was
+    # tried: the clause shortens, and every clause behind it moves forward by
+    # about 157 characters. That puts the closed cast at 1990 against a window
+    # of ~1790. It is still outside. So the trade buys nothing and spends the
+    # character lock -- the one clause in this prompt that a picture is also
+    # holding, and the one whose absence produces "the mother and daughter
+    # look like different people in different scenes".
+    #
+    # A clause is worth shortening for the window when shortening it puts
+    # another one INSIDE. This one does not, so it keeps its full share.
     identity_budget = (
         MAX_IMAGE_PROMPT_CHARS
         - len(style_prefix)
@@ -1358,6 +1558,7 @@ def build_frame_prompt(
         - len(cast_clause)
         - len(dialogue_clause)
         - len(framing_clause)
+        - len(plate_clause)
         - IDENTITY_CLAUSE_OVERHEAD
     )
     # The floor is what stops a very crowded scene from starving the one clause
@@ -1406,19 +1607,42 @@ def build_frame_prompt(
     # first thing about WHO was a costume lock -- "Close-up on Vivian Kesler
     # half-risen from her chair" came after both.
     #
-    # So: this frame first, every frame second. The shot, its framing and the
-    # performance in it; then who these people are and where they stand; then
-    # the room, its light and the film's finish. Priorities are untouched, so
-    # what dies under budget pressure dies in exactly the order the ladder
-    # below already records -- only the order it READS in has changed.
-    return fit_image_prompt([
+    # So: this frame first. The style, the shot and its framing lead, and that
+    # part of the decision stands -- it was made against a delivered close-up
+    # whose prompt opened with "windowless basement card room".
+    #
+    # WHAT FOLLOWS THEM NOW READS IN PRIORITY ORDER, which is new, and the
+    # reason is MAX_IMAGE_PROMPT_TOKENS. The rest of this list used to be
+    # editorial too -- "then who these people are and where they stand; then
+    # the room, its light and the film's finish" -- and that sentence was
+    # written against the CHARACTER budget, where reading order costs nothing
+    # because every clause that survives the ladder is read. Against a TOKEN
+    # window it is not free at all: the tail of the prompt is silently
+    # discarded, so reading order decides what the model sees quite apart from
+    # what the ladder kept.
+    #
+    # The two orders disagreed, and the editorial one was losing. The ladder
+    # says the closed cast (3), the setting (1) and the lighting (5) are worth
+    # more than the film-look note and the axis; the reading order put all
+    # three of them behind both. On job 01a0a502 they were the last ~1000
+    # characters of a ~2800-character prompt, past a window of about 1790 --
+    # kept by the ladder, paid for in the payload, and never read. Two
+    # strangers in frame three and a set that moves every shot.
+    #
+    # Sorting by priority makes one decision serve both budgets: what survives
+    # a squeeze longest is also what is read first. Priorities themselves are
+    # untouched -- every rank below is still the rank its own note argues for,
+    # and the drop order is exactly what it was.
+    opening = [
         (REQUIRED, style_prefix),
         (REQUIRED, desc_clause),
         (REQUIRED, framing_clause),
+    ]
+    ladder = [
+        (REQUIRED, identity_clause),
         (2, expression_clause),
         (4, face_clause),
         (dialogue_rank, dialogue_clause),
-        (REQUIRED, identity_clause),
         (OPTIONAL_DIRECTION, direction_clause),
         (3, cast_clause),
         # RANK, not wording -- the same distinction the mouth clause turned on
@@ -1439,6 +1663,20 @@ def build_frame_prompt(
         # clause and the drop, and a second described character would have
         # spent that margin: the identity clause is REQUIRED and this is not,
         # so a richer cast buys its faces with the story's own climax.
+        # Ahead of the setting clause, and they share a rank so this ordering
+        # is the tie-break rather than a promotion. Two reasons, and the
+        # second is why it is written down: the picture should be introduced
+        # before the rule about it is given, and these are the last two
+        # clauses that fit the read window on a crowded one-hander -- measured
+        # at 1481 and 1788 against ~1792. Putting the longer one first left
+        # the plate note four characters inside the window, which is not a
+        # margin, it is a coincidence.
+        #
+        # A frame that keeps the sentence and drops the explanation of the
+        # photograph backing it is the state that shipped: job 01a0a502 sent
+        # the harbour plate on all three frames and told the model what it was
+        # on none of them, and its set changes every shot.
+        (REQUIRED if (change_now or change_before) else 1, plate_clause),
         (
             REQUIRED if (change_now or change_before) else 1,
             setting_clause,
@@ -1453,7 +1691,36 @@ def build_frame_prompt(
         # person nobody wrote reads as a different film.
         (5, lighting_clause),
         (7, resolve_visual_style(style).render_note),
-    ])
+    ]
+    # Stable, so clauses that share a rank keep the order their notes above
+    # were written in -- the ranks are the argument, and a tie is not one.
+    ladder.sort(key=lambda pair: pair[0])
+    prompt = fit_image_prompt(opening + ladder)
+    # The character budget is enforced; this one cannot be, so it is SAID.
+    #
+    # Nothing here truncates: IMAGE_PROMPT_CHARS_PER_TOKEN is an estimate, and
+    # cutting a prompt on a guessed tokenizer would replace a silent overrun
+    # with a silent amputation -- the same failure with better manners. What
+    # this does is end the silence. An operator reading the log now learns
+    # that the frame they are looking at was drawn from part of its prompt,
+    # and which part, which is the thing no delivered job has ever been able
+    # to tell anyone.
+    if len(prompt) > IMAGE_PROMPT_TOKEN_WINDOW:
+        unread = prompt[IMAGE_PROMPT_TOKEN_WINDOW:]
+        logger.warning(
+            "Frame prompt is %d chars (~%d-%d tokens) against a %d-token "
+            "window: roughly the last %d characters are at risk of never "
+            "being read, starting at %r. Priority order puts the cheapest "
+            "direction there, but a prompt this long is one whose lowest-"
+            "ranked clauses are being paid for and discarded.",
+            len(prompt),
+            int(len(prompt) / 4.0),
+            int(len(prompt) / IMAGE_PROMPT_CHARS_PER_TOKEN),
+            MAX_IMAGE_PROMPT_TOKENS,
+            len(unread),
+            unread[:60],
+        )
+    return prompt
 
 
 def build_motion_prompt(
@@ -3669,6 +3936,13 @@ class Script2VideoPipeline:
                     matched_char=anchor,
                     world_change=world_change,
                     world_state=world_state,
+                    # Only when the plate is a SECOND picture. With no anchor
+                    # the plate IS the anchor (resolve_frame_references falls
+                    # back to it for an establishing shot or an insert), and
+                    # a sentence about "the last reference image" would then
+                    # be describing the only one -- pointing the model at a
+                    # second photograph it was never sent.
+                    has_location_plate=bool(location_plate_url) and anchor is not None,
                 ),
                 generate_audio=take_speaks,
                 scene_dialogue=scene_dialogue,
@@ -3737,6 +4011,13 @@ class Script2VideoPipeline:
                         matched_char=matched_char,
                         world_change=world_change,
                         world_state=world_state,
+                        # Read off the set that is actually going, not off
+                        # `location_plate_url` being non-empty: the plate is
+                        # de-duplicated against the anchor, so on a
+                        # characterless shot the two are one URL in one slot.
+                        # [1:] is "sent, and not as the anchor".
+                        has_location_plate=bool(location_plate_url)
+                        and location_plate_url in frame_references[1:],
                     )
 
                     # fal.ai reference-to-video binds character identity in a
