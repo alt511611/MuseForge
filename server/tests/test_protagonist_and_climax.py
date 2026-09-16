@@ -150,7 +150,7 @@ def test_frame_prompt_breaks_the_lighting_lock_for_the_event():
     )
 
     # The lock still holds for an ordinary scene.
-    assert "the room itself must not change" in ordinary
+    assert "the place itself must not change" in ordinary
     # ...and gets out of the way for the one scene the drama exists for.
     assert "must not change" not in event
     assert "every light in the city and on the docks goes out" in event
@@ -313,7 +313,7 @@ def test_an_ordinary_scene_still_pays_for_its_faces_with_continuity():
 
     segments = _segments()
 
-    rank = _rank_of(segments, "the room itself must not change")
+    rank = _rank_of(segments, "the place itself must not change")
     assert rank != REQUIRED
     assert rank > 0
 

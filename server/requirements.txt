@@ -13,3 +13,13 @@ pillow==10.4.0
 python-dotenv==1.0.1
 stripe==11.3.0
 fal-client==1.0.0
+
+# The T5 vocabulary, for sizing frame prompts against the window FLUX
+# actually reads rather than against MuAPI's character validator. The two are
+# different budgets and were being treated as one: job 01a0a502's frames
+# cleared the 3000-character gate at 2761-2883 characters and were 700-800
+# tokens against a 512-token cap, so a third of every prompt was discarded in
+# silence. The vocabulary itself is vendored at assets/t5_spiece.model (773 KB,
+# Apache-2.0) so a render does not depend on a hub being up; this is only the
+# code that reads it. See tools/t5_budget.
+sentencepiece==0.2.2

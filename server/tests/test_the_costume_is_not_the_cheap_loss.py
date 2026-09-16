@@ -8,7 +8,7 @@ was touched. The reasoning was written down: the costume lock is still in the
 prompt and still covers drift.
 
 It does not. With no garment named, the lock can only say "everyone wears the
-EXACT outfit from the reference image", and the reference image is a
+EXACT outfit from the reference image", and the reference is a
 photograph of a FACE (interfaces/character.wardrobe; both shipped reference
 models bind identity from it, and flux-pulid is an identity model outright).
 Job 8b8fce47-445 is what the sentence is worth on its own: one face,

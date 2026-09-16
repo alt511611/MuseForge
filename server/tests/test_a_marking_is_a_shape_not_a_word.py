@@ -69,7 +69,7 @@ def test_it_did_not_cost_a_word_of_any_rule_already_there():
     """Every one of those names something a delivered drama actually did."""
     clause = _clause()
     for kept in (
-        "IDENTICAL in every scene",     # face drift
+        "FIXED in every scene",     # face drift
         "hard hat",                     # a worker in a beanie, then a hard hat
         "backpack",                     # a pack in one shot of six
         # The costume lock is now stated positively -- these endpoints are

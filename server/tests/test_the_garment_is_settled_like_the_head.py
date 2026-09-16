@@ -181,7 +181,7 @@ def test_a_settled_garment_still_reaches_the_frame():
 
 def test_it_does_not_cost_the_rules_the_last_two_fixes_bought():
     prompt = _prompt(_yara())
-    assert "The cast is closed" in prompt
+    assert "Cast is closed" in prompt
     assert "mouth is fully visible" in prompt
     assert "eyes stay inside the scene" in prompt
 
@@ -228,7 +228,7 @@ def test_a_two_shot_spends_its_settled_wardrobes_on_the_axis():
     # The locks the wardrobe was outbidding.
     assert "180-degree rule" in prompt
     assert "Lighting continuity" in prompt
-    assert "The cast is closed" in prompt
+    assert "Cast is closed" in prompt
 
 
 def test_and_it_pays_for_them_from_the_half_that_has_a_picture():
@@ -256,6 +256,6 @@ def test_and_it_pays_for_them_from_the_half_that_has_a_picture():
     # face: with the wardrobe dropped it could only say "the EXACT outfit from
     # the reference image", which is the sentence job 8b8fce47-445 was
     # rendered under.
-    assert "each wears the outfit named above" in prompt
+    assert "the outfit named above" in prompt
     for garment in ("matte yellow PVC slicker", "dark green oilskin coat"):
         assert garment in prompt, garment

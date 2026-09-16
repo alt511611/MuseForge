@@ -12,8 +12,8 @@ a real job:
 
     dropping 262 chars ... (Shot on 35mm film, natural filmic grain ...)
     dropping 299 chars ... (Screen direction (LOCKED for the entire story ...)
-    dropping 186 chars ... (The speaking character's mouth is fully visible ...)
-    dropping 260 chars ... (The cast is closed: Mara Voss, Tomas Reyes ...)
+    dropping 186 chars ... (The speaking mouth is fully visible ...)
+    dropping 260 chars ... (Cast is closed: Mara Voss, Tomas Reyes ...)
 
 The 180-degree rule, the closed cast, and the mouth-visibility line the
 lip-sync pass depends on -- all pushed out by a description of the man who is
@@ -111,7 +111,7 @@ def test_the_room_that_frees_keeps_the_direction_the_scene_needs():
     prompt = _prompt(SINGLE, _cast())
     assert len(prompt) <= MAX_IMAGE_PROMPT_CHARS
     assert "180-degree rule" in prompt, "screen direction was dropped again"
-    assert "The cast is closed" in prompt
+    assert "Cast is closed" in prompt
     assert "mouth is fully visible" in prompt, (
         "the clause the lip-sync pass depends on was dropped from a dialogue "
         "frame"
@@ -122,7 +122,7 @@ def test_the_closed_cast_still_names_everyone():
     """Narrowing the DESCRIPTION must not narrow the guest list: the clause
     that keeps strangers out of the frame is about the whole story."""
     prompt = _prompt(SINGLE, _cast())
-    assert "Mara Voss, Tomas Reyes appear in this story" in prompt
+    assert "Mara Voss, Tomas Reyes appear" in prompt
 
 
 def test_a_shot_that_names_nobody_still_describes_the_whole_cast():

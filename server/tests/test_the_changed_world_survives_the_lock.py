@@ -95,7 +95,7 @@ def test_the_light_named_in_the_setting_is_overruled():
 def test_an_unchanged_scene_keeps_its_prompt_exactly_as_it_was():
     prompt = _prompt()
     assert "BEFORE the change" not in prompt
-    assert "Only the time-of-day lighting may shift subtly" in prompt
+    assert "Only time-of-day light may shift" in prompt
 
 
 # ── and the QA does not repair the event away ───────────────────────────────

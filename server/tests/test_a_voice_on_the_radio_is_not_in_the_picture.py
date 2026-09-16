@@ -7,7 +7,7 @@ second character spoke through all three scenes, appeared in none, and still:
 
   * had a portrait generated for a face that is never on screen;
   * took a place in the closed-cast clause, which tells the image model "X and
-    Y appear in this story";
+    Y appear";
   * held one end of the 180-degree axis, which tells EVERY frame which way the
     other person is facing -- an axis drawn to somebody who is not there.
 
@@ -140,7 +140,7 @@ def test_the_closed_cast_stops_claiming_they_appear():
     )
 
     clause = build_cast_closure_clause([mara, tomas])
-    assert "only Mara appears in this story" in clause
+    assert "only Mara appears" in clause
     assert "Tomas" not in clause
 
 

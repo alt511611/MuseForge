@@ -16,7 +16,7 @@ the budget was over.
 The second delivered job dropped the cast rule to keep it:
 
     dropping 262 chars ... (Shot on 35mm film, natural filmic grain ...)
-    dropping 248 chars ... (The cast is closed: only Yara appears in this ...)
+    dropping 248 chars ... (Cast is closed: only Yara appears in this ...)
 
 and a man in a green jacket is standing at the end of the container row in
 shot two, in a one-hander.
@@ -174,7 +174,7 @@ def test_the_closed_cast_survives_the_frame_that_lost_it():
     real storyboard sentence, and a prompt over budget."""
     prompt = _harbour_prompt()
     assert len(prompt) <= MAX_IMAGE_PROMPT_CHARS
-    assert "The cast is closed" in prompt, "a stranger can walk into this frame"
+    assert "Cast is closed" in prompt, "a stranger can walk into this frame"
     assert "mouth is fully visible" in prompt
 
 
@@ -187,8 +187,8 @@ def test_the_lighting_lock_goes_before_the_closed_cast():
         [
             (0, "x" * 2900),
             (5, "LIGHTING " * 20),
-            (3, "The cast is closed: only Yara. "),
+            (3, "Cast is closed: only Yara. "),
         ]
     )
-    assert "The cast is closed" in squeezed
+    assert "Cast is closed" in squeezed
     assert "LIGHTING" not in squeezed

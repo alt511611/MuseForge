@@ -12,7 +12,7 @@ From the delivered job (one dock worker on screen, a dispatcher on the radio),
 four of six frames:
 
     dropping 262 chars ... (Shot on 35mm film, natural filmic grain ...)
-    dropping 186 chars ... (The speaking character's mouth is fully visible ...)
+    dropping 186 chars ... (The speaking mouth is fully visible ...)
 
 Its middle scene then plays a five-second line over a closed mouth: the sync
 was requested, billed, returned at 5.21s and composited -- onto a frame with

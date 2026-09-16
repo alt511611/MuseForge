@@ -11,7 +11,7 @@ dark-coated men flood into the room". And then, in the same prompt:
     Any light named in that setting line describes this place BEFORE the
     change; do not light the frame with it.
     ...
-    The cast is closed: Vivian Kesler, Silas Vane appear in this story. Every
+    Cast is closed: Vivian Kesler, Silas Vane appear. Every
     featured, recognisable face in the frame is one of them.
     ...
     Shot type: close-up.
@@ -168,7 +168,7 @@ def test_the_shot_is_the_first_thing_the_model_reads():
         ("Setting:", "the room"),
         ("Appearance is FIXED", "the identity lock"),
         ("180-degree rule", "the axis"),
-        ("The cast is closed", "the closed cast"),
+        ("Cast is closed", "the closed cast"),
     ):
         assert shot < prompt.index(later), (
             f"{what} is identical in every frame of the film; this shot is not"

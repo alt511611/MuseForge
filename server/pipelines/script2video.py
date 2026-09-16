@@ -41,6 +41,7 @@ from tools.character_qa import (
     verify_frame,
 )
 from tools.muapi_image_generator import MuAPIImageGenerator
+from tools.t5_budget import MAX_PROMPT_TOKENS, count_tokens, tokenizer_is_real
 from tools.muapi_video_generator import MuAPIVideoGenerator
 from tools.muapi_client import MuAPICancelled
 from tools.provider_choice import resolve_provider
@@ -166,24 +167,8 @@ MAX_IMAGE_PROMPT_CHARS = 3000
 #: container across three consecutive shots.
 #:
 #: Those three clauses were in every prompt. None of them was ever read.
-MAX_IMAGE_PROMPT_TOKENS = 512
+MAX_IMAGE_PROMPT_TOKENS = MAX_PROMPT_TOKENS
 
-#: Characters per token for T5's sentencepiece on this module's prose, taken
-#: from the frame-prompt-audit skill, which measured it on this repo's own
-#: delivered prompts. Cinematic direction sits at the LOW end -- hyphenated
-#: compounds ("blue-white", "180-degree"), em dashes and proper nouns all
-#: split -- so 3.5 is the conservative end of a 3.5-4.0 range and the right
-#: one to budget against.
-#:
-#: It is an ESTIMATE, and the repo has no T5 tokenizer to make it a
-#: measurement. That is why it drives a WARNING and a reading order rather
-#: than a hard cut: a prompt sized against a guessed tokenizer and truncated
-#: on it would trade a silent overrun for a silent amputation.
-IMAGE_PROMPT_CHARS_PER_TOKEN = 3.5
-
-#: How many characters of an assembled prompt are reliably read. Everything
-#: past it is at risk, in the order it was written.
-IMAGE_PROMPT_TOKEN_WINDOW = int(MAX_IMAGE_PROMPT_TOKENS * IMAGE_PROMPT_CHARS_PER_TOKEN)
 
 #: Ranks for `fit_image_prompt`. REQUIRED survives every squeeze; everything
 #: above it is direction the frame is better with and still legible without.
@@ -223,15 +208,42 @@ MAX_VISUAL_DESC_CHARS = 320
 #: allowed to spend the film's spatial continuity on its third.
 MIN_VISUAL_DESC_CHARS = 200
 
+#: The same cap, in the unit that actually binds.
+#:
+#: MAX_VISUAL_DESC_CHARS is 320 characters, and on this module's prose that is
+#: about 80 tokens -- so for every description a storyboard has ever written,
+#: this ceiling is not reached and changes nothing.
+#:
+#: It exists for the descriptions that are not prose. Characters are a proxy
+#: for cost and the proxy holds at roughly 4.0 chars/token for English
+#: sentences and collapses to 1.0 for a string with no word breaks in it. A
+#: 320-character description of that kind is 320 tokens -- nearly two thirds
+#: of everything the model reads -- and it takes the closed cast, the setting,
+#: the axis, the eyeline and the acted expression down with it while sitting
+#: inside a limit written to prevent exactly that.
+#:
+#: So the cap is enforced in tokens as well, and MAX_VISUAL_DESC_CHARS's own
+#: argument settles what happens when they disagree: "it is not worth the
+#: rules it was costing".
+MAX_VISUAL_DESC_TOKENS = 80
 
-def _drop_to(kept: list, limit: int, why: str) -> list:
+
+def _drop_to(kept: list, limit: int, why: str, measure=None) -> list:
     """Drop whole clauses, worst priority first, until they fit `limit`.
 
     Stops at the required ones rather than cutting into them: a prompt that
     is all REQUIRED and still too long is a different problem, and the caller
     decides what to do about it.
+
+    `measure` is how a candidate set is sized -- characters by default, and
+    tokens for the window the model actually reads. It takes the whole list
+    rather than one clause because tokenization is not additive: two clauses
+    measured apart and measured joined do not have to agree, and the number
+    that matters is the one for the string that is sent.
     """
-    while sum(len(t) for _, t in kept) > limit:
+    if measure is None:
+        measure = lambda texts: sum(len(t) for t in texts)
+    while measure([t for _, t in kept]) > limit:
         droppable = [p for p, _ in kept if p > 0]
         if not droppable:
             break
@@ -245,7 +257,11 @@ def _drop_to(kept: list, limit: int, why: str) -> list:
     return kept
 
 
-def fit_image_prompt(segments: list, limit: int = MAX_IMAGE_PROMPT_CHARS) -> str:
+def fit_image_prompt(
+    segments: list,
+    limit: int = MAX_IMAGE_PROMPT_CHARS,
+    token_limit: int = MAX_IMAGE_PROMPT_TOKENS,
+) -> str:
     """Assemble a prompt that respects the provider's character budget.
 
     `segments` is a list of `(priority, text)` in the order they should READ.
@@ -261,6 +277,23 @@ def fit_image_prompt(segments: list, limit: int = MAX_IMAGE_PROMPT_CHARS) -> str
     """
     kept = [(prio, text) for prio, text in segments if text]
     kept = _drop_to(kept, limit, "the %d-char provider budget" % limit)
+    # THE BUDGET THAT DECIDES WHAT IS READ, and it is measured rather than
+    # inferred -- see tools/t5_budget. The character gate above only decides
+    # what the provider will ACCEPT.
+    #
+    # Dropping here was previously refused on the grounds that it would be
+    # trading a clause against a guessed tokenizer. That objection was correct
+    # and is now spent: this is the real T5 vocabulary counting the real
+    # string. What goes is what the ladder already says goes first, and the
+    # alternative is not keeping the clause -- it is paying for it and having
+    # it silently truncated, which is the state every delivered frame has
+    # shipped in.
+    kept = _drop_to(
+        kept,
+        token_limit,
+        "the %d-token T5 window" % token_limit,
+        measure=lambda texts: count_tokens("".join(texts)),
+    )
     prompt = "".join(t for _, t in kept)
     if len(prompt) > limit:
         # Even the required segments are too long, which in practice means one
@@ -308,8 +341,20 @@ def fit_visual_desc(text: str, limit: int = MAX_VISUAL_DESC_CHARS) -> str:
     for stop in (". ", "; ", ", "):
         cut = head.rfind(stop)
         if cut >= floor:
-            return head[:cut].rstrip(" ,;.")
-    return head.rsplit(" ", 1)[0].rstrip(" ,;.")
+            return _within_token_cap(head[:cut].rstrip(" ,;."))
+    return _within_token_cap(head.rsplit(" ", 1)[0].rstrip(" ,;."))
+
+
+def _within_token_cap(desc: str, limit: int = MAX_VISUAL_DESC_TOKENS) -> str:
+    """The same description, also inside the cap that binds. See
+    MAX_VISUAL_DESC_TOKENS -- a no-op for prose, and the whole of the cap for
+    a description with no word breaks to cut at."""
+    while desc and count_tokens(desc) > limit:
+        cut = desc.rsplit(" ", 1)[0] if " " in desc else desc[: len(desc) * 3 // 4]
+        if cut == desc:
+            break
+        desc = cut.rstrip(" ,;.")
+    return desc
 
 
 def _describe_characters(visible, limit=None) -> list:
@@ -432,8 +477,10 @@ def _shorten(text: str, chars) -> str:
 # Shorten further only by deleting an instruction on purpose, never by
 # rewording one into vagueness.
 _APPEARANCE_LOCK = (
-    "Appearance is FIXED, IDENTICAL in every scene — same face, age, build, "
-    "and same hair length, colour and style: "
+    # Compressed against the measured T5 window (tools/t5_budget). What went
+    # is redundancy, not instruction: "IDENTICAL" restates "FIXED", and a
+    # model that holds the hair holds its length, colour and style with it.
+    "Appearance is FIXED in every scene — same face, age, build, hair: "
 )
 # Stated as what the costume IS, not as what may not happen to it. Both of
 # these endpoints are guidance-distilled -- flux-2-pro is FLUX.2, flux-pulid is
@@ -452,12 +499,12 @@ _APPEARANCE_LOCK = (
 # this pipeline cannot render a frame to break the tie, so those two are left
 # exactly as they are.
 _COSTUME_LOCK_NAMED = (
-    "Costume is LOCKED: each wears the outfit named above in every "
-    "scene — the same garment, cut and colour throughout. "
+    "Costume is LOCKED: the outfit named above, same garment, cut and "
+    "colour, every scene. "
 )
 _COSTUME_LOCK_REFERENCED = (
-    "Costume is LOCKED: everyone wears the EXACT outfit from the reference "
-    "image in every scene — the same garment, cut and colour throughout. "
+    "Costume is LOCKED: the EXACT outfit from the reference image, same "
+    "cut and colour, every scene. "
 )
 # The costume lock above only forbids CHANGING what was named. Adding
 # something that was never named slips straight past it -- and an
@@ -586,8 +633,8 @@ _REFERENCE_NOTE = (
     # whole reference set and stopped being true when build_frame_references
     # started sending the other faces and the location plate behind it -- see
     # _PLATE_REFERENCE_NOTE below, which is the other half of this fix.
-    "The first reference image is {name}: match that face exactly and wear "
-    "the exact outfit worn in it, down to colour and material. Take NOTHING else "
+    "The first reference is {name}: match that face and wear that outfit "
+    "exactly, to colour and material. Take NOTHING else "
     # This says what to do with the REFERENCE, and it used to carry the
     # eyeline as well -- the whole rule, folded in here because this block is
     # never dropped. Two delivered dramas later the faces were still looking
@@ -600,8 +647,10 @@ _REFERENCE_NOTE = (
     # Every character this block costs is taken from the scene's own
     # description -- the budget guard in tests/test_image_prompt_budget holds
     # it under 800 -- so the words that moved are words this frame got back.
-    "from it — its pose and framing belong to a portrait; stage this shot "
-    "from its own description. "
+    # "stage this shot from its own description" said a second time what
+    # "not its pose, not its framing" has just said, and the negative form is
+    # the one the failure was about: a portrait's pose copied into a shot.
+    "from it — not its pose, not its framing. "
 )
 
 #: The sentence that tells the model what the LAST reference image is.
@@ -635,9 +684,8 @@ _REFERENCE_NOTE = (
 #: frames this sentence is the only thing pointing at where the key comes
 #: from, and it points at a photograph rather than at prose.
 _PLATE_REFERENCE_NOTE = (
-    "The last reference image is this film's set, photographed empty: take "
-    "its architecture, materials and light from it. No one in it is a "
-    "character. "
+    "The last reference is this set, photographed empty: take its "
+    "architecture, materials and light. Nobody in it is a character. "
 )
 
 #: What the identity clause costs before a single character is described.
@@ -1096,12 +1144,18 @@ def build_cast_closure_clause(characters) -> str:
     if not named:
         return ""
     return (
-        f"The cast is closed: {'only ' if len(named) == 1 else ''}"
+        # Compressed against the measured token window. "in this story" and
+        # "each appearing exactly once" were the two phrases that cost most
+        # and constrained least: the first is context the frame cannot act on,
+        # and the second forbids a duplicate of a face that the closure has
+        # already limited to one person. What is kept is the whole of what a
+        # delivered frame broke -- who may appear, and what a background
+        # figure is allowed to be.
+        f"Cast is closed: {'only ' if len(named) == 1 else ''}"
         + ", ".join(named)
-        + f" appear{'s' if len(named) == 1 else ''} in this story. Every "
-        "featured, recognisable face in the frame is one of them, each "
-        "appearing exactly once. Background figures only if the shot "
-        "description asks for them, and then distant and unfocused. "
+        + f" appear{'s' if len(named) == 1 else ''}. No other recognisable "
+        "face in frame; background figures only if the shot asks, and then "
+        "distant and unfocused. "
     )
 
 
@@ -1133,10 +1187,14 @@ def build_screen_direction_clause(characters) -> str:
     # across three of the film's four two-shots. Every instruction that was
     # here is still here; the prose around them is not. See fit_image_prompt.
     return (
-        f"180-degree rule, LOCKED for the whole film: "
-        f"{left} is on frame-left facing screen-right; {right} is on "
-        f"frame-right facing screen-left. True in singles too — each looks "
-        f"toward the other's side. Never mirror the composition. "
+        # Trimmed again, on the same principle and for the token budget this
+        # time: "for the whole film" is what LOCKED already means, and "the
+        # composition" is what "it" refers to. Both sides of the axis, the
+        # singles rule and the mirror ban are all still here.
+        f"180-degree rule, LOCKED: "
+        f"{left} frame-left facing screen-right; {right} frame-right facing "
+        f"screen-left. True in singles — each looks toward the other's side. "
+        f"Never mirror it. "
     )
 
 
@@ -1242,9 +1300,8 @@ def build_frame_prompt(
     if parts:
         # Prefer "location, time_of_day" when both exist (user-requested shape).
         setting_clause = (
-            f"Setting: {', '.join(parts)}. The EXACT SAME physical location as "
-            f"the story's opening shot -- identical architecture, furniture, "
-            f"decor and lighting fixtures. "
+            f"Setting: {', '.join(parts)}. The EXACT SAME location as the opening "
+            f"shot -- identical architecture, fixtures and decor. "
         )
         if change_now or change_before:
             # WITHOUT this the next sentence ("only the time-of-day lighting
@@ -1316,8 +1373,8 @@ def build_frame_prompt(
                 )
         else:
             setting_clause += (
-                "Only the time-of-day lighting may shift subtly; the room "
-                "itself must not change. "
+                "Only time-of-day light may shift; the place itself "
+                "must not change. "
             )
     else:
         setting_clause = ""
@@ -1383,16 +1440,15 @@ def build_frame_prompt(
         # so an optional rank is a clause that gets trimmed exactly when it
         # matters.
         dialogue_clause = (
-            "The speaking character's mouth is visible and unobscured, not "
-            "hidden behind hands, props or hair -- this scene is spoken aloud "
-            "and the face has to be free to say it. "
+            "The speaking mouth is visible and unobscured, not hidden by hands, "
+            "props or hair -- this scene is spoken aloud. "
         )
         dialogue_rank = REQUIRED
     elif lipsync_enabled:
         dialogue_clause = (
-            "The speaking character's mouth is fully visible, unobscured and "
-            "facing camera -- their lips will be animated to the dialogue. "
-            "Do not hide the mouth behind hands, props, hair or profile. "
+            "The speaking mouth is fully visible, unobscured and facing camera -- "
+            "their lips will be animated to the dialogue. Not hidden by hands, "
+            "props, hair or profile. "
         )
         dialogue_rank = REQUIRED
     else:
@@ -1427,9 +1483,8 @@ def build_frame_prompt(
     # boilerplate below it), and naming what the eyes ARE on, which an image
     # model follows far better than what they are not.
     face_clause = (
-        "The face is lit and readable — not a silhouette, not backlit into "
-        "shadow. The eyes stay inside the scene, on the other character or on "
-        "the object in their hands — never on the lens. "
+        "The face is lit and readable, not a silhouette. The eyes stay inside "
+        "the scene — never on the lens. "
     )
     # WHO THIS SHOT SHOWS, which is not the same list as who the SCENE has.
     # The identity clause used to restate every character in the scene on
@@ -1568,6 +1623,118 @@ def build_frame_prompt(
     identity_clause = build_character_identity_clause(
         identity_characters, matched_char, limit=max(identity_budget, 200)
     )
+    # ...and then measured against the window, which is the budget the
+    # character count above cannot see.
+    #
+    # WHY THIS LOOP EXISTS. The identity clause is 281 of a delivered frame's
+    # 710 tokens -- 44% of everything the model reads, on a ONE-HANDER. Left
+    # at its character share it pushes the whole prompt ~200 tokens past the
+    # cap, and the ladder then pays for that by dropping the closed cast and
+    # the eyeline rule: two clauses that exist because a delivered drama came
+    # back with a stranger in frame and a cast staring down the lens.
+    #
+    # Compacting the description instead is the cheaper side of that trade,
+    # and it is the side this module already argues for everywhere else: the
+    # face has a PICTURE holding it (the reference portrait, and flux-pulid is
+    # an identity model outright), while the closed cast has nothing but this
+    # sentence. So the words go and the rules stay.
+    #
+    # Iterated rather than computed, because tokens are not a function of
+    # characters -- the ratio on this module's own prose runs 3.5 to 4.0
+    # depending on how many hyphenated compounds and proper nouns a wardrobe
+    # happens to carry, and a frame sized on the average is a frame sized
+    # wrong for the outfits at either end of it. Each pass is a real
+    # measurement of the real string.
+    if identity_clause:
+        # Measured on the ASSEMBLED string, not on the clause alone.
+        #
+        # Tokenization is not additive: clauses measured separately and
+        # measured joined disagree by a token or two, because the piece at a
+        # join depends on both sides of it. Budgeting from a sum of parts left
+        # the eyeline rule one token outside a window it fitted in, and there
+        # is no constant that fixes that -- only measuring the string that is
+        # actually sent.
+        #
+        # The set below is everything ranked at or above the eyeline rule:
+        # what this loop is buying room for. The lighting plan and the
+        # film-look note are deliberately absent -- they are the two the
+        # ladder gives up first, and shrinking a character description to keep
+        # them would be paying the wrong price.
+        # The axis is in this set despite being rank 6, and it is the one
+        # deliberate departure from reading the ladder straight down.
+        #
+        # Its rank was set against the CHARACTER budget, where losing it costs
+        # a frame some geometry. Against the token window it is emitted only
+        # for a two-hander -- which is exactly the prompt that has no room --
+        # so a straight reading drops it from every two-shot in the film. The
+        # ladder's own note on it says what that delivered: job 21e3d767-bce
+        # lost the axis from every frame and its two players swap sides across
+        # three of the film's four two-shots. A swapped axis is not a blemish
+        # the next shot can absorb; it is the scene's space changing hands.
+        #
+        # So it is bought here, out of the character description, rather than
+        # left to a rank that predates this budget. Cheaper than re-ranking it,
+        # which would also change what dies under the character budget, where
+        # the rank is still right.
+        def _assembled():
+            return "".join(
+                (
+                    style_prefix, desc_clause, framing_clause, identity_clause,
+                    expression_clause, face_clause, dialogue_clause,
+                    cast_clause, plate_clause, setting_clause, direction_clause,
+                )
+            )
+
+        # The floor this loop compacts down to.
+        #
+        # 200 is build_character_identity_clause's own floor and it was set
+        # against the character budget. Against the token window it is too
+        # high for a two-hander: measured on the settled-wardrobe two-shot in
+        # tests, the clause sits at the floor and the axis still falls off,
+        # with 49 tokens of the window going unused because there is nothing
+        # left that the loop is allowed to give.
+        #
+        # 150 is where _describe_characters starts dropping WARDROBE, and that
+        # is the intended order rather than an accident of the number: its own
+        # note says the face is the half with a picture behind it, and the
+        # two-shot test says the rest -- "the costume lock is still in the
+        # prompt and still covers drift, while nothing whatsoever covers a
+        # film whose geometry flips shot to shot". So the garment pays for the
+        # axis, which is the trade that test was written to force.
+        IDENTITY_SHRINK_FLOOR = 150
+        shrink = max(identity_budget, IDENTITY_SHRINK_FLOOR)
+        desc_limit = len(visual_desc)
+        # Two things may be given, in this order, and both have floors.
+        #
+        # The character description goes first: IDENTITY_CLAUSE_OVERHEAD's
+        # fixed sentences do not compact, so below 200 there is nothing left
+        # for that half to give.
+        #
+        # The SHOT description goes second, and only once the first is spent.
+        # That order is MAX_VISUAL_DESC_CHARS's own argument, made against the
+        # character budget and equally true here: "a description longer than
+        # this is cut to it ... the rest is atmosphere the setting clause is
+        # already carrying, and it is not worth the rules it was costing". A
+        # delivered job wrote 700-800 characters of description and the log
+        # shows what it bought -- the eyeline rule dropped from all six of its
+        # frames, and twenty-two of its thirty seconds are one composition
+        # with the character looking down the barrel of the lens.
+        #
+        # MIN_VISUAL_DESC_CHARS is where that stops: "the first two sentences
+        # of a shot description are the shot", and a shot is not allowed to
+        # spend the film's continuity on its third.
+        while count_tokens(_assembled()) > MAX_IMAGE_PROMPT_TOKENS and (
+            shrink > IDENTITY_SHRINK_FLOOR or desc_limit > MIN_VISUAL_DESC_CHARS
+        ):
+            if shrink > IDENTITY_SHRINK_FLOOR:
+                shrink = max(IDENTITY_SHRINK_FLOOR, int(shrink * 0.9))
+                identity_clause = build_character_identity_clause(
+                    identity_characters, matched_char, limit=shrink
+                )
+            else:
+                desc_limit = max(MIN_VISUAL_DESC_CHARS, int(desc_limit * 0.9))
+                visual_desc = fit_visual_desc(shot.visual_desc, limit=desc_limit)
+                desc_clause = f"{visual_desc}. "
     # (priority, text) in READING order. Priority 0 is required: the style,
     # the shot itself, its framing, and the character lock -- without the
     # first there is no frame, without the last the frame renders a stranger,
@@ -1643,7 +1810,24 @@ def build_frame_prompt(
         (2, expression_clause),
         (4, face_clause),
         (dialogue_rank, dialogue_clause),
-        (OPTIONAL_DIRECTION, direction_clause),
+        # Rank 5, above the lighting plan, and the two swapped places when the
+        # budget stopped being characters and started being tokens.
+        #
+        # Both notes argue from a delivered job. The lighting one says a shot
+        # lit slightly differently "reads as a lighting change" -- a blemish
+        # the eye forgives across a cut. The axis one says job 21e3d767-bce
+        # lost it from every frame and "its two players swap sides across three
+        # of the film's four two-shots", which is not a blemish: it is the
+        # scene's geometry changing hands mid-conversation, and no later pass
+        # repairs it.
+        #
+        # What settles the order is which loss the frame can absorb, and the
+        # lighting plan now has a second carrier that the axis does not: the
+        # plate note says "take its architecture, materials and light from it",
+        # so a frame that loses the written plan is still pointed at a
+        # photograph of how this place is lit. There is no photograph of which
+        # side of the axis these two people stand on.
+        (5, direction_clause),
         (3, cast_clause),
         # RANK, not wording -- the same distinction the mouth clause turned on
         # above. Ordinarily this clause is continuity: worth keeping, and a
@@ -1689,36 +1873,39 @@ def build_frame_prompt(
         # green jacket is standing at the end of the container row in shot
         # two. A shot lit slightly differently reads as a lighting change; a
         # person nobody wrote reads as a different film.
-        (5, lighting_clause),
+        (OPTIONAL_DIRECTION, lighting_clause),
         (7, resolve_visual_style(style).render_note),
     ]
     # Stable, so clauses that share a rank keep the order their notes above
     # were written in -- the ranks are the argument, and a tie is not one.
     ladder.sort(key=lambda pair: pair[0])
     prompt = fit_image_prompt(opening + ladder)
-    # The character budget is enforced; this one cannot be, so it is SAID.
+    # The invariant, asserted in the log rather than assumed.
     #
-    # Nothing here truncates: IMAGE_PROMPT_CHARS_PER_TOKEN is an estimate, and
-    # cutting a prompt on a guessed tokenizer would replace a silent overrun
-    # with a silent amputation -- the same failure with better manners. What
-    # this does is end the silence. An operator reading the log now learns
-    # that the frame they are looking at was drawn from part of its prompt,
-    # and which part, which is the thing no delivered job has ever been able
-    # to tell anyone.
-    if len(prompt) > IMAGE_PROMPT_TOKEN_WINDOW:
-        unread = prompt[IMAGE_PROMPT_TOKEN_WINDOW:]
+    # fit_image_prompt drops until this holds, so reaching here over the cap
+    # means every droppable clause is already gone and what is left is
+    # REQUIRED -- the style, the shot, its framing and the character lock.
+    # That is a prompt no budget can fix by dropping, and it is worth a line
+    # of its own: it says the shot description or the cast has outgrown what
+    # the model can read, which is a story-shaped problem, not a ladder one.
+    used = count_tokens(prompt)
+    if used > MAX_IMAGE_PROMPT_TOKENS:
         logger.warning(
-            "Frame prompt is %d chars (~%d-%d tokens) against a %d-token "
-            "window: roughly the last %d characters are at risk of never "
-            "being read, starting at %r. Priority order puts the cheapest "
-            "direction there, but a prompt this long is one whose lowest-"
-            "ranked clauses are being paid for and discarded.",
-            len(prompt),
-            int(len(prompt) / 4.0),
-            int(len(prompt) / IMAGE_PROMPT_CHARS_PER_TOKEN),
-            MAX_IMAGE_PROMPT_TOKENS,
-            len(unread),
-            unread[:60],
+            "Frame prompt is %d tokens against a %d-token window with nothing "
+            "optional left to drop — its required clauses alone exceed what "
+            "FLUX will read, and the tail will be truncated silently. %d "
+            "chars: %.80s...",
+            used, MAX_IMAGE_PROMPT_TOKENS, len(prompt), prompt,
+        )
+    elif not tokenizer_is_real():
+        # Said once per frame rather than once per process, because this is
+        # the line that explains why a frame came out sized differently than
+        # the same frame on a working deployment.
+        logger.warning(
+            "Frame prompt budgeted from an estimate (%d chars) — the T5 "
+            "tokenizer did not load, so this frame's %d-token window was not "
+            "measured. See tools/t5_budget.",
+            len(prompt), MAX_IMAGE_PROMPT_TOKENS,
         )
     return prompt
 
