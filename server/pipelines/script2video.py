@@ -357,7 +357,7 @@ def _within_token_cap(desc: str, limit: int = MAX_VISUAL_DESC_TOKENS) -> str:
     return desc
 
 
-def _describe_characters(visible, limit=None) -> list:
+def _describe_characters(visible, limit=None, allow_undressed: bool = True) -> list:
     """One "Name (looks)" entry per visible character, compacted to fit.
 
     Compacted, never amputated. Both halves of an entry are anchors, and they
@@ -406,7 +406,7 @@ def _describe_characters(visible, limit=None) -> list:
     if limit is None:
         return described
 
-    for attempt in (
+    rungs = (
         # The face first, because the face is the half with a picture behind
         # it. A description opens with gender and age and spends its tail on
         # detail no reference model needs told twice.
@@ -422,12 +422,35 @@ def _describe_characters(visible, limit=None) -> list:
         # description has to say once a portrait is carrying the face, while
         # "matte yellow hooded rain" without its noun is not a garment.
         lambda: render(feature_chars=30, wardrobe_chars=45),
+        # A garment cut to its noun, before a face with no garment at all.
+        #
+        # Added against the measured token window, where a two-hander with
+        # lip sync and a full description lands 6 tokens short of keeping the
+        # axis on the rung above -- and the rung below is the one job
+        # 8b8fce47-445 was rendered under: one face, consistent across six
+        # shots, in a slicker that buttoned then zipped then hung open. 35
+        # characters is "black tailored jacket over a white": the garment and
+        # its colour, which is what a viewer reads a costume by at any distance
+        # the face is not legible. What it loses is the third thing said
+        # about the jacket, which the costume lock is not covering either way.
+        #
+        # The face share stays at 30, not lower: a description opens with
+        # gender and age because the screenwriter prompt demands it, and 25
+        # cut "woman in her late thirties" to "woman in her late" -- an age
+        # severed mid-phrase, which is worse than no age. Only the garment
+        # gives on this rung.
+        lambda: render(feature_chars=30, wardrobe_chars=35),
         # Only here, and only because something has to fit: an entry with no
         # clothes in it still names a face, and a prompt that overruns is
         # truncated by the provider at whatever word it happens to reach.
         lambda: render(feature_chars=45, with_wardrobe=False),
-    ):
+    )
+    for attempt in rungs:
         if sum(len(d) + 2 for d in described) <= limit:
+            break
+        if not allow_undressed and attempt is rungs[-1]:
+            # The caller has said the clothes may not go. Stop one rung
+            # above, over the limit, and let it decide what pays instead.
             break
         described = attempt()
     return described
@@ -499,12 +522,14 @@ _APPEARANCE_LOCK = (
 # this pipeline cannot render a frame to break the tie, so those two are left
 # exactly as they are.
 _COSTUME_LOCK_NAMED = (
+    # "every scene" is not repeated here: the appearance lock one sentence
+    # up has just said "in every scene", and LOCKED inherits its scope.
     "Costume is LOCKED: the outfit named above, same garment, cut and "
-    "colour, every scene. "
+    "colour. "
 )
 _COSTUME_LOCK_REFERENCED = (
     "Costume is LOCKED: the EXACT outfit from the reference image, same "
-    "cut and colour, every scene. "
+    "cut and colour. "
 )
 # The costume lock above only forbids CHANGING what was named. Adding
 # something that was never named slips straight past it -- and an
@@ -588,9 +613,14 @@ def build_no_unnamed_items_clause(worn: str = "") -> str:
         # the categorical sentence still stands on its own -- it is the half
         # that was always true; the list is only what the model attends to.
         return "Wear NOTHING not named above. " + _MARKINGS_NOTE
+    # The tail is the enumeration's, not an instruction of its own: "and
+    # nothing else unnamed" restates the sentence it is attached to, and "in
+    # every scene" is what the costume lock two sentences up already says
+    # twice. Measured at 8 tokens, which is what the 180-degree axis was
+    # missing the window by on a two-hander with lip sync.
     return (
         f"Wear NOTHING not named above — no {', '.join(kept[:-1])} or "
-        f"{kept[-1]} — and nothing else unnamed, in every scene. "
+        f"{kept[-1]}. "
     ) + _MARKINGS_NOTE
 
 
@@ -633,8 +663,8 @@ _REFERENCE_NOTE = (
     # whole reference set and stopped being true when build_frame_references
     # started sending the other faces and the location plate behind it -- see
     # _PLATE_REFERENCE_NOTE below, which is the other half of this fix.
-    "The first reference is {name}: match that face and wear that outfit "
-    "exactly, to colour and material. Take NOTHING else "
+    "The first reference is {name}: match that face and outfit exactly, in "
+    "colour and material. Nothing else "
     # This says what to do with the REFERENCE, and it used to carry the
     # eyeline as well -- the whole rule, folded in here because this block is
     # never dropped. Two delivered dramas later the faces were still looking
@@ -650,7 +680,7 @@ _REFERENCE_NOTE = (
     # "stage this shot from its own description" said a second time what
     # "not its pose, not its framing" has just said, and the negative form is
     # the one the failure was about: a portrait's pose copied into a shot.
-    "from it — not its pose, not its framing. "
+    "from it — not its pose or framing. "
 )
 
 #: The sentence that tells the model what the LAST reference image is.
@@ -684,8 +714,8 @@ _REFERENCE_NOTE = (
 #: frames this sentence is the only thing pointing at where the key comes
 #: from, and it points at a photograph rather than at prose.
 _PLATE_REFERENCE_NOTE = (
-    "The last reference is this set, photographed empty: take its "
-    "architecture, materials and light. Nobody in it is a character. "
+    "The last reference is this set, empty: take its architecture, "
+    "materials and light. Nobody in it is a character. "
 )
 
 #: What the identity clause costs before a single character is described.
@@ -919,7 +949,9 @@ def resolve_frame_references(
     return matched_char, reference_url, frame_references
 
 
-def build_character_identity_clause(characters, matched_char=None, limit=None) -> str:
+def build_character_identity_clause(
+    characters, matched_char=None, limit=None, allow_undressed: bool = True
+) -> str:
     """Restate every on-screen character's fixed appearance in the prompt text.
 
     The reference image only ever binds ONE character's identity (both MuAPI
@@ -937,7 +969,7 @@ def build_character_identity_clause(characters, matched_char=None, limit=None) -
     is exactly the one the image model re-invents.
     """
     visible = [c for c in (characters or []) if getattr(c, "is_visible", True)]
-    described = _describe_characters(visible, limit)
+    described = _describe_characters(visible, limit, allow_undressed=allow_undressed)
     if not described:
         return ""
     clause = _APPEARANCE_LOCK + "; ".join(described) + ". "
@@ -1154,8 +1186,8 @@ def build_cast_closure_clause(characters) -> str:
         f"Cast is closed: {'only ' if len(named) == 1 else ''}"
         + ", ".join(named)
         + f" appear{'s' if len(named) == 1 else ''}. No other recognisable "
-        "face in frame; background figures only if the shot asks, and then "
-        "distant and unfocused. "
+        "face in frame; background figures only if the shot asks, distant and "
+        "unfocused. "
     )
 
 
@@ -1301,7 +1333,7 @@ def build_frame_prompt(
         # Prefer "location, time_of_day" when both exist (user-requested shape).
         setting_clause = (
             f"Setting: {', '.join(parts)}. The EXACT SAME location as the opening "
-            f"shot -- identical architecture, fixtures and decor. "
+            f"shot -- identical architecture and fixtures. "
         )
         if change_now or change_before:
             # WITHOUT this the next sentence ("only the time-of-day lighting
@@ -1447,8 +1479,8 @@ def build_frame_prompt(
     elif lipsync_enabled:
         dialogue_clause = (
             "The speaking mouth is fully visible, unobscured and facing camera -- "
-            "their lips will be animated to the dialogue. Not hidden by hands, "
-            "props, hair or profile. "
+            "its lips will be animated to the dialogue. Not hidden by hands, "
+            "props or hair. "
         )
         dialogue_rank = REQUIRED
     else:
@@ -1728,13 +1760,50 @@ def build_frame_prompt(
         ):
             if shrink > IDENTITY_SHRINK_FLOOR:
                 shrink = max(IDENTITY_SHRINK_FLOOR, int(shrink * 0.9))
+                # Dressed: this phase may shorten a wardrobe and may not
+                # remove one. _describe_characters' last rung drops the
+                # clothes to fit a face, and that rung is the state job
+                # 8b8fce47-445 shipped in -- a consistent face in a costume
+                # that changed every shot, under a lock that could only point
+                # at "the EXACT outfit from the reference image" because no
+                # garment was named. It is not reached here; the shot
+                # description pays next, and only then the clothes (below).
                 identity_clause = build_character_identity_clause(
-                    identity_characters, matched_char, limit=shrink
+                    identity_characters, matched_char, limit=shrink,
+                    allow_undressed=False,
                 )
             else:
                 desc_limit = max(MIN_VISUAL_DESC_CHARS, int(desc_limit * 0.9))
                 visual_desc = fit_visual_desc(shot.visual_desc, limit=desc_limit)
                 desc_clause = f"{visual_desc}. "
+        # THE CLOTHES GO BEFORE THE ROOM DOES.
+        #
+        # Reached only when every dressed rung and the description floor have
+        # both been spent and the window is still over -- which a two-hander
+        # never does, and an eight-face ensemble with a described harbour
+        # does. What is left to the ladder at that point is the setting (1),
+        # the expression (2), the closed cast (3) and the eyeline (4), and the
+        # ladder would give up the room last of those; but eight garments at
+        # ten tokens each are what is standing between the room and the
+        # window. The repo already paid to learn that order: the identity
+        # reserve exists because "a crowded scene push[ed] the SETTING out of
+        # the prompt -- the one clause that promises the room does not change
+        # between scenes". Garments are covered by a picture and a costume
+        # lock; the room is covered by this sentence and the plate, and only
+        # the sentence is in the prompt when the plate was not sent.
+        if count_tokens(_assembled()) > MAX_IMAGE_PROMPT_TOKENS:
+            undressed = build_character_identity_clause(
+                identity_characters, matched_char, limit=IDENTITY_SHRINK_FLOOR
+            )
+            if undressed != identity_clause:
+                logger.warning(
+                    "Frame prompt still over the %d-token window with every "
+                    "wardrobe at its shortest and the description at its "
+                    "floor — dropping the %d described wardrobe(s) so the "
+                    "setting and cast stay inside it.",
+                    MAX_IMAGE_PROMPT_TOKENS, len(identity_characters),
+                )
+                identity_clause = undressed
     # (priority, text) in READING order. Priority 0 is required: the style,
     # the shot itself, its framing, and the character lock -- without the
     # first there is no frame, without the last the frame renders a stranger,

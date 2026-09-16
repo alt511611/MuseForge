@@ -185,7 +185,12 @@ def test_the_lighting_lock_goes_before_the_closed_cast():
 
     squeezed = fit_image_prompt(
         [
-            (0, "x" * 2900),
+            # Real words: filler of repeated single characters costs ~1 token each,
+            # so 2900 of them is 2900 tokens against a 512-token window and no
+            # ladder can fit it. Sized in tokens instead: 450 for the required
+            # segment, so the cast (9) fits at 460 and the lighting plan (60)
+            # does not at 520. That is the squeeze this test is about.
+            (0, "wet steel " * 150),
             (5, "LIGHTING " * 20),
             (3, "Cast is closed: only Yara. "),
         ]

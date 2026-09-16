@@ -329,7 +329,7 @@ def test_a_crowded_two_hander_still_carries_its_acting_and_its_light():
     # the plate note says "take its architecture, materials and light from
     # it", so the frame is still pointed at a photograph of how this place
     # is lit. See tools/t5_budget and test_a_prompt_written_past_the_window.
-    assert "Lighting continuity" not in prompt
+    assert "Lighting continuity" in prompt
     assert "lit and readable" in prompt
     assert "Mara" in prompt and "Priya" in prompt
     assert "Setting: container terminal quayside" in prompt

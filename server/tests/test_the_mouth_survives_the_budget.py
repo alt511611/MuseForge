@@ -28,8 +28,10 @@ import pytest  # noqa: E402
 
 from interfaces.character import CharacterInScene  # noqa: E402
 from interfaces.shot import StoryboardShot  # noqa: E402
+from tools.t5_budget import count_tokens  # noqa: E402
 from pipelines.script2video import (  # noqa: E402
     MAX_IMAGE_PROMPT_CHARS,
+    MAX_IMAGE_PROMPT_TOKENS,
     build_frame_prompt,
     fit_image_prompt,
 )
@@ -101,9 +103,17 @@ def _prompt(cast, desc=LONG_DESC, lipsync_enabled=True):
 def test_a_one_hander_keeps_the_mouth_when_the_prompt_runs_long():
     """The delivered job's own shape: one face on screen, prompt over budget."""
     prompt = _prompt([LEAD, RADIO])
-    assert len(prompt) > MAX_IMAGE_PROMPT_CHARS - 400, (
+    # The squeeze is measured in TOKENS now, which is the budget that binds.
+    # This frame is ~1980 characters -- nowhere near the 3000-character gate,
+    # and against the 512-token window it is at the line, which is the whole
+    # point: the two budgets are not the same budget, and a frame can be
+    # comfortable in one while the other is deciding what gets read. Testing
+    # the squeeze by character count stopped testing anything once the
+    # clauses were sized against the window.
+    assert count_tokens(prompt) > MAX_IMAGE_PROMPT_TOKENS - 60, (
         "this frame no longer squeezes the budget, so it no longer tests it"
     )
+    assert count_tokens(prompt) <= MAX_IMAGE_PROMPT_TOKENS
     assert len(prompt) <= MAX_IMAGE_PROMPT_CHARS
     assert MOUTH in prompt, "the clause the sync pass depends on was dropped"
 

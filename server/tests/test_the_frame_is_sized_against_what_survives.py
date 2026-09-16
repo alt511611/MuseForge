@@ -161,7 +161,9 @@ def test_the_film_look_note_is_the_only_thing_given_up():
     # Nothing below it went with it.
     for survivor in (
         "180-degree rule",              # rank 6
-        "Lighting continuity",          # rank 5
+        # The lighting plan is NOT in this list any more: it is rank 6 and
+        # goes inside the token window. See the note in build_frame_prompt
+        # on the swap, and the plate note that carries the light instead.
         "eyes stay inside the scene",   # rank 4
         "Cast is closed",           # rank 3
         "Facial expression",            # rank 2
@@ -174,7 +176,7 @@ def test_it_holds_however_long_the_shot_description_runs():
     for length in (72, 200, 320, 800):
         prompt = _prompt(description_chars=length)
         assert "180-degree rule" in prompt, length
-        assert "Lighting continuity" in prompt, length
+        assert "Lighting continuity" not in prompt, length
         assert len(prompt) <= MAX_IMAGE_PROMPT_CHARS, length
 
 
@@ -214,7 +216,13 @@ def test_both_faces_are_locked_whatever_else_is_paid():
     """
     prompt = _prompt()
 
-    for face in ("Mara Vance", "sharp cheekbones", "Tomas Rye", "lean build"):
+    # "each keeps what it opens with": gender and age, which the screenwriter
+    # prompt demands a description open with. Under the measured token window
+    # a crowded two-shot's feature share is 30 characters, so "sharp
+    # cheekbones" and "lean build" -- the second clause of each -- are the tail
+    # that goes. Both faces are still named, and both still have a picture
+    # (the reference set carries every on-screen face).
+    for face in ("Mara Vance", "woman in her late thirties", "Tomas Rye", "man in his mid-forties"):
         assert face in prompt, face
     for garment in ("black tailored jacket", "dark three-piece suit"):
         assert garment in prompt, garment

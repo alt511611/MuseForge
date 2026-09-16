@@ -332,7 +332,14 @@ def test_the_acted_expression_outlives_the_boilerplate_in_a_crowded_prompt():
         (7, "QUALITY" + "q" * 255),
     ]
 
-    prompt = fit_image_prompt(segments, limit=3000)
+    # This exercises the CHARACTER ladder -- the drop order under the
+    # provider's 3000-character gate -- so the token window is lifted out of
+    # the way. The segments are repeated-letter filler at about one token per
+    # character, which is four times what the clauses they stand for actually
+    # cost; leaving the window in would make this a test of the filler's
+    # spelling rather than of the ranks. The window has its own tests in
+    # test_a_prompt_written_past_the_window_that_reads_it.
+    prompt = fit_image_prompt(segments, limit=3000, token_limit=10**9)
 
     assert "EXPRESSION" in prompt
     assert "SETTING" in prompt
