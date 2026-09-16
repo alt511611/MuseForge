@@ -193,10 +193,10 @@ def test_identity_clause_pins_every_on_screen_character():
 
     assert "Ayse (50s woman, grey bun)" in clause
     assert "Elif (20s woman, long dark hair)" in clause
-    assert "IDENTICAL in every scene" in clause
+    assert "FIXED in every scene" in clause
     # The referenced character must be identified so the model knows which
     # face the attached image belongs to.
-    assert "reference image is Ayse" in clause
+    assert "reference is Ayse" in clause
 
 
 def test_identity_clause_skips_invisible_and_undescribed_characters():
@@ -229,7 +229,7 @@ def test_frame_prompt_includes_identity_clause_when_characters_given():
     )
     assert "Ayse (50s woman, grey bun)" in prompt
     assert "Elif (20s woman, long dark hair)" in prompt
-    assert "reference image is Elif" in prompt
+    assert "reference is Elif" in prompt
 
 
 # --- end-to-end through the real pipeline ------------------------------
@@ -307,7 +307,7 @@ async def test_emotion_and_identity_reach_the_image_model(monkeypatch, tmp_path)
     # Flat "neutral" was repaired from the scene emotion.
     assert "tearful reconciliation" in prompt
     assert "not a silhouette" in prompt
-    # BOTH characters pinned, even though only one reference image is sent.
+    # BOTH characters pinned, even though only one reference is sent.
     assert "Ayse (50s woman, grey bun)" in prompt
     assert "Elif (20s woman, long dark hair)" in prompt
 
@@ -332,7 +332,14 @@ def test_the_acted_expression_outlives_the_boilerplate_in_a_crowded_prompt():
         (7, "QUALITY" + "q" * 255),
     ]
 
-    prompt = fit_image_prompt(segments, limit=3000)
+    # This exercises the CHARACTER ladder -- the drop order under the
+    # provider's 3000-character gate -- so the token window is lifted out of
+    # the way. The segments are repeated-letter filler at about one token per
+    # character, which is four times what the clauses they stand for actually
+    # cost; leaving the window in would make this a test of the filler's
+    # spelling rather than of the ranks. The window has its own tests in
+    # test_a_prompt_written_past_the_window_that_reads_it.
+    prompt = fit_image_prompt(segments, limit=3000, token_limit=10**9)
 
     assert "EXPRESSION" in prompt
     assert "SETTING" in prompt

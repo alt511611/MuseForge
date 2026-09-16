@@ -13,7 +13,7 @@ the man across the table is copying her own tell": the man across the table
 was marked never-seen. He is opposite her in two scenes of three. Having no
 portrait, he was drawn from the only portrait that existed -- hers -- so the
 delivered film is two versions of one face at one table, while the closed-cast
-clause told the image model that only the dealer appears in this story.
+clause told the image model that only the dealer appears.
 
 The absence now has to be corroborated: something in the script must actually
 stage a voice arriving without a body. The harbour drama that this check was
@@ -112,16 +112,16 @@ def test_the_voice_on_the_radio_still_has_none():
 
 def test_the_card_room_cast_clause_stops_lying():
     """The symptom the delivered film showed. With one visible character the
-    clause told the image model "only Mara appears in this story" over a shot
+    clause told the image model "only Mara appears" over a shot
     with two people in it, and both were drawn from Mara's portrait."""
     cast = Idea2VideoPipeline("test-key")._characters_from_script(CARD_ROOM)
     for character in cast:
         character.static_features = character.static_features or "described"
 
     clause = build_cast_closure_clause(cast)
-    assert "Mara, The Stranger appear in this story" in clause
+    assert "Mara, The Stranger appear" in clause
     # The one-hander wording is what the delivered job carried into every
-    # frame of a two-hander: "only Mara appears in this story".
+    # frame of a two-hander: "only Mara appears".
     assert "only Mara" not in clause
 
 

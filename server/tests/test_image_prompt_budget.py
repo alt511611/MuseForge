@@ -83,7 +83,7 @@ def test_character_lock_survives_trimming(count):
     characters = [_character(i) for i in range(count)]
     prompt = _frame_prompt(characters)
 
-    assert "IDENTICAL in every scene" in prompt
+    assert "FIXED in every scene" in prompt
     for c in characters:
         assert c.name in prompt, f"{c.name} dropped from the identity clause"
 
@@ -324,6 +324,11 @@ def test_a_crowded_two_hander_still_carries_its_acting_and_its_light():
 
     assert len(prompt) <= 3000
     assert "Facial expression and body language" in prompt
+    # TOKEN BUDGET: the lighting plan (rank 6) is given up inside the
+    # 512-token window, and it is the one clause with a second carrier --
+    # the plate note says "take its architecture, materials and light from
+    # it", so the frame is still pointed at a photograph of how this place
+    # is lit. See tools/t5_budget and test_a_prompt_written_past_the_window.
     assert "Lighting continuity" in prompt
     assert "lit and readable" in prompt
     assert "Mara" in prompt and "Priya" in prompt

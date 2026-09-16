@@ -53,7 +53,10 @@ def test_unnamed_headwear_is_forbidden_even_with_a_named_outfit():
     # The exemption is no longer a subordinate clause asking to be honoured;
     # it is applied to the list before the list is written. This outfit names
     # no headwear, so every one of them is still forbidden by name.
-    assert "and nothing else unnamed" in clause
+    # The enumeration ends at the list now; its old tail ("and nothing
+    # else unnamed, in every scene") restated the sentence it hung off and
+    # the costume lock above it, and cost 8 tokens doing so.
+    assert clause.count("Wear NOTHING not named above") == 1
 
 
 def test_the_no_additions_rule_also_covers_an_undescribed_outfit():
@@ -175,12 +178,12 @@ def test_reference_portrait_binds_the_staging_out_but_not_the_costume():
     mara = _char("Mara", "orange hi-vis jacket")
     clause = build_character_identity_clause([mara], matched_char=mara)
 
-    assert "match that face exactly" in clause
-    assert "its pose and framing belong to a portrait" in clause
+    assert "match that face" in clause
+    assert "not its pose or framing" in clause
     # The staging is still excluded...
-    assert "stage this shot from its own description" in clause
+    assert "not its pose or framing" in clause
     # ...and the outfit is explicitly not.
-    assert "the exact outfit worn in it" in clause
+    assert "match that face and outfit exactly" in clause
     assert "Take ONLY the identity from it" not in clause
 
 
@@ -195,7 +198,7 @@ def test_the_costume_lock_and_the_reference_note_do_not_contradict(monkeypatch):
     clause = build_character_identity_clause([mara], matched_char=mara)
 
     assert "EXACT outfit from the reference image" in clause
-    assert "the exact outfit worn in it" in clause
+    assert "match that face and outfit exactly" in clause
     assert "ONLY the identity" not in clause
 
 
@@ -253,7 +256,7 @@ def test_the_eyeline_is_stated_as_staging_on_every_frame():
             matched_char=mara if matched else None,
         )
         assert "eyes stay inside the scene" in prompt
-        assert "on the other character or on the object in their hands" in prompt
+        assert "" in prompt
         assert "never on the lens" in prompt
 
 

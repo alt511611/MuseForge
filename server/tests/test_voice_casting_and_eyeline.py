@@ -110,8 +110,8 @@ def test_axis_clause_for_a_two_hander():
     clause = build_screen_direction_clause(
         _chars(("Ayse", "52"), ("Elif", "24"))
     )
-    assert "Ayse is on frame-left facing screen-right" in clause
-    assert "Elif is on frame-right facing screen-left" in clause
+    assert "Ayse frame-left facing screen-right" in clause
+    assert "Elif frame-right facing screen-left" in clause
     assert "180-degree rule" in clause
     assert "Never mirror" in clause
 
@@ -123,7 +123,7 @@ def test_axis_clause_only_for_exactly_two_visible():
     ) == ""
     two_plus_hidden = _chars(("Ayse", "52"), ("Elif", "24"), ("Ghost", "x"))
     two_plus_hidden[2].is_visible = False
-    assert "Ayse is on frame-left" in build_screen_direction_clause(two_plus_hidden)
+    assert "Ayse frame-left" in build_screen_direction_clause(two_plus_hidden)
     assert build_screen_direction_clause(None) == ""
 
 
@@ -144,7 +144,7 @@ def test_frame_prompt_carries_the_axis():
     prompt = build_frame_prompt(
         "Cinematic", shot, characters=_chars(("Ayse", "52"), ("Elif", "24"))
     )
-    assert "Ayse is on frame-left facing screen-right" in prompt
+    assert "Ayse frame-left facing screen-right" in prompt
 
 
 def test_storyboard_prompt_teaches_the_rule():

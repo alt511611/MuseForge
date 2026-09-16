@@ -138,7 +138,7 @@ def test_no_description_however_long_can_cost_the_rules(desc):
     storyboard artist writes."""
     prompt = _prompt(desc)
     assert "never on the lens" in prompt
-    assert "The cast is closed" in prompt
+    assert "Cast is closed" in prompt
     assert "Facial expression and body language" in prompt
 
 
