@@ -78,11 +78,11 @@ _DOOR = (
 def test_a_close_up_is_not_asked_to_show_a_room():
     prompt = _prompt("close-up", _DOOR)
 
-    assert "must be plainly visible in the frame" not in prompt, (
+    assert "plainly visible in frame" not in prompt, (
         "a close-up has no room in it to make a room plainly visible"
     )
     assert "as it reaches THIS framing" in prompt
-    assert "do not add people the shot does not name" in prompt, (
+    assert "add nobody it does not name" in prompt, (
         "the cast clause already forbids them; the event clause was inviting "
         "them in the same prompt"
     )
@@ -92,7 +92,7 @@ def test_a_wide_still_has_to_show_the_event():
     """The demand was added for a delivered climax that was never filmed."""
     prompt = _prompt("wide shot", _DOOR)
 
-    assert "must be plainly visible in the frame, not implied" in prompt
+    assert "plainly visible in frame, not implied" in prompt
 
 
 def test_the_light_the_event_is_about_is_not_vetoed():

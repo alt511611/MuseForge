@@ -243,7 +243,17 @@ def _drop_to(kept: list, limit: int, why: str, measure=None) -> list:
     """
     if measure is None:
         measure = lambda texts: sum(len(t) for t in texts)
-    while measure([t for _, t in kept]) > limit:
+    while True:
+        # Measured before the drop, and reported in the unit that was
+        # measured. The line used to print the LIMIT and label it "chars" on
+        # both passes, so the token pass announced "over the 512-token T5
+        # window (512 chars)" -- a number that is neither the prompt's size
+        # nor in the unit it was weighed in. Reading job cfed7701-884's log,
+        # the one question it cannot answer is the only one worth asking:
+        # by how much.
+        size = measure([t for _, t in kept])
+        if size <= limit:
+            break
         droppable = [p for p, _ in kept if p > 0]
         if not droppable:
             break
@@ -251,8 +261,8 @@ def _drop_to(kept: list, limit: int, why: str, measure=None) -> list:
         idx = next(i for i, (p, _) in enumerate(kept) if p == worst)
         _, dropped = kept.pop(idx)
         logger.warning(
-            "Frame prompt over %s (%d chars) — dropping %d chars of "
-            "lower-priority direction (%.60s...)", why, limit, len(dropped), dropped,
+            "Frame prompt at %d against %s — dropping %d chars of "
+            "lower-priority direction (%.60s...)", size, why, len(dropped), dropped,
         )
     return kept
 
@@ -985,10 +995,27 @@ def build_character_identity_clause(
         (getattr(c, "wardrobe", "") or "").strip() for c in visible
     )
     clause += _COSTUME_LOCK_NAMED if wardrobe_named else _COSTUME_LOCK_REFERENCED
-    # Built against the costume that was actually written above, not pasted
-    # in whole: the entries in `described` are this clause's own text, so
-    # anything the enumeration would contradict is already in them.
-    clause += build_no_unnamed_items_clause(" ".join(described))
+    # Built against the costume the CHARACTER has, not the words that survived
+    # compaction -- and those are two different strings the moment the window
+    # is tight.
+    #
+    # It used to read `described`, on the argument that those entries are this
+    # clause's own text so anything the enumeration would contradict is
+    # already in them. True of the text, and false of the frame: what the
+    # model is matching is also a PICTURE. Job cfed7701-884 compacted a dock
+    # worker whose library wardrobe ends "a hard hat with a headlamp, work
+    # gloves" down to "orange dock jacket over a navy work shirt" -- and the
+    # enumeration, reading only what was left, went back to forbidding the
+    # hard hat and the gloves she is wearing in the reference sheet the very
+    # next sentence orders it to match exactly. The ban list existed to stop
+    # the prompt arguing with the outfit; sized against the compacted outfit
+    # it reinvents that argument at exactly the moment the budget is tightest.
+    #
+    # So the exemption is read off the full wardrobe. The clause still names
+    # only what the text names, and it no longer bans what the picture wears.
+    clause += build_no_unnamed_items_clause(
+        " ".join(described + [(getattr(c, "wardrobe", "") or "") for c in visible])
+    )
     if matched_char is not None and getattr(matched_char, "name", ""):
         clause += _REFERENCE_NOTE.format(name=matched_char.name)
     # The PLATE note is deliberately not here, though it is a sentence about
@@ -1331,9 +1358,24 @@ def build_frame_prompt(
     change_before = (world_state or "").strip()
     if parts:
         # Prefer "location, time_of_day" when both exist (user-requested shape).
-        setting_clause = (
-            f"Setting: {', '.join(parts)}. The EXACT SAME location as the opening "
-            f"shot -- identical architecture and fixtures. "
+        #
+        # ONE SENTENCE ABOUT THE ARCHITECTURE, not two. The continuity promise
+        # and the change that qualifies it were written at different times and
+        # each said the fixtures do not move: "identical architecture and
+        # fixtures", then "The FIXTURES and architecture are unchanged, but
+        # their STATE is not". Repeating it cost 82 tokens on top of the
+        # no-change clause -- at rank 1, where nothing below can outbid it --
+        # and job cfed7701-884 shows where those tokens came from. Its two
+        # steady scenes gave up only the film-look note and the lighting plan,
+        # the two the ladder is meant to give up; its THIRD scene, the one the
+        # brief's blackout happens in, dropped the eyeline rule, the closed
+        # cast and the acted expression as well. The scene that needed the
+        # most direction got the least, because saying the walls stand still
+        # twice cost more than the clause that keeps strangers out of frame.
+        setting_clause = f"Setting: {', '.join(parts)}. "
+        continuity = (
+            "The EXACT SAME location as the opening shot -- identical "
+            "architecture and fixtures"
         )
         if change_now or change_before:
             # WITHOUT this the next sentence ("only the time-of-day lighting
@@ -1362,17 +1404,16 @@ def build_frame_prompt(
             )
             visibility = (
                 "show it as it reaches THIS framing -- in the light, the "
-                "shadow and what it does to the face and hands in frame. Do "
-                "not widen the shot to fit the event in, and do not add "
-                "people the shot does not name. "
+                "shadow, the face and hands in frame. Do not widen the shot, "
+                "and add nobody it does not name. "
                 if tight
-                else "this is the story's event and it must be plainly "
-                "visible in the frame, not implied. "
+                else "it is the story's event, plainly visible in frame, not "
+                "implied. "
             )
             setting_clause += (
-                f"The FIXTURES and architecture are unchanged, but their "
-                f"STATE is not: {change_now or change_before}. Render the "
-                f"location in that state -- {visibility}"
+                f"{continuity}, in a changed STATE: "
+                f"{change_now or change_before}. Render that state; "
+                f"{visibility}"
                 # The setting line is the screenwriter's, and a screenwriter
                 # describing a place at night describes how it is lit -- the
                 # delivered job's own locked setting reads "rain-soaked cargo
@@ -1400,13 +1441,13 @@ def build_frame_prompt(
             # ignore and the thing to render.
             if not names_the_same_light(", ".join(parts), change_now or change_before):
                 setting_clause += (
-                    "Any light named in that setting line describes this "
-                    "place BEFORE the change; do not light the frame with it. "
+                    "Any light named above is this place BEFORE the change; "
+                    "do not light the frame with it. "
                 )
         else:
             setting_clause += (
-                "Only time-of-day light may shift; the place itself "
-                "must not change. "
+                f"{continuity}. Only time-of-day light may shift; the place "
+                f"itself must not change. "
             )
     else:
         setting_clause = ""

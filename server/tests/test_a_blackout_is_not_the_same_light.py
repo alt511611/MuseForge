@@ -139,7 +139,7 @@ def test_the_yard_lamps_are_vetoed_for_the_blackout(change):
 
     assert HARBOUR in prompt, "the location lock still has to name the place"
     assert change in prompt
-    assert "describes this place BEFORE the change" in prompt
+    assert "is this place BEFORE the change" in prompt
     assert "do not light the frame with it" in prompt, (
         "this sentence is the only thing standing between the setting line's "
         "sodium floodlights and a lit harbour"

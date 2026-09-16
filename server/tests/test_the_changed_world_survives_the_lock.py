@@ -67,7 +67,7 @@ def _prompt(**kwargs):
 def test_the_scene_that_causes_the_event_renders_it():
     prompt = _prompt(world_change=EVENT)
     assert EVENT in prompt
-    assert "must be plainly visible in the frame, not implied" in prompt
+    assert "plainly visible in frame, not implied" in prompt
 
 
 def test_a_later_scene_inherits_the_changed_world():
@@ -88,7 +88,7 @@ def test_the_light_named_in_the_setting_is_overruled():
     before the change, and asking for both is asking for the lamps."""
     prompt = _prompt(world_change=EVENT)
     assert HARBOUR in prompt, "the location lock has to survive"
-    assert "describes this place BEFORE the change" in prompt
+    assert "is this place BEFORE the change" in prompt
     assert "do not light the frame with it" in prompt
 
 
