@@ -154,7 +154,7 @@ def test_frame_prompt_breaks_the_lighting_lock_for_the_event():
     # ...and gets out of the way for the one scene the drama exists for.
     assert "must not change" not in event
     assert "every light in the city and on the docks goes out" in event
-    assert "architecture are unchanged" in event
+    assert "identical architecture and fixtures, in a changed STATE" in event
 
 
 def test_frame_prompt_keeps_a_changed_world_changed():
