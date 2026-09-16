@@ -106,7 +106,12 @@ def test_a_named_bag_is_still_allowed():
     name, not on bags."""
     clause = _clause("a yellow slicker and a canvas satchel on her hip")
     assert "canvas satchel" in clause
-    assert "unless the outfit names one" in clause
+    # A satchel IS a bag, which is the half a plain word match misses: the
+    # outfit never says "bag", so the exemption has to know the synonym or
+    # the prompt forbids the garment it just issued.
+    assert "bag" not in clause.split("canvas satchel")[1]
+    # Still forbidding everything the outfit did not name.
+    assert "backpack" in clause and "harness" in clause
 
 
 # ── the room it costs ───────────────────────────────────────────────────────
