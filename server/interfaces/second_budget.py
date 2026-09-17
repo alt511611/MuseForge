@@ -86,6 +86,43 @@ DEFAULT_TENSION = 5
 SPEECH_BEAT_SECONDS = 1.5
 
 
+#: How fast a generated voice actually delivers a line, in words per second.
+#:
+#: Dramatic delivery, not newsreading: ~150 words a minute is the neutral
+#: conversational rate and a tense two-hander sits below it, so 2.3 is the
+#: number the brief is written against. It is used ONLY to tell the
+#: screenwriter roughly how much speech a scene holds -- nothing downstream
+#: measures a line this way, because by then the real audio exists and
+#: pipelines/idea2video measures that instead.
+SPEAKING_WORDS_PER_SECOND = 2.3
+
+#: How much of a scene's running time should be someone speaking.
+#:
+#: Not 1.0, and the gap is the point: a take needs a beat to arrive on its
+#: first word, a beat for the last one to land (SPEECH_BEAT_SECONDS above),
+#: and room for the action the scene was written around. Not 0.28 either,
+#: which is what job a8d0766b-421 delivered -- 8.4 seconds of speech across a
+#: 30-second drama, budgeted [9, 9, 12] against measured speech of
+#: [2.64, 2.16, 3.6]. Nothing was wrong with that distribution: the budget is
+#: fixed before the script exists and distribute_budget spent it correctly.
+#: The script simply had nothing to say for two thirds of the film it was
+#: written for, because the brief told the writer how long a scene runs and,
+#: separately, to "keep lines short", and never once connected the two.
+SPEECH_FILL_TARGET = 0.6
+
+
+def spoken_words_for(seconds: float) -> int:
+    """Roughly how many spoken words a scene of this length holds.
+
+    A brief-writing aid, deliberately coarse. It exists so the screenwriter is
+    told a scene's LINE LENGTH in the same breath as its RUNNING TIME, from
+    the same constants, rather than being told the second and left to guess
+    the first.
+    """
+    usable = max(0.0, float(seconds)) * SPEECH_FILL_TARGET
+    return max(1, int(round(usable * SPEAKING_WORDS_PER_SECOND)))
+
+
 def total_budget_seconds(num_scenes: int) -> float:
     """Total seconds a job of this many scenes is entitled to."""
     return max(1, int(num_scenes)) * SECONDS_PER_CREDIT
