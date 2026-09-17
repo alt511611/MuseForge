@@ -24,37 +24,94 @@ def test_image_endpoint_is_flux_2_pro():
     assert MuAPIImageGenerator.KONTEXT_ENDPOINT == "flux-pulid"
 
 
-def test_text_to_image_payload_uses_size_string():
+def test_flux_2_pro_is_asked_in_ratios_not_pixels():
+    """flux-2-pro's schema is {prompt, aspect_ratio, resolution}. Nothing else.
+
+    Read off MuAPI's schema service, and the reason this test exists: the
+    payload used to be `size: "864*1536"` with num_inference_steps, seed and
+    guidance_scale, none of which flux-2-pro declares. It answered every call
+    with HTTP 400 Internal Error, and the retry ladder paid for it three times
+    per image before falling back.
+    """
     from tools.muapi_image_generator import MuAPIImageGenerator
 
     gen = MuAPIImageGenerator(api_key="test-key")
-    payload = gen._text_to_image_payload("a cat", "1:1")
+    payload = gen._text_to_image_payload("a cat", "9:16")
 
-    assert payload["prompt"] == "a cat"
-    assert payload["size"] == "1024*1024"
-    assert "resolution" not in payload
-    assert "aspect_ratio" not in payload
-    assert "width" not in payload
-    assert "height" not in payload
+    assert payload == {
+        "prompt": "a cat",
+        "aspect_ratio": "9:16",
+        "resolution": "1k",
+    }
 
 
-def test_invalid_aspect_ratio_falls_back_to_16_9():
+def test_an_aspect_ratio_the_endpoint_does_not_take_becomes_one_it_does():
     from tools.muapi_image_generator import MuAPIImageGenerator
 
     gen = MuAPIImageGenerator(api_key="test-key")
     payload = gen._text_to_image_payload("a cat", "99:1")
-    assert payload["size"] == _expected_size("16:9")
+    assert payload["aspect_ratio"] == "1:1", (
+        "a ratio outside the endpoint's enum is refused, not clamped; order "
+        "one it declares and let the frame be conformed downstream"
+    )
 
 
-def test_legacy_size_payload_still_available_for_pulid_fallback():
+def test_resolution_is_a_knob(monkeypatch):
+    from tools.muapi_image_generator import MuAPIImageGenerator
+
+    monkeypatch.setenv("MUSEFORGE_IMAGE_RESOLUTION", "2k")
+    gen = MuAPIImageGenerator(api_key="test-key")
+    assert gen._text_to_image_payload("a cat", "16:9")["resolution"] == "2k"
+
+
+def test_flux_dev_image_is_asked_in_pixels_divisible_by_64():
+    """The fallback's schema is {prompt, width, height, num_images}.
+
+    It ignored the `size` string it used to be sent and rendered its 1024x1024
+    default, which is how a 9:16 order kept coming back square. Its own
+    constraint is that both axes are divisible by 64, so 864 -- the old 9:16
+    width -- was never going to be honoured even once the field name was right.
+    """
+    from tools.muapi_image_generator import ASPECT_RATIO_MAP, MuAPIImageGenerator
+
+    gen = MuAPIImageGenerator(api_key="test-key")
+    payload = gen._legacy_size_payload("a cat", "9:16")
+
+    assert payload == {
+        "prompt": "a cat",
+        "width": ASPECT_RATIO_MAP["9:16"]["width"],
+        "height": ASPECT_RATIO_MAP["9:16"]["height"],
+        "num_images": 1,
+    }
+    assert "size" not in payload
+
+
+def test_every_mapped_size_is_divisible_by_64():
+    from tools.muapi_image_generator import ASPECT_RATIO_MAP
+
+    for ratio, dims in ASPECT_RATIO_MAP.items():
+        assert dims["width"] % 64 == 0, f"{ratio} width {dims['width']}"
+        assert dims["height"] % 64 == 0, f"{ratio} height {dims['height']}"
+
+
+def test_the_text_only_fallback_does_not_pretend_to_take_a_reference(caplog):
+    """flux-dev-image has no image input, so a reference handed to it is lost.
+
+    Silently dropping it is what made a fallback look character-locked in the
+    log while the faces drifted in the delivered frame.
+    """
+    import logging
+
     from tools.muapi_image_generator import MuAPIImageGenerator
 
     gen = MuAPIImageGenerator(api_key="test-key")
-    payload = gen._build_payload("a cat", "16:9", reference_url="https://example.com/ref.png")
+    with caplog.at_level(logging.WARNING):
+        payload = gen._build_payload(
+            "a cat", "16:9", reference_url="https://example.com/ref.png"
+        )
 
-    assert payload["image"] == "https://example.com/ref.png"
-    assert payload["size"] == _expected_size("16:9")
-    assert "image_url" not in payload
+    assert "image" not in payload and "image_url" not in payload
+    assert "dropped" in caplog.text
 
 
 @pytest.mark.asyncio

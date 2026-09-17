@@ -85,6 +85,47 @@ _REFERENCE_REJECTION_MARKERS = (
 )
 
 
+#: What the provider says when it counted the reference images and there were
+#: too many. Delivered verbatim on job a8d0766b-421, three scenes in a row::
+#:
+#:     HTTP 422: Value error, You must provide 1 or 2 image URLs
+#:     (on /api/v1/flux-kontext-pro-i2i)
+#:
+#: This is NOT :func:`is_reference_rejection`: the provider never looked at the
+#: pictures. It is a schema complaint with a number in it, and the number is
+#: the remedy -- the same call with the set trimmed to the stated ceiling
+#: succeeds, where falling through to the single-reference legacy endpoint
+#: throws away every supporting face in the frame.
+_REFERENCE_COUNT_CEILING_PATTERNS = (
+    r"provide\s+\d+\s+or\s+(\d+)\s+image",
+    r"at\s+most\s+(\d+)\s+image",
+    r"maximum\s+of\s+(\d+)\s+image",
+    r"up\s+to\s+(\d+)\s+image",
+    r"no\s+more\s+than\s+(\d+)\s+image",
+)
+
+
+def reference_count_ceiling(exc: Exception):
+    """How many references the provider says it will take, or None.
+
+    Returns an int only when the provider NAMED a ceiling, because a retry
+    against a guessed number is the mistake that produced this function: the
+    capacity table carried 4 for an endpoint that takes 2, and nothing in the
+    failure path read the 2 that MuAPI put in the error message.
+    """
+    message = str(exc).lower()
+    for pattern in _REFERENCE_COUNT_CEILING_PATTERNS:
+        match = re.search(pattern, message)
+        if match:
+            try:
+                ceiling = int(match.group(1))
+            except ValueError:
+                continue
+            if ceiling >= 1:
+                return ceiling
+    return None
+
+
 #: A retryable status the provider QUOTED at us inside a non-retryable one.
 #:
 #: MuAPI proxies its own upstreams, and when one of them times out the failure

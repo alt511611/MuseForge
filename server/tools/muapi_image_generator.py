@@ -10,27 +10,36 @@ from tools.muapi_client import (
     MuAPIError,
     is_reference_rejection,
     is_transient_inference_error,
+    reference_count_ceiling,
 )
 
 logger = logging.getLogger(__name__)
 
-# Pixel sizes for flux-2-pro / flux-dev-image style "size" payloads
-# (e.g. "1024*1024"). Also used for demo placeholder URLs.
+# Pixel sizes for the PIXEL-shaped endpoints (flux-dev-image: `width` and
+# `height`, two separate ints). Also used for demo placeholder URLs.
 #
-# These frames are the conditioning image for Kling image-to-video, which
-# renders at its own (higher) output resolution -- so anything we hand it
-# below that gets upscaled, and the softness is baked into every frame of the
-# finished shot. The video ratios are therefore ~1.3MP rather than the old
-# ~1.0MP, which buys real detail while staying inside the range FLUX renders
-# reliably; pushing to a full 1920x1080 (2.07MP) sits at the edge of that
-# range and is left to MUSEFORGE_IMAGE_WIDTH/HEIGHT for anyone whose endpoint
-# handles it. 1:1 is only ever the character portrait (a reference, never
-# shown), so it stays at 1024 and costs nothing extra.
+# These frames are the conditioning image for Kling image-to-video, which has
+# no aspect ratio of its own -- fal's v3 schema has no such field -- so it
+# reads its canvas off this picture. Anything handed to it below its own
+# output resolution is upscaled and the softness is baked into every frame of
+# the finished shot, so the video ratios sit at ~1.4MP.
+#
+# EVERY VALUE HERE MUST BE DIVISIBLE BY 64. That is flux-dev-image's own
+# constraint, read off MuAPI's schema service: "The value must be divisible by
+# 64, eg: 128...512, 576, 640...2048." The previous map was not: 864 is 13.5
+# sixty-fourths, so the 16:9 and 9:16 rows were unusable on the one endpoint
+# that reads pixels at all. Exact ratios that are also multiples of 64 exist
+# but cost either detail (1024x768) or 2-3MP (2048x1152), so the video rows
+# are within 0.5% of their ratio instead of exact; the opening frame is
+# centre-cropped to the exact ratio downstream anyway.
+#
+# 1:1 is only ever the character portrait (a reference, never shown), so it
+# stays at 1024 and costs nothing extra.
 ASPECT_RATIO_MAP = {
     "1:1": {"width": 1024, "height": 1024},
-    "16:9": {"width": 1536, "height": 864},
-    "9:16": {"width": 864, "height": 1536},
-    "4:3": {"width": 1344, "height": 1008},
+    "16:9": {"width": 1600, "height": 896},
+    "9:16": {"width": 896, "height": 1600},
+    "4:3": {"width": 1536, "height": 1152},
 }
 
 
@@ -65,6 +74,18 @@ def resolve_dimensions(aspect_ratio: str) -> dict:
             aspect_ratio,
         )
         return dims
+    if width % 64 or height % 64:
+        # Honoured anyway -- this is the escape hatch for endpoints that take
+        # sizes flux-dev-image will not -- but said out loud, because the
+        # failure mode is the quiet one: flux-dev-image does not refuse an
+        # off-grid size, it renders its 1024x1024 default instead.
+        logger.warning(
+            "MUSEFORGE_IMAGE_WIDTH/HEIGHT %sx%s is not divisible by 64; "
+            "flux-dev-image requires that and will fall back to its own "
+            "1024x1024 default rather than refusing the request.",
+            width,
+            height,
+        )
     return {"width": width, "height": height}
 
 
@@ -82,18 +103,29 @@ def resolve_dimensions(aspect_ratio: str) -> dict:
 #: PuLID is 1 by construction: it is an IDENTITY model and its payload field
 #: is the singular `image_url`. That number is certain.
 #:
-#: The Kontext family's field is `images_list`, a LIST -- confirmed against
-#: MuAPI's own 422 ({"loc": ["body", "images_list"]}). What is NOT confirmed
-#: is where its ceiling sits, so the number below is a starting point to be
-#: checked in the playground, not a measurement. Raise or lower it per
-#: endpoint with MUAPI_REFERENCE_CAPACITY_<SLUG> without a deploy; the slug is
-#: upper-cased with non-alphanumerics turned into underscores, so
-#: `flux-kontext-pro-i2i` reads MUAPI_REFERENCE_CAPACITY_FLUX_KONTEXT_PRO_I2I.
+#: The Kontext family's field is `images_list`, a LIST. The numbers below are
+#: that field's `maxItems`, read off MuAPI's own schema service
+#: (GET /api/app/get-task-data?name=<endpoint> -- the document the playground
+#: builds its form from), not inferred from behaviour.
+#:
+#: They used to be a guess of 4, and the guess was wrong in the expensive
+#: direction: a three-reference frame is not trimmed, it is REFUSED outright
+#: ("You must provide 1 or 2 image URLs"), and the whole scene then fell
+#: through to a text-only fallback. Job a8d0766b-421 lost the set on all
+#: three scenes that way.
+#:
+#: Override per endpoint with MUAPI_REFERENCE_CAPACITY_<SLUG> without a
+#: deploy; the slug is upper-cased with non-alphanumerics turned into
+#: underscores, so `flux-kontext-pro-i2i` reads
+#: MUAPI_REFERENCE_CAPACITY_FLUX_KONTEXT_PRO_I2I.
 REFERENCE_CAPACITY = {
     "flux-pulid": 1,
-    "flux-kontext-pro-i2i": 4,
-    "flux-kontext-dev-i2i": 4,
-    "flux-kontext-max-i2i": 4,
+    # images_list.maxItems, read off MuAPI's schema service. They are NOT the
+    # same across the family, which is why this is a table and not a constant:
+    # the dev tier takes five times what the pro tier does.
+    "flux-kontext-pro-i2i": 2,
+    "flux-kontext-max-i2i": 2,
+    "flux-kontext-dev-i2i": 10,
 }
 
 #: What an endpoint nobody has measured is assumed to take. One, because the
@@ -139,6 +171,112 @@ def normalise_references(references) -> list:
     return ordered
 
 
+#: How an endpoint asks for its canvas. Read off MuAPI's schema service
+#: (GET /api/app/get-task-data?name=<endpoint>), not guessed from names.
+#:
+#:   RATIO_SHAPE  {prompt, aspect_ratio, resolution}   flux-2-pro, flux-2-flex
+#:   PIXEL_SHAPE  {prompt, width, height, num_images}  flux-dev-image
+#:
+#: Sending the wrong one is not an error you can see. flux-2-pro rejects the
+#: request outright (400 at generation time); flux-dev-image accepts it,
+#: ignores every field it does not recognise, and renders its 1024x1024
+#: default -- a square frame on a 9:16 order that nothing downstream can get
+#: the sides back for.
+RATIO_SHAPE = "ratio"
+PIXEL_SHAPE = "pixels"
+
+ENDPOINT_SHAPES = {
+    "flux-2-pro": RATIO_SHAPE,
+    "flux-2-flex": RATIO_SHAPE,
+    "flux-dev-image": PIXEL_SHAPE,
+    "flux-2-dev": PIXEL_SHAPE,
+}
+
+#: What an endpoint nobody has recorded is assumed to be. PIXEL_SHAPE,
+#: because it is the forgiving one: an endpoint that wanted a ratio and got
+#: width/height fails loudly on the first call, where the reverse renders a
+#: silently wrong canvas for as long as nobody measures a delivered frame.
+DEFAULT_ENDPOINT_SHAPE = PIXEL_SHAPE
+
+
+def endpoint_shape(endpoint: str) -> str:
+    """Which payload shape this endpoint's schema declares.
+
+    Overridable per endpoint with MUAPI_ENDPOINT_SHAPE_<SLUG>=ratio|pixels,
+    for the same reason the endpoints themselves are env-swappable: a model
+    can be pointed somewhere new without a deploy, and its shape has to be
+    able to follow it.
+    """
+    slug = (endpoint or "").strip()
+    env_key = "MUAPI_ENDPOINT_SHAPE_" + re.sub(r"[^A-Za-z0-9]", "_", slug).upper()
+    override = (os.environ.get(env_key, "") or "").strip().lower()
+    if override in (RATIO_SHAPE, PIXEL_SHAPE):
+        return override
+    if override:
+        logger.warning(
+            "%s=%r is not %r or %r; using the recorded shape for %r.",
+            env_key, override, RATIO_SHAPE, PIXEL_SHAPE, slug,
+        )
+    return ENDPOINT_SHAPES.get(slug, DEFAULT_ENDPOINT_SHAPE)
+
+
+#: The `aspect_ratio` enums, per endpoint, as the schema service lists them.
+#: Every ratio this pipeline orders (1:1, 16:9, 9:16, 4:3) is in all of them;
+#: the table exists so that pointing an endpoint somewhere new cannot send a
+#: ratio the target has never heard of.
+SUPPORTED_RATIOS = {
+    "flux-2-pro": ("16:9", "9:16", "1:1", "4:3", "3:4", "2:3", "3:2"),
+    "flux-2-flex": ("16:9", "9:16", "1:1", "4:3", "3:4", "2:3", "3:2"),
+    "flux-kontext-pro-i2i": ("16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "16:21"),
+    "flux-kontext-max-i2i": ("16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "16:21"),
+    "flux-kontext-dev-i2i": ("16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "16:21"),
+    "flux-pulid": ("16:9", "9:16", "1:1", "4:3", "3:4"),
+}
+
+
+def supported_ratio(endpoint: str, aspect_ratio: str) -> str:
+    """``aspect_ratio`` if the endpoint takes it, else its own default.
+
+    Falls back to "1:1" -- which every one of these endpoints declares as its
+    default -- rather than passing a value through to be rejected. A wrong
+    shape is recoverable downstream (the opening frame is conformed before the
+    take is ordered); a refused request is not.
+    """
+    wanted = (aspect_ratio or "").strip()
+    allowed = SUPPORTED_RATIOS.get((endpoint or "").strip())
+    if not allowed or wanted in allowed:
+        return wanted or "1:1"
+    logger.warning(
+        "%s does not take aspect_ratio %r (it takes %s); ordering 1:1 and "
+        "letting the frame be conformed downstream.",
+        endpoint, wanted, ", ".join(allowed),
+    )
+    return "1:1"
+
+
+#: The `resolution` rung ordered from a RATIO_SHAPE endpoint.
+#:
+#: "1k" is the provider's own default and the cheaper rung ($0.032 vs $0.045
+#: on flux-2-pro). "2k" is the quality knob, and it is a real one here: this
+#: frame is the conditioning image Kling reads its canvas and its detail off,
+#: so softness bought at this step is baked into every frame of the take.
+DEFAULT_IMAGE_RESOLUTION = "1k"
+IMAGE_RESOLUTIONS = ("1k", "2k")
+
+
+def image_resolution() -> str:
+    """Which resolution rung to order. MUSEFORGE_IMAGE_RESOLUTION=2k raises it."""
+    value = (os.environ.get("MUSEFORGE_IMAGE_RESOLUTION", "") or "").strip().lower()
+    if value in IMAGE_RESOLUTIONS:
+        return value
+    if value:
+        logger.warning(
+            "MUSEFORGE_IMAGE_RESOLUTION=%r is not one of %s; using %s.",
+            value, ", ".join(IMAGE_RESOLUTIONS), DEFAULT_IMAGE_RESOLUTION,
+        )
+    return DEFAULT_IMAGE_RESOLUTION
+
+
 #: MuAPI's documented bound on `positivePrompt`: a non-empty, non-whitespace
 #: string of 2..3000 characters. Violating it is a 400 raised at GENERATION
 #: time rather than on submit, so the job pays for the round trip and then
@@ -146,8 +284,23 @@ def normalise_references(references) -> list:
 MAX_PROMPT_CHARS = 3000
 MIN_PROMPT_CHARS = 2
 
+#: Endpoints whose own schema declares a SHORTER prompt than the 3000 above.
+#: flux-pulid's reads "Text prompt describing the image (max 1500
+#: characters)", which is half the budget every caller here is written
+#: against -- and PuLID is the default reference endpoint, so the frames most
+#: likely to carry a long locked-character prompt are exactly the ones with
+#: the smallest allowance.
+ENDPOINT_PROMPT_LIMITS = {
+    "flux-pulid": 1500,
+}
 
-def clamp_prompt(prompt: str) -> str:
+
+def prompt_limit(endpoint: str = "") -> int:
+    """The prompt ceiling for one endpoint, defaulting to MuAPI's 3000."""
+    return ENDPOINT_PROMPT_LIMITS.get((endpoint or "").strip(), MAX_PROMPT_CHARS)
+
+
+def clamp_prompt(prompt: str, endpoint: str = "") -> str:
     """Enforce the provider's prompt contract at the last possible moment.
 
     Callers are expected to build prompts that already fit (see
@@ -155,7 +308,10 @@ def clamp_prompt(prompt: str) -> str:
     priority instead of cutting mid-sentence). This is the backstop for every
     OTHER caller -- character portraits, retakes, repair passes -- so that no
     code path can put a job in front of a 400 it could have prevented.
+
+    ``endpoint`` selects the ceiling, because it is not the same everywhere.
     """
+    limit = prompt_limit(endpoint)
     text = (prompt or "").strip()
     if len(text) < MIN_PROMPT_CHARS:
         # An empty prompt is a bug upstream, but failing the render on it
@@ -165,13 +321,13 @@ def clamp_prompt(prompt: str) -> str:
             "neutral prompt. Check the caller.", len(text),
         )
         return "a cinematic film still"
-    if len(text) > MAX_PROMPT_CHARS:
+    if len(text) > limit:
         logger.warning(
-            "Image prompt is %d chars, over MuAPI's %d limit — truncating. "
+            "Image prompt is %d chars, over %s's %d limit — truncating. "
             "The caller should be trimming by priority instead.",
-            len(text), MAX_PROMPT_CHARS,
+            len(text), endpoint or "MuAPI", limit,
         )
-        text = text[:MAX_PROMPT_CHARS].rsplit(" ", 1)[0]
+        text = text[:limit].rsplit(" ", 1)[0]
     return text
 
 
@@ -205,33 +361,77 @@ class MuAPIImageGenerator:
         self.client = MuAPIClient(api_key)
 
     def _size_payload(
-        self, prompt: str, aspect_ratio: str, reference_url: str = None
+        self, prompt: str, aspect_ratio: str, reference_url: str = None, *,
+        endpoint: str = "",
     ) -> dict:
-        """flux-2-pro / flux-dev-image style payload (combined size string)."""
+        """The text-to-image payload THIS endpoint's schema actually declares.
+
+        There is no single shape. MuAPI's two text-to-image families disagree
+        on how you ask for a canvas, and this method used to send a third
+        shape that neither of them has:
+
+        * ratio-shaped (flux-2-pro, flux-2-flex) -- `aspect_ratio` from a
+          fixed enum, plus `resolution` of "1k" or "2k".
+        * pixel-shaped (flux-dev-image) -- `width` and `height`, ints,
+          divisible by 64, plus `num_images`.
+
+        What went out instead was `size: "864*1536"` with
+        `num_inference_steps`, `seed` and `guidance_scale`, none of which
+        exists on either. flux-2-pro answered every single call with
+        ``HTTP 400: Internal Error`` -- job a8d0766b-421 burned three
+        portraits x three attempts before falling back -- and flux-dev-image
+        quietly ignored the lot and rendered its 1024x1024 default, which is
+        why a 9:16 order kept coming back square and losing 44% of its width
+        to the correcting crop.
+
+        ``reference_url`` is accepted and DROPPED for a pixel-shaped endpoint:
+        flux-dev-image has no image input at all. Passing one used to set an
+        `image` key that the endpoint discarded, so a fallback logged as
+        carrying the reference was in fact a text-only render.
+        """
+        endpoint = (endpoint or self.IMAGE_ENDPOINT or "").strip()
+        text = clamp_prompt(prompt, endpoint=endpoint)
+        if endpoint_shape(endpoint) == RATIO_SHAPE:
+            if reference_url:
+                logger.warning(
+                    "%s takes no reference image; rendering %r from the "
+                    "prompt alone.", endpoint, reference_url,
+                )
+            return {
+                "prompt": text,
+                "aspect_ratio": supported_ratio(endpoint, aspect_ratio),
+                "resolution": image_resolution(),
+            }
         dims = resolve_dimensions(aspect_ratio)
-        payload = {
-            "prompt": clamp_prompt(prompt),
-            "size": f"{dims['width']}*{dims['height']}",
-            "num_inference_steps": 28,
-            "seed": -1,
-            "guidance_scale": 3.5,
+        if reference_url:
+            logger.warning(
+                "%s is a text-to-image endpoint with no image input; the "
+                "reference %r is being dropped and this frame will not be "
+                "character-locked.", endpoint, reference_url,
+            )
+        return {
+            "prompt": text,
+            "width": dims["width"],
+            "height": dims["height"],
             "num_images": 1,
         }
-        if reference_url:
-            payload["image"] = reference_url
-        return payload
 
     # Aliases kept for call sites / tests.
     def _text_to_image_payload(self, prompt: str, aspect_ratio: str) -> dict:
-        return self._size_payload(prompt, aspect_ratio)
+        return self._size_payload(
+            prompt, aspect_ratio, endpoint=self.IMAGE_ENDPOINT
+        )
 
     def _legacy_size_payload(
         self, prompt: str, aspect_ratio: str, reference_url: str = None
     ) -> dict:
-        return self._size_payload(prompt, aspect_ratio, reference_url)
+        return self._size_payload(
+            prompt, aspect_ratio, reference_url,
+            endpoint=self.LEGACY_SIZE_ENDPOINT,
+        )
 
     def _build_payload(self, prompt: str, aspect_ratio: str, reference_url: str = None) -> dict:
-        return self._size_payload(prompt, aspect_ratio, reference_url)
+        return self._legacy_size_payload(prompt, aspect_ratio, reference_url)
 
     async def generate_image(
         self, prompt: str, aspect_ratio: str = "1:1", is_cancelled=None
@@ -391,23 +591,22 @@ class MuAPIImageGenerator:
         # Reference-model payloads are built here rather than in
         # _size_payload, so they need the same clamp -- this is the path a
         # character-locked frame actually takes.
-        prompt = clamp_prompt(prompt)
+        prompt = clamp_prompt(prompt, endpoint=endpoint)
         if "pulid" in endpoint.lower():
             # PuLID is identity-focused and uses a singular reference URL.
             payload = {
                 "prompt": prompt,
                 "image_url": used[0],
-                "aspect_ratio": aspect_ratio,
+                "aspect_ratio": supported_ratio(endpoint, aspect_ratio),
             }
         else:
             # Kontext family (e.g. flux-kontext-dev-i2i, flux-kontext-pro-i2i)
-            # expects a LIST of reference images under "images_list" --
-            # confirmed against MuAPI's own 422 validation error during an
-            # earlier attempt ({"loc": ["body", "images_list"]}).
+            # expects a LIST of reference images under "images_list", capped
+            # at that endpoint's own maxItems (see REFERENCE_CAPACITY).
             payload = {
                 "prompt": prompt,
                 "images_list": list(used),
-                "aspect_ratio": aspect_ratio,
+                "aspect_ratio": supported_ratio(endpoint, aspect_ratio),
             }
         logger.info(
             "Sending %s request with %d reference(s) (prompt starts: %.80s)",
@@ -422,6 +621,34 @@ class MuAPIImageGenerator:
                 is_cancelled=is_cancelled,
             )
         except MuAPIError as exc:
+            # The provider counted the images and said how many it takes. That
+            # number beats our capacity table, which is the thing that was
+            # wrong: obey it here and the frame keeps the references it is
+            # allowed, instead of dropping to an endpoint that reads one.
+            ceiling = reference_count_ceiling(exc)
+            if (
+                ceiling is not None
+                and ceiling < len(used)
+                and "images_list" in payload
+            ):
+                logger.warning(
+                    "%s refused %d reference(s) and named a ceiling of %d; "
+                    "resending with the first %d. Set "
+                    "MUAPI_REFERENCE_CAPACITY_%s=%d to stop paying for this "
+                    "round trip on every frame.",
+                    endpoint,
+                    len(used),
+                    ceiling,
+                    ceiling,
+                    re.sub(r"[^A-Za-z0-9]", "_", endpoint).upper(),
+                    ceiling,
+                )
+                payload["images_list"] = list(used[:ceiling])
+                return await self.client.generate(
+                    endpoint,
+                    payload,
+                    is_cancelled=is_cancelled,
+                )
             message = str(exc).lower()
             is_schema_rejection = "404" in message or "422" in message
             # Shared with the video path via the client, because the shape of
@@ -439,24 +666,26 @@ class MuAPIImageGenerator:
             if not (is_schema_rejection or is_runtime_failure or is_ref_rejected):
                 raise
 
+            # There is no reference to keep here, whatever the reason was.
+            # The fallback endpoint is a TEXT-to-image model -- flux-dev-image
+            # declares {prompt, width, height, num_images} and has no image
+            # input at all -- so the old "falling back to ... reference
+            # payload" log line was describing a key the provider discarded.
+            # The frame comes back unlocked either way; the honest thing is to
+            # say so, because "the reference survived the fallback" is the
+            # belief that stops anyone investigating why the faces drifted.
             logger.warning(
                 "%s failed (schema_rejection=%s, runtime_failure=%s, "
-                "reference_rejected=%s): %s; falling back to %s %s",
+                "reference_rejected=%s): %s; falling back to %s, which takes "
+                "no reference — this frame will NOT be character-locked.",
                 endpoint,
                 is_schema_rejection,
                 is_runtime_failure,
                 is_ref_rejected,
                 exc,
                 self.LEGACY_SIZE_ENDPOINT,
-                "WITHOUT the reference" if is_ref_rejected else "reference payload",
             )
-            fallback_payload = self._legacy_size_payload(
-                prompt,
-                aspect_ratio,
-                # The legacy endpoint takes ONE reference; the anchor is the
-                # one worth keeping when the set has to be given up.
-                None if is_ref_rejected else used[0],
-            )
+            fallback_payload = self._legacy_size_payload(prompt, aspect_ratio)
             return await self.client.generate(
                 self.LEGACY_SIZE_ENDPOINT,
                 fallback_payload,

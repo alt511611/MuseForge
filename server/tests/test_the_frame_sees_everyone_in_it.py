@@ -68,9 +68,17 @@ async def test_pulid_gets_the_anchor_from_a_set():
 
 
 @pytest.mark.asyncio
-async def test_a_multi_reference_endpoint_receives_the_whole_set():
+async def test_a_multi_reference_endpoint_receives_the_whole_set(monkeypatch):
+    """Whatever an endpoint's ceiling is, the set travels up to it.
+
+    The ceiling itself is deliberately NOT asserted here -- it is a provider
+    fact that moves (flux-kontext-pro-i2i was carried as 4 and measured at 2).
+    What must not move is that a multi-reference endpoint gets every reference
+    it will read, in anchor-first order.
+    """
     from tools.muapi_image_generator import MuAPIImageGenerator
 
+    monkeypatch.setenv("MUAPI_REFERENCE_CAPACITY_FLUX_KONTEXT_PRO_I2I", "3")
     generator = MuAPIImageGenerator(api_key="k", demo=False)
     generator.KONTEXT_ENDPOINT = "flux-kontext-pro-i2i"
     generator.client.generate = AsyncMock(return_value="https://cdn/frame.png")
@@ -91,6 +99,53 @@ async def test_a_multi_reference_endpoint_receives_the_whole_set():
         "https://cdn/julian.png",
         "https://cdn/plate.png",
     ]
+
+
+@pytest.mark.asyncio
+async def test_the_provider_named_ceiling_is_obeyed_instead_of_falling_back(
+    monkeypatch, caplog
+):
+    """A counted refusal trims the set; it does not surrender it.
+
+    Job a8d0766b-421: three references went to flux-kontext-pro-i2i, MuAPI
+    answered "You must provide 1 or 2 image URLs", and all three scenes fell
+    through to the single-reference legacy endpoint -- every supporting face
+    in the frame invented from prose. The number was in the error the whole
+    time.
+    """
+    from tools.muapi_client import MuAPIError
+    from tools.muapi_image_generator import MuAPIImageGenerator
+
+    monkeypatch.setenv("MUAPI_REFERENCE_CAPACITY_FLUX_KONTEXT_PRO_I2I", "4")
+    generator = MuAPIImageGenerator(api_key="k", demo=False)
+    generator.KONTEXT_ENDPOINT = "flux-kontext-pro-i2i"
+
+    calls = []
+
+    async def generate(endpoint, payload, is_cancelled=None):
+        calls.append((endpoint, dict(payload)))
+        if len(calls) == 1:
+            raise MuAPIError(
+                "MuAPI request failed after 1 attempt(s): HTTP 422: Value "
+                "error, You must provide 1 or 2 image URLs "
+                "(on /api/v1/flux-kontext-pro-i2i)"
+            )
+        return "https://cdn/frame.png"
+
+    generator.client.generate = generate
+
+    url = await generator.generate_image_with_reference(
+        prompt="the card table",
+        references=["https://cdn/a.png", "https://cdn/b.png", "https://cdn/c.png"],
+        aspect_ratio="9:16",
+    )
+
+    assert url == "https://cdn/frame.png"
+    assert len(calls) == 2, "the refusal is answered with a retry, not a fallback"
+    assert calls[1][0] == "flux-kontext-pro-i2i", (
+        "the retry stays on the multi-reference endpoint"
+    )
+    assert calls[1][1]["images_list"] == ["https://cdn/a.png", "https://cdn/b.png"]
 
 
 @pytest.mark.asyncio

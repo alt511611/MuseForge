@@ -16,6 +16,7 @@ from interfaces.second_budget import (
     MAX_SCENE_SECONDS,
     MIN_SCENE_SECONDS,
     SECONDS_PER_CREDIT,
+    spoken_words_for,
 )
 from tools.anthropic_request import classify, log_usage
 from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
@@ -408,6 +409,16 @@ line does not need it sounded out, and a viewer reading it sees a typo."""
     #:
     #: The numbers come from interfaces/second_budget so the brief the writer
     #: is given and the budget the pipeline enforces cannot drift apart.
+    #:
+    #: The LINE LENGTH half was missing, and the two halves have to be one
+    #: clause because apart they contradict each other in practice. The writer
+    #: was told a scene runs ten seconds, and told separately, under DIALOGUE,
+    #: to "keep lines short and speakable". It obeyed both: job a8d0766b-421
+    #: came back with 8.4 seconds of speech inside a 30-second drama, three
+    #: scenes of [9, 9, 12] carrying [2.64, 2.16, 3.6]. Two thirds of the film
+    #: was people standing still, and no stage downstream could fix it -- the
+    #: budget is fixed before the script exists, and a take cannot be told to
+    #: be shorter than the runtime the credit bought.
     RUNTIME_CLAUSE = """
 
 WRITE TO THE RUNNING TIME. Each scene is about {seconds:.0f} seconds of finished
@@ -419,7 +430,17 @@ actions in one scene -- crossing a yard, then kneeling, then reaching for a
 lever, then answering a radio is four scenes' worth of film, and only the
 first of them will be shot. Keep the "action" to what the camera can hold in
 one take; anything else belongs in another scene or in the story you leave
-out."""
+out.
+
+FILL THE RUNNING TIME WITH THE SCENE. A {seconds:.0f}-second scene holds roughly
+{words} spoken words -- that is what {seconds:.0f} seconds of delivery actually is, and
+"keep lines short" above means short SENTENCES, not a scene that stops talking
+after three. A two-word line in a {seconds:.0f}-second take leaves eight seconds of
+someone standing still, and nothing later in the pipeline can shorten the take
+to hide it. If a scene genuinely has {words} words' worth to say, write them. If
+it does not, make it a SILENT scene and let the action carry the whole {seconds:.0f}
+seconds -- an empty dialogue list is a real choice. What does not work is the
+middle: a sentence, then silence."""
 
     SCENE_COUNT_CLAUSE = """
 
@@ -477,6 +498,7 @@ into a single scene rather than adding one."""
             seconds=SECONDS_PER_CREDIT,
             minimum=MIN_SCENE_SECONDS,
             maximum=MAX_SCENE_SECONDS,
+            words=spoken_words_for(SECONDS_PER_CREDIT),
         )
         if num_scenes > 0:
             prompt += self.SCENE_COUNT_CLAUSE.format(
