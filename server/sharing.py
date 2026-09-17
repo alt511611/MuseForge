@@ -324,7 +324,18 @@ async def shared_job_ids() -> List[str]:
             params={"select": "id", "share_slug": "not.is.null", "limit": "10000"},
             headers=_headers(),
         )
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            # PostgREST says WHY in the body; raise_for_status throws it away
+            # and leaves the retention loop logging `Client error '400 Bad
+            # Request' for url '...'` once an hour forever. That is what job
+            # a8d0766b-421's deployment did -- the sweep had been dead for as
+            # long as the log went back, and the one sentence that named the
+            # cause ("column jobs.share_slug does not exist", i.e. a migration
+            # that never ran) was in a body nobody was reading.
+            raise RuntimeError(
+                "shared_job_ids: PostgREST answered %s: %s"
+                % (resp.status_code, (resp.text or "").strip()[:500])
+            )
         rows = resp.json()
         if not isinstance(rows, list):
             raise ValueError(f"shared_job_ids: unexpected response {type(rows)}")

@@ -345,12 +345,28 @@ def is_exact_resolution_enabled() -> bool:
 
 
 def describe(delivery: Optional[Delivery]) -> str:
-    """One line for the log: what shipped, and whether it was real."""
+    """One line for the log: what shipped, and whether it was real.
+
+    The tier is what was ORDERED, not what was delivered, and printing the two
+    next to each other with nothing between them reads as a claim. Job
+    a8d0766b-421 logged ``Delivering master: 720x1280 1080p`` -- a 720p file
+    described in the record as 1080p, because the default tier never upscales
+    and the render only ever measured 720x1280. The file was right and the
+    sentence was wrong, which is the worse way round: a 4K delivery already
+    says it was upscaled, so a delivery SHORT of its tier has to say that too.
+    """
     if not delivery:
         return "untouched"
-    provenance = (
-        f" (upscaled from {delivery.source_width}x{delivery.source_height})"
-        if delivery.upscaled
-        else ""
-    )
-    return f"{delivery.width}x{delivery.height} {delivery.tier}{provenance}"
+    if delivery.upscaled:
+        return (
+            f"{delivery.width}x{delivery.height} {delivery.tier} "
+            f"(upscaled from {delivery.source_width}x{delivery.source_height})"
+        )
+    canonical = tier_size(delivery.aspect_ratio, delivery.tier)
+    if canonical and (delivery.width < canonical[0] or delivery.height < canonical[1]):
+        return (
+            f"{delivery.width}x{delivery.height} — short of the "
+            f"{delivery.tier} ordered; the render was "
+            f"{delivery.source_width}x{delivery.source_height}"
+        )
+    return f"{delivery.width}x{delivery.height} {delivery.tier}"

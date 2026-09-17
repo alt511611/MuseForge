@@ -76,27 +76,33 @@ def _duration_str(seconds) -> str:
 #: cast clause in the prompt is not decoration: it is the only place the model
 #: learns that @Element1 is Vera Kessler.
 #:
-#: THE ELEMENT HAS NO VOICE FIELD. Read off fal's published schema for
-#: v3 standard and v3 pro image-to-video on 2026-09-15: a
-#: KlingV3ComboElementInput is "either an image set (frontal + reference
-#: images) or a video", and the request carries prompt / multi_prompt /
-#: start_image_url / duration / generate_audio / end_image_url / elements /
-#: shot_type / negative_prompt / cfg_scale. There is no voice anywhere in it.
+#: THE ELEMENT NOW HAS A VOICE FIELD, AND THIS CODE STILL DOES NOT SEND ONE.
+#: Two separate facts, and the history matters because both directions of
+#: being wrong about it have already happened here.
 #:
-#: This file used to say the element took a `voice_id` from the backend's
-#: library, and sent one when an element carried it. Nothing broke only
-#: because nothing ever set the field. An unknown key is a 422 here (see the
-#: registry's note in interfaces/video_backend), so the first caller to fill
-#: it would have failed every take -- and this comment would have been the
-#: reason they believed it should work.
+#: Read on 2026-09-15, the element was "either an image set (frontal +
+#: reference images) or a video" with no voice anywhere. Before that, this
+#: file claimed the element took a `voice_id` and sent one whenever an element
+#: carried it; nothing broke only because nothing ever set the attribute, and
+#: an unknown key is a 422 here (see interfaces/video_backend), so the first
+#: caller to fill it would have failed every take.
 #:
-#: Kling's voice control is real, but it is somewhere else: v2.6 PRO
-#: image-to-video takes a request-level `voice_ids` list, at most two per
-#: task, cited in the prompt as <<<voice_1>>>, and the ids come from
-#: fal-ai/kling-video/create-voice, which DOES take a 5-30 second sample.
-#: That endpoint has neither multi_prompt nor elements, so reaching the voices
-#: costs the multi-shot take and the character element lock -- the face, to
-#: buy the voice. See interfaces/who_speaks for what that leaves.
+#: Read again on 2026-09-17, KlingV3ComboElementInput declares `voice_id`:
+#: "The voice ID for this element. The voice will be binded to the element and
+#: references to this element will use the binded voice", with ids from
+#: fal-ai/kling-video/create-voice (which takes a 5-30 second sample). fal
+#: added it. The multi-shot take and the element lock no longer have to be
+#: given up to reach a chosen voice -- which was the whole reason
+#: interfaces/who_speaks declines native audio, and that module's reasoning
+#: is stale in exactly this one respect.
+#:
+#: It is still not sent, and that is a decision rather than a limit: a bound
+#: voice is only worth anything with `generate_audio` on, the voices have to
+#: be created and persisted per character the way the TTS cast already is
+#: (tools/elevenlabs_voice_generator.lock_voices), and audio-on with voice
+#: control moves the take from $0.084 to $0.154 a second. Sending a voice_id
+#: on a mute take buys nothing and costs a field. The work to do it properly
+#: is described in interfaces/who_speaks.
 def _element_payload(element) -> dict:
     frontal = (getattr(element, "frontal", "") or "").strip()
     if not frontal:
@@ -121,10 +127,10 @@ def _element_payload(element) -> dict:
         "frontal_image_url": frontal,
         "reference_image_urls": references or [frontal],
     }
-    # Deliberately not sending element.voice_id: this endpoint has no such
-    # field, and an unknown key fails the whole take. The attribute is kept on
-    # Element because the field is real on other endpoints in the family; it
-    # is this one's payload that cannot carry it.
+    # Deliberately not sending element.voice_id. The field is real here now
+    # (see above), but it only means something on a take with generate_audio
+    # on, and this pipeline renders mute by default. Wiring it is the job
+    # interfaces/who_speaks describes, not a key to start filling in.
     return payload
 
 
