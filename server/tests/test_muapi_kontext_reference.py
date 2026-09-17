@@ -15,7 +15,7 @@ def _expected_size(aspect_ratio):
     from tools.muapi_image_generator import ASPECT_RATIO_MAP
 
     dims = ASPECT_RATIO_MAP[aspect_ratio]
-    return f"{dims['width']}*{dims['height']}"
+    return dims["width"], dims["height"]
 
 
 @pytest.mark.asyncio
@@ -72,9 +72,12 @@ async def test_flux_pulid_rejection_falls_back_to_flux_dev(status):
 
     assert fallback_call.args[0] == generator.LEGACY_SIZE_ENDPOINT
     fallback_payload = fallback_call.args[1]
-    assert fallback_payload["image"] == "https://cdn.example/maya-portrait.png"
+    # flux-dev-image declares {prompt, width, height, num_images} and has no
+    # image input, so the reference cannot survive this hop. It used to be set
+    # anyway, under a key the provider discarded.
+    assert "image" not in fallback_payload
     assert "image_url" not in fallback_payload
-    assert fallback_payload["size"] == _expected_size("16:9")
+    assert (fallback_payload["width"], fallback_payload["height"]) == _expected_size("16:9")
 
 
 @pytest.mark.asyncio
@@ -105,8 +108,8 @@ async def test_flux_pulid_internal_runtime_failure_falls_back_to_flux_dev():
     pulid_call, fallback_call = generator.client.generate.await_args_list
     assert pulid_call.args[0] == generator.KONTEXT_ENDPOINT
     assert fallback_call.args[0] == generator.LEGACY_SIZE_ENDPOINT
-    assert fallback_call.args[1]["image"] == (
-        "https://cdn.example/maya-portrait.png"
+    assert "image" not in fallback_call.args[1], (
+        "the fallback is text-to-image; it cannot carry the portrait"
     )
 
 
@@ -144,7 +147,10 @@ async def test_rejected_reference_falls_back_without_the_reference():
     _, fallback_call = generator.client.generate.await_args_list
     assert fallback_call.args[0] == generator.LEGACY_SIZE_ENDPOINT
     assert "image" not in fallback_call.args[1]
-    assert fallback_call.args[1]["size"] == _expected_size("16:9")
+    assert (
+        fallback_call.args[1]["width"],
+        fallback_call.args[1]["height"],
+    ) == _expected_size("16:9")
 
 
 @pytest.mark.asyncio

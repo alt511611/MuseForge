@@ -244,12 +244,19 @@ def test_resolution_override_applies_and_fails_safe(monkeypatch):
 
 
 def test_resolution_override_reaches_the_payload(monkeypatch):
+    """The pixel override lands on the endpoint that speaks pixels.
+
+    flux-2-pro does not: its schema takes `aspect_ratio` and a `resolution`
+    rung, so MUSEFORGE_IMAGE_WIDTH/HEIGHT has nothing to attach to there.
+    flux-dev-image is the one that declares width and height.
+    """
     from tools.muapi_image_generator import MuAPIImageGenerator
 
     monkeypatch.setenv("MUSEFORGE_IMAGE_WIDTH", "1920")
-    monkeypatch.setenv("MUSEFORGE_IMAGE_HEIGHT", "1080")
+    monkeypatch.setenv("MUSEFORGE_IMAGE_HEIGHT", "1088")
     gen = MuAPIImageGenerator(api_key="k", demo=False)
-    assert gen._text_to_image_payload("x", "16:9")["size"] == "1920*1080"
+    payload = gen._legacy_size_payload("x", "16:9")
+    assert (payload["width"], payload["height"]) == (1920, 1088)
 
 
 # --- prompt-side image quality -----------------------------------------
