@@ -64,6 +64,9 @@ async def test_insufficient_credits_returns_false():
     import api as _api
 
     mock_resp = MagicMock()
+    # A real PostgREST response carries a status, and _deduct_credits reads it
+    # before the body -- an error body is not a balance.
+    mock_resp.status_code = 200
     mock_resp.json.return_value = -1  # RPC signals insufficient balance
 
     mock_client = AsyncMock()
@@ -85,6 +88,7 @@ async def test_sufficient_credits_returns_true():
     import api as _api
 
     mock_resp = MagicMock()
+    mock_resp.status_code = 200
     mock_resp.json.return_value = 10  # 15 credits → deduct 5 → 10 remaining
 
     mock_client = AsyncMock()
@@ -120,6 +124,7 @@ async def test_concurrent_deductions_use_rpc_atomically():
     async def _fake_post(url, **kwargs):
         nonlocal call_count
         resp = MagicMock()
+        resp.status_code = 200
         if "rpc/deduct_credits" in url:
             call_count += 1
             # First call succeeds, second call returns -1 (atomic DB constraint)

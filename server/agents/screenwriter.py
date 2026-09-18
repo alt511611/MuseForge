@@ -1,13 +1,19 @@
 """Screenwriter agent — transforms an idea into a structured drama script."""
 
+import asyncio
 import json
 import logging
 import os
 import re
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from interfaces import gender as gender_of
-from interfaces.character import CharacterProfile, DramaScript, ScriptScene
+from interfaces.character import (
+    CharacterProfile,
+    DialogueLine,
+    DramaScript,
+    ScriptScene,
+)
 from interfaces.language import DEFAULT_LANGUAGE, is_default, name_of
 from interfaces.lighting import GOES_DARK_PATTERNS
 from interfaces.micro_drama import SCREENWRITER_CLAUSE, is_micro_drama
@@ -22,6 +28,48 @@ from tools.anthropic_request import classify, log_usage
 from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
 
 logger = logging.getLogger(__name__)
+
+
+def _first_json_object(text: str) -> str:
+    """The FIRST complete JSON object in `text`, brace-balanced.
+
+    The old reading of this was `re.search(r"{[\s\S]*}", text)`, which is
+    greedy: it runs from the first opening brace to the LAST closing one
+    anywhere in the response. A model that answers with its script and then
+    adds a second object -- a note, an alternative ending, a "here is the same
+    thing with shorter scenes" -- had both of them, plus the prose between,
+    handed to json.loads as one string, and the whole paid job failed on a
+    script that was perfectly good.
+
+    Braces inside strings do not count, and neither does an escaped quote,
+    which is why this is a small scanner and not a bigger regex. Returns ""
+    when there is no complete object.
+    """
+    start = text.find("{")
+    if start == -1:
+        return ""
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        char = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return ""
 
 
 def _repair_json(text: str) -> str:
@@ -85,6 +133,44 @@ def _repair_json(text: str) -> str:
         index += 1
 
     return "".join(out)
+
+
+#: One spoken line per dramatic function, for the demo script only. Short on
+#: purpose: they exist so the dialogue stages have something to run on, not to
+#: be read as writing.
+_TEMPLATE_LINES = {
+    "setup": "It's quieter than I remember.",
+    "inciting_incident": "That wasn't supposed to be there.",
+    "rising_action": "We don't have time to be careful about it.",
+    "turning_point": "Then it was never about the money.",
+    "climax": "I'm not leaving without it.",
+    "resolution": "We'll say it happened the other way.",
+}
+
+
+def _preset_block(preset_characters: Optional[List[dict]]) -> str:
+    """The PRESET CHARACTERS section of the prompt, or "" when there is none.
+
+    One function, because there were two copies and they had already drifted:
+    one stripped and coerced with `or ""`, the other called `str()` on a
+    missing name and put the literal word "None" in the prompt, which the
+    writer then used as a character's name.
+    """
+    if not preset_characters:
+        return ""
+    lines = []
+    for c in preset_characters:
+        name = str(c.get("name") or "").strip()
+        features = str(c.get("static_features") or "").strip()
+        if name and features:
+            lines.append(_preset_line(name, features, c.get("wardrobe")))
+    if not lines:
+        return ""
+    return (
+        "PRESET CHARACTERS (already exist — use directly, do not redefine):\n"
+        + "\n".join(lines)
+        + "\n"
+    )
 
 
 def _preset_line(name: str, features: str, wardrobe: Optional[str] = None) -> str:
@@ -465,11 +551,35 @@ into a single scene rather than adding one."""
     #: path streams, so a larger budget costs nothing in wall-clock risk;
     #: unused tokens are not billed.
     MAX_SCRIPT_TOKENS = 16000
+    #: Named once. It was written out at the call and again in the usage log,
+    #: which is how a deployment ends up reporting spend against a model it is
+    #: not running.
+    MODEL = "claude-sonnet-5"
+    #: Ceiling on draining one script stream. Generous -- a 24-scene script
+    #: with thinking is a long answer -- but finite.
+    SCRIPT_STREAM_TIMEOUT_SECONDS = 300.0
 
     def __init__(self, api_key: Optional[str] = None, demo: bool = False):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self.muapi_key = os.environ.get("MUAPI_KEY", "")
         self.demo = demo
+        self._anthropic_client: Any = None
+
+    def _anthropic(self):
+        """The Anthropic client for this agent, built once.
+
+        A fresh AsyncAnthropic per script means a fresh connection pool per
+        script: every job paid for a new TLS handshake, and nothing reused a
+        warm connection. Built lazily so importing this module still works
+        without the SDK installed, which the demo and template paths rely on.
+        """
+        if self._anthropic_client is None:
+            import anthropic
+
+            self._anthropic_client = anthropic.AsyncAnthropic(
+                api_key=self.api_key, max_retries=2
+            )
+        return self._anthropic_client
 
     def _system_prompt(
         self,
@@ -542,23 +652,15 @@ into a single scene rather than adding one."""
         # matches MuAPIImageGenerator/MuAPIVideoGenerator's demo behavior.
         if self.demo:
             return self._write_template(
-                idea, style, num_scenes, preset_characters, narrative_mode
+                idea,
+                style,
+                num_scenes,
+                preset_characters,
+                narrative_mode,
+                require_dialogue=require_dialogue,
             )
 
-        preset_block = ""
-        if preset_characters:
-            lines = []
-            for c in preset_characters:
-                name = str(c.get("name") or "").strip()
-                features = str(c.get("static_features") or "").strip()
-                if name and features:
-                    lines.append(_preset_line(name, features, c.get("wardrobe")))
-            if lines:
-                preset_block = (
-                    "PRESET CHARACTERS (already exist — use directly, do not redefine):\n"
-                    + "\n".join(lines)
-                    + "\n"
-                )
+        preset_block = _preset_block(preset_characters)
 
         prompt = (
             f"{_series_block(series_brief)}"
@@ -794,7 +896,12 @@ into a single scene rather than adding one."""
         stand this down, and the city's power never went out in any frame of
         the film. A filled field is not the same fact as a filmed event.
         """
-        scenes = [s for s in (script.scenes or []) if hasattr(s, "world_change")]
+        all_scenes = list(script.scenes or [])
+        # Only scenes that can CARRY a world_change are candidates to receive
+        # one. Reading the spoken event, further down, uses every scene: a
+        # scene that cannot hold the field can still contain the line that
+        # says the event happened.
+        scenes = [s for s in all_scenes if hasattr(s, "world_change")]
         if not scenes:
             return
         declared = [
@@ -838,7 +945,7 @@ into a single scene rather than adding one."""
             # Same word list and the same refusal to guess as the brief path:
             # this reads what the writer already wrote, into the field that
             # exists to carry it.
-            clause, source = cls._script_event_clause(scenes), "script"
+            clause, source = cls._script_event_clause(all_scenes), "script"
         if not clause:
             return
         target = next(
@@ -955,7 +1062,11 @@ into a single scene rather than adding one."""
             if (char.role or "").strip().lower() != "protagonist":
                 continue
             if gender_of.infer(char.description):
-                return  # already gendered by the writer — leave it alone
+                # `continue`, not `return`: a two-hander with two protagonists
+                # (which this product writes) stopped the whole pass at the
+                # first one the writer had already gendered, and the second
+                # stayed genderless -- the exact case this exists to repair.
+                continue  # already gendered by the writer — leave it alone
             described = (char.description or "").strip()
             char.description = f"{noun}, {described}" if described else noun
             logger.info(
@@ -980,21 +1091,7 @@ into a single scene rather than adding one."""
     ) -> DramaScript:
         import anthropic
 
-        preset_block = ""
-        if preset_characters:
-            lines = [
-                _preset_line(
-                    str(c.get("name")), str(c.get("static_features")), c.get("wardrobe")
-                )
-                for c in preset_characters
-                if c.get("name") and c.get("static_features")
-            ]
-            if lines:
-                preset_block = (
-                    "PRESET CHARACTERS (already exist — use directly, do not redefine):\n"
-                    + "\n".join(lines)
-                    + "\n"
-                )
+        preset_block = _preset_block(preset_characters)
         prompt = (
             f"{_series_block(series_brief)}"
             f"{preset_block}"
@@ -1018,10 +1115,10 @@ into a single scene rather than adding one."""
         # list by position again. Thinking stays on: it measurably improves
         # story structure, and `max_tokens` covers thinking plus text
         # together, which the raised budget above accounts for.
-        client = anthropic.AsyncAnthropic(api_key=self.api_key, max_retries=2)
+        client = self._anthropic()
         try:
             async with client.messages.stream(
-                model="claude-sonnet-5",
+                model=self.MODEL,
                 max_tokens=self.MAX_SCRIPT_TOKENS,
                 system=self._system_prompt(
                     language,
@@ -1032,7 +1129,14 @@ into a single scene rather than adding one."""
                 ),
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:
-                message = await stream.get_final_message()
+                # A deadline, because a stream that stalls has no other one:
+                # the SDK's request timeout covers establishing the response,
+                # not draining it, so a connection that goes quiet mid-script
+                # held the job open until the pipeline's own hard timeout.
+                message = await asyncio.wait_for(
+                    stream.get_final_message(),
+                    timeout=self.SCRIPT_STREAM_TIMEOUT_SECONDS,
+                )
         except anthropic.APIStatusError as exc:
             # _failure_message already sorts what the USER is told by status.
             # This sorts what the OPERATOR is told, which was one line for
@@ -1072,7 +1176,7 @@ into a single scene rather than adding one."""
                 "credits were spent — please try again shortly."
             ) from exc
 
-        log_usage("screenwriter", "claude-sonnet-5", getattr(message, "usage", None))
+        log_usage("screenwriter", self.MODEL, getattr(message, "usage", None))
 
         # A truncated response is not an outage: the model answered, the
         # budget ran out mid-JSON. Saying "unavailable" here sent operators
@@ -1163,17 +1267,37 @@ into a single scene rather than adding one."""
         operator should be able to see, not something that silently costs
         retries.
         """
-        match = re.search(r"\{[\s\S]*\}", text)
-        if not match:
+        body = _first_json_object(text)
+        if not body:
+            # Two different failures, said differently: nothing that looks like
+            # JSON at all, versus an object that starts and never closes --
+            # which is what a response cut off at max_tokens looks like, and is
+            # worth naming rather than reporting as "no JSON".
+            if "{" in text:
+                raise ValueError(
+                    "JSON object in response is unterminated (the answer looks "
+                    "truncated)"
+                )
             raise ValueError("No JSON found in response")
-        body = match.group()
         try:
             return json.loads(body)
         except json.JSONDecodeError as strict_error:
             repaired = _repair_json(body)
             if repaired == body:
                 raise
-            data = json.loads(repaired)  # still raises if it was worse than this
+            try:
+                data = json.loads(repaired)
+            except json.JSONDecodeError as repair_error:
+                # Both messages, because they point at different things: the
+                # first says what the model actually got wrong, the second says
+                # what the repair left behind. Reporting only the second turns
+                # every bad script into the same unhelpful line.
+                logger.error(
+                    "Script JSON did not parse and the repair did not help. "
+                    "Original: %s. After repair: %s",
+                    strict_error.msg, repair_error.msg,
+                )
+                raise repair_error from strict_error
             logger.warning(
                 "Script JSON needed repair before it would parse (%s). The "
                 "model's answer was usable; only its punctuation was not.",
@@ -1188,6 +1312,7 @@ into a single scene rather than adding one."""
         num_scenes: int,
         preset_characters: Optional[List[dict]] = None,
         narrative_mode: str = "",
+        require_dialogue: bool = False,
     ) -> DramaScript:
         title = idea[:60].strip().rstrip(".") or "Untitled Drama"
         protagonist = self._extract_protagonist(idea)
@@ -1305,12 +1430,25 @@ into a single scene rather than adding one."""
             "turning_point": 8,
             "climax": 10,
         }
+        # The demo's own speaker: whoever the cast has, or the name pulled out
+        # of the idea. A demo run asked for dialogue and got a silent script,
+        # so every stage downstream that only exists when somebody speaks --
+        # the voice cast, the subtitle pass, the mouths -- was untestable
+        # without spending real provider money.
+        speaker = characters[0].name if characters else protagonist
         scenes = []
         for fn in shape:
             beat = dict(beats.get(fn) or beats["rising_action"])
             if micro:
                 beat["tension"] = micro_tensions.get(fn, beat.get("tension", 5))
-            scenes.append(ScriptScene(dialogue=[], dramatic_function=fn, **beat))
+            # Into the copy rather than as a second keyword: `**beat` would
+            # collide with a literal `dialogue=` the moment a beat carries one.
+            beat["dialogue"] = (
+                [DialogueLine(character=speaker, line=_TEMPLATE_LINES[fn])]
+                if require_dialogue and fn in _TEMPLATE_LINES
+                else []
+            )
+            scenes.append(ScriptScene(dramatic_function=fn, **beat))
 
         return DramaScript(
             generated_by="template",
@@ -1320,12 +1458,19 @@ into a single scene rather than adding one."""
             theme="A choice made too late still counts as a choice.",
             visual_motif="light through a window, falling differently in each scene",
             mood=style.lower(),
-            estimated_duration_seconds=len(scenes) * 8,
+            # The same seconds-per-credit the rest of the product quotes and
+            # bills in (interfaces/second_budget); 8 was a second, older answer
+            # to the same question.
+            estimated_duration_seconds=len(scenes) * SECONDS_PER_CREDIT,
             setting_location="generic cinematic location",
             setting_time_of_day="midday",
             setting_era="present day",
             characters=characters,
             scenes=scenes,
+            # Micro-drama ends on the question, and the field that carries it
+            # is what the next episode is commissioned from -- a demo run that
+            # left it empty could not exercise a series at all.
+            cliffhanger="What happens after the choice?" if micro else "",
         )
 
     def _extract_protagonist(self, idea: str) -> str:

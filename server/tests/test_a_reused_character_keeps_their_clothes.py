@@ -50,14 +50,43 @@ def test_a_preset_with_no_saved_outfit_reads_as_it_always_did():
 
 def test_both_provider_paths_brief_it_the_same_way():
     """The MuAPI route is tried FIRST, so a preset block improved only on the
-    Anthropic fallback would do nothing on the primary path."""
+    Anthropic fallback would do nothing on the primary path.
+
+    Both paths now build the block with the same function rather than with two
+    copies of the same loop -- which is the stronger version of this check,
+    since the copies had already drifted apart once.
+    """
     import inspect
 
     for method in (
         ScreenwriterAgent.write_script,
         ScreenwriterAgent._write_with_claude,
     ):
-        assert "_preset_line(" in inspect.getsource(method), method.__name__
+        assert "_preset_block(" in inspect.getsource(method), method.__name__
+
+
+def test_a_preset_character_with_no_name_is_left_out_not_called_none():
+    """str(None) is "None", and a prompt that says so gets a character by that
+    name. Both paths went through the copy that did this."""
+    from agents.screenwriter import _preset_block
+
+    block = _preset_block(
+        [
+            {"static_features": "woman in her late thirties"},
+            {"name": "Mara", "static_features": "woman in her late thirties"},
+        ]
+    )
+
+    assert "None" not in block
+    assert "- Mara: woman in her late thirties" in block
+
+
+def test_no_usable_preset_character_is_no_block_at_all():
+    from agents.screenwriter import _preset_block
+
+    assert _preset_block(None) == ""
+    assert _preset_block([]) == ""
+    assert _preset_block([{"name": "Mara"}]) == ""
 
 
 # ── what the pipeline restores ──────────────────────────────────────────────

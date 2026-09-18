@@ -2951,7 +2951,8 @@ def _probe_fps(video_path: str) -> float:
 
         with VideoFileClip(video_path) as clip:
             return float(clip.fps or 24.0)
-    except Exception:
+    except Exception as exc:
+        logger.debug("Could not probe the frame rate of %s: %s", video_path, exc)
         return 24.0
 
 
@@ -3722,6 +3723,22 @@ class Script2VideoPipeline:
             "on" if generate_audio else "off",
         )
 
+        # A ratio the endpoint does not take is sent as "" (its own default,
+        # 16:9) and the master is conformed by CROPPING afterwards. That is the
+        # right fallback -- the film still ships in the shape it was ordered in
+        # -- but it is a quality decision made silently, on the one ratio this
+        # product sells that the shipped backends do not list (1:1). Said out
+        # loud, so "why is this square film missing the second actor" is one
+        # log line rather than an investigation.
+        if aspect_ratio and not backend.accepts_aspect_ratio(aspect_ratio):
+            logger.warning(
+                "Backend %s does not take an aspect ratio of %s; the take will "
+                "be generated at the endpoint's default and conformed to %s by "
+                "cropping.",
+                backend.slug,
+                aspect_ratio,
+                aspect_ratio,
+            )
         video_url = await self.video_gen.generate_scene_take(
             take,
             is_cancelled=is_cancelled,
