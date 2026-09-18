@@ -13,6 +13,7 @@ Design intent
 import asyncio
 import logging
 import os
+import re
 import shutil
 import time
 import uuid
@@ -90,6 +91,14 @@ def _sb_headers() -> dict:
 
 
 def _sb_row(job: "Job") -> dict:
+    """The jobs-table columns for this job.
+
+    `updated_at` is deliberately absent: the `jobs_updated_at` trigger in
+    supabase_migration.sql sets it on every UPDATE (and the column defaults to
+    now() on INSERT), and a BEFORE trigger overwrites whatever a client sends
+    anyway. This is the column the stale-job reaper reads, so it matters that
+    the trigger, not this function, is the thing keeping it current.
+    """
     return {
         "id": job.id,
         "user_id": job.user_id,
@@ -189,7 +198,13 @@ def _sb_row_to_dict(row: dict) -> dict:
         # The flag itself is not persisted; the status is what the client acts
         # on, and a job parked awaiting approval was necessarily started with
         # it on.
-        "require_script_approval": status == JobStatus.AWAITING_SCRIPT_APPROVAL.value,
+        # Intent first, status second -- see the note where it is written.
+        "require_script_approval": bool(
+            result.get(
+                "_require_script_approval",
+                status == JobStatus.AWAITING_SCRIPT_APPROVAL.value,
+            )
+        ),
         "events": [],  # events are not persisted to DB
         "result": public_result(row.get("result")),
         "error": row.get("error"),
@@ -202,9 +217,14 @@ def _sb_row_to_dict(row: dict) -> dict:
     }
 
 
-async def _sb_upsert(job: "Job") -> None:
+async def _sb_upsert(job: "Job", row: Optional[dict] = None) -> None:
     """Upsert job row into Supabase. Never raises (fire-and-forget), but
     now actually surfaces failures instead of hiding them.
+
+    ``row`` lets the caller pass the snapshot it wants written. persist() takes
+    it at call time so a write that queues behind another one cannot pick up a
+    LATER state and report it under the earlier transition -- and so the two
+    writes cannot be reordered into the older one landing last.
 
     Found via a real, paid generation that completed successfully (a real,
     playable video existed) but had ZERO row in the jobs table -- meaning
@@ -222,8 +242,11 @@ async def _sb_upsert(job: "Job") -> None:
     try:
         async with httpx.AsyncClient(timeout=6.0) as client:
             resp = await client.post(
-                f"{SUPABASE_URL}/rest/v1/jobs",
-                json=_sb_row(job),
+                # on_conflict is named rather than left to PostgREST's
+                # inference: "resolution=merge-duplicates" says what to do
+                # about a conflict, not which constraint counts as one.
+                f"{SUPABASE_URL}/rest/v1/jobs?on_conflict=id",
+                json=_sb_row(job) if row is None else row,
                 headers=_sb_headers(),
             )
         if resp.status_code >= 400:
@@ -299,12 +322,24 @@ async def _sb_refund_credits(user_id: str, amount: int, job_id: str) -> None:
             if resp.status_code < 400:
                 # grant_credits' ledger row carries no job_id (the RPC has no
                 # such parameter), so attach one for support/audit purposes.
+                #
+                # Narrowed to rows written in the last few seconds -- i.e. the
+                # one this call just made. Without the time bound, the filter
+                # "this user's refunds with no job id" matched EVERY earlier
+                # refund whose row had never been labelled (any refund written
+                # before this labelling existed, or any whose PATCH failed),
+                # and stamped all of them with this job's id. The audit trail
+                # then said one failed job had been refunded many times over.
+                since = (
+                    datetime.now(timezone.utc) - timedelta(seconds=30)
+                ).isoformat()
                 await client.patch(
                     f"{SUPABASE_URL}/rest/v1/credit_ledger",
                     params={
                         "user_id": f"eq.{user_id}",
                         "reason": "eq.refund",
                         "job_id": "is.null",
+                        "created_at": f"gte.{since}",
                     },
                     json={"job_id": job_id},
                     headers={**headers, "Prefer": "return=minimal"},
@@ -531,6 +566,9 @@ class JobStore:
         self._jobs: Dict[str, Job] = {}
         self._max_jobs = max_jobs
         self._lock = asyncio.Lock()
+        # One lock per job, so writes for the same row cannot interleave while
+        # writes for different jobs stay fully parallel. Dropped with the job.
+        self._persist_locks: Dict[str, asyncio.Lock] = {}
 
     #: Statuses that mean a job is done and safe to drop from memory.
     _TERMINAL_STATUSES = (
@@ -558,14 +596,23 @@ class JobStore:
                 "live job — raise max_jobs if this recurs.",
                 self._max_jobs,
             )
-        oldest = min(pool, key=lambda j: j.created_at)
+        # The id breaks ties, so two jobs created in the same clock tick evict
+        # deterministically instead of by dict order.
+        oldest = min(pool, key=lambda j: (j.created_at, j.id))
         del self._jobs[oldest.id]
+        self._persist_locks.pop(oldest.id, None)
 
     async def create(self, **kwargs) -> Job:
         async with self._lock:
             self._evict_if_full()
 
-            job_id = str(uuid.uuid4())[:12]
+            # The whole uuid4, not the first twelve characters of it. A job id
+            # is a capability: it is what /api/jobs/{id}/video and the SSE
+            # stream are addressed by, and those are reachable without a token
+            # because the browser fetches them from a <video> tag and an
+            # EventSource. Twelve hex characters is 48 bits, which is a space
+            # worth walking; 122 is not.
+            job_id = str(uuid.uuid4())
             job = Job(id=job_id, **kwargs)
             self._jobs[job_id] = job
 
@@ -637,6 +684,27 @@ class JobStore:
             music_enabled=bool(row.get("music_enabled", False)),
             dialogue_enabled=bool(row.get("dialogue_enabled", False)),
             plan=row.get("plan", "free"),
+            # Also not columns, and recovered the same way _sb_row_to_dict
+            # recovers them for the client. This is the path that RESUMES
+            # work -- a retake, a re-cut, an approved script -- so a field
+            # missing here is not a display bug: an evicted Pro 4K micro-drama
+            # came back as a 1080p cinematic one, and an episode came back
+            # with no memory of the series it belongs to.
+            narrative_mode=(result or {}).get("narrative_mode") or "cinematic",
+            delivery_tier=(result or {}).get("delivery_tier") or "",
+            series_id=(result or {}).get("series_id") or "",
+            episode_number=int((result or {}).get("episode_number") or 0),
+            series_brief=(result or {}).get("series_brief") or "",
+            library_characters=list((result or {}).get("_library_characters") or []),
+            # The flag is not persisted; a job parked awaiting approval was
+            # necessarily started with it on, which is the only state in which
+            # it still decides anything.
+            require_script_approval=bool(
+                (result or {}).get(
+                    "_require_script_approval",
+                    status == JobStatus.AWAITING_SCRIPT_APPROVAL,
+                )
+            ),
             result=result,
             error=row.get("error"),
             created_at=row.get("created_at") or datetime.now(timezone.utc).isoformat(),
@@ -656,8 +724,25 @@ class JobStore:
 
     async def persist(self, job: Job) -> None:
         """Fire-and-forget upsert of the current job state to Supabase.
-        Call at every status transition; never awaited in a blocking sense."""
-        asyncio.create_task(_sb_upsert(job))
+
+        Call at every status transition; never awaited in a blocking sense.
+
+        The row is snapshotted HERE and the writes for one job are serialised
+        behind a per-job lock. Two transitions close together used to become
+        two independent tasks racing to the same row, each sending whatever
+        the Job looked like when its HTTP call got around to running: a
+        completed job could be overwritten by the running state that was
+        supposed to precede it, and the browser would be told a finished film
+        was still rendering.
+        """
+        row = _sb_row(job)
+        lock = self._persist_locks.setdefault(job.id, asyncio.Lock())
+
+        async def _write() -> None:
+            async with lock:
+                await _sb_upsert(job, row)
+
+        asyncio.create_task(_write())
 
     async def get_or_fetch_dict(self, job_id: str) -> Optional[dict]:
         """Return job dict from memory first; fall back to Supabase on miss.
@@ -671,6 +756,7 @@ class JobStore:
     async def delete(self, job_id: str) -> None:
         """Remove from memory and fire-and-forget delete from Supabase."""
         self._jobs.pop(job_id, None)
+        self._persist_locks.pop(job_id, None)
         asyncio.create_task(_sb_delete(job_id))
 
     async def emit(self, job: Job, stage: str, message: str, progress: float, data=None):
@@ -736,17 +822,26 @@ class JobStore:
             return
 
         queue: asyncio.Queue = asyncio.Queue()
+        # The high-water mark BEFORE this subscriber is attached. Everything up
+        # to it is replayed from `job.events`; everything after it arrives on
+        # the queue. Without the mark, an event emitted between attaching and
+        # replaying went out twice -- the browser showed a stage advancing and
+        # then advancing again, and a duplicated "complete" ended the stream
+        # twice.
+        last_seq = job._seq
         job._subscribers.append(queue)
 
         try:
             for event in list(job.events):
-                yield event
+                if event.seq <= last_seq:
+                    yield event
 
-            while job.status in (JobStatus.QUEUED, JobStatus.RUNNING):
+            while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=HEARTBEAT_INTERVAL)
-                    yield event
                 except asyncio.TimeoutError:
+                    if job.status not in (JobStatus.QUEUED, JobStatus.RUNNING):
+                        return
                     last = job.events[-1].progress if job.events else 0
                     # The heartbeat is the only thing that fires during the
                     # long silences — a single Kling call can run for minutes
@@ -760,6 +855,20 @@ class JobStore:
                         seq=-1,
                         eta_seconds=job.eta_seconds(),
                     )
+                    continue
+
+                if event.seq != -1 and event.seq <= last_seq:
+                    continue  # already replayed above
+                yield event
+                # The EVENT ends the stream, not the status. Reading the status
+                # meant the last event and the transition that produced it were
+                # two separate observations: a job that finished while this
+                # coroutine was between them either dropped its "complete" or
+                # waited a whole heartbeat to send it.
+                if event.stage in ("complete", "error", "cancelled"):
+                    return
+                if job.status not in (JobStatus.QUEUED, JobStatus.RUNNING):
+                    return
         finally:
             if queue in job._subscribers:
                 job._subscribers.remove(queue)
@@ -772,8 +881,14 @@ def _is_remote_storage_url(url: Optional[str]) -> bool:
     """True when the result points at a hosted (Supabase Storage) URL."""
     if not url or not isinstance(url, str):
         return False
-    return url.startswith("http") and (
-        "/storage/v1/" in url or "/object/sign/" in url or "supabase" in url.lower()
+    # "supabase" as a bare substring matched any URL with the word anywhere in
+    # it -- a path, a query parameter, somebody else's CDN hostname -- and a
+    # false positive here deletes the local working directory of a job whose
+    # video was never uploaded anywhere.
+    return url.startswith("http") and bool(
+        "/storage/v1/" in url
+        or "/object/sign/" in url
+        or re.match(r"https?://[A-Za-z0-9-]+\.supabase\.(co|in)/", url)
     )
 
 
@@ -788,14 +903,56 @@ def cleanup_working_dir(working_dir: str) -> None:
         logger.error("Failed to clean working dir %s: %s", working_dir, exc)
 
 
-def cleanup_orphan_job_dirs() -> int:
-    """Delete job dirs older than 24h that are not in the in-memory job store.
+async def _recently_active_job_ids() -> set:
+    """Ids of jobs Supabase has touched inside the orphan window.
+
+    In-memory is not the same set as "still in use": the store evicts finished
+    jobs at 100, and a restored job's `_render_state` still points at the files
+    in its working directory -- the frames and clips a retake reuses instead of
+    paying to generate again. Deleting those because the process happened to
+    have forgotten the job turns a retake into a full re-render.
+
+    Best effort: an unreachable database means the in-memory set only, which
+    is the behaviour this had before.
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return set()
+    since = (
+        datetime.now(timezone.utc) - timedelta(seconds=ORPHAN_MAX_AGE_SECONDS)
+    ).isoformat()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/jobs",
+                params={"select": "id", "updated_at": f"gte.{since}"},
+                headers={
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                },
+            )
+        if resp.status_code >= 400:
+            logger.warning(
+                "Orphan cleanup could not list recent jobs: %s %s",
+                resp.status_code, resp.text[:200],
+            )
+            return set()
+        rows = resp.json()
+        if not isinstance(rows, list):
+            return set()
+        return {row.get("id") for row in rows if row.get("id")}
+    except Exception as exc:
+        logger.warning("Orphan cleanup could not list recent jobs: %s", exc)
+        return set()
+
+
+def cleanup_orphan_job_dirs(also_active: Optional[set] = None) -> int:
+    """Delete job dirs older than 24h that no live job refers to.
 
     Returns the number of directories removed.
     """
     if not os.path.isdir(JOBS_DIR):
         return 0
-    active_ids = set(job_store._jobs.keys())
+    active_ids = set(job_store._jobs.keys()) | set(also_active or ())
     cutoff = time.time() - ORPHAN_MAX_AGE_SECONDS
     removed = 0
     try:
@@ -828,12 +985,33 @@ async def orphan_cleanup_loop() -> None:
     """Background task: periodically remove stale local job directories."""
     while True:
         try:
-            n = cleanup_orphan_job_dirs()
+            n = cleanup_orphan_job_dirs(await _recently_active_job_ids())
             if n:
                 logger.info("Orphan cleanup removed %d directories", n)
         except Exception as exc:
             logger.error("Orphan cleanup loop error: %s", exc)
         await asyncio.sleep(ORPHAN_CLEANUP_INTERVAL_SECONDS)
+
+
+async def _refund_reaped_job(row: dict) -> None:
+    """Give back what a stale job was charged, if anything, and say so.
+
+    Deliberately reads the amount off the job rather than recomputing it:
+    recomputation cannot tell whether the money was ever taken, and the one
+    mistake that cannot be undone from here is minting credits nobody paid.
+    """
+    user_id = row.get("user_id")
+    result = row.get("result") if isinstance(row.get("result"), dict) else {}
+    charged = (result or {}).get("_credits_charged")
+    if not user_id or row.get("demo"):
+        return
+    if not isinstance(charged, int) or isinstance(charged, bool) or charged <= 0:
+        return
+    await _sb_refund_credits(user_id, charged, row.get("id") or "")
+    logger.info(
+        "Refunded %s credits to %s for reaped job %s",
+        charged, user_id, row.get("id"),
+    )
 
 
 async def reap_stale_jobs() -> int:
@@ -860,7 +1038,9 @@ async def reap_stale_jobs() -> int:
                 f"{SUPABASE_URL}/rest/v1/jobs",
                 params={
                     "status": "in.(queued,running)",
-                    "select": "id,status,updated_at",
+                    # user_id/demo/result come back too, because a reaped job
+                    # owes its owner the credits it took (see below).
+                    "select": "id,status,updated_at,user_id,demo,result",
                 },
                 headers=headers,
             )
@@ -905,6 +1085,16 @@ async def reap_stale_jobs() -> int:
                 if mem and mem.status in (JobStatus.QUEUED, JobStatus.RUNNING):
                     mem.status = JobStatus.FAILED
                     mem.error = STALE_JOB_ERROR
+
+                # A job this reaper fails is a job that took the customer's
+                # credits and delivered nothing: every OTHER failure path
+                # refunds, and this one used to keep the money. Paid out from
+                # `_credits_charged`, which /api/generate and approve-script
+                # write on the job at the moment they take it -- so a run that
+                # was never charged (demo, anonymous, or one still writing its
+                # free script before approval) is given back nothing rather
+                # than minted credits it never paid.
+                await _refund_reaped_job(row)
 
                 reaped += 1
                 logger.info("Reaped stale job %s (updated_at=%s)", job_id, row.get("updated_at"))
@@ -998,20 +1188,34 @@ def _lipsync_was_charged(job: Job) -> bool:
 
 
 def _job_refund_amount(job: Job) -> int:
-    return (
-        job.num_scenes
-        + (1 if job.music_enabled else 0)
-        + (
-            job.num_scenes * DIALOGUE_EXTRA_CREDIT_COST
-            if job.dialogue_enabled
-            else 0
+    """Exactly what this job was charged, asked of the function that charged it.
+
+    This used to be a second copy of the arithmetic, and a copy that did not
+    know about the PLAN: music is billed only on Creator and Pro and dialogue
+    only on Pro, so a free-plan job that carried those flags was refunded for
+    two surcharges nobody ever paid. build_credit_breakdown applies the same
+    gates on the way out as /api/generate applied on the way in, which is the
+    only arrangement in which the two cannot drift.
+
+    Fail-closed at 0 if api cannot be asked: refunding nothing is fixable by
+    hand, minting credits is not.
+    """
+    try:
+        from api import build_credit_breakdown
+
+        return build_credit_breakdown(
+            job.num_scenes,
+            music_enabled=job.music_enabled,
+            dialogue_enabled=job.dialogue_enabled,
+            lipsync_enabled=job.lipsync_enabled,
+            plan=job.plan,
+            language=job.language,
+        )["total_credits"]
+    except Exception:  # pragma: no cover -- api not importable
+        logger.exception(
+            "Refund amount for job %s could not be computed; refunding 0", job.id
         )
-        + (
-            job.num_scenes * LIPSYNC_EXTRA_CREDIT_COST
-            if _lipsync_was_charged(job)
-            else 0
-        )
-    )
+        return 0
 
 
 async def _refund_undelivered_extras(job: Job, result: Dict[str, Any]) -> None:
@@ -1076,13 +1280,18 @@ async def _record_series_episode(job: Job, result: Dict[str, Any]) -> Dict[str, 
         await record_episode(
             job.user_id, job.series_id, job.episode_number, job.id, result
         )
-    except Exception as exc:
-        logger.warning(
+    except Exception:
+        # error, not warning: the episode was rendered and paid for, and the
+        # series now has a gap nothing downstream will fill in. The next
+        # episode is written against a continuity brief that has never heard
+        # of this one -- so the customer's series quietly forgets an episode
+        # they are watching. With the traceback, because this is a bug to fix
+        # rather than a condition to tolerate.
+        logger.exception(
             "Episode %s of series %s was delivered but not recorded on the "
-            "series: %s",
+            "series",
             job.episode_number,
             job.series_id,
-            exc,
         )
     return result
 
@@ -1229,6 +1438,14 @@ async def run_generation_job(job: Job, api_key: str):
                     #
                     # Recorded as INTENT here, where it is still known.
                     "_lipsync_enabled": bool(job.lipsync_enabled),
+                    # Recorded as intent too, for the same reason: the status
+                    # only says "awaiting approval" while the job is still
+                    # waiting. Once approved it is RUNNING like any other job,
+                    # and a reader inferring the flag from the status would say
+                    # this run never required approval -- which is the opposite
+                    # of true, and is what decides whether credits were taken
+                    # up front or at approval time.
+                    "_require_script_approval": True,
                 }
                 job.status = JobStatus.AWAITING_SCRIPT_APPROVAL
                 await job_store.persist(job)
@@ -1369,6 +1586,11 @@ async def run_regenerate_scene_job(
 
     previous_result = dict(job.result or {})
     job.status = JobStatus.RUNNING
+    # One scene's worth of work, even for a beat retake, which is shorter: the
+    # ETA model's smallest unit is a scene (interfaces/render_eta.RenderPlan
+    # counts scene batches), so a beat is quoted as the scene it belongs to.
+    # An overestimate that finishes early, rather than a countdown that hits
+    # zero with work still running.
     arm_job_eta(job, scenes=1, prologue=False)
     await job_store.persist(job)
 
@@ -1392,6 +1614,10 @@ async def run_regenerate_scene_job(
         completed video the user can no longer play."""
         job.result = previous_result
         job.status = JobStatus.COMPLETED
+        # ...and the error with it. A job that is COMPLETED and still carries
+        # the error from the retake that failed is a finished video the client
+        # renders under a failure message.
+        job.error = None
 
     try:
         pipeline = Idea2VideoPipeline(api_key=api_key, demo=job.demo)
@@ -1489,6 +1715,10 @@ async def run_global_edit_job(
     def _restore_previous() -> None:
         job.result = previous_result
         job.status = JobStatus.COMPLETED
+        # ...and the error with it. A job that is COMPLETED and still carries
+        # the error from the retake that failed is a finished video the client
+        # renders under a failure message.
+        job.error = None
 
     try:
         pipeline = Idea2VideoPipeline(api_key=api_key, demo=job.demo)
@@ -1564,6 +1794,10 @@ async def run_timeline_edit_job(job: Job, api_key: str, timeline: List[Dict[str,
     def _restore_previous() -> None:
         job.result = previous_result
         job.status = JobStatus.COMPLETED
+        # ...and the error with it. A job that is COMPLETED and still carries
+        # the error from the retake that failed is a finished video the client
+        # renders under a failure message.
+        job.error = None
 
     try:
         pipeline = Idea2VideoPipeline(api_key=api_key, demo=job.demo)
@@ -1635,6 +1869,10 @@ async def run_restore_take_job(
     def _restore_previous() -> None:
         job.result = previous_result
         job.status = JobStatus.COMPLETED
+        # ...and the error with it. A job that is COMPLETED and still carries
+        # the error from the retake that failed is a finished video the client
+        # renders under a failure message.
+        job.error = None
 
     label = f"Take {take} of scene {scene_index + 1}"
     try:
@@ -1751,6 +1989,12 @@ async def run_continue_from_script_job(job: Job, api_key: str, script_data: Dict
         # Keep approved script alongside final result for the UI.
         result = await _record_series_episode(job, {**result, "script": script_data})
         job.result = result
+        # Same as the full path (run_generation_job): a lip-sync pass that was
+        # charged for and then refused by the provider is given back here,
+        # before COMPLETED is persisted, so the balance on screen when the film
+        # lands is already the corrected one. Approved-script jobs pay for lip
+        # sync exactly like any other job; only this branch forgot to.
+        await _refund_undelivered_extras(job, result)
         job.status = JobStatus.COMPLETED
         await job_store.persist(job)
         await job_store.emit(

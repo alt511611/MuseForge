@@ -20,7 +20,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("MUAPI_KEY", "test-key-not-real")
 
 import jobs as jobs_module  # noqa: E402
-from jobs import LIPSYNC_EXTRA_CREDIT_COST, Job, _refund_undelivered_extras  # noqa: E402
+from jobs import (  # noqa: E402
+    DIALOGUE_EXTRA_CREDIT_COST,
+    LIPSYNC_EXTRA_CREDIT_COST,
+    Job,
+    _refund_undelivered_extras,
+)
 
 
 @pytest.fixture
@@ -152,11 +157,15 @@ def test_a_failed_film_the_picture_does_not_speak_still_gets_the_surcharge_back(
     from jobs import _job_refund_amount
 
     monkeypatch.setattr(api_mod, "_picture_will_carry_dialogue", lambda lang: False)
-    job = _job()
+    monkeypatch.setattr(api_mod, "is_dialogue_enabled", lambda: True)
+    monkeypatch.setattr(api_mod, "_lipsync_configured", lambda: True)
+    # Pro, because that is the only plan on which a lip-sync surcharge is
+    # taken in the first place, and a refund mirrors what was taken.
+    job = _job(plan="pro", dialogue_enabled=True)
 
     assert _job_refund_amount(job) == job.num_scenes + (
-        job.num_scenes * LIPSYNC_EXTRA_CREDIT_COST
-    )
+        job.num_scenes * DIALOGUE_EXTRA_CREDIT_COST
+    ) + (job.num_scenes * LIPSYNC_EXTRA_CREDIT_COST)
 
 
 def test_the_refund_matches_what_generate_would_have_deducted(
@@ -172,14 +181,14 @@ def test_the_refund_matches_what_generate_would_have_deducted(
 
     monkeypatch.setattr(api_mod, "is_dialogue_enabled", lambda: True)
     monkeypatch.setattr(api_mod, "_lipsync_configured", lambda: True)
-    job = _job(dialogue_enabled=True)
+    job = _job(plan="pro", dialogue_enabled=True)
 
     charged = api_mod.build_credit_breakdown(
         job.num_scenes,
         music_enabled=job.music_enabled,
         dialogue_enabled=job.dialogue_enabled,
         lipsync_enabled=job.lipsync_enabled,
-        plan="pro",
+        plan=job.plan,
         language=job.language,
     )["total_credits"]
 
@@ -203,7 +212,7 @@ def test_the_refund_never_exceeds_what_the_job_was_charged():
     """Read off the two expressions rather than trusted to stay in step."""
     from jobs import _job_refund_amount
 
-    job = _job()
+    job = _job(plan="pro", dialogue_enabled=True)
     full = _job_refund_amount(job)
     lipsync_share = job.num_scenes * LIPSYNC_EXTRA_CREDIT_COST
 
