@@ -135,7 +135,7 @@ ALLOWED_ORIGINS = os.environ.get(
 # Override via ALLOWED_ORIGIN_REGEX if you need something stricter/different.
 ALLOWED_ORIGIN_REGEX = os.environ.get(
     "ALLOWED_ORIGIN_REGEX",
-    r"https://(.*\.vercel\.app|(www\.)?museforge\.studio)",
+    r"https://([A-Za-z0-9-]+\.)*vercel\.app|https://(www\.)?museforge\.studio",
 )
 
 DEMO_FLAG = os.environ.get("MUSEFORGE_DEMO", "").lower() in ("1", "true", "yes")
@@ -259,24 +259,52 @@ class _SlidingWindowRateLimiter:
     """Per-key sliding-window rate limiter using monotonic clock.
 
     Keeps a list of hit timestamps per key and trims them on every check.
-    The memory footprint is bounded by limit * number_of_unique_keys.
+    Per-key memory is bounded by `limit`, but the KEY SET is not: every new
+    IP or user id adds an entry that nothing ever removed, so a spray of
+    requests from thousands of addresses grew this dict without limit. Keys
+    whose hits have all aged out are swept once the dict crosses
+    _SWEEP_THRESHOLD, which keeps the footprint proportional to the traffic
+    actually inside the window.
     """
+
+    _SWEEP_THRESHOLD = 10_000
 
     def __init__(self, limit: int = 5, window: float = 60.0):
         self._limit = limit
         self._window = window
-        self._hits: dict[str, list[float]] = defaultdict(list)
+        self._hits: dict[str, list[float]] = {}
 
     def allow(self, key: str) -> bool:
         now = time.monotonic()
         cutoff = now - self._window
-        hits = [t for t in self._hits[key] if t > cutoff]
+        hits = [t for t in self._hits.get(key, ()) if t > cutoff]
         if len(hits) >= self._limit:
             self._hits[key] = hits
             return False
         hits.append(now)
         self._hits[key] = hits
+        if len(self._hits) > self._SWEEP_THRESHOLD:
+            self._sweep(cutoff)
         return True
+
+    def _sweep(self, cutoff: float) -> None:
+        """Drop keys that can no longer refuse anything.
+
+        Expired keys go first. If that is not enough -- a flood wide enough to
+        keep tens of thousands of distinct addresses inside a single window --
+        the most recently seen keys are kept and the rest dropped, because a
+        bounded limiter that occasionally forgets a quiet address is better
+        than an unbounded dict on a path any anonymous caller can reach.
+        """
+        live = {
+            key: times
+            for key, times in self._hits.items()
+            if any(t > cutoff for t in times)
+        }
+        if len(live) > self._SWEEP_THRESHOLD:
+            newest = sorted(live.items(), key=lambda kv: max(kv[1]), reverse=True)
+            live = dict(newest[: self._SWEEP_THRESHOLD])
+        self._hits = live
 
 
 # 5 generate requests per 60 s per authenticated user / IP
@@ -344,7 +372,12 @@ def _cors_header_for(request: Request) -> dict:
         return {}
     if origin in ALLOWED_ORIGINS:
         return {"Access-Control-Allow-Origin": origin, "Vary": "Origin"}
-    if ALLOWED_ORIGIN_REGEX and re.match(ALLOWED_ORIGIN_REGEX, origin):
+    # fullmatch, not match: re.match only anchors the START, so a hostile
+    # origin like https://museforge.studio.attacker.com would satisfy the
+    # pattern and be echoed back as an allowed origin. Starlette's own
+    # CORSMiddleware uses fullmatch for allow_origin_regex; this manual
+    # path has to agree with it or it is the weaker of the two.
+    if ALLOWED_ORIGIN_REGEX and re.fullmatch(ALLOWED_ORIGIN_REGEX, origin):
         return {"Access-Control-Allow-Origin": origin, "Vary": "Origin"}
     return {}
 
@@ -359,14 +392,53 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
     )
 
 
+def _hsts_enabled() -> bool:
+    """True when this process is serving over TLS on a real domain.
+
+    Opt-out rather than opt-in: production is the case that must not be
+    forgotten. MUSEFORGE_ENV names the environment (anything other than
+    "production" is treated as local), and MUSEFORGE_HSTS forces either
+    answer for deployments that set neither.
+    """
+    forced = os.environ.get("MUSEFORGE_HSTS", "").strip().lower()
+    if forced in ("1", "true", "yes"):
+        return True
+    if forced in ("0", "false", "no"):
+        return False
+    env = os.environ.get("MUSEFORGE_ENV", "production").strip().lower()
+    return env not in ("dev", "development", "local", "test")
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+    # HSTS only where there is TLS to insist on. Sent from a local server it
+    # pins http://localhost to https for two years in that browser, for every
+    # project on that port -- a developer machine that then refuses to load
+    # anything on localhost, with no obvious cause and no way to undo it short
+    # of clearing the browser's HSTS store by hand.
+    if _hsts_enabled():
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=63072000; includeSubDomains"
+        )
     return response
+
+
+# Real, currently-enforced plan differentiators. Keep in sync with
+# supabase_migration.sql's public.plan_limits view, client IdeaForm.js, and
+# client/lib/i18n plan_*_features strings. Do NOT add a plan feature here
+# (or to the pricing copy) unless there's an actual enforcement mechanism.
+# Avg ~7.5s/scene (non-finale ≤9s, finale ≤15s) → Pro 24 scenes ≈ 3 min video.
+# Pydantic allows up to max(PLAN_MAX_SCENES); per-plan caps below are the ceiling.
+PLAN_MAX_SCENES = {"free": 8, "creator": 16, "pro": 24}
+
+#: The most scenes any plan allows, which is what the request models bound
+#: themselves by. Stated once: a hardcoded 24 in a Field() is a number that
+#: does not move when the Pro ceiling does.
+MAX_SCENES_ANY_PLAN = max(PLAN_MAX_SCENES.values())
 
 
 # ── Request / Response models ─────────────────────────────────────────────────
@@ -395,7 +467,7 @@ class GenerateRequest(BaseModel):
     # asked for vertical got a landscape video and no error explaining why.
     aspect_ratio: str = Field(default="16:9", pattern=r"^(16:9|9:16|1:1)$")
     # Absolute ceiling = Pro plan max; per-plan caps enforced in generate().
-    num_scenes: int = Field(default=3, ge=2, le=24)
+    num_scenes: int = Field(default=3, ge=2, le=MAX_SCENES_ANY_PLAN)
     # The drama's SPOKEN language, as an ISO-639-1 code. The site is served in
     # twenty locales and none of them reached the backend, so a Turkish user on
     # a Turkish page got whatever language the screenwriter happened to infer
@@ -413,7 +485,10 @@ class GenerateRequest(BaseModel):
     # 1080p-class render -- no video model in this pipeline generates 4K, and
     # neither does anyone else's.
     delivery_tier: str = Field(default="", pattern=r"^(|480p|720p|1080p|1440p|4k)$")
-    user_requirement: str = ""
+    # Bounded like `idea`: it goes straight into the screenwriter's prompt,
+    # and an unbounded field there is both a cost and a way to push the rest
+    # of the brief out of the model's context.
+    user_requirement: str = Field(default="", max_length=2000)
     character_image: Optional[str] = None
     character_name: str = ""
     # Optional base64 photo of the real place the drama is set in. Locks the
@@ -421,7 +496,12 @@ class GenerateRequest(BaseModel):
     # generated from the script's own setting_* fields instead.
     location_image: Optional[str] = None
     # Pro-only: reuse locked portraits from the character library.
-    library_characters: List[LibraryCharacterIn] = Field(default_factory=list)
+    # Capped: every entry is a locked face the writer is briefed about, and a
+    # cast of thousands is a prompt nothing can answer and a request nobody
+    # meant to make.
+    library_characters: List[LibraryCharacterIn] = Field(
+        default_factory=list, max_length=20
+    )
     # Optional instrumental background music. Only honoured for Creator/Pro
     # plans (checked server-side against the caller's actual plan) — silently
     # ignored for free/anonymous requests rather than erroring.
@@ -482,7 +562,7 @@ class EpisodeRequest(BaseModel):
     # the point of a series is that the previous episode's last frame already
     # says what happens next, so "" commissions exactly that.
     idea: str = Field(default="", max_length=2000)
-    user_requirement: str = ""
+    user_requirement: str = Field(default="", max_length=2000)
     music_enabled: bool = False
     dialogue_enabled: bool = False
     lipsync_enabled: bool = False
@@ -526,7 +606,7 @@ class GlobalEditRequest(BaseModel):
 
 
 class TimelineEntry(BaseModel):
-    scene_index: int = Field(..., ge=0, le=23)
+    scene_index: int = Field(..., ge=0, le=MAX_SCENES_ANY_PLAN - 1)
     # Seconds to shave off the head/tail of this clip. Capped well below any
     # clip's runtime; the pipeline additionally refuses to trim a shot to
     # nothing (see MIN_TRIMMED_SECONDS).
@@ -536,12 +616,14 @@ class TimelineEntry(BaseModel):
 
 class TimelineEditRequest(BaseModel):
     # The new cut, in order. Scenes left out are dropped from it.
-    timeline: List[TimelineEntry] = Field(..., min_length=1, max_length=24)
+    timeline: List[TimelineEntry] = Field(
+        ..., min_length=1, max_length=MAX_SCENES_ANY_PLAN
+    )
 
 
 class EstimateRequest(BaseModel):
     # Absolute ceiling = Pro plan max; estimate is informational only.
-    num_scenes: int = Field(default=3, ge=2, le=24)
+    num_scenes: int = Field(default=3, ge=2, le=MAX_SCENES_ANY_PLAN)
     music_enabled: bool = False
     dialogue_enabled: bool = False
     lipsync_enabled: bool = False
@@ -552,19 +634,14 @@ class EstimateRequest(BaseModel):
     language: str = "en"
     # Client-supplied plan for the credit breakdown preview. The generate
     # path always re-checks the caller's real plan server-side; spoofing
-    # here only changes the displayed estimate, not billing.
-    plan: str = "free"
+    # here only changes the displayed estimate, not billing. Constrained
+    # anyway, so an unknown plan is a 422 that names the field rather than a
+    # silent fall-through to the free-tier quote.
+    plan: str = Field(default="free", pattern=r"^(free|creator|pro)$")
 
 
 # ── Plan helpers ──────────────────────────────────────────────────────────────
 
-# Real, currently-enforced plan differentiators. Keep in sync with
-# supabase_migration.sql's public.plan_limits view, client IdeaForm.js, and
-# client/lib/i18n plan_*_features strings. Do NOT add a plan feature here
-# (or to the pricing copy) unless there's an actual enforcement mechanism.
-# Avg ~7.5s/scene (non-finale ≤9s, finale ≤15s) → Pro 24 scenes ≈ 3 min video.
-# Pydantic allows up to max(PLAN_MAX_SCENES); per-plan caps below are the ceiling.
-PLAN_MAX_SCENES = {"free": 8, "creator": 16, "pro": 24}
 MUSIC_EXTRA_CREDIT_COST = 1  # flat surcharge on top of scene credits, Creator/Pro only
 DIALOGUE_EXTRA_CREDIT_COST = 1  # per scene, Pro only
 # Per scene, Pro only, on top of dialogue. Lip sync is a second paid provider
@@ -619,7 +696,19 @@ def _picture_will_carry_dialogue(language: str) -> bool:
         from pipelines.idea2video import picture_will_carry_dialogue
 
         return picture_will_carry_dialogue(normalize_language(language))
-    except Exception:  # pragma: no cover -- a missing optional backend
+    except ImportError:  # pragma: no cover -- a missing optional backend
+        return False
+    except Exception:
+        # Anything else is a bug in the backend selector, not an absent
+        # backend. Still answered "no native speech" -- a quote is not worth
+        # failing a request over -- but no longer silently: an exception
+        # swallowed here shows up as customers being billed for a lip-sync
+        # pass that does not run, which is not a thing to diagnose twice.
+        logger.exception(
+            "Could not decide whether %s renders as a speaking take; pricing "
+            "it as if it does not",
+            language,
+        )
         return False
 
 
@@ -804,10 +893,16 @@ async def public_stats():
     if SUPABASE_URL and SUPABASE_SERVICE_KEY:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                import datetime
-                first_of_month = datetime.datetime.utcnow().replace(
-                    day=1, hour=0, minute=0, second=0, microsecond=0
-                ).isoformat() + "Z"
+                from datetime import datetime, timezone
+
+                # Aware, not naive: datetime.utcnow() is deprecated in 3.12
+                # precisely because it returns a UTC time that claims to be
+                # local, and the string below is compared against timestamptz.
+                first_of_month = (
+                    datetime.now(timezone.utc)
+                    .replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                    .isoformat()
+                )
                 headers = {
                     "apikey": SUPABASE_SERVICE_KEY,
                     "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
@@ -873,15 +968,22 @@ async def estimate(req: EstimateRequest):
         language=req.language,
     )
     # Surface wall-clock wait for longer jobs so users know before they start.
-    # Scenes run sequentially for character continuity — 16–24 scene jobs
-    # commonly take 30–60+ minutes.
+    #
+    # `wait_warning_minutes` is the field the client actually renders, through
+    # its own translated string (form_long_job_warning), which is why this
+    # English sentence is a fallback for older bundles rather than the message.
+    # It no longer says scenes render "one-by-one": they render in parallel
+    # batches (pipelines/idea2video._scene_concurrency), which is also why the
+    # estimate is not linear in the scene count, and a warning that explains
+    # the wait with a mechanism the product does not use teaches the reader
+    # something false about their own job.
     wait_warning = None
     wait_warning_minutes = None
     if not demo and minutes >= WAIT_WARNING_MINUTES:
         wait_warning_minutes = minutes
         wait_warning = (
-            f"A production this long typically takes ~{minutes} minutes on average. "
-            "Scenes render one-by-one for character continuity — keep this tab open."
+            f"A production this long typically takes ~{minutes} minutes on "
+            "average — keep this tab open."
         )
     return {
         "num_scenes": req.num_scenes,
@@ -905,8 +1007,16 @@ async def _get_user_plan(user_id: str) -> str:
     """Return the user's subscription plan ('free', 'creator', 'pro').
 
     Returns 'pro' (unrestricted) when Supabase isn't configured, matching
-    _get_user_credits' dev-mode fallback. Returns 'free' on lookup failure —
-    the safest default since it's the most restrictive plan.
+    _get_user_credits' dev-mode fallback. Falls back to the last plan this
+    process saw for the user, and only then to 'free'.
+
+    That fallback is the point. Dropping a Pro customer to 'free' during a
+    Supabase blip does not merely restrict them: it silently downgrades the
+    film. Their scene ceiling drops to 8, music and dialogue are dropped
+    without an error, and a 4K order is delivered at 1080p -- and they are
+    charged for whatever was made. A minute-old answer is a far better guess
+    than the most restrictive one. Only a user this process has never
+    successfully looked up gets 'free'.
     """
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         return "pro"
@@ -919,10 +1029,48 @@ async def _get_user_plan(user_id: str) -> str:
             )
             data = resp.json()
             if isinstance(data, list) and data:
-                return data[0].get("plan") or "free"
+                plan = data[0].get("plan") or "free"
+                _remember_plan(user_id, plan)
+                return plan
     except Exception as exc:
+        remembered = _remembered_plan(user_id)
+        if remembered:
+            logger.warning(
+                "Could not read the plan for %s (%s); using the last one this "
+                "process saw (%s) rather than downgrading them mid-order",
+                user_id, exc, remembered,
+            )
+            return remembered
         logger.error("_get_user_plan failed for user %s: %s", user_id, exc)
     return "free"
+
+
+#: Last plan successfully read per user, and when. Bounded and short-lived:
+#: it exists to survive an outage, not to cache a subscription. An upgrade or
+#: cancellation is visible on the next successful read, at most _PLAN_CACHE_TTL
+#: seconds of staleness on a lookup that WORKED -- and this value is only ever
+#: consulted when one did not.
+_PLAN_CACHE_TTL = float(os.environ.get("MUSEFORGE_PLAN_CACHE_TTL", "900"))
+_PLAN_CACHE_MAX = 10_000
+_plan_cache: Dict[str, tuple] = {}
+
+
+def _remember_plan(user_id: str, plan: str) -> None:
+    if len(_plan_cache) >= _PLAN_CACHE_MAX:
+        cutoff = time.monotonic() - _PLAN_CACHE_TTL
+        for key, (_, seen) in list(_plan_cache.items()):
+            if seen < cutoff:
+                _plan_cache.pop(key, None)
+        if len(_plan_cache) >= _PLAN_CACHE_MAX:
+            _plan_cache.clear()
+    _plan_cache[user_id] = (plan, time.monotonic())
+
+
+def _remembered_plan(user_id: str) -> str:
+    plan, seen = _plan_cache.get(user_id, ("", 0.0))
+    if plan and time.monotonic() - seen <= _PLAN_CACHE_TTL:
+        return plan
+    return ""
 
 
 # ── Credit helpers ────────────────────────────────────────────────────────────
@@ -951,7 +1099,10 @@ async def _get_user_credits(user_id: str) -> int:
             )
             if resp.status_code < 400:
                 balance = resp.json()
-                if isinstance(balance, int):
+                # `not isinstance(balance, bool)`, because bool subclasses int
+                # in Python: a JSON `true`/`false` from a misdeclared RPC would
+                # otherwise sail through as a balance of 1 or 0.
+                if isinstance(balance, int) and not isinstance(balance, bool):
                     return balance
 
             # Fall back to the cache if the RPC is missing -- an install that
@@ -996,7 +1147,27 @@ async def _deduct_credits(user_id: str, amount: int, reason: str = "video_genera
                 json={"p_user_id": user_id, "p_amount": amount},
                 headers=sb_headers,
             )
+            # The RPC's HTTP status has to be read BEFORE its body. On a 4xx/5xx
+            # PostgREST returns an error OBJECT, and `{...} == -1` is False, so
+            # the old code read a failed deduction as a successful one and let
+            # the render run for free. Staying fail-open on an outage is the
+            # deliberate call (a paying customer is not blocked by our database
+            # having a bad minute), but it is now a call that leaves a record.
+            if rpc_resp.status_code >= 400:
+                logger.error(
+                    "deduct_credits RPC failed for %s (HTTP %s): %s — allowing the "
+                    "job through without charging",
+                    user_id, rpc_resp.status_code, rpc_resp.text[:300],
+                )
+                return True
             new_balance = rpc_resp.json()
+            if not isinstance(new_balance, int) or isinstance(new_balance, bool):
+                logger.error(
+                    "deduct_credits returned %r for %s, which is not a balance — "
+                    "allowing the job through without charging",
+                    new_balance, user_id,
+                )
+                return True
             if new_balance == -1:
                 return False  # insufficient credits
             # Fire-and-forget ledger entry
@@ -1035,7 +1206,9 @@ async def generate(
     if not _rate_limiter.allow(rl_key):
         raise HTTPException(
             status_code=429,
-            detail="Çok fazla istek. Lütfen 1 dakika bekleyin ve tekrar deneyin.",
+            # English for the same reason as the billing message below: the
+            # client renders `detail` verbatim in every locale it serves.
+            detail="Too many requests. Please wait a minute and try again.",
             headers={"Retry-After": "60"},
         )
 
@@ -1063,6 +1236,9 @@ async def generate(
     # "" resolves at render time under the job's own plan, which is what an
     # anonymous or demo run wants: the deployment default, never a paid tier.
     delivery_tier = ""
+    # 0 until something is actually taken: a demo run, an anonymous run and a
+    # script-approval run all reach the job creation below without paying.
+    credit_cost = 0
     if current_user and not demo:
         plan = await _get_user_plan(current_user.user_id)
         _enforce_plan_scene_limit(plan, req.num_scenes)
@@ -1145,6 +1321,16 @@ async def generate(
         library_characters=library_characters,
     )
 
+    # What this job was actually charged, written on the job itself. The
+    # deduction happens BEFORE the job exists (there is no id to bill
+    # against yet), so nothing downstream could otherwise tell a running job
+    # that has been paid for from one still writing its free script -- which
+    # is what the stale-job reaper needs to know before it hands credits back.
+    # Underscore-prefixed, so public_result keeps it off the wire.
+    if credit_cost:
+        job.result = {**(job.result or {}), "_credits_charged": int(credit_cost)}
+        await job_store.persist(job)
+
     logger.info("About to schedule background job %s", job.id)
     background_tasks.add_task(run_generation_job, job, api_key)
     logger.info("Successfully scheduled background job %s", job.id)
@@ -1152,6 +1338,18 @@ async def generate(
 
 
 # ── Job endpoints (auth optional for public demo jobs) ───────────────────────
+
+def _assert_may_read_job(owner_id: Optional[str], current_user: Optional["AuthUser"]) -> None:
+    """Refuse a signed-in caller who is not the job's owner (admins excepted).
+
+    Deliberately silent when there is no token: several of these URLs are
+    loaded by the browser itself (<video src>, EventSource), which cannot
+    attach one.
+    """
+    if current_user and owner_id and owner_id != current_user.user_id:
+        if not current_user.is_admin:
+            raise HTTPException(status_code=403, detail="Access denied")
+
 
 @app.get("/api/jobs/{job_id}")
 async def get_job(
@@ -1178,14 +1376,25 @@ async def get_job(
 
 
 @app.get("/api/jobs/{job_id}/video")
-async def get_job_video(job_id: str, format: Optional[str] = None):
+async def get_job_video(
+    job_id: str,
+    format: Optional[str] = None,
+    current_user: Optional[AuthUser] = Depends(get_optional_user),
+):
+    # Same ownership rule as GET /api/jobs/{job_id}: a signed-in customer may
+    # not pull down another account's film. It stays permissive for callers
+    # with no token, because the browser fetches this URL from a <video> tag
+    # and a download link, neither of which can carry an Authorization header.
     job = job_store.get(job_id)
 
     if job:
+        _assert_may_read_job(job.user_id, current_user)
         result = job.result
     else:
         # Post-restart fallback
         data = await job_store.get_or_fetch_dict(job_id)
+        if data:
+            _assert_may_read_job(data.get("user_id"), current_user)
         result = data.get("result") if data else None
 
     if not result:
@@ -1548,23 +1757,24 @@ async def approve_script(
     job.num_scenes = approved_scenes  # keeps refunds/estimates consistent
 
     # Charge credits here — script phase was free.
+    credit_cost = 0
     if current_user and not demo and job.user_id:
         plan = (job.plan or await _get_user_plan(job.user_id) or "free").lower()
         _enforce_plan_scene_limit(plan, approved_scenes)
-        credit_cost = (
-            approved_scenes
-            + (MUSIC_EXTRA_CREDIT_COST if job.music_enabled else 0)
-            + (
-                approved_scenes * DIALOGUE_EXTRA_CREDIT_COST
-                if job.dialogue_enabled
-                else 0
-            )
-            + (
-                approved_scenes * LIPSYNC_EXTRA_CREDIT_COST
-                if job.lipsync_enabled
-                else 0
-            )
-        )
+        # The same function that produced the quote the customer agreed to,
+        # rather than a second copy of the arithmetic. The copy that used to
+        # live here had drifted: it knew nothing about the film's language, so
+        # it charged a lip-sync credit per scene even when the picture speaks
+        # its own lines and that pass never runs -- the one surcharge
+        # build_credit_breakdown exists to waive.
+        credit_cost = build_credit_breakdown(
+            approved_scenes,
+            music_enabled=job.music_enabled,
+            dialogue_enabled=job.dialogue_enabled,
+            lipsync_enabled=job.lipsync_enabled,
+            plan=plan,
+            language=job.language,
+        )["total_credits"]
         ok = await _deduct_credits(
             job.user_id, credit_cost, "video_generation", job_id=job.id
         )
@@ -1576,6 +1786,11 @@ async def approve_script(
 
     script_data = script.model_dump()
     job.result = {**(job.result or {}), "script": script_data}
+    # Same record as /api/generate keeps: what was taken, on the job, so a
+    # reaped or otherwise abandoned run can be given back exactly that much
+    # and a run that was never charged is given back nothing.
+    if credit_cost:
+        job.result["_credits_charged"] = int(credit_cost)
     job.status = JobStatus.RUNNING
     await job_store.persist(job)
     await job_store.emit(job, "screenwriting", "Script approved — starting production", 12)
@@ -1933,10 +2148,17 @@ async def timeline_edit(
 
 
 @app.get("/api/jobs/{job_id}/stream")
-async def stream_job(job_id: str):
+async def stream_job(
+    job_id: str,
+    current_user: Optional[AuthUser] = Depends(get_optional_user),
+):
     job = job_store.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    # EventSource cannot set an Authorization header, so the owner's own
+    # browser arrives here anonymous -- which is why this, like the video
+    # endpoint, refuses only a token belonging to somebody else.
+    _assert_may_read_job(job.user_id, current_user)
 
     async def event_generator():
         async for event in job_store.subscribe(job_id):
@@ -2340,12 +2562,15 @@ def _next_episode_idea(series: Series) -> str:
     summarise their own cliffhanger. Episode one with no idea falls back to
     the premise, which is the only thing that exists yet.
     """
+    parts = []
     if series.open_question:
-        return (
-            f"Answer what happens next: {series.open_question}. "
-            f"{series.premise}".strip()
-        )
-    return series.premise
+        parts.append(f"Answer what happens next: {series.open_question}.")
+    if series.premise:
+        parts.append(series.premise)
+    # Joined rather than interpolated: with no premise the old form left a
+    # trailing space, and with no open question it was the premise alone --
+    # two shapes the caller could not tell apart from the outside.
+    return " ".join(parts).strip()
 
 
 # ── Auth helper ───────────────────────────────────────────────────────────────
@@ -2439,6 +2664,14 @@ async def admin_retry_job(
         plan=old.plan,
         require_script_approval=old.require_script_approval,
         library_characters=list(old.library_characters or []),
+        # Also the four that decide WHAT gets rendered rather than how it is
+        # billed: without them a Pro 4K retry comes back at 1080p, a
+        # micro-drama comes back cinematic, and an episode of a series comes
+        # back as a standalone film with no memory of the episodes before it.
+        narrative_mode=old.narrative_mode,
+        delivery_tier=old.delivery_tier,
+        series_id=old.series_id,
+        series_brief=old.series_brief,
     )
     api_key = os.environ.get("MUAPI_KEY", "")
     logger.info("About to schedule background job %s", new_job.id)
@@ -2725,7 +2958,14 @@ async def stripe_portal(
     if not customer_id:
         raise HTTPException(
             status_code=400,
-            detail="Bu hesap için Stripe müşteri kaydı bulunamadı. Önce bir abonelik başlatın.",
+            # English, like every other detail this API returns: the client is
+            # served in twenty locales and renders `detail` verbatim, so a
+            # Turkish sentence here was unreadable for almost everyone who hit
+            # it -- at the moment they are trying to manage their billing.
+            detail=(
+                "No Stripe customer record found for this account. "
+                "Start a subscription first."
+            ),
         )
 
     try:
