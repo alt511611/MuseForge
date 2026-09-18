@@ -854,9 +854,24 @@ def _scene_concurrency(total_scenes: int) -> int:
     them together would race and silently fall back to the locked portrait,
     quietly discarding the very continuity that mode exists to provide.
     """
-    from pipelines.script2video import is_dynamic_reference_enabled
+    # Guarded, because this function is also on the QUOTE path: /api/estimate
+    # asks for it (api.render_plan_for) on a request anyone can make, and
+    # script2video pulls in the whole render stack. An install missing one of
+    # those optional dependencies answered every estimate with a 500 -- the
+    # pricing page, for a question that is arithmetic. The flag itself is an
+    # environment variable, so it can still be read the one way that cannot
+    # fail to import.
+    try:
+        from pipelines.script2video import is_dynamic_reference_enabled
 
-    if is_dynamic_reference_enabled():
+        chained = is_dynamic_reference_enabled()
+    except Exception:  # pragma: no cover -- render stack not installed
+        chained = os.environ.get("MUSEFORGE_DYNAMIC_REFERENCE", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+    if chained:
         return 1
     raw = os.environ.get("MUSEFORGE_SCENE_CONCURRENCY", "").strip()
     if raw:
@@ -3018,7 +3033,11 @@ def _probe_video_duration(video_path: str) -> float:
 
         with VideoFileClip(video_path) as clip:
             return float(clip.duration or 0.0)
-    except Exception:
+    except Exception as exc:
+        # debug rather than silence: 0.0 travels to callers as "unknown" and
+        # they all do nothing with it, so without this line a clip that cannot
+        # be measured is indistinguishable from one that needed no measuring.
+        logger.debug("Could not probe the duration of %s: %s", video_path, exc)
         return 0.0
 
 
@@ -4288,6 +4307,13 @@ class Idea2VideoPipeline:
         # stop losing a scene to it.
         semaphore = asyncio.Semaphore(_lipsync_concurrency(len(ordered)))
         completed = 0
+        # Held across the count AND the emit, the same way the scene loop does
+        # it (_render_scene). Nothing is lost without it -- a coroutine cannot
+        # be interrupted between the two statements -- but three syncs
+        # finishing together could still emit 3/3, 1/3, 2/3 in whatever order
+        # the loop resumed them, and a progress bar that goes backwards reads
+        # as a stall.
+        progress_lock = asyncio.Lock()
 
         # Say the stage has STARTED, not just that a scene of it has finished.
         # The only other emit here fires on completion, so until the first
@@ -4595,12 +4621,13 @@ class Idea2VideoPipeline:
                         return None
                     local_path = rejoined
 
-                completed += 1
-                await progress(
-                    "lipsync",
-                    f"Syncing lips to dialogue ({completed}/{len(ordered)})",
-                    88,
-                )
+                async with progress_lock:
+                    completed += 1
+                    await progress(
+                        "lipsync",
+                        f"Syncing lips to dialogue ({completed}/{len(ordered)})",
+                        88,
+                    )
                 return scene_index, local_path
 
         results = await asyncio.gather(
@@ -4717,8 +4744,14 @@ class Idea2VideoPipeline:
             )
             for i, c in enumerate(script.characters)
         ]
+        # Computed ONCE. It is a pure function of the script and the cast, and
+        # calling it per character re-read every action line of every scene for
+        # each of them -- and repeated its "kept visible" log line once per
+        # character, which reads like several separate decisions about
+        # different people rather than one decision said several times.
+        heard_only = _heard_but_never_seen(script, cast)
         for character in cast:
-            if character.name.casefold() in _heard_but_never_seen(script, cast):
+            if character.name.casefold() in heard_only:
                 character.is_visible = False
         return cast
 
@@ -5038,6 +5071,11 @@ class Idea2VideoPipeline:
         # than reused: the scene it is taken from may be the one just retaken.
         sfx_tracks = [dict(t) for t in (state.get("sfx_tracks") or [])]
         reframe_plan: List[Dict[str, Any]] = []
+        # Built BEFORE the hook, off the scene clips, and handed to the cold
+        # open so the teaser inherits the crop of the scene it was cut from.
+        scene_anchor_map = _anchors_by_path(
+            ordered, scene_paths, previous_result.get("characters") or []
+        )
         assembly_paths, assembly_dialogue, assembly_sfx = await self._with_cold_open(
             scene_paths,
             [
@@ -5049,6 +5087,7 @@ class Idea2VideoPipeline:
             working_dir,
             narrative_mode=previous_result.get("narrative_mode", ""),
             language=previous_result.get("language", DEFAULT_LANGUAGE),
+            anchors=scene_anchor_map,
         )
 
         final_path = await self._assemble_final_drama(
@@ -5067,9 +5106,7 @@ class Idea2VideoPipeline:
             # rather than re-resolved from the environment, which would
             # silently re-master an old job at whatever today's default is.
             delivery_tier=previous_result.get("delivery_tier", ""),
-            scene_anchors=_anchors_by_path(
-                ordered, scene_paths, previous_result.get("characters") or []
-            ),
+            scene_anchors=scene_anchor_map,
             reframe_out=reframe_plan,
         )
 
@@ -5670,6 +5707,7 @@ class Idea2VideoPipeline:
             working_dir,
             narrative_mode=previous_result.get("narrative_mode", ""),
             language=previous_result.get("language", DEFAULT_LANGUAGE),
+            anchors=scene_anchor_map,
         )
 
         _check_cancel()
@@ -5721,6 +5759,7 @@ class Idea2VideoPipeline:
         working_dir: str,
         narrative_mode: str = "",
         language: str = DEFAULT_LANGUAGE,
+        anchors: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[str], List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Put the hook in front of the film, and move everything timed with it.
 
@@ -5744,11 +5783,20 @@ class Idea2VideoPipeline:
         ):
             return scene_paths, list(dialogue_tracks or []), list(sfx_tracks or [])
 
-        cold_open = await self._build_cold_open(
+        cold_open, teaser_source = await self._build_cold_open(
             scene_records, scene_paths, working_dir, language=language
         )
         if not cold_open:
             return scene_paths, list(dialogue_tracks or []), list(sfx_tracks or [])
+
+        # The teaser is a COPY of the last seconds of a scene, so where to
+        # point its crop is already known -- it is wherever that scene's crop
+        # points. Without this the hook is the one part of a vertical export
+        # that is centre-cropped: the most important second and a half of a
+        # micro-drama, framed by default, while the same footage later in the
+        # film is aimed properly. The card is left alone; it is black.
+        if anchors is not None and teaser_source in (anchors or {}):
+            anchors[cold_open[0]] = anchors[teaser_source]
 
         offset = len(cold_open)
         logger.info("Cold open: %d clip(s) in front of the drama.", offset)
@@ -5764,10 +5812,12 @@ class Idea2VideoPipeline:
         scene_paths: List[str],
         working_dir: str,
         language: str = DEFAULT_LANGUAGE,
-    ) -> List[str]:
+    ) -> Tuple[List[str], Optional[str]]:
         """A glimpse of the climax, then a card, to put in front of the film.
 
-        Returns the clips to PREPEND, or [] when there is nothing to build.
+        Returns the clips to PREPEND and the clip the teaser was cut from (so
+        the caller can point the teaser's crop where that scene's already
+        points), or ([], None) when there is nothing to build.
         Nothing here generates video: the teaser is the last second and a half
         of a scene that has already been rendered and paid for, which is what
         a flash-forward is — the same footage, shown early.
@@ -5797,7 +5847,7 @@ class Idea2VideoPipeline:
         # "the first scene".
         climax = declared or most_tense
         if climax is None:
-            return []
+            return [], None
 
         source = scene_paths[int(climax["clip_index"])]
         teaser = await trim_to_duration(
@@ -5808,10 +5858,10 @@ class Idea2VideoPipeline:
         if teaser == source:
             # Nothing was trimmed, so the "teaser" would be the whole scene
             # played twice. That is not a hook, it is a repeat.
-            return []
+            return [], None
 
         card = await self._build_title_card(teaser, working_dir, language)
-        return [teaser, card] if card else [teaser]
+        return ([teaser, card] if card else [teaser]), source
 
     async def _build_title_card(
         self,
@@ -7234,6 +7284,7 @@ class Idea2VideoPipeline:
                 working_dir,
                 narrative_mode=narrative_mode,
                 language=language,
+                anchors=scene_anchor_map,
             )
 
             final_path = await self._assemble_final_drama(

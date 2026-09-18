@@ -186,13 +186,16 @@ async def test_the_teaser_comes_from_the_climax(tmp_path, monkeypatch):
         _scene(2, "rising_action", 6),
     ]
     paths = ["s0.mp4", "s1.mp4", "s2.mp4"]
-    clips = await Idea2VideoPipeline(api_key="k", demo=False)._build_cold_open(
-        scenes, paths, str(tmp_path)
-    )
+    clips, teaser_source = await Idea2VideoPipeline(
+        api_key="k", demo=False
+    )._build_cold_open(scenes, paths, str(tmp_path))
 
     assert captured["source"] == "s1.mp4"
     assert captured["seconds"] == micro_drama.COLD_OPEN_SECONDS
     assert len(clips) == 1
+    # Reported back, so the teaser can be given the crop of the scene it was
+    # cut from rather than a centre crop of its own.
+    assert teaser_source == "s1.mp4"
 
 
 @pytest.mark.asyncio
@@ -205,10 +208,11 @@ async def test_a_scene_that_could_not_be_trimmed_is_not_used(tmp_path, monkeypat
         return source
 
     monkeypatch.setattr(pipeline, "trim_to_duration", _no_trim)
-    clips = await Idea2VideoPipeline(api_key="k", demo=False)._build_cold_open(
-        [_scene(0, "climax", 10)], ["s0.mp4"], str(tmp_path)
-    )
+    clips, teaser_source = await Idea2VideoPipeline(
+        api_key="k", demo=False
+    )._build_cold_open([_scene(0, "climax", 10)], ["s0.mp4"], str(tmp_path))
     assert clips == []
+    assert teaser_source is None
 
 
 @pytest.mark.asyncio
@@ -239,12 +243,9 @@ async def test_a_script_with_no_climax_still_finds_its_peak(tmp_path, monkeypatc
 
 @pytest.mark.asyncio
 async def test_a_drama_with_no_clips_gets_no_hook(tmp_path):
-    assert (
-        await Idea2VideoPipeline(api_key="k", demo=False)._build_cold_open(
-            [], [], str(tmp_path)
-        )
-        == []
-    )
+    assert await Idea2VideoPipeline(api_key="k", demo=False)._build_cold_open(
+        [], [], str(tmp_path)
+    ) == ([], None)
 
 
 # --- the hook survives editing ------------------------------------------
