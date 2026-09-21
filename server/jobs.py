@@ -520,6 +520,47 @@ class Job:
             return None
         return self._eta.remaining(time.monotonic())
 
+    def mark_provider_job_submitted(
+        self, key: str, request_id: str, endpoint: str, stage: str
+    ) -> None:
+        """Record a paid-for provider ticket the instant it is issued.
+
+        Written into ``result["_pending_provider_jobs"]`` -- the same
+        underscore-prefixed, Supabase-round-trip-surviving side channel
+        ``public_result()`` already strips before a response goes to the
+        browser (see its docstring). This is the only durable trace of the
+        ticket if the process dies before the matching
+        ``clear_provider_job()`` call: without it, a request MuAPI has
+        already queued (and, for many endpoints, billed) leaves no record
+        that it was ever sent. A later submit under the same ``key`` (the
+        retry loop in MuAPIClient.generate() issuing a fresh prediction
+        after a died inference) overwrites the entry rather than adding a
+        second one -- only the newest ticket for a given stage/scene/shot is
+        still live.
+        """
+        if not isinstance(self.result, dict):
+            self.result = {}
+        pending = self.result.setdefault("_pending_provider_jobs", {})
+        pending[key] = {
+            "request_id": request_id,
+            "endpoint": endpoint,
+            "stage": stage,
+            "submitted_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def clear_provider_job(self, key: str) -> None:
+        """Drop a pending-ticket record once its generate() call has returned.
+
+        Called on success (the file is in hand, nothing left to recover) and
+        left alone on failure paths that might still resolve later -- see
+        ``mark_provider_job_submitted``.
+        """
+        if not isinstance(self.result, dict):
+            return
+        pending = self.result.get("_pending_provider_jobs")
+        if isinstance(pending, dict):
+            pending.pop(key, None)
+
     def to_dict(self, include_events: bool = True) -> dict:
         return {
             "id": self.id,
@@ -1495,6 +1536,15 @@ async def run_generation_job(job: Job, api_key: str):
                     plan=job.plan,
                     preset_characters=library_characters or None,
                     location_image_override=location_url,
+                    # See run_continue_from_script_job's identical wiring:
+                    # persists a paid-for MuAPI ticket the instant it is
+                    # issued, so a crash mid-poll does not lose track of it.
+                    on_provider_job_submitted=lambda stage, scene_index, request_id: (
+                        job.mark_provider_job_submitted(
+                            f"{stage}:{scene_index}", request_id, "", stage
+                        ),
+                        asyncio.create_task(job_store.persist(job)),
+                    ),
                 ),
                 timeout=PIPELINE_HARD_TIMEOUT_SECONDS,
             )
@@ -1988,6 +2038,20 @@ async def run_continue_from_script_job(job: Job, api_key: str, script_data: Dict
                 plan=job.plan,
                 library_characters=library_characters or None,
                 location_image_override=location_override,
+                # See Job.mark_provider_job_submitted: records the ticket the
+                # instant MuAPI issues it, before this call waits on the poll,
+                # then writes it to Supabase right away rather than waiting
+                # for the next natural status-transition persist -- a crash
+                # between here and there is exactly the case this exists for.
+                # Endpoint is left blank -- the pipeline layer threads up the
+                # stage, not the specific endpoint name, but the request_id is
+                # what recovery actually needs.
+                on_provider_job_submitted=lambda stage, scene_index, request_id: (
+                    job.mark_provider_job_submitted(
+                        f"{stage}:{scene_index}", request_id, "", stage
+                    ),
+                    asyncio.create_task(job_store.persist(job)),
+                ),
             ),
             timeout=PIPELINE_HARD_TIMEOUT_SECONDS,
         )

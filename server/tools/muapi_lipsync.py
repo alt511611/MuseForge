@@ -108,12 +108,20 @@ class MuAPILipsync:
         video_path_or_url: str,
         audio_url: str,
         is_cancelled: Optional[Callable[[], bool]] = None,
+        on_submitted: Optional[Callable[[str], None]] = None,
     ) -> Optional[str]:
         """Return a URL to the lip-synced clip, or None if it could not be done.
 
         ``video_path_or_url`` may be a local file (the assembled scene clip on
         disk) — it is uploaded to MuAPI storage first, because the API fetches
         the video by URL.
+
+        ``on_submitted``, when given, fires with MuAPI's ``request_id`` the
+        instant this stage's ticket is issued -- before the poll. Lip sync is
+        charged per scene, up front (see ``jobs.py``'s
+        ``_lipsync_was_charged``); this is the hook that lets the caller
+        record that a charge has already happened before this call finishes
+        waiting on it.
         """
         if not self.available() or not audio_url or not video_path_or_url:
             return None
@@ -153,12 +161,15 @@ class MuAPILipsync:
                     return None
                 audio_url = uploaded_audio
 
+            # Passed only when wired -- see muapi_video_generator's identical note.
+            generate_kwargs = {"on_submitted": on_submitted} if on_submitted else {}
             return await self.client.generate(
                 ENDPOINT,
                 {"video_url": video_url, "audio_url": audio_url},
                 poll_interval=DEFAULT_POLL_INTERVAL,
                 max_polls=DEFAULT_MAX_POLLS,
                 is_cancelled=is_cancelled,
+                **generate_kwargs,
             )
         except MuAPIError as exc:
             logger.warning(

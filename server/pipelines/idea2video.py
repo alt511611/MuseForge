@@ -4229,8 +4229,17 @@ class Idea2VideoPipeline:
         reaction_tails: Optional[Dict[int, float]] = None,
         off_screen: Optional[Set[str]] = None,
         shots_by_clip: Optional[Dict[int, Sequence[Any]]] = None,
+        on_provider_job_submitted: Optional[Callable[[int, str], None]] = None,
     ) -> List[int]:
         """Replace each speaking scene's clip with a lip-synced one, in place.
+
+        ``on_provider_job_submitted``, when given, is called with
+        ``(scene_index, request_id)`` the instant MuAPI issues a ticket for
+        that scene's sync -- before this call waits on the result. Lip sync
+        is charged per scene, up front (see jobs.py's
+        ``_lipsync_was_charged``), so this is what lets the caller persist a
+        charge that has already happened before a crash mid-poll could lose
+        track of it.
 
         Mutates ``scene_paths`` (the list concatenation reads from) and
         ``dialogue_tracks`` (the list the audio mixer reads from), and returns
@@ -4588,8 +4597,17 @@ class Idea2VideoPipeline:
                             ),
                         )
 
+                # Passed only when wired: several tests substitute a bare fake
+                # for `lipsync` that does not accept this kwarg at all, and
+                # the feature is opt-in, so an unwired call must look exactly
+                # like it did before this existed.
+                sync_kwargs = {}
+                if on_provider_job_submitted:
+                    sync_kwargs["on_submitted"] = (
+                        lambda rid, _idx=scene_index: on_provider_job_submitted(_idx, rid)
+                    )
                 synced_url = await lipsync.sync(
-                    sync_source, guide_url, is_cancelled=is_cancelled
+                    sync_source, guide_url, is_cancelled=is_cancelled, **sync_kwargs
                 )
                 if not synced_url:
                     return None
@@ -6472,8 +6490,16 @@ class Idea2VideoPipeline:
         language: str = DEFAULT_LANGUAGE,
         narrative_mode: str = "",
         delivery_tier: str = "",
+        on_provider_job_submitted: Optional[Callable[[str, int, str], None]] = None,
     ) -> dict:
-        """Phase B: everything after screenwriting (portraits → scenes → assemble)."""
+        """Phase B: everything after screenwriting (portraits → scenes → assemble).
+
+        ``on_provider_job_submitted``, given, is called ``(stage, scene_index,
+        request_id)`` the instant a paid MuAPI ticket is issued for that
+        scene's stage -- currently wired for lip sync only (see
+        ``_lipsync_scenes``). Lets the caller (jobs.py) persist a charge that
+        has already happened before a crash mid-poll could lose track of it.
+        """
         os.makedirs(working_dir, exist_ok=True)
 
         # Resolved here rather than at the encode, so the tier this drama is
@@ -7295,6 +7321,11 @@ class Idea2VideoPipeline:
                     for scene in scene_results
                     if scene.get("clip_index") is not None
                 },
+                on_provider_job_submitted=(
+                    (lambda idx, rid: on_provider_job_submitted("lipsync", idx, rid))
+                    if on_provider_job_submitted
+                    else None
+                ),
             )
 
             # The user switched lip sync on and paid a credit per speaking
@@ -7610,6 +7641,7 @@ class Idea2VideoPipeline:
         narrative_mode: str = "",
         delivery_tier: str = "",
         series_brief: str = "",
+        on_provider_job_submitted: Optional[Callable[[str, int, str], None]] = None,
     ) -> dict:
         """Full end-to-end run (script + production). Default path unchanged."""
         script = await self.write_script_only(
@@ -7646,4 +7678,5 @@ class Idea2VideoPipeline:
             language=language,
             narrative_mode=narrative_mode,
             delivery_tier=delivery_tier,
+            on_provider_job_submitted=on_provider_job_submitted,
         )

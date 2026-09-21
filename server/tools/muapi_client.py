@@ -507,6 +507,23 @@ class MuAPIClient:
 
         raise MuAPIError(f"MuAPI job timed out after {max_polls * poll_interval}s")
 
+    async def check_status_once(self, request_id: str) -> Dict[str, Any]:
+        """One GET of a prediction's status, with no polling loop.
+
+        For recovering a ticket left behind by a crashed process: unlike
+        ``poll_result``, this never sleeps, never retries on "still running",
+        and never raises for a status other than "completed" -- there is no
+        such thing as this call timing out, only a status it hands back
+        as-is (``{"status": "processing"}`` and the like) for the caller to
+        interpret. Reading a prediction's status costs nothing extra on top
+        of what generating it already cost -- see ``poll_result``, which this
+        shares its GET with.
+        """
+        url = f"{MUAPI_BASE}/predictions/{request_id}/result"
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            resp = await self._request_with_retry(client, "GET", url)
+            return resp.json()
+
     async def generate(
         self,
         endpoint: str,
@@ -514,6 +531,7 @@ class MuAPIClient:
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         max_polls: int = DEFAULT_MAX_POLLS,
         is_cancelled: Optional[Callable[[], bool]] = None,
+        on_submitted: Optional[Callable[[str], None]] = None,
     ) -> str:
         """Submit a job and wait for its file, re-submitting a died inference.
 
@@ -522,12 +540,28 @@ class MuAPIClient:
         long as anyone asks it (see GENERATION_RETRY_ATTEMPTS). Cancellation
         and endpoint rejections are never retried -- the first is the user's
         decision and the second would fail identically every time.
+
+        ``on_submitted``, when given, is called with the provider's
+        ``request_id`` the instant a ticket comes back -- before the poll
+        loop is awaited, and again on every re-submission this retry loop
+        makes. This is the only point at which a caller can persist the id
+        of a job that has already been paid for: if the process dies during
+        the poll below, that callback's side effect is the only record that
+        the ticket exists at all.
         """
         last_exc: Optional[MuAPIError] = None
         for attempt in range(GENERATION_RETRY_ATTEMPTS + 1):
             if is_cancelled and is_cancelled():
                 raise MuAPICancelled(f"Job cancelled before {endpoint}")
             try:
+                # `on_submitted` passed only when given: a caller that never
+                # asked for it must see the exact call shape this had before
+                # the hook existed -- some tests substitute a fake
+                # `_generate_once` with no slot for a 6th argument at all.
+                if on_submitted is not None:
+                    return await self._generate_once(
+                        endpoint, payload, poll_interval, max_polls, is_cancelled, on_submitted
+                    )
                 return await self._generate_once(
                     endpoint, payload, poll_interval, max_polls, is_cancelled
                 )
@@ -557,6 +591,7 @@ class MuAPIClient:
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         max_polls: int = DEFAULT_MAX_POLLS,
         is_cancelled: Optional[Callable[[], bool]] = None,
+        on_submitted: Optional[Callable[[str], None]] = None,
     ) -> str:
         data = await self._submit_raw(endpoint, payload)
 
@@ -590,5 +625,19 @@ class MuAPIClient:
                 request_id,
                 sorted(data),
             )
+
+        if on_submitted:
+            try:
+                on_submitted(request_id)
+            except Exception:
+                # A caller's bookkeeping must never cost a generation that
+                # MuAPI has already queued (and, for many endpoints, billed).
+                logger.exception(
+                    "on_submitted callback failed for %s request_id=%s; "
+                    "continuing to poll regardless.",
+                    endpoint,
+                    request_id,
+                )
+
         outputs = await self.poll_result(request_id, poll_interval, max_polls, is_cancelled=is_cancelled)
         return outputs[0]

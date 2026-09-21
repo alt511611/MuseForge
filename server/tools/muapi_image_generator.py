@@ -4,6 +4,7 @@ import hashlib
 import logging
 import os
 import re
+from typing import Callable, Optional
 
 from tools.muapi_client import (
     MuAPIClient,
@@ -434,7 +435,11 @@ class MuAPIImageGenerator:
         return self._legacy_size_payload(prompt, aspect_ratio, reference_url)
 
     async def generate_image(
-        self, prompt: str, aspect_ratio: str = "1:1", is_cancelled=None
+        self,
+        prompt: str,
+        aspect_ratio: str = "1:1",
+        is_cancelled=None,
+        on_submitted: Optional[Callable[[str, str], None]] = None,
     ) -> str:
         if self.demo:
             return _demo_image_url(prompt, aspect_ratio)
@@ -444,9 +449,16 @@ class MuAPIImageGenerator:
             self.IMAGE_ENDPOINT,
             prompt,
         )
+        # Passed only when wired -- some tests substitute a fake
+        # `client.generate` with no slot for this kwarg at all.
+        primary_kwargs = (
+            {"on_submitted": lambda rid: on_submitted(rid, self.IMAGE_ENDPOINT)}
+            if on_submitted
+            else {}
+        )
         try:
             return await self.client.generate(
-                self.IMAGE_ENDPOINT, payload, is_cancelled=is_cancelled
+                self.IMAGE_ENDPOINT, payload, is_cancelled=is_cancelled, **primary_kwargs
             )
         except MuAPIError as exc:
             message = str(exc).lower()
@@ -471,8 +483,16 @@ class MuAPIImageGenerator:
                 self.LEGACY_SIZE_ENDPOINT,
             )
             fallback_payload = self._legacy_size_payload(prompt, aspect_ratio)
+            fallback_kwargs = (
+                {"on_submitted": lambda rid: on_submitted(rid, self.LEGACY_SIZE_ENDPOINT)}
+                if on_submitted
+                else {}
+            )
             return await self.client.generate(
-                self.LEGACY_SIZE_ENDPOINT, fallback_payload, is_cancelled=is_cancelled
+                self.LEGACY_SIZE_ENDPOINT,
+                fallback_payload,
+                is_cancelled=is_cancelled,
+                **fallback_kwargs,
             )
 
     #: Image-to-image EDIT model, used only by :meth:`edit_image`.
@@ -493,6 +513,7 @@ class MuAPIImageGenerator:
         image_url: str,
         aspect_ratio: str = "16:9",
         is_cancelled=None,
+        on_submitted: Optional[Callable[[str, str], None]] = None,
     ) -> str:
         """Edit an existing image, keeping its composition.
 
@@ -519,8 +540,13 @@ class MuAPIImageGenerator:
             self.EDIT_ENDPOINT,
             prompt,
         )
+        edit_kwargs = (
+            {"on_submitted": lambda rid: on_submitted(rid, self.EDIT_ENDPOINT)}
+            if on_submitted
+            else {}
+        )
         return await self.client.generate(
-            self.EDIT_ENDPOINT, payload, is_cancelled=is_cancelled
+            self.EDIT_ENDPOINT, payload, is_cancelled=is_cancelled, **edit_kwargs
         )
 
     async def generate_image_with_reference(
@@ -529,6 +555,7 @@ class MuAPIImageGenerator:
         references,
         aspect_ratio: str = "16:9",
         is_cancelled=None,
+        on_submitted: Optional[Callable[[str, str], None]] = None,
     ) -> str:
         """Render a frame from one or more reference images.
 
@@ -554,7 +581,7 @@ class MuAPIImageGenerator:
             # No usable reference: this is the unreferenced path, and taking
             # it here beats sending `null` to a model that requires one.
             return await self.generate_image(
-                prompt, aspect_ratio, is_cancelled=is_cancelled
+                prompt, aspect_ratio, is_cancelled=is_cancelled, on_submitted=on_submitted
             )
 
         capacity = reference_capacity(endpoint)
@@ -614,11 +641,14 @@ class MuAPIImageGenerator:
             len(used),
             prompt,
         )
+        ref_kwargs = (
+            {"on_submitted": lambda rid, _ep=endpoint: on_submitted(rid, _ep)}
+            if on_submitted
+            else {}
+        )
         try:
             return await self.client.generate(
-                endpoint,
-                payload,
-                is_cancelled=is_cancelled,
+                endpoint, payload, is_cancelled=is_cancelled, **ref_kwargs
             )
         except MuAPIError as exc:
             # The provider counted the images and said how many it takes. That
@@ -645,9 +675,7 @@ class MuAPIImageGenerator:
                 )
                 payload["images_list"] = list(used[:ceiling])
                 return await self.client.generate(
-                    endpoint,
-                    payload,
-                    is_cancelled=is_cancelled,
+                    endpoint, payload, is_cancelled=is_cancelled, **ref_kwargs
                 )
             message = str(exc).lower()
             is_schema_rejection = "404" in message or "422" in message
@@ -686,8 +714,14 @@ class MuAPIImageGenerator:
                 self.LEGACY_SIZE_ENDPOINT,
             )
             fallback_payload = self._legacy_size_payload(prompt, aspect_ratio)
+            unlocked_kwargs = (
+                {"on_submitted": lambda rid: on_submitted(rid, self.LEGACY_SIZE_ENDPOINT)}
+                if on_submitted
+                else {}
+            )
             return await self.client.generate(
                 self.LEGACY_SIZE_ENDPOINT,
                 fallback_payload,
                 is_cancelled=is_cancelled,
+                **unlocked_kwargs,
             )
