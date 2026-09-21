@@ -426,6 +426,32 @@ def _speaks_in_a_readable_framing(
     )
 
 
+def _has_one_visible_speaker(
+    lines: Sequence[Dict[str, Any]], off_screen: Optional[Set[str]] = None
+) -> bool:
+    """Whether one on-screen mouth can truthfully carry this scene's audio.
+
+    The lip-sync provider receives one *combined* audio file per scene. It can
+    animate one face well; it cannot know that a second visible character must
+    take over halfway through that same file. Sending a two-hander anyway makes
+    whichever face dominates the frame mouth the other person's words.
+
+    Off-screen voices do not count: they are muted in the guide track later in
+    ``_lipsync_scenes``. Empty or malformed speaker names fail open so old
+    stored dialogue remains renderable; the ordinary framing guard and the
+    provider still make the final call in that case.
+    """
+    off_screen = {str(name).strip().casefold() for name in (off_screen or set())}
+    speakers = {
+        str(track.get("character") or "").strip().casefold()
+        for track in lines or ()
+        if str(track.get("line") or "").strip()
+        and str(track.get("character") or "").strip()
+        and str(track.get("character") or "").strip().casefold() not in off_screen
+    }
+    return len(speakers) <= 1
+
+
 async def _split_off_tail(
     source_path: str, head_path: str, tail_path: str, tail_seconds: float
 ) -> Tuple[str, Optional[str]]:
@@ -4200,6 +4226,12 @@ class Idea2VideoPipeline:
         1 and 3 still are, and scene 2 simply keeps its original clip with its
         voice mixed over the top exactly as before.
         """
+        # Kept on the pipeline so the finished result can distinguish a scene
+        # that was deliberately ineligible (a two-hander / voice-over) from a
+        # provider failure. Jobs uses the successful list to return every
+        # scene surcharge that did not actually arrive.
+        self._lipsync_eligible_scenes: List[int] = []
+
         # `requested` is the per-job opt-in (the user paid for it);
         # is_lipsync_enabled() is the deployment flag. Both must hold.
         #
@@ -4281,6 +4313,24 @@ class Idea2VideoPipeline:
             scene_index = int(track.get("scene_index", -1))
             if scene_index in audio_by_scene:
                 lines_by_scene.setdefault(scene_index, []).append(track)
+
+        # Do not ask one mouth to perform a two-hander. This gate belongs
+        # before ffmpeg splitting, uploads and provider calls, so an
+        # intentionally unsupported scene consumes neither render time nor
+        # third-party lip-sync spend.
+        for scene_index in list(audio_by_scene):
+            if _has_one_visible_speaker(
+                lines_by_scene.get(scene_index, ()), off_screen
+            ):
+                self._lipsync_eligible_scenes.append(scene_index)
+                continue
+            logger.info(
+                "Scene %s has multiple visible speakers in one combined "
+                "dialogue track; keeping it as voice-over instead of driving "
+                "the wrong face.",
+                scene_index,
+            )
+            del audio_by_scene[scene_index]
 
         # Where each scene's speech actually lands on the finished timeline.
         # Read from the same plan the mixer and the captions read, so all three
@@ -7426,6 +7476,12 @@ class Idea2VideoPipeline:
                 if c.name.casefold() in character_voices
             },
             "lipsynced_scenes": lipsynced_scenes,
+            # Positions in the final concatenation, just like
+            # ``lipsynced_scenes``. This makes the lip-sync decision legible
+            # to the UI/support without exposing provider implementation.
+            "lipsync_eligible_scenes": list(
+                getattr(self, "_lipsync_eligible_scenes", [])
+            ),
             # Everything regenerate_scene() needs to re-render ONE scene the
             # same way it was rendered the first time. Underscore-prefixed
             # because it is machinery, not something the UI should render;
