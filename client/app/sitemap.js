@@ -1,6 +1,6 @@
 import { SITE_URL } from "../lib/seo";
 import { lastModified } from "../lib/routeMtime";
-import { LOCALE_CODES, withLocale } from "../lib/i18n/routing";
+import { LOCALE_CODES, DEFAULT_LOCALE, withLocale } from "../lib/i18n/routing";
 import { getRecentShares, SHARE_REVALIDATE } from "../lib/share";
 
 /* The share list is read from the API, so this file is no longer a pure
@@ -38,9 +38,15 @@ const ROUTES = [
     changeFrequency: "monthly",
     priority: 0.9,
   },
+  /* Each segment page's copy (./content.js, per page) is English only --
+     canonical() and openGraphFor() already point every non-English URL at the
+     English one (see lib/seo.js), so listing all twenty here would advertise
+     nineteen URLs per page that the pages themselves disclaim as canonical.
+     `locales` narrows the sitemap entry the same way it does for the blog. */
   ...["creators", "agencies", "filmmakers", "education"].map((seg) => ({
     path: `/solutions/${seg}`,
     files: [`${L}/solutions/${seg}/page.js`, "components/SolutionPage.js"],
+    locales: [DEFAULT_LOCALE],
     changeFrequency: "monthly",
     priority: 0.8,
   })),
