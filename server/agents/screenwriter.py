@@ -411,14 +411,44 @@ Respond ONLY with valid JSON matching this schema:
     #: short briefs back to English.
     #:
     #: Field NAMES stay English or the JSON stops parsing.
+    #:
+    #: AND SO DO THE FIELDS NO VIEWER EVER READS, which is the harder half.
+    #: "only the prose changes" used to be the whole of that instruction, and
+    #: a model told to write a Turkish drama read it the way anyone would --
+    #: as all of the prose. Delivered job 4631cc44-d30 went to flux-2-pro as
+    #: "Character reference sheet of a woman, Sci-Fi style. otuzlu yaşlarının
+    #: sonunda bi..." and to the location plate as "yağmurla ıslanmış kargo
+    #: limanı, konteyner...". Nobody watching the film sees either sentence.
+    #:
+    #: It cost that job twice. FLUX conditions on T5, whose vocabulary is
+    #: English-centric: this repo measures its own English prose at 3.98
+    #: characters per token and that job's Turkish frames at 2.94, so the same
+    #: description costs about 40% more of a 512-token window that the film's
+    #: continuity rules are the first to be dropped from. Three of its frames
+    #: ran the window out and the ladder had nothing optional left to give
+    #: (see script2video._trim_to_token_window). The model also simply reads
+    #: English better, so the more expensive description was the weaker one.
     LANGUAGE_CLAUSE = """
 
 LANGUAGE. Write the drama in {language}. Every piece of text a viewer will
 read or hear — "title", "logline", and every "line" of dialogue — must be in
 {language}, natural and idiomatic, never a translation of an English sentence.
 This holds even when the user's brief itself is written in another language.
+
+WRITE THESE FIELDS IN ENGLISH, whatever the drama's language:
+"setting_location", "setting_time_of_day", "setting_era", "mood", "theme",
+"visual_motif", every character's "description" and "wardrobe", and every
+scene's "emotion" and "world_change".
+
+No viewer ever reads them. They are pasted straight into the prompts for the
+image, video and music models, none of which is a person and all of which are
+trained on English — they read {language} worse, and charge about 40% more
+tokens for the same words out of a budget the film's own continuity rules are
+the first to lose. A {language} "wardrobe" buys a poorer frame at a higher
+price. Everything a viewer actually experiences stays in {language}.
+
 The JSON field NAMES and the enum values ("protagonist", "climax", ...) stay
-in English exactly as specified; only the prose changes."""
+in English exactly as specified."""
 
     #: Appended to the system prompt when the job will actually VOICE the
     #: script (dialogue is enabled and paid for on this run).
