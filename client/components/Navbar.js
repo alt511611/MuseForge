@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import Link from "./LocaleLink";
 import { useRouter } from "next/navigation";
-import { Film, LogOut, Shield, ChevronDown, User, LayoutDashboard, Globe, Building2, Users, Clapperboard, BookOpen, AlertTriangle, Menu, X } from "lucide-react";
+import { Film, LogOut, Shield, ChevronDown, User, LayoutDashboard, Globe, Building2, Users, Clapperboard, BookOpen, AlertTriangle, Menu, X, Tv } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { useLanguage } from "../contexts/LanguageContext";
 import { isLowCredits, isOutOfCredits } from "../lib/credits";
@@ -265,6 +265,15 @@ export default function Navbar() {
                       <LayoutDashboard size={14} />
                       {t("nav_dashboard")}
                     </Link>
+                    <Link
+                      href="/series"
+                      onClick={() => setOpen(false)}
+                      className="flex items-center gap-2 px-4 py-2 text-sm transition-colors hover:bg-white/5"
+                      style={{ color: "var(--mf-ink-2)" }}
+                    >
+                      <Tv size={14} />
+                      {t("nav_series")}
+                    </Link>
                     {isAdmin && (
                       <Link
                         href="/admin"
@@ -329,6 +338,10 @@ export default function Navbar() {
               <Link href="/dashboard" onClick={() => setMobileOpen(false)}
                 className="block px-3 py-2.5 rounded-lg text-sm" style={{ color: "var(--mf-ink-2)" }}>
                 {t("nav_dashboard")}
+              </Link>
+              <Link href="/series" onClick={() => setMobileOpen(false)}
+                className="block px-3 py-2.5 rounded-lg text-sm" style={{ color: "var(--mf-ink-2)" }}>
+                {t("nav_series")}
               </Link>
               {isAdmin && (
                 <Link href="/admin" onClick={() => setMobileOpen(false)}

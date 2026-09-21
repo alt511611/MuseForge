@@ -319,9 +319,55 @@ def test_an_episode_number_is_claimed_before_the_render_starts():
     with _auth_as(), patch.object(_api, "_get_user_plan", AsyncMock(return_value="pro")):
         series = _create_series().json()
         first = client.post(f"/api/series/{series['id']}/episodes", json={}).json()
+        # The next episode is blocked until episode 1 is reviewed (see
+        # test_an_unconfirmed_episode_blocks_the_next_one) -- confirm it so
+        # this test can still check what it is actually about: numbering.
+        confirm = client.post(
+            f"/api/series/{series['id']}/episodes/{first['episode_number']}/confirm"
+        )
+        assert confirm.status_code == 200
         second = client.post(f"/api/series/{series['id']}/episodes", json={}).json()
 
     assert [first["episode_number"], second["episode_number"]] == [1, 2]
+
+
+def test_an_unconfirmed_episode_blocks_the_next_one():
+    """A pending episode's continuity hasn't reached the series yet, so
+    writing the next one now would silently skip whatever it changed."""
+    with _auth_as(), patch.object(_api, "_get_user_plan", AsyncMock(return_value="pro")):
+        series = _create_series().json()
+        client.post(f"/api/series/{series['id']}/episodes", json={})
+
+        blocked = client.post(f"/api/series/{series['id']}/episodes", json={})
+        assert blocked.status_code == 400
+        assert "episode 1" in blocked.json()["detail"].lower()
+
+        fetched = client.get(f"/api/series/{series['id']}").json()
+        assert fetched["episodes"][0]["status"] == "awaiting_confirmation"
+        # Nothing about the pending episode has reached the series yet.
+        assert fetched["cast"] == []
+        assert fetched["open_question"] == ""
+
+
+def test_rejecting_an_episode_never_touches_the_series():
+    """Discarded means discarded: the video stays reachable, nothing it would
+    have locked -- cast, setting, open question -- ever lands."""
+    with _auth_as(), patch.object(_api, "_get_user_plan", AsyncMock(return_value="pro")):
+        series = _create_series().json()
+        first = client.post(f"/api/series/{series['id']}/episodes", json={}).json()
+
+        rejected = client.post(
+            f"/api/series/{series['id']}/episodes/{first['episode_number']}/reject"
+        )
+        assert rejected.status_code == 200
+        assert rejected.json()["episodes"][0]["status"] == "rejected"
+        assert rejected.json()["cast"] == []
+        assert rejected.json()["open_question"] == ""
+
+        # The gate is clear again: ordering the next episode now works, and
+        # does not reuse the rejected number.
+        second = client.post(f"/api/series/{series['id']}/episodes", json={}).json()
+        assert second["episode_number"] == 2
 
 
 def test_deleting_a_series_is_not_deleting_its_episodes():

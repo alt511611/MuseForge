@@ -1305,13 +1305,14 @@ async def _refund_undelivered_extras(job: Job, result: Dict[str, Any]) -> None:
 
 
 async def _record_series_episode(job: Job, result: Dict[str, Any]) -> Dict[str, Any]:
-    """Fold a finished episode into the series that commissioned it.
+    """Mark a finished episode as delivered on the series that commissioned it.
 
     Stamps the result first, so the episode knows what it is even if the
-    series is gone, and then updates the series: its cast picks up whatever
-    this episode locked, its rolling summary advances, and its open question
-    becomes this episode's cliffhanger -- the field that has been written by
-    every micro-drama and read by nothing (see interfaces/series).
+    series is gone. Deliberately does NOT fold the episode into the series'
+    cast/setting/open-question yet -- that is a confirmation the user gives
+    from the series page (see interfaces/series.mark_delivered vs .confirm),
+    so a bad take never becomes the next episode's continuity before anyone
+    has watched it. The episode itself is fully watchable either way.
 
     Never raises. A series is a memory wrapped around jobs that are stored
     independently; losing the bookkeeping must not lose a delivered episode.
@@ -1326,9 +1327,9 @@ async def _record_series_episode(job: Job, result: Dict[str, Any]) -> Dict[str, 
     if not job.user_id:
         return result
     try:
-        from series_store import record_episode
+        from series_store import mark_episode_delivered
 
-        await record_episode(
+        await mark_episode_delivered(
             job.user_id, job.series_id, job.episode_number, job.id, result
         )
     except Exception:
