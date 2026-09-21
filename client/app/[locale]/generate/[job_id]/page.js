@@ -100,6 +100,9 @@ export default function GeneratePage() {
   const [nowTick, setNowTick] = useState(0);
   const [editScript, setEditScript] = useState(null);
   const [approving, setApproving] = useState(false);
+  // Lazily-fetched title for the "back to series" banner. Failure just hides
+  // the banner -- it must never block the job itself from loading.
+  const [seriesTitle, setSeriesTitle] = useState(null);
   // Bumped to force a NEW EventSource. The server's SSE generator only streams
   // while the job is queued/running (jobs.JobStore.subscribe), so it closes the
   // moment the job parks in awaiting_script_approval — and nothing reopened it
@@ -222,6 +225,28 @@ export default function GeneratePage() {
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [events]);
+
+  // This job is an episode of a series -- fetch just the title for the
+  // banner. Best-effort: a failed/absent fetch simply hides the banner
+  // rather than surfacing an error on an otherwise normal job page.
+  useEffect(() => {
+    if (!job?.series_id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const headers = await authHeaders();
+        const res = await fetch(`${API_BASE}/api/series/${job.series_id}`, { headers });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!cancelled) setSeriesTitle(data.title || "");
+      } catch {
+        /* banner stays hidden */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [job?.series_id, authHeaders]);
 
   const handleCancel = async () => {
     setCancelling(true);
@@ -391,6 +416,22 @@ export default function GeneratePage() {
             </button>
           )}
         </div>
+
+        {/* Series banner */}
+        {job?.series_id && seriesTitle && (
+          <Link
+            href={`/series/${job.series_id}`}
+            className="inline-flex items-center gap-2 text-xs px-3 py-1.5 rounded-full mb-6"
+            style={{ backgroundColor: "rgba(139,92,246,0.1)", border: "1px solid rgba(139,92,246,0.25)", color: "var(--mf-violet-soft)" }}
+          >
+            {tr(
+              t,
+              "gen_series_banner",
+              `Episode ${job.episode_number} of ${seriesTitle} · Back to series`,
+              { n: job.episode_number, title: seriesTitle }
+            )}
+          </Link>
+        )}
 
         {/* Title */}
         <div className="text-center mb-10">

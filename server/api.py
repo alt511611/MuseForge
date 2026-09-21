@@ -2510,6 +2510,21 @@ async def commission_episode(
     if not series:
         raise HTTPException(status_code=404, detail="Series not found")
 
+    # A pending episode's continuity hasn't reached the series yet (see
+    # interfaces/series.mark_delivered), so writing the NEXT one now would
+    # silently skip whatever this one changed. Confirm or reject it first.
+    pending = next(
+        (e for e in series.episodes if e.status == "awaiting_confirmation"), None
+    )
+    if pending:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Confirm or reject episode {pending.number} before ordering "
+                "the next one."
+            ),
+        )
+
     demo = _is_demo()
     music_enabled = bool(req.music_enabled)
     dialogue_enabled = bool(req.dialogue_enabled) and is_dialogue_enabled()
@@ -2575,6 +2590,76 @@ async def commission_episode(
         "episode_number": job.episode_number,
         "demo": demo,
     }
+
+
+@app.post("/api/series/{series_id}/episodes/{number}/confirm")
+async def confirm_episode(
+    series_id: str,
+    number: int,
+    current_user: AuthUser = Depends(get_current_user),
+):
+    """Approve a reviewed episode: fold it into the series' continuity.
+
+    Re-fetches the finished job's own result rather than holding onto a copy
+    from delivery time -- the same job.result mark_delivered saw, restored
+    from storage exactly as regenerate/retake/approve-script already do for a
+    job that may have aged out of memory.
+    """
+    series = await series_store.get(current_user.user_id, series_id)
+    if not series:
+        raise HTTPException(status_code=404, detail="Series not found")
+    episode = series.episode(number)
+    if not episode:
+        raise HTTPException(status_code=404, detail="Episode not found")
+    if episode.status != "awaiting_confirmation":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Episode {number} is not awaiting confirmation (status={episode.status}).",
+        )
+
+    job = await job_store.get_or_restore(episode.job_id)
+    if not job or not job.result:
+        raise HTTPException(
+            status_code=404,
+            detail="The finished job for this episode could not be found.",
+        )
+
+    updated = await series_store.confirm_episode(
+        current_user.user_id, series_id, number, job.result
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Episode not found")
+    return updated.as_dict()
+
+
+@app.post("/api/series/{series_id}/episodes/{number}/reject")
+async def reject_episode(
+    series_id: str,
+    number: int,
+    current_user: AuthUser = Depends(get_current_user),
+):
+    """Discard a reviewed episode: the series never learns it happened.
+
+    The episode's video stays reachable through its own job page; only its
+    effect on the series (cast, setting, open question) never lands, because
+    it was never folded in to begin with (see interfaces/series.reject).
+    """
+    series = await series_store.get(current_user.user_id, series_id)
+    if not series:
+        raise HTTPException(status_code=404, detail="Series not found")
+    episode = series.episode(number)
+    if not episode:
+        raise HTTPException(status_code=404, detail="Episode not found")
+    if episode.status != "awaiting_confirmation":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Episode {number} is not awaiting confirmation (status={episode.status}).",
+        )
+
+    updated = await series_store.reject_episode(current_user.user_id, series_id, number)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Episode not found")
+    return updated.as_dict()
 
 
 def _next_episode_idea(series: Series) -> str:

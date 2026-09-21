@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Mapping, Optional
 
 import httpx
 
-from interfaces.series import Series, absorb, from_dict
+from interfaces.series import Series, absorb, confirm, from_dict, mark_delivered, reject
 
 logger = logging.getLogger(__name__)
 
@@ -242,6 +242,53 @@ async def record_episode(
     if not series:
         return None
     return await save(user_id, absorb(series, number, job_id, result))
+
+
+async def mark_episode_delivered(
+    user_id: str,
+    series_id: str,
+    number: int,
+    job_id: str,
+    result: Mapping[str, Any],
+) -> Optional[Series]:
+    """A render finished; watchable, but not yet locked into the series.
+
+    The gated counterpart of ``record_episode``: called from the same job
+    -completion path, but folds only the episode's own fields, not its effect
+    on the series. See ``interfaces.series.mark_delivered``.
+    """
+    series = await get(user_id, series_id)
+    if not series:
+        return None
+    return await save(user_id, mark_delivered(series, number, job_id, result))
+
+
+async def confirm_episode(
+    user_id: str, series_id: str, number: int, result: Mapping[str, Any]
+) -> Optional[Series]:
+    """A reviewed episode is approved: fold it into the series now.
+
+    None means either the series or the episode is gone, which the caller
+    reads as "not found" -- never raised, per this module's contract.
+    """
+    series = await get(user_id, series_id)
+    if not series:
+        return None
+    updated = confirm(series, number, result)
+    if updated is None:
+        return None
+    return await save(user_id, updated)
+
+
+async def reject_episode(user_id: str, series_id: str, number: int) -> Optional[Series]:
+    """A reviewed episode is discarded: the series never learns it happened."""
+    series = await get(user_id, series_id)
+    if not series:
+        return None
+    updated = reject(series, number)
+    if updated is None:
+        return None
+    return await save(user_id, updated)
 
 
 def reserve_episode(series: Series, job_id: str) -> int:

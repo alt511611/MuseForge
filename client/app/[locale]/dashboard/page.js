@@ -356,6 +356,12 @@ export default function DashboardPage() {
           </div>
           <div className="flex items-center gap-3 flex-wrap">
             <ManageSubscriptionButton getAccessToken={getAccessToken} />
+            <Link href="/series"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all"
+              style={{ backgroundColor: "var(--mf-panel)", border: "1px solid var(--mf-line-strong)", color: "var(--mf-ink-2)" }}>
+              <Film size={15} />
+              {t("dash_series_cta")}
+            </Link>
             <Link href="/"
               className="mf-btn-primary inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold">
               <Plus size={15} />

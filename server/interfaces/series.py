@@ -387,36 +387,48 @@ def _merged_cast(
     return merged
 
 
-def absorb(series: Series, number: int, job_id: str, result: Mapping[str, Any]) -> Series:
-    """Fold a finished episode into the series it belongs to.
+def _apply_episode_fields(
+    series: Series, number: int, job_id: str, result: Mapping[str, Any]
+) -> Episode:
+    """Write a finished render's own fields onto its Episode record.
 
-    Four things move: the episode's own record, the cast (whatever it locked
-    that the series did not already hold), the open question (this episode's
-    cliffhanger, which is the next one's opening), and -- once an episode
-    falls out of the recent window -- the rolling summary.
-
-    The series' production locks are NOT updated from the episode. They are
-    what the episode was made under; letting a render write back to them would
-    make a drifting episode redefine the series it drifted from.
+    Shared by every path that learns a render finished, gated or not: the
+    episode's title/synopsis/cliffhanger/video are what a reviewer needs to
+    SEE before deciding whether the series should absorb it, so they are
+    never behind the confirmation gate -- only the series-level effects in
+    ``_apply_continuity`` are.
     """
     script = (result or {}).get("script") or {}
     episode = series.episode(number) or Episode(number=number)
+    is_new = series.episode(number) is None
     episode.job_id = job_id or episode.job_id
     episode.title = str(script.get("title") or episode.title)
     episode.logline = str(script.get("logline") or episode.logline)
     episode.synopsis = synopsis_of(script) or episode.synopsis
     episode.cliffhanger = str(script.get("cliffhanger") or episode.cliffhanger)
     episode.video_url = str((result or {}).get("video_url") or episode.video_url)
-    episode.status = "completed"
-    if series.episode(number) is None:
+    if is_new:
         series.episodes.append(episode)
     series.episodes.sort(key=lambda e: e.number)
+    return episode
 
+
+def _apply_continuity(series: Series, episode: Episode, result: Mapping[str, Any]) -> None:
+    """Fold a confirmed episode's effect onto the SERIES itself.
+
+    The cast (whatever it locked that the series did not already hold), the
+    setting (locked by the FIRST episode that establishes one and never moved
+    afterwards -- "the same room" is most of what makes a set of films a
+    series), and the open question (this episode's cliffhanger, which is the
+    next one's opening).
+
+    The series' production locks are NOT updated from the episode. They are
+    what the episode was made under; letting a render write back to them
+    would make a drifting episode redefine the series it drifted from.
+    """
+    script = (result or {}).get("script") or {}
     series.cast = _merged_cast(series.cast, cast_from_result(result))
 
-    # The setting is locked by the FIRST episode that establishes one, and
-    # never moved afterwards: "the same room" is most of what makes a set of
-    # films a series.
     series.setting_location = series.setting_location or str(
         script.get("setting_location") or ""
     )
@@ -431,7 +443,68 @@ def absorb(series: Series, number: int, job_id: str, result: Mapping[str, Any]) 
     # cinematic episode resolves and leaves none, and then the next one opens
     # on the story rather than on a hook -- which is correct for that mode.
     series.open_question = episode.cliffhanger or series.open_question
+
+
+def absorb(series: Series, number: int, job_id: str, result: Mapping[str, Any]) -> Series:
+    """Fold a finished episode into the series it belongs to, immediately.
+
+    Used where there is no confirmation gate in front of it (existing
+    non-series-UI callers, and tests exercising the combined behavior). The
+    gated path a series episode actually takes is ``mark_delivered`` followed
+    later by ``confirm`` or ``reject`` -- see below.
+    """
+    episode = _apply_episode_fields(series, number, job_id, result)
+    episode.status = "completed"
+    _apply_continuity(series, episode, result)
     series.story_so_far = _rolled_up(series)
+    return series
+
+
+def mark_delivered(
+    series: Series, number: int, job_id: str, result: Mapping[str, Any]
+) -> Series:
+    """A render finished, but nothing about the SERIES changes yet.
+
+    The episode becomes watchable and reviewable (its own title, synopsis,
+    cliffhanger, video are all set) while the cast, setting and open question
+    it would otherwise lock stay exactly as the series left them -- so a
+    second episode ordered before this one is reviewed is still written from
+    the LAST CONFIRMED episode's continuity, not from a take nobody has seen.
+    """
+    episode = _apply_episode_fields(series, number, job_id, result)
+    episode.status = "awaiting_confirmation"
+    return series
+
+
+def confirm(series: Series, number: int, result: Mapping[str, Any]) -> Optional[Series]:
+    """A reviewed episode is approved: fold it into the series, now.
+
+    ``result`` is the SAME finished job's result ``mark_delivered`` was
+    called with -- re-fetched at confirm time rather than held onto, so the
+    gate costs no extra storage. Returns None if the episode was never
+    delivered (nothing to confirm), which the caller reads as "not found".
+    """
+    episode = series.episode(number)
+    if episode is None:
+        return None
+    episode.status = "completed"
+    _apply_continuity(series, episode, result)
+    series.story_so_far = _rolled_up(series)
+    return series
+
+
+def reject(series: Series, number: int) -> Optional[Series]:
+    """A reviewed episode is discarded: the series never learns it happened.
+
+    The episode keeps its video/job_id (still traceable, still watchable on
+    its own) but nothing it would have locked -- cast, setting, open
+    question -- ever reaches the series. Its number is not reused; the next
+    episode continues from wherever the series was BEFORE this attempt.
+    """
+    episode = series.episode(number)
+    if episode is None:
+        return None
+    episode.status = "rejected"
     return series
 
 
