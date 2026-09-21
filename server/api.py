@@ -1734,6 +1734,20 @@ async def approve_script(
         if not current_user.is_admin:
             raise HTTPException(status_code=403, detail="Access denied")
 
+    demo = job.demo or _is_demo()
+
+    # A job with an owner is a paid job (or one billed at approval, like this
+    # one) -- approving it is what triggers the render, so an anonymous
+    # caller here would get the full video without ever reaching the credit
+    # charge below. Only a demo/anonymous job (no owner) may be approved
+    # without a token.
+    if not demo and job.user_id and not current_user:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required. Please sign in to approve this script.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     if job.status != JobStatus.AWAITING_SCRIPT_APPROVAL:
         raise HTTPException(
             status_code=400,
@@ -1745,7 +1759,6 @@ async def approve_script(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid script: {exc}") from exc
 
-    demo = job.demo or _is_demo()
     api_key = os.environ.get("MUAPI_KEY", "")
 
     # Bill and limit-check against the APPROVED script, not the scene count
@@ -1759,7 +1772,17 @@ async def approve_script(
     # Charge credits here — script phase was free.
     credit_cost = 0
     if current_user and not demo and job.user_id:
-        plan = (job.plan or await _get_user_plan(job.user_id) or "free").lower()
+        # Re-checked fresh rather than trusted from job.plan: the job's plan
+        # was decided at /api/generate time, and a transient lookup failure
+        # there falls back to "free" (see _get_user_plan) -- a snapshot this
+        # step must not carry forward uncorrected into what gets charged and
+        # rendered a minute or more later. job.plan is only the fallback, for
+        # when THIS lookup is the one that fails.
+        plan = (await _get_user_plan(job.user_id) or job.plan or "free").lower()
+        # Written back onto the job itself: run_continue_from_script_job reads
+        # job.plan to decide the render's watermark, music and dialogue, and
+        # must see this corrected value, not the one /api/generate guessed.
+        job.plan = plan
         _enforce_plan_scene_limit(plan, approved_scenes)
         # The same function that produced the quote the customer agreed to,
         # rather than a second copy of the arithmetic. The copy that used to
