@@ -411,14 +411,44 @@ Respond ONLY with valid JSON matching this schema:
     #: short briefs back to English.
     #:
     #: Field NAMES stay English or the JSON stops parsing.
+    #:
+    #: AND SO DO THE FIELDS NO VIEWER EVER READS, which is the harder half.
+    #: "only the prose changes" used to be the whole of that instruction, and
+    #: a model told to write a Turkish drama read it the way anyone would --
+    #: as all of the prose. Delivered job 4631cc44-d30 went to flux-2-pro as
+    #: "Character reference sheet of a woman, Sci-Fi style. otuzlu yaşlarının
+    #: sonunda bi..." and to the location plate as "yağmurla ıslanmış kargo
+    #: limanı, konteyner...". Nobody watching the film sees either sentence.
+    #:
+    #: It cost that job twice. FLUX conditions on T5, whose vocabulary is
+    #: English-centric: this repo measures its own English prose at 3.98
+    #: characters per token and that job's Turkish frames at 2.94, so the same
+    #: description costs about 40% more of a 512-token window that the film's
+    #: continuity rules are the first to be dropped from. Three of its frames
+    #: ran the window out and the ladder had nothing optional left to give
+    #: (see script2video._trim_to_token_window). The model also simply reads
+    #: English better, so the more expensive description was the weaker one.
     LANGUAGE_CLAUSE = """
 
 LANGUAGE. Write the drama in {language}. Every piece of text a viewer will
 read or hear — "title", "logline", and every "line" of dialogue — must be in
 {language}, natural and idiomatic, never a translation of an English sentence.
 This holds even when the user's brief itself is written in another language.
+
+WRITE THESE FIELDS IN ENGLISH, whatever the drama's language:
+"setting_location", "setting_time_of_day", "setting_era", "mood", "theme",
+"visual_motif", every character's "description" and "wardrobe", and every
+scene's "emotion" and "world_change".
+
+No viewer ever reads them. They are pasted straight into the prompts for the
+image, video and music models, none of which is a person and all of which are
+trained on English — they read {language} worse, and charge about 40% more
+tokens for the same words out of a budget the film's own continuity rules are
+the first to lose. A {language} "wardrobe" buys a poorer frame at a higher
+price. Everything a viewer actually experiences stays in {language}.
+
 The JSON field NAMES and the enum values ("protagonist", "climax", ...) stay
-in English exactly as specified; only the prose changes."""
+in English exactly as specified."""
 
     #: Appended to the system prompt when the job will actually VOICE the
     #: script (dialogue is enabled and paid for on this run).
@@ -471,6 +501,54 @@ screen and let the actor handle the saying of it. No pronunciation respellings, 
 syllable hyphens, no phonetic spacing: write "fourteen-oh-two", never
 "four-teen-oh-two"; "Route 7", never "Route seh-ven". A viewer who can hear the
 line does not need it sounded out, and a viewer reading it sees a typo."""
+
+    #: Appended when the job has BOUGHT lip sync.
+    #:
+    #: The sync provider is handed ONE combined audio file per scene and one
+    #: face to drive with it. It cannot know that a second visible character
+    #: takes over halfway through that file, so a two-hander sent to it puts
+    #: one person's words in the other's mouth. That is why
+    #: idea2video._has_one_visible_speaker refuses such a scene outright,
+    #: before any provider is paid -- and the refusal is right.
+    #:
+    #: Nothing ever told the screenwriter that the shape mattered. Delivered
+    #: job 532aa102-86f, three scenes, all three refused:
+    #:
+    #:     Scene 0 has multiple visible speakers in one combined dialogue
+    #:     track; keeping it as voice-over instead of driving the wrong face.
+    #:     ... Lip sync was charged for 3 scene(s), delivered on 0;
+    #:     refunding 3 undelivered scene surcharge(s).
+    #:
+    #: The refund is correct and the film still played -- three scenes of
+    #: closed mouths over voice-over, on a job that had asked and paid for the
+    #: opposite. Job 4631cc44-d30 synced all three of ITS scenes a few hours
+    #: earlier, with no code difference between the two runs: its second voice
+    #: happened to be a dispatcher on a radio. Whether the feature the customer
+    #: bought arrived at all was a property of the script's shape, settled by a
+    #: writer who had never been told the shape was load-bearing.
+    #:
+    #: The escape hatch is one drama uses constantly and that job took by
+    #: accident: put the second voice off-screen. It costs nothing -- the
+    #: character is still in the scene and still in the story -- and
+    #: _heard_but_never_seen reads exactly this staging (a radio, a handset,
+    #: an intercom, an (O.S.)) to keep that speaker out of the frame's closed
+    #: cast and off the 180-degree axis as well.
+    LIPSYNC_CLAUSE = """
+
+LIP SYNC. The mouths in this film will be animated to the voices, and that pass
+is given ONE audio file per scene and ONE face to drive with it. So the dialogue
+in any one scene belongs to ONE character who is visible in that scene.
+
+A scene may still be an exchange. The second voice arrives from off-screen — over
+a radio, a handset, an intercom, a phone, or called from the next room — and the
+"action" stages it plainly ("Her radio crackles", "TOMAS (O.S.)"), which is what
+keeps that speaker out of the frame and lets the visible character be the one
+answering. Where a scene genuinely needs two people speaking face to face, split
+it in two: each half its own scene, each with its own single speaker.
+
+This is not a style preference. A scene written with two visible speakers is
+dropped from the sync pass entirely and plays with unmoving mouths over
+voice-over, on a film whose maker asked and paid for the opposite."""
 
     #: Appended LAST-but-one, for the same reason the micro-drama clause goes
     #: last: it contradicts the base prompt's "Build 3-5 scenes" and a model
@@ -588,6 +666,7 @@ into a single scene rather than adding one."""
         narrative_mode: str = "",
         num_scenes: int = 0,
         is_episode: bool = False,
+        lipsync_enabled: bool = False,
     ) -> str:
         """The system prompt for this drama's language, audio mode and length.
 
@@ -600,6 +679,12 @@ into a single scene rather than adding one."""
             prompt += self.LANGUAGE_CLAUSE.format(language=name_of(language))
         if require_dialogue:
             prompt += self.DIALOGUE_CLAUSE
+        # Straight after the dialogue clause, because it constrains the thing
+        # that clause has just asked for. Only when the sync was actually
+        # bought: it costs the drama its face-to-face two-handers, and that is
+        # not a price to charge a job which was never going to sync anyway.
+        if lipsync_enabled:
+            prompt += self.LIPSYNC_CLAUSE
         # Always, and before the scene count: a scene's LENGTH is a fixed fact
         # about the product (interfaces/second_budget), not something the
         # caller chooses, and it is the constraint the script is most often
@@ -647,6 +732,9 @@ into a single scene rather than adding one."""
         #: rules ride in the system prompt, where a model reads them as
         #: instruction rather than as material.
         series_brief: str = "",
+        #: Whether this job bought lip sync, which constrains who may speak in
+        #: a scene -- see LIPSYNC_CLAUSE.
+        lipsync_enabled: bool = False,
     ) -> DramaScript:
         # Demo mode must stay fast and free of real network calls --
         # matches MuAPIImageGenerator/MuAPIVideoGenerator's demo behavior.
@@ -682,6 +770,7 @@ into a single scene rather than adding one."""
                         narrative_mode,
                         num_scenes,
                         bool(series_brief),
+                        lipsync_enabled=lipsync_enabled,
                     ),
                     prompt,
                     max_tokens=self.MAX_SCRIPT_TOKENS,
@@ -715,6 +804,7 @@ into a single scene rather than adding one."""
                 require_dialogue,
                 narrative_mode,
                 series_brief,
+                lipsync_enabled=lipsync_enabled,
             )
 
         # 3) No provider answered. The deterministic template is NOT an
@@ -1088,6 +1178,7 @@ into a single scene rather than adding one."""
         require_dialogue: bool = False,
         narrative_mode: str = "",
         series_brief: str = "",
+        lipsync_enabled: bool = False,
     ) -> DramaScript:
         import anthropic
 
@@ -1126,6 +1217,7 @@ into a single scene rather than adding one."""
                     narrative_mode,
                     num_scenes,
                     bool(series_brief),
+                    lipsync_enabled=lipsync_enabled,
                 ),
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:

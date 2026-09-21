@@ -87,6 +87,79 @@ def test_a_non_english_drama_gets_a_binding_instruction():
     assert "field NAMES" in prompt
 
 
+# ── the half of the script no viewer reads ──────────────────────────────────
+#
+# Delivered job 4631cc44-d30 sent flux-2-pro "Character reference sheet of a
+# woman, Sci-Fi style. otuzlu yaşlarının sonunda bi..." and a location plate
+# reading "yağmurla ıslanmış kargo limanı, konteyner...". Nobody watching the
+# film sees either sentence; both are prompts. The clause said "only the prose
+# changes" and a model writing a Turkish drama read that as all of the prose,
+# which is how it should be read -- so the clause had to say which prose.
+
+
+#: Fields that end up inside an image, video or music prompt. Kept as a list
+#: rather than one assertion per field so that adding a field to the schema
+#: and forgetting it here is a diff a reviewer can see.
+MODEL_FACING = (
+    "setting_location",
+    "setting_time_of_day",
+    "setting_era",
+    "mood",
+    "theme",
+    "visual_motif",
+    "description",
+    "wardrobe",
+    "emotion",
+    "world_change",
+)
+
+
+@pytest.mark.parametrize("field", MODEL_FACING)
+def test_the_fields_that_are_prompts_are_ordered_in_english(field):
+    """Each of these is pasted into a generative model's prompt and read by no
+    one: the two settings and the character blocks go to the image model, and
+    "mood", "theme" and "emotion" build the music request."""
+    prompt = ScreenwriterAgent(demo=True)._system_prompt("tr")
+    english_rule = prompt.split("WRITE THESE FIELDS IN ENGLISH")[1]
+    assert f'"{field}"' in english_rule, (
+        f"{field} reaches a model's prompt but is not named as an English field"
+    )
+
+
+def test_what_the_viewer_hears_is_still_the_drama_s_language():
+    """The carve-out must not swallow the feature. A Turkish drama whose
+    dialogue came back in English is the bug this clause was added for."""
+    prompt = ScreenwriterAgent(demo=True)._system_prompt("tr")
+    ordered = prompt.split("LANGUAGE. Write the drama in")[1]
+    viewer_rule = ordered.split("WRITE THESE FIELDS IN ENGLISH")[0]
+    for field in ("title", "logline", "line"):
+        assert f'"{field}"' in viewer_rule
+    assert "Turkish" in viewer_rule
+    # And the carve-out names none of them.
+    english_rule = prompt.split("WRITE THESE FIELDS IN ENGLISH")[1]
+    for field in ("title", "logline", '"line"'):
+        assert field not in english_rule
+
+
+def test_an_english_drama_is_told_none_of_this():
+    """There is nothing to carve out when both halves are the same language,
+    and the clause is paid for on every job that carries it."""
+    prompt = ScreenwriterAgent(demo=True)._system_prompt("en")
+    assert "WRITE THESE FIELDS IN ENGLISH" not in prompt
+
+
+def test_the_storyboard_writes_english_whatever_it_is_handed():
+    """The storyboard agent never sees a language code, and does not need one:
+    every field it writes is a prompt. It drifted into Turkish anyway, because
+    the script it reads is in Turkish -- contagion, not instruction, so the
+    instruction is unconditional."""
+    from agents.storyboard_artist import StoryboardArtist
+
+    prompt = StoryboardArtist.SYSTEM_PROMPT
+    assert "WRITE EVERY FIELD IN ENGLISH" in prompt
+    assert "even when the script you are handed is in another" in prompt
+
+
 def test_the_language_reaches_both_provider_paths():
     """The MuAPI LLM route is tried FIRST, so a clause added only to the
     Anthropic fallback would do nothing on the primary path."""

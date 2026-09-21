@@ -1421,6 +1421,11 @@ async def run_generation_job(job: Job, api_key: str):
                         # the (possibly silent) script is already written and
                         # approved.
                         dialogue_enabled=job.dialogue_enabled,
+                        # Same argument as dialogue_enabled above, one step
+                        # further: by the time the sync pass discovers a scene
+                        # has two visible speakers, that script has been
+                        # written, approved and shot.
+                        lipsync_enabled=job.lipsync_enabled,
                         narrative_mode=job.narrative_mode,
                         series_brief=job.series_brief,
                     ),

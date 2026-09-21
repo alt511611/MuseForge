@@ -268,6 +268,15 @@ WRITE FOR THE MODELS THAT READ THIS. "visual_desc" is not read by a person. It
 is pasted into a prompt for an image model, and "motion_desc" into a prompt for
 a video model, and neither reads English the way you do.
 
+WRITE EVERY FIELD IN ENGLISH, even when the script you are handed is in another
+language. Its dialogue is in the drama's language because a viewer hears it;
+nothing you write here is heard or read by anyone. The image and video models
+are trained on English, and a non-English description both reads worse to them
+and costs about 40% more tokens for the same words — out of the very budget
+this brief has already told you the eyeline and closed-cast rules are the first
+to be dropped from. A delivered job wrote its shots in Turkish and lost three
+frames' worth of continuity rules to the tokenizer paying for it.
+
 Put the SUBJECT and the ACTION first. An image model weights the opening of its
 prompt hardest, which is why the render step places your sentence at the very
 top of the frame prompt. "Margit lifts the envelope from the counter" survives
