@@ -3,6 +3,38 @@ import { NextResponse } from "next/server";
 import { SUPABASE_URL, SUPABASE_ANON_KEY, hasSupabaseConfig } from "./lib/supabaseEnv";
 import { DEFAULT_LOCALE, isLocale, splitLocale, withLocale } from "./lib/i18n/routing";
 
+// Browsers send a weighted list such as "tr-TR,tr;q=0.9,en;q=0.8". Keep the
+// negotiation deliberately small and deterministic: exact locale first,
+// then the base language, then English. Unsupported languages are ignored.
+function preferredLocale(request) {
+  const saved = request.cookies.get("mf_locale")?.value;
+  if (saved && isLocale(saved)) return saved;
+
+  const header = request.headers.get("accept-language") || "";
+  const candidates = header
+    .split(",")
+    .map((part, index) => {
+      const [raw, ...params] = part.trim().split(";");
+      const qParam = params.find((p) => p.trim().startsWith("q="));
+      const q = qParam ? Number(qParam.trim().slice(2)) : 1;
+      return { raw: raw.toLowerCase(), q: Number.isFinite(q) ? q : 0, index };
+    })
+    .filter(({ raw, q }) => raw && raw !== "*" && q > 0)
+    .sort((a, b) => b.q - a.q || a.index - b.index);
+
+  for (const { raw } of candidates) {
+    const exact = raw.split("-")[0];
+    if (isLocale(raw)) return raw;
+    if (isLocale(exact)) return exact;
+  }
+  return DEFAULT_LOCALE;
+}
+
+function isLikelyCrawler(request) {
+  const ua = (request.headers.get("user-agent") || "").toLowerCase();
+  return /bot|crawler|spider|slurp|bingpreview|facebookexternalhit|twitterbot|linkedinbot/.test(ua);
+}
+
 // NOTE: "/" is intentionally NOT in this list. The landing page must stay
 // reachable by anonymous visitors (demo mode generates videos without an
 // account). Only the actual generation results page and admin are gated.
@@ -18,6 +50,17 @@ export async function middleware(request) {
   // request resolves through app/[locale]/ while the URL stays clean.
   const { locale, path } = splitLocale(pathname);
   const hasPrefix = isLocale(pathname.split("/")[1]);
+
+  // The unprefixed root is the stable English URL. For a human's first visit,
+  // honour their saved choice or browser language and move them to the
+  // localized URL. Crawlers stay on the canonical English URL so indexing is
+  // stable and the hreflang cluster remains authoritative.
+  if (!hasPrefix && path === "/" && !isLikelyCrawler(request)) {
+    const negotiated = preferredLocale(request);
+    if (negotiated !== DEFAULT_LOCALE) {
+      return NextResponse.redirect(new URL(withLocale("/", negotiated), request.url), 307);
+    }
+  }
 
   // /en/pricing and /pricing render identically. Collapse the prefixed form
   // permanently so only one URL per locale is ever crawlable or linkable.

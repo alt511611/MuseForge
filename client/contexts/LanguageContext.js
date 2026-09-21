@@ -44,6 +44,10 @@ export function LanguageProvider({ children, locale: localeProp, dictionary }) {
       if (typeof window !== "undefined") {
         try {
           localStorage.setItem(LS_KEY, code);
+          // Keep the preference available to the edge middleware as well as
+          // the client. This lets a later visit to the clean root URL open in
+          // the language the visitor chose, even before React hydrates.
+          document.cookie = `${LS_KEY}=${encodeURIComponent(code)}; Max-Age=31536000; Path=/; SameSite=Lax`;
         } catch {
           /* private mode / storage disabled — the URL still carries the locale */
         }
