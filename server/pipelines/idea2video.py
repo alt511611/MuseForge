@@ -6408,6 +6408,7 @@ class Idea2VideoPipeline:
         dialogue_enabled: bool = False,
         narrative_mode: str = "",
         series_brief: str = "",
+        lipsync_enabled: bool = False,
     ) -> DramaScript:
         """Phase A: screenwriting only — no portraits / frames / video."""
 
@@ -6434,6 +6435,12 @@ class Idea2VideoPipeline:
             # on produces no voices, no captions and, with music off, a master
             # with no audio stream at all.
             require_dialogue=dialogue_enabled,
+            # Who may speak in a scene, when the mouths will be animated. The
+            # sync pass drives one face from one combined file, so a scene with
+            # two visible speakers is refused (_has_one_visible_speaker) --
+            # and a writer never told so wrote three of them on a job that had
+            # paid for sync (see ScreenwriterAgent.LIPSYNC_CLAUSE).
+            lipsync_enabled=lipsync_enabled and dialogue_enabled,
             # Cinematic or micro-drama: two different dramatic curves, not one
             # curve at two lengths (see interfaces/micro_drama).
             narrative_mode=narrative_mode,
@@ -7617,6 +7624,7 @@ class Idea2VideoPipeline:
             dialogue_enabled=dialogue_enabled,
             narrative_mode=narrative_mode,
             series_brief=series_brief,
+            lipsync_enabled=lipsync_enabled,
         )
         return await self.continue_from_script(
             script=script,

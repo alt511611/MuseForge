@@ -502,6 +502,54 @@ syllable hyphens, no phonetic spacing: write "fourteen-oh-two", never
 "four-teen-oh-two"; "Route 7", never "Route seh-ven". A viewer who can hear the
 line does not need it sounded out, and a viewer reading it sees a typo."""
 
+    #: Appended when the job has BOUGHT lip sync.
+    #:
+    #: The sync provider is handed ONE combined audio file per scene and one
+    #: face to drive with it. It cannot know that a second visible character
+    #: takes over halfway through that file, so a two-hander sent to it puts
+    #: one person's words in the other's mouth. That is why
+    #: idea2video._has_one_visible_speaker refuses such a scene outright,
+    #: before any provider is paid -- and the refusal is right.
+    #:
+    #: Nothing ever told the screenwriter that the shape mattered. Delivered
+    #: job 532aa102-86f, three scenes, all three refused:
+    #:
+    #:     Scene 0 has multiple visible speakers in one combined dialogue
+    #:     track; keeping it as voice-over instead of driving the wrong face.
+    #:     ... Lip sync was charged for 3 scene(s), delivered on 0;
+    #:     refunding 3 undelivered scene surcharge(s).
+    #:
+    #: The refund is correct and the film still played -- three scenes of
+    #: closed mouths over voice-over, on a job that had asked and paid for the
+    #: opposite. Job 4631cc44-d30 synced all three of ITS scenes a few hours
+    #: earlier, with no code difference between the two runs: its second voice
+    #: happened to be a dispatcher on a radio. Whether the feature the customer
+    #: bought arrived at all was a property of the script's shape, settled by a
+    #: writer who had never been told the shape was load-bearing.
+    #:
+    #: The escape hatch is one drama uses constantly and that job took by
+    #: accident: put the second voice off-screen. It costs nothing -- the
+    #: character is still in the scene and still in the story -- and
+    #: _heard_but_never_seen reads exactly this staging (a radio, a handset,
+    #: an intercom, an (O.S.)) to keep that speaker out of the frame's closed
+    #: cast and off the 180-degree axis as well.
+    LIPSYNC_CLAUSE = """
+
+LIP SYNC. The mouths in this film will be animated to the voices, and that pass
+is given ONE audio file per scene and ONE face to drive with it. So the dialogue
+in any one scene belongs to ONE character who is visible in that scene.
+
+A scene may still be an exchange. The second voice arrives from off-screen — over
+a radio, a handset, an intercom, a phone, or called from the next room — and the
+"action" stages it plainly ("Her radio crackles", "TOMAS (O.S.)"), which is what
+keeps that speaker out of the frame and lets the visible character be the one
+answering. Where a scene genuinely needs two people speaking face to face, split
+it in two: each half its own scene, each with its own single speaker.
+
+This is not a style preference. A scene written with two visible speakers is
+dropped from the sync pass entirely and plays with unmoving mouths over
+voice-over, on a film whose maker asked and paid for the opposite."""
+
     #: Appended LAST-but-one, for the same reason the micro-drama clause goes
     #: last: it contradicts the base prompt's "Build 3-5 scenes" and a model
     #: weighs a late override against what came before instead of averaging
@@ -618,6 +666,7 @@ into a single scene rather than adding one."""
         narrative_mode: str = "",
         num_scenes: int = 0,
         is_episode: bool = False,
+        lipsync_enabled: bool = False,
     ) -> str:
         """The system prompt for this drama's language, audio mode and length.
 
@@ -630,6 +679,12 @@ into a single scene rather than adding one."""
             prompt += self.LANGUAGE_CLAUSE.format(language=name_of(language))
         if require_dialogue:
             prompt += self.DIALOGUE_CLAUSE
+        # Straight after the dialogue clause, because it constrains the thing
+        # that clause has just asked for. Only when the sync was actually
+        # bought: it costs the drama its face-to-face two-handers, and that is
+        # not a price to charge a job which was never going to sync anyway.
+        if lipsync_enabled:
+            prompt += self.LIPSYNC_CLAUSE
         # Always, and before the scene count: a scene's LENGTH is a fixed fact
         # about the product (interfaces/second_budget), not something the
         # caller chooses, and it is the constraint the script is most often
@@ -677,6 +732,9 @@ into a single scene rather than adding one."""
         #: rules ride in the system prompt, where a model reads them as
         #: instruction rather than as material.
         series_brief: str = "",
+        #: Whether this job bought lip sync, which constrains who may speak in
+        #: a scene -- see LIPSYNC_CLAUSE.
+        lipsync_enabled: bool = False,
     ) -> DramaScript:
         # Demo mode must stay fast and free of real network calls --
         # matches MuAPIImageGenerator/MuAPIVideoGenerator's demo behavior.
@@ -712,6 +770,7 @@ into a single scene rather than adding one."""
                         narrative_mode,
                         num_scenes,
                         bool(series_brief),
+                        lipsync_enabled=lipsync_enabled,
                     ),
                     prompt,
                     max_tokens=self.MAX_SCRIPT_TOKENS,
@@ -745,6 +804,7 @@ into a single scene rather than adding one."""
                 require_dialogue,
                 narrative_mode,
                 series_brief,
+                lipsync_enabled=lipsync_enabled,
             )
 
         # 3) No provider answered. The deterministic template is NOT an
@@ -1118,6 +1178,7 @@ into a single scene rather than adding one."""
         require_dialogue: bool = False,
         narrative_mode: str = "",
         series_brief: str = "",
+        lipsync_enabled: bool = False,
     ) -> DramaScript:
         import anthropic
 
@@ -1156,6 +1217,7 @@ into a single scene rather than adding one."""
                     narrative_mode,
                     num_scenes,
                     bool(series_brief),
+                    lipsync_enabled=lipsync_enabled,
                 ),
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:
