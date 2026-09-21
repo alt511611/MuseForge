@@ -45,13 +45,27 @@ export function canonical(path = "/", locale = DEFAULT_LOCALE, available = LOCAL
   /* `available` narrows the cluster for pages that do not exist in every
      language -- an article written in English and Turkish must not advertise
      eighteen hreflang targets that 404. x-default stays on the English URL,
-     which every such page has by construction. */
+     which every such page has by construction.
+
+     It also decides what THIS page points at. A locale outside `available` is
+     being rendered with borrowed content -- the four /solutions/* pages ship
+     English copy at all twenty prefixes, and every non-English one used to
+     self-canonicalize, so Google was handed eighty URLs whose bodies are
+     byte-identical and told, eighty times, "this one is the original." It
+     picked one on its own and flagged the rest -- Search Console's "Duplicate
+     without user-selected canonical" on /th/solutions/education is that
+     finding. A locale that is not in `available` gets the FIRST available
+     locale's URL as its canonical instead of its own, so the duplicate mass
+     collapses onto the one URL that actually has unique content. A locale
+     that IS in `available` is unaffected: it still self-canonicalizes,
+     because its content is genuinely its own. */
   const codes = available.length ? available : LOCALE_CODES;
   const languages = Object.fromEntries(
     codes.map((code) => [code, withLocale(path, code)])
   );
+  const canonicalLocale = codes.includes(locale) ? locale : codes[0] || DEFAULT_LOCALE;
   return {
-    canonical: withLocale(path, locale),
+    canonical: withLocale(path, canonicalLocale),
     languages: { ...languages, "x-default": path },
   };
 }
@@ -73,14 +87,19 @@ export function openGraphFor({
   article,
 }) {
   const codes = available.length ? available : LOCALE_CODES;
+  /* Same reasoning as canonical()'s canonicalLocale: og:url is itself a
+     dedup signal (Facebook's and LinkedIn's debuggers use it to decide two
+     shares are the same page), so a locale rendering borrowed content should
+     not claim to be the original here either. */
+  const canonicalLocale = codes.includes(locale) ? locale : codes[0] || DEFAULT_LOCALE;
   return {
     type,
     siteName: SITE_NAME,
     title,
     description,
-    url: withLocale(path, locale),
-    locale: ogLocale(locale),
-    alternateLocale: codes.filter((c) => c !== locale).map(ogLocale),
+    url: withLocale(path, canonicalLocale),
+    locale: ogLocale(canonicalLocale),
+    alternateLocale: codes.filter((c) => c !== canonicalLocale).map(ogLocale),
     /* og:article:* is only meaningful when type is "article"; Facebook ignores
        the keys otherwise but validators complain about them. */
     ...(type === "article" && article ? article : {}),
