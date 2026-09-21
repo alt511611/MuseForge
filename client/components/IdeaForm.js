@@ -749,7 +749,7 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
             <span>
               {tr(t, "form_lipsync_toggle", "Dudak senkronu")}
               <span className="block text-[11px] mt-0.5" style={{ color: "var(--mf-ink-4)" }}>
-                {tr(t, "form_lipsync_hint", "Karakterlerin ağzı, üretilen sesle konuşur. Kapalıyken ses görüntünün üstüne bindirilir.")}
+                {tr(t, "form_lipsync_hint", "Sync is applied only when one visible character is speaking in a readable shot; otherwise the dialogue stays as a clean voice-over.")}
               </span>
             </span>
           </label>

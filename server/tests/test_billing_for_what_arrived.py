@@ -68,12 +68,13 @@ async def test_lip_sync_that_ran_is_not_refunded(refunds):
 
 
 @pytest.mark.asyncio
-async def test_one_synced_scene_is_still_a_delivered_feature(refunds):
-    """Partial delivery is a judgement about quality, not about billing, and
-    this refunds only what plainly did not happen at all."""
+async def test_each_missing_synced_scene_is_refunded(refunds):
+    """The add-on is priced per scene, so partial delivery is too."""
     await _refund_undelivered_extras(_job(), {"lipsynced_scenes": [1]})
 
-    assert refunds == []
+    assert refunds == [
+        ("user-1", 2 * LIPSYNC_EXTRA_CREDIT_COST, "930f11de-4b0")
+    ]
 
 
 @pytest.mark.asyncio

@@ -30,7 +30,7 @@ def _tracks():
     (combined audio attached to a scene's FIRST line only)."""
     return [
         {"character": "Kemal", "line": "Bu kokuyu unutma.", "audio_url": "https://cdn/s0.mp3", "scene_index": 0},
-        {"character": "Deniz", "line": "Unutmam.", "scene_index": 0},
+        {"character": "Kemal", "line": "Unutmam.", "scene_index": 0},
         {"character": "Deniz", "line": "Söz.", "audio_url": "https://cdn/s2.mp3", "scene_index": 2},
     ]
 

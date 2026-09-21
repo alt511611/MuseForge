@@ -1239,16 +1239,26 @@ async def _refund_undelivered_extras(job: Job, result: Dict[str, Any]) -> None:
     """
     if job.demo or not job.user_id or not _lipsync_was_charged(job):
         return
-    if (result or {}).get("lipsynced_scenes"):
-        return
-    amount = job.num_scenes * LIPSYNC_EXTRA_CREDIT_COST
+    # The surcharge is taken per scene, so delivery and refund must be
+    # per-scene too. Returning nothing when one of three syncs happened made
+    # a customer pay for the two closed mouths that did not. Clamp to the
+    # purchased count: malformed persisted indices must never mint credits.
+    synced = {
+        int(scene)
+        for scene in ((result or {}).get("lipsynced_scenes") or [])
+        if isinstance(scene, int) and 0 <= scene < job.num_scenes
+    }
+    undelivered = max(0, int(job.num_scenes) - len(synced))
+    amount = undelivered * LIPSYNC_EXTRA_CREDIT_COST
     if amount <= 0:
         return
     logger.info(
-        "[%s] Lip sync was charged (%d credit(s)) and ran on no scene; "
-        "refunding it.",
+        "[%s] Lip sync was charged for %d scene(s), delivered on %d; "
+        "refunding %d undelivered scene surcharge(s).",
         job.id,
-        amount,
+        job.num_scenes,
+        len(synced),
+        undelivered,
     )
     await _sb_refund_credits(job.user_id, amount, job.id)
 
