@@ -8,6 +8,7 @@ rather than failing the whole job. See `Idea2VideoPipeline._assemble_final_drama
 
 import logging
 import os
+from typing import Callable, Optional
 
 from tools.muapi_client import MuAPIClient, MuAPIError
 
@@ -33,6 +34,7 @@ class MuAPIMusicGenerator:
         mood: str,
         duration: int = 30,
         style_hint: str = "",
+        on_submitted: Optional[Callable[[str], None]] = None,
     ) -> str:
         """Generate a short instrumental track matching the drama's mood.
 
@@ -51,8 +53,16 @@ class MuAPIMusicGenerator:
             f"{hint} no vocals, no lyrics."
         )
         payload = {"prompt": prompt, "duration": duration, "instrumental": True}
+        # Passed only when wired -- see muapi_video_generator's identical note.
+        generate_kwargs = {"on_submitted": on_submitted} if on_submitted else {}
         try:
-            return await self.client.generate(self.MUSIC_ENDPOINT, payload, poll_interval=3.0, max_polls=100)
+            return await self.client.generate(
+                self.MUSIC_ENDPOINT,
+                payload,
+                poll_interval=3.0,
+                max_polls=100,
+                **generate_kwargs,
+            )
         except MuAPIError as exc:
             logger.warning("Music generation failed, continuing without music: %s", exc)
             raise

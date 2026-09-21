@@ -155,6 +155,7 @@ class MuAPISFXGenerator:
         duration: float = 8.0,
         scene_emotion: str = "",
         is_cancelled: Optional[Callable[[], bool]] = None,
+        on_submitted: Optional[Callable[[str], None]] = None,
     ) -> str:
         """URL of a sound bed for this scene, or "" in demo mode.
 
@@ -167,12 +168,15 @@ class MuAPISFXGenerator:
             "prompt": build_prompt(audio_desc, scene_emotion),
             "duration": clamp_duration(duration),
         }
+        # Passed only when wired -- see muapi_video_generator's identical note.
+        generate_kwargs = {"on_submitted": on_submitted} if on_submitted else {}
         return await self.client.generate(
             SFX_ENDPOINT,
             payload,
             poll_interval=SFX_POLL_INTERVAL,
             max_polls=_max_polls(),
             is_cancelled=is_cancelled,
+            **generate_kwargs,
         )
 
 

@@ -2,7 +2,7 @@
 
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from tools.muapi_client import MuAPIClient, MuAPIError
 
@@ -157,8 +157,15 @@ class MuAPIVideoGenerator:
         is_cancelled=None,
         shot_profile: Optional[str] = None,
         last_image: Optional[str] = None,
+        on_submitted: Optional[Callable[[str, str], None]] = None,
     ) -> str:
         """Animate ``image_url``; land on ``last_image`` when one is given.
+
+        ``on_submitted``, when given, is called with ``(request_id, endpoint)``
+        the moment MuAPI hands back a ticket -- before this call waits on it.
+        See ``MuAPIClient.generate``'s own docstring for why: it is the only
+        way a caller can persist a paid-for job before a crash mid-poll can
+        lose track of it.
 
         ``last_image`` is the acted PEAK of the shot (see interfaces/acting).
         Given both ends, the Kling v3.0 family interpolates between them, so
@@ -212,6 +219,15 @@ class MuAPIVideoGenerator:
                 endpoint=endpoint,
                 aspect_ratio=aspect_ratio,
             )
+            # Passed only when wired: several tests substitute a fake
+            # `client.generate` with no slot for this kwarg at all, and the
+            # feature is opt-in, so an unwired call must look exactly like it
+            # did before this existed.
+            generate_kwargs = {}
+            if on_submitted:
+                generate_kwargs["on_submitted"] = (
+                    lambda rid, _ep=endpoint: on_submitted(rid, _ep)
+                )
             try:
                 return await self.client.generate(
                     endpoint,
@@ -219,6 +235,7 @@ class MuAPIVideoGenerator:
                     poll_interval=3.0,
                     max_polls=200,
                     is_cancelled=is_cancelled,
+                    **generate_kwargs,
                 )
             except MuAPIError as exc:
                 last_exc = exc

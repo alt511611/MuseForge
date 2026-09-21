@@ -331,6 +331,7 @@ class MuAPIVoiceGenerator:
         is_cancelled: Optional[Callable[[], bool]] = None,
         language: str = DEFAULT_LANGUAGE,
         emotion: str = "",
+        on_submitted: Optional[Callable[[str], None]] = None,
     ) -> List[Dict[str, Any]]:
         """Generate all non-empty scene lines in ONE ElevenLabs dialogue request.
 
@@ -399,6 +400,8 @@ class MuAPIVoiceGenerator:
             attempts.append((form, values))
 
         forms = [form for form, _ in attempts]
+        # Passed only when wired -- see muapi_video_generator's identical note.
+        generate_kwargs = {"on_submitted": on_submitted} if on_submitted else {}
         for position, (form, values) in enumerate(attempts):
             payload["dialogue"] = [
                 {"text": row.get("spoken_text") or row["line"], "voice_id": value}
@@ -411,6 +414,7 @@ class MuAPIVoiceGenerator:
                     poll_interval=2.0,
                     max_polls=120,
                     is_cancelled=is_cancelled,
+                    **generate_kwargs,
                 )
             except Exception as exc:
                 last_exc = exc
