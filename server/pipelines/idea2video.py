@@ -856,6 +856,40 @@ DEFAULT_SCENE_CONCURRENCY = 3
 DEFAULT_LIPSYNC_CONCURRENCY = 3
 
 
+#: How many scenes may have their sound bed generated at once.
+#:
+#: Lower than the two above it, and the reason is a delivered failure rather
+#: than caution. Job 4631cc44-d30 submitted all three of its scenes' foley
+#: simultaneously -- `asyncio.gather` over every scene, with nothing between
+#: it and the provider -- and all three timed out, within two seconds of each
+#: other, having waited out the entire poll budget without one of them
+#: finishing. Three requests for eleven seconds of audio, from a model that
+#: answers in tens of seconds when it is asked once.
+#:
+#: Failures that land together were not three independent failures; they were
+#: one queue. Raising the budget alone (SFX_MAX_POLLS) would have paid for
+#: that queue rather than avoided it, so the burst is bounded here as well:
+#: two at a time still overlaps the waiting, which is all this stage does,
+#: without asking the provider to hold a whole film's worth of jobs open.
+DEFAULT_FOLEY_CONCURRENCY = 2
+
+
+def _foley_concurrency(total_scenes: int) -> int:
+    """Resolve how many scenes to generate foley for in parallel."""
+    raw = os.environ.get("MUSEFORGE_FOLEY_CONCURRENCY", "").strip()
+    configured = DEFAULT_FOLEY_CONCURRENCY
+    if raw:
+        try:
+            configured = int(raw)
+        except ValueError:
+            logger.warning(
+                "Invalid MUSEFORGE_FOLEY_CONCURRENCY=%r, using %s",
+                raw,
+                DEFAULT_FOLEY_CONCURRENCY,
+            )
+    return max(1, min(configured, max(1, total_scenes)))
+
+
 def _lipsync_concurrency(total_scenes: int) -> int:
     """Resolve how many scenes to lip-sync in parallel."""
     raw = os.environ.get("MUSEFORGE_LIPSYNC_CONCURRENCY", "").strip()
@@ -6007,10 +6041,10 @@ class Idea2VideoPipeline:
         nothing read it, so every drama this product has made was designed
         with a soundtrack it then threw away.
 
-        Scenes are generated concurrently and failures are swallowed per
-        scene: foley is the layer a film can most afford to lose, and it is
-        being added at the very end of a job the customer has already paid
-        for.
+        Scenes are generated concurrently -- but BOUNDED concurrently, see
+        DEFAULT_FOLEY_CONCURRENCY -- and failures are swallowed per scene:
+        foley is the layer a film can most afford to lose, and it is being
+        added at the very end of a job the customer has already paid for.
         """
         if self.demo or not is_foley_enabled() or not scene_paths:
             return []
@@ -6024,6 +6058,8 @@ class Idea2VideoPipeline:
             # to lose, and losing it must not take the finished drama with it.
             logger.warning("Foley provider unavailable, continuing without it: %s", exc)
             return []
+
+        semaphore = asyncio.Semaphore(_foley_concurrency(len(scene_results)))
 
         async def _one(scene: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             clip_index = scene.get("clip_index")
@@ -6040,12 +6076,16 @@ class Idea2VideoPipeline:
             if duration <= 0:
                 return None
             try:
-                url = await generator.generate_scene_sfx(
-                    audio_desc,
-                    duration=duration,
-                    scene_emotion=_scene_emotion(scene.get("script")),
-                    is_cancelled=is_cancelled,
-                )
+                # Held around the provider call only. The probe above is
+                # ffprobe on this box and has nothing to do with the burst
+                # this bound exists to prevent.
+                async with semaphore:
+                    url = await generator.generate_scene_sfx(
+                        audio_desc,
+                        duration=duration,
+                        scene_emotion=_scene_emotion(scene.get("script")),
+                        is_cancelled=is_cancelled,
+                    )
             except Exception as exc:
                 if is_account_locked(exc):
                     self.account_locked = True

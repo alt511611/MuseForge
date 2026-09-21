@@ -33,7 +33,12 @@ import os
 from typing import Callable, Optional
 
 from tools.provider_choice import resolve_provider
-from tools.muapi_client import MuAPIClient, MuAPIError
+from tools.muapi_client import (
+    DEFAULT_MAX_POLLS,
+    DEFAULT_POLL_INTERVAL,
+    MuAPIClient,
+    MuAPIError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +47,50 @@ TRUTHY = {"1", "true", "yes", "on"}
 #: Note the slash: this endpoint is namespaced, unlike the flat slugs used by
 #: the image and video models. Getting it wrong is a 404 per scene.
 SFX_ENDPOINT = os.environ.get("MUAPI_SFX_MODEL", "mmaudio-v2/text-to-audio")
+
+#: How long a sound bed is waited for, and why it is no longer the shortest
+#: wait in this client.
+#:
+#: This used to be 100 polls at 2s -- a 200 second ceiling, written nowhere
+#: else and explained nowhere at all. It was the tightest budget any MuAPI
+#: stage in this repo runs on: lip sync waits 480s (the client default),
+#: Kling waits 600s, the voice prober 240s, music 300s. Foley, alone, was
+#: given 200s.
+#:
+#: Delivered job 4631cc44-d30, a three-scene harbour drama: all three scenes'
+#: foley failed, and they failed TOGETHER -- 09:07:52, 09:07:53, 09:07:54,
+#: each one 216-218 seconds after the stage began. Three jobs that were
+#: submitted at the same moment and ran the whole poll loop out without one
+#: of them finishing. For eleven seconds of audio, from a model that answers
+#: in tens of seconds when it is not queued behind itself.
+#:
+#: Nothing about generating a sound bed justifies a ceiling a third of what
+#: the same client gives every other stage, so it now takes the client's own
+#: default and a deployment that disagrees can say so without a release.
+#: Paired with the concurrency bound in idea2video._generate_foley: the
+#: budget stops a queued job from being abandoned, the bound stops the queue
+#: from forming.
+SFX_POLL_INTERVAL = DEFAULT_POLL_INTERVAL
+
+
+def _max_polls() -> int:
+    """The poll budget, from the environment when it is set and parseable.
+
+    A bad value falls back rather than raising: this is read on the way to
+    generating foley, and foley is the layer a film can most afford to lose
+    -- losing it to a typo in an environment variable would be the one way
+    this module could take a paid drama down with it.
+    """
+    raw = os.environ.get("MUSEFORGE_SFX_MAX_POLLS", "").strip()
+    if not raw:
+        return DEFAULT_MAX_POLLS
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning(
+            "Invalid MUSEFORGE_SFX_MAX_POLLS=%r, using %s", raw, DEFAULT_MAX_POLLS
+        )
+        return DEFAULT_MAX_POLLS
 
 #: The provider's own bounds. A request outside them is rejected, and the
 #: rejection arrives per scene, so it is clamped here rather than trusted.
@@ -121,8 +170,8 @@ class MuAPISFXGenerator:
         return await self.client.generate(
             SFX_ENDPOINT,
             payload,
-            poll_interval=2.0,
-            max_polls=100,
+            poll_interval=SFX_POLL_INTERVAL,
+            max_polls=_max_polls(),
             is_cancelled=is_cancelled,
         )
 
@@ -156,6 +205,7 @@ __all__ = [
     "MuAPIError",
     "MuAPISFXGenerator",
     "SFX_ENDPOINT",
+    "SFX_POLL_INTERVAL",
     "build_prompt",
     "clamp_duration",
     "is_foley_enabled",

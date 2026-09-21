@@ -267,6 +267,108 @@ def _drop_to(kept: list, limit: int, why: str, measure=None) -> list:
     return kept
 
 
+#: How many times the token last resort may go back for the longest clause.
+#:
+#: Each pass takes the longest clause REMAINING, so four passes cut four
+#: different descriptions down before anything is cut twice -- and more than
+#: one pass is needed at all only because tokenization is not additive: a
+#: clause cut to a target measured on its own can land a token or two over
+#: once it is joined back to its neighbours. A loop that has not converged in
+#: four is not converging, and this runs inside a paid render.
+MAX_TOKEN_TRIM_PASSES = 4
+
+#: Tokens of slack asked for beyond the arithmetic, for that same
+#: non-additivity. Cheaper than another pass.
+TOKEN_TRIM_MARGIN = 2
+
+
+def _trim_clause_to_tokens(text: str, target: int) -> str:
+    """`text` cut to roughly `target` tokens, keeping how it ends.
+
+    Segments are joined with no glue -- each one carries its own trailing
+    ". " -- so a trim that strips the punctuation off the end welds this
+    clause onto the next one ("...rain-slicked steelShot type: wide"), which
+    is a different way to lose a clause than the one this is preventing. The
+    separator is lifted off, the body is cut at a word, and the separator
+    goes back on.
+    """
+    body = text.rstrip()
+    tail = text[len(body):]
+    if not body:
+        return text
+    # A proportional first cut, so the word-at-a-time convergence in
+    # _within_token_cap starts beside its target instead of walking a
+    # 400-token clause down one word at a time on a render the customer is
+    # waiting for.
+    used = count_tokens(body)
+    words = body.split(" ")
+    if used > target and len(words) > 1:
+        body = " ".join(words[: max(1, int(len(words) * target / used))])
+    cut = _within_token_cap(body, target)
+    if not cut:
+        return ""
+    # _within_token_cap strips " ,;." so the body never ends mid-sentence;
+    # give it back the full stop it was cut out of.
+    return (cut if cut.endswith(".") else cut + ".") + tail
+
+
+def _trim_to_token_window(kept: list, token_limit: int) -> list:
+    """Cut the longest clauses down until the joined prompt fits the window.
+
+    The token twin of the character last resort in `fit_image_prompt`, and it
+    trims the same thing for the same reason: THE TAIL IS WHERE THE SHORTEST
+    REQUIRED CLAUSES SIT -- shot type, lens, and the lip-sync mouth line --
+    so cutting the assembled prompt from the end deletes them whole to save a
+    few words of a description with hundreds to spare.
+
+    Until this existed, that is precisely what happened, just not here. When
+    every droppable clause was gone and the REQUIRED ones still overran,
+    `fit_image_prompt` returned the over-long prompt and `build_frame_prompt`
+    logged that "the tail will be truncated silently" -- and then sent it, and
+    T5 did the truncating, from the end, in silence. A module written to stop
+    a budget being enforced by a tokenizer was handing the tokenizer the one
+    case it could not handle.
+
+    `test_the_mouth_survives_the_budget` is the shape of what that costs: a
+    frame whose mouth clause fell off renders a closed mouth, the sync pass is
+    still requested and still billed, and a five-second line plays over it.
+    """
+    for _ in range(MAX_TOKEN_TRIM_PASSES):
+        used = count_tokens("".join(t for _, t in kept))
+        if used <= token_limit:
+            break
+        # Measured, not guessed from length: the clause with the most
+        # CHARACTERS is not always the one with the most tokens, and the gap
+        # between those two is the whole argument of MAX_VISUAL_DESC_TOKENS.
+        sizes = [count_tokens(text) for _, text in kept]
+        idx = max(range(len(kept)), key=lambda i: sizes[i])
+        prio, longest = kept[idx]
+        target = max(1, sizes[idx] - (used - token_limit) - TOKEN_TRIM_MARGIN)
+        trimmed = _trim_clause_to_tokens(longest, target)
+        if not trimmed or trimmed == longest:
+            # Nothing left to be clever with: the longest clause will not get
+            # any shorter at a word boundary. Said plainly rather than looped
+            # on, because the next pass would cut the same clause to the same
+            # place.
+            logger.warning(
+                "Frame prompt at %d tokens against the %d-token T5 window and "
+                "its longest required clause will not trim further — the "
+                "window will cut the tail. %d chars: %.80s...",
+                used, token_limit, len("".join(t for _, t in kept)),
+                "".join(t for _, t in kept),
+            )
+            break
+        logger.warning(
+            "Frame prompt at %d tokens against the %d-token T5 window with "
+            "nothing optional left to drop — trimming its longest REQUIRED "
+            "clause from %d to %d tokens, rather than letting the window cut "
+            "the tail where the mouth and framing clauses sit (%.60s...).",
+            used, token_limit, sizes[idx], count_tokens(trimmed), longest,
+        )
+        kept[idx] = (prio, trimmed)
+    return kept
+
+
 def fit_image_prompt(
     segments: list,
     limit: int = MAX_IMAGE_PROMPT_CHARS,
@@ -327,6 +429,18 @@ def fit_image_prompt(
             # The longest segment was not the whole overflow. Nothing left to
             # be clever with.
             prompt = prompt[:limit].rsplit(" ", 1)[0]
+    # And the same last resort in the unit that decides what is READ rather
+    # than what is accepted. This runs after the character pass because
+    # trimming for tokens only ever shortens the prompt, so it cannot put the
+    # character budget back out; the reverse is not true.
+    #
+    # Reaching here over the window means every droppable clause is already
+    # gone -- _drop_to stops at REQUIRED by design. What was missing was any
+    # answer to that state: the prompt was returned over-long and T5 cut it
+    # from the end, which is where the mouth, the shot type and the lens sit.
+    if count_tokens(prompt) > token_limit:
+        kept = _trim_to_token_window(kept, token_limit)
+        prompt = "".join(t for _, t in kept)
     return prompt
 
 
@@ -1992,19 +2106,21 @@ def build_frame_prompt(
     prompt = fit_image_prompt(opening + ladder)
     # The invariant, asserted in the log rather than assumed.
     #
-    # fit_image_prompt drops until this holds, so reaching here over the cap
-    # means every droppable clause is already gone and what is left is
-    # REQUIRED -- the style, the shot, its framing and the character lock.
-    # That is a prompt no budget can fix by dropping, and it is worth a line
-    # of its own: it says the shot description or the cast has outgrown what
-    # the model can read, which is a story-shaped problem, not a ladder one.
+    # fit_image_prompt drops until this holds, and then TRIMS its longest
+    # required clauses until it holds, so reaching here over the cap means
+    # both have run out: every droppable clause is gone, and the longest of
+    # what remains would not shorten at a word boundary. That is a prompt no
+    # budget can fix, and it is worth a line of its own -- it says the shot
+    # description or the cast has outgrown what the model can read, which is
+    # a story-shaped problem, not a ladder one.
     used = count_tokens(prompt)
     if used > MAX_IMAGE_PROMPT_TOKENS:
         logger.warning(
-            "Frame prompt is %d tokens against a %d-token window with nothing "
-            "optional left to drop — its required clauses alone exceed what "
-            "FLUX will read, and the tail will be truncated silently. %d "
-            "chars: %.80s...",
+            "Frame prompt is %d tokens against a %d-token window after every "
+            "optional clause was dropped AND its longest required clauses were "
+            "trimmed (_trim_to_token_window) — the shot description or the "
+            "cast has outgrown what the model can read, and FLUX will now cut "
+            "the tail itself. %d chars: %.80s...",
             used, MAX_IMAGE_PROMPT_TOKENS, len(prompt), prompt,
         )
     elif not tokenizer_is_real():
