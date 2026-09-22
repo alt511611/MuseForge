@@ -101,19 +101,37 @@ def _make_video_generator(api_key: str, demo: bool):
 
 def _make_image_generator(api_key: str, demo: bool):
     """Pick the image-generation backend. Defaults to MuAPI unchanged.
-    MUSEFORGE_IMAGE_PROVIDER=falai opts into fal.ai FLUX (v1.1 text-to-image
-    + flux-pro/kontext for reference). Lazy-imported.
+
+    MUSEFORGE_IMAGE_PROVIDER:
+      - "muapi" (default) — MuAPIImageGenerator
+      - "falai" — fal.ai FLUX (v1.1 text-to-image + flux-pro/kontext for
+        reference, which reads only the FIRST reference resolve_frame_
+        references builds)
+      - "falai_multiref" — same text-to-image endpoint, but fal-ai/
+        flux-2-pro/edit for reference, which takes the WHOLE list
+        (anchor + second character + location plate)
+
+    "falai_multiref" is a separate value rather than a capability "falai"
+    discovers for itself, and deliberately so, matching MUSEFORGE_VIDEO_
+    PROVIDER's falai/falai_multishot split: an existing deployment on
+    "falai" must not start sending a different schema to a different
+    endpoint because this was added. Opting in is a decision, not a side
+    effect. Lazy-imported.
     """
     provider = resolve_provider(
         "MUSEFORGE_IMAGE_PROVIDER",
-        ("muapi", "falai"),
+        ("muapi", "falai", "falai_multiref"),
         default="muapi",
         stage="Image generation",
     )
-    if provider == "falai":
+    if provider in ("falai", "falai_multiref"):
         from tools.falai_image_generator import FalAIImageGenerator
 
-        return FalAIImageGenerator(os.environ.get("FAL_KEY", ""), demo=demo)
+        return FalAIImageGenerator(
+            os.environ.get("FAL_KEY", ""),
+            demo=demo,
+            multiref=(provider == "falai_multiref"),
+        )
     return MuAPIImageGenerator(api_key, demo=demo)
 
 
