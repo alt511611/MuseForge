@@ -21,8 +21,18 @@ Schemas CONFIRMED against fal.ai's own docs:
            guidance_scale, num_images, output_format, ...
    output: {"images": [{"url": "...", ...}, ...], ...}
 
-NOTE: fal's Kontext uses singular ``image_url`` (NOT MuAPI's images_list /
-image_urls). Do not confuse the two schemas.
+3) Multi-reference image-to-image (generate_image_with_reference, multiref=True)
+   — fal-ai/flux-2-pro/edit, selected via MUSEFORGE_IMAGE_PROVIDER=falai_multiref
+   https://fal.ai/models/fal-ai/flux-2-pro/edit/api
+   input:  prompt (str, required),
+           image_urls (list[str], required) — the WHOLE ordered reference set,
+           image_size (enum, same set as flux-pro/v1.1, or {width,height}),
+           seed, output_format, ...
+   output: {"images": [{"url": "...", ...}, ...], "seed": ...}
+
+NOTE: fal's Kontext uses singular ``image_url``; flux-2-pro/edit uses a
+plural ``image_urls`` list (closer to MuAPI's ``images_list``). Do not
+confuse the three schemas.
 
 Errors raise (no silent MuAPI fallback).
 """
@@ -78,9 +88,18 @@ class FalAIImageGenerator:
     KONTEXT_ENDPOINT = os.environ.get(
         "FALAI_KONTEXT_MODEL", "fal-ai/flux-pro/kontext"
     )
+    EDIT_ENDPOINT = os.environ.get(
+        "FALAI_FLUX2_EDIT_MODEL", "fal-ai/flux-2-pro/edit"
+    )
 
-    def __init__(self, api_key: str, demo: bool = False):
+    def __init__(self, api_key: str, demo: bool = False, multiref: bool = False):
         self.demo = demo
+        #: True selects flux-2-pro/edit (the WHOLE reference list), false
+        #: keeps the original Kontext/image_url behaviour. A constructor
+        #: flag rather than a per-call one: which schema a deployment speaks
+        #: is a provider decision (MUSEFORGE_IMAGE_PROVIDER), not something a
+        #: caller re-litigates on every frame.
+        self.multiref = multiref
         self.api_key = (api_key or os.environ.get("FAL_KEY", "")).strip()
         self.client = make_fal_client(self.api_key, demo=demo)
 
@@ -117,10 +136,14 @@ class FalAIImageGenerator:
         Same contract as the MuAPI backend: ``references`` is a URL or an
         ORDERED sequence, index 0 being the identity anchor.
 
-        This endpoint reads exactly one. That is a property of fal's Kontext
-        schema (singular ``image_url``), not a choice made here, so the rest
-        of the set is reported rather than quietly discarded -- the caller
-        assembled it for a reason and is entitled to know it did not arrive.
+        Non-multiref (default): reads exactly one. That is a property of
+        fal's Kontext schema (singular ``image_url``), not a choice made
+        here, so the rest of the set is reported rather than quietly
+        discarded -- the caller assembled it for a reason and is entitled to
+        know it did not arrive.
+
+        multiref=True: flux-2-pro/edit takes the WHOLE ordered set as
+        ``image_urls``, so nothing this method receives is ever held back.
         """
         if self.demo:
             return _demo_image_url(prompt + "|ref", aspect_ratio)
@@ -130,11 +153,29 @@ class FalAIImageGenerator:
             return await self.generate_image(
                 prompt, aspect_ratio, is_cancelled=is_cancelled
             )
+
+        if self.multiref:
+            payload = {
+                "prompt": prompt,
+                "image_urls": ordered,
+                "image_size": IMAGE_SIZE_ENUM.get(aspect_ratio)
+                or ASPECT_RATIO_MAP.get(aspect_ratio, ASPECT_RATIO_MAP["16:9"]),
+                "num_images": 1,
+                "output_format": "jpeg",
+            }
+            result = await fal_generate(
+                self.client,
+                self.EDIT_ENDPOINT,
+                payload,
+                is_cancelled=is_cancelled,
+            )
+            return self._first_image_url(result)
+
         if len(ordered) > 1:
             logger.info(
                 "%s takes a single reference image; using the anchor and "
-                "holding back %d. Point MUSEFORGE_IMAGE_PROVIDER at a "
-                "multi-reference backend to use the whole set.",
+                "holding back %d. Point MUSEFORGE_IMAGE_PROVIDER at "
+                "falai_multiref to use the whole set.",
                 self.KONTEXT_ENDPOINT,
                 len(ordered) - 1,
             )

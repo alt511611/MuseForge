@@ -22,7 +22,20 @@ def test_image_factory_returns_falai(monkeypatch):
     from pipelines.script2video import _make_image_generator
     from tools.falai_image_generator import FalAIImageGenerator
 
-    assert isinstance(_make_image_generator("k", demo=False), FalAIImageGenerator)
+    generator = _make_image_generator("k", demo=False)
+    assert isinstance(generator, FalAIImageGenerator)
+    assert generator.multiref is False
+
+
+def test_image_factory_returns_falai_multiref(monkeypatch):
+    monkeypatch.setenv("MUSEFORGE_IMAGE_PROVIDER", "falai_multiref")
+    monkeypatch.setenv("FAL_KEY", "test-fal-key")
+    from pipelines.script2video import _make_image_generator
+    from tools.falai_image_generator import FalAIImageGenerator
+
+    generator = _make_image_generator("k", demo=False)
+    assert isinstance(generator, FalAIImageGenerator)
+    assert generator.multiref is True
 
 
 @pytest.mark.asyncio
@@ -79,6 +92,39 @@ async def test_generate_image_with_reference_uses_kontext_image_url(monkeypatch)
     assert args["aspect_ratio"] == "16:9"
     assert "images_list" not in args
     assert "image_urls" not in args
+
+
+@pytest.mark.asyncio
+async def test_generate_image_with_reference_multiref_uses_flux2_edit_image_urls(monkeypatch):
+    """multiref=True sends the WHOLE ordered reference set, not just index 0."""
+    import tools.falai_image_generator as mod
+    from tools.falai_image_generator import FalAIImageGenerator
+
+    captured = {}
+
+    async def fake_fal_generate(client, endpoint, arguments, **_kwargs):
+        captured["endpoint"] = endpoint
+        captured["arguments"] = arguments
+        return {"images": [{"url": "https://fal.media/multiref.jpg"}], "seed": 1}
+
+    monkeypatch.setattr(mod, "fal_generate", fake_fal_generate)
+
+    gen = FalAIImageGenerator(api_key="k", demo=False, multiref=True)
+    url = await gen.generate_image_with_reference(
+        "two people at a cafe",
+        ["https://example.com/anchor.png", "https://example.com/location.png"],
+        aspect_ratio="16:9",
+    )
+
+    assert url == "https://fal.media/multiref.jpg"
+    assert captured["endpoint"] == "fal-ai/flux-2-pro/edit"
+    args = captured["arguments"]
+    assert args["prompt"] == "two people at a cafe"
+    assert args["image_urls"] == [
+        "https://example.com/anchor.png",
+        "https://example.com/location.png",
+    ]
+    assert "image_url" not in args
 
 
 @pytest.mark.asyncio

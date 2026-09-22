@@ -107,12 +107,21 @@ def _make_voice_generator(api_key: str, demo: bool, working_dir: str = ""):
 
 def _make_music_generator(api_key: str, demo: bool):
     """Pick the music-generation backend. Defaults to MuAPI unchanged.
-    MUSEFORGE_MUSIC_PROVIDER=falai opts into fal.ai Beatoven
-    (endpoint ``beatoven/music-generation``). Lazy-imported.
+
+    MUSEFORGE_MUSIC_PROVIDER:
+      - "muapi" (default) — MuAPIMusicGenerator (Suno)
+      - "falai" — fal.ai Beatoven (endpoint ``beatoven/music-generation``)
+      - "elevenlabs" — ElevenLabs' own Music API, called directly (not
+        through fal.ai's hosted copy, which is deprecating and whose
+        recommended replacement is access-gated — see
+        tools/elevenlabs_music_generator.py). Reuses ELEVENLABS_API_KEY,
+        already configured for dialogue.
+
+    Lazy-imported.
     """
     provider = resolve_provider(
         "MUSEFORGE_MUSIC_PROVIDER",
-        ("muapi", "falai"),
+        ("muapi", "falai", "elevenlabs"),
         default="muapi",
         stage="Music",
     )
@@ -120,6 +129,12 @@ def _make_music_generator(api_key: str, demo: bool):
         from tools.falai_music_generator import FalAIMusicGenerator
 
         return FalAIMusicGenerator(os.environ.get("FAL_KEY", ""), demo=demo)
+    if provider == "elevenlabs":
+        from tools.elevenlabs_music_generator import ElevenLabsMusicGenerator
+
+        return ElevenLabsMusicGenerator(
+            os.environ.get("ELEVENLABS_API_KEY", ""), demo=demo
+        )
     from tools.muapi_music_generator import MuAPIMusicGenerator
 
     return MuAPIMusicGenerator(api_key, demo=demo)
