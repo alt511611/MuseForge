@@ -196,14 +196,35 @@ export default function GeneratePage() {
             })
             .catch(() => {});
         }
+        // Handed back to the SSE reconnect logic below, so it can tell
+        // "the job actually finished" apart from "the connection just
+        // dropped" without reading stale state out of a stale closure.
+        return data;
       }
+    } catch {
+      // A network-level failure (the same proxy blip the SSE reconnect
+      // exists to survive) must resolve to "unknown, not terminal" rather
+      // than an unhandled rejection -- an uncaught throw here would skip
+      // the reconnect entirely, in exactly the moment it is needed most.
+      return null;
     } finally {
       setInitialLoading(false);
     }
+    return null;
   }, [job_id, addEvent, authHeaders]);
 
   useEffect(() => {
     if (!job_id) return;
+    // A dropped SSE connection is not a failed job. Coolify/Traefik (or any
+    // reverse proxy) can close a long-lived stream well before a multi-
+    // minute render finishes -- the heartbeat every 15s keeps it alive
+    // against an IDLE timeout, but not against a proxy's own maximum
+    // connection duration. Job a8d0766b-421 was one such case: the render
+    // completed cleanly server-side while the browser showed "The request
+    // timed out." Reconnecting (rather than giving up on one failed fetch)
+    // is what makes that recoverable without a manual page reload.
+    let cancelled = false;
+    let retryTimer = null;
     fetchJob();
     const source = new EventSource(`${API_BASE}/api/jobs/${job_id}/stream`);
     source.onmessage = (event) => {
@@ -218,8 +239,25 @@ export default function GeneratePage() {
         addEvent(data);
       } catch { /* ignore */ }
     };
-    source.onerror = () => { source.close(); fetchJob(); };
-    return () => source.close();
+    source.onerror = async () => {
+      source.close();
+      const data = await fetchJob();
+      if (cancelled) return;
+      const terminal = data && ["completed", "failed", "cancelled"].includes(data.status);
+      if (!terminal) {
+        // Backoff before reopening: an immediate retry against a proxy
+        // that is still tearing down the old connection just repeats the
+        // same failure in a tight loop.
+        retryTimer = setTimeout(() => {
+          if (!cancelled) setStreamEpoch((n) => n + 1);
+        }, 4000);
+      }
+    };
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      source.close();
+    };
   }, [job_id, fetchJob, addEvent, streamEpoch]);
 
   useEffect(() => {
