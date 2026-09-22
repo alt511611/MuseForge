@@ -48,7 +48,16 @@ DEMO_VIDEO_URL = os.environ.get("MUSEFORGE_DEMO_VIDEO", "").strip() or (
 MIN_DURATION_SECONDS = 3
 MAX_DURATION_SECONDS = 15
 DEFAULT_POLL_INTERVAL = 3.0
-DEFAULT_MAX_POLLS = 200
+#: 400 * 3.0s = 1200s (20 minutes). Was 200 (10 minutes) until a real
+#: multishot scene take -- more beats, more reference elements than a
+#: single-shot render -- was observed completing at 504s and 559s: 84-93%
+#: of the old ceiling, on an otherwise SUCCESSFUL render. A render that
+#: happens to run a little slower than that raises a real TimeoutError,
+#: which reaches the viewer as "The request timed out" even though
+#: nothing failed -- it just needed more runway than a single-shot render
+#: ever did. Overridable because fal.ai's own queue depth, not this
+#: pipeline, is what actually decides how long is enough.
+DEFAULT_MAX_POLLS = int(os.environ.get("FALAI_VIDEO_MAX_POLLS", "400"))
 
 
 def _duration_str(seconds) -> str:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any, Callable, Optional
 
 import fal_client
@@ -18,7 +19,13 @@ from tools.muapi_client import MuAPICancelled
 logger = logging.getLogger(__name__)
 
 DEFAULT_POLL_INTERVAL = 3.0
-DEFAULT_MAX_POLLS = 200
+#: 400 * 3.0s = 1200s (20 minutes) -- see the same constant and its reasoning
+#: in falai_video_generator.py (that module keeps its own copy so a refactor
+#: here can never silently change its behaviour). Image/SFX/music calls
+#: finish in seconds regardless, so raising this only widens the ceiling for
+#: the one caller here that renders video (falai_reference_video_generator.py)
+#: and never makes a fast call wait longer than it already does.
+DEFAULT_MAX_POLLS = int(os.environ.get("FALAI_MAX_POLLS", "400"))
 
 
 def make_fal_client(api_key: str, demo: bool = False) -> fal_client.AsyncClient:
