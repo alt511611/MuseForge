@@ -145,6 +145,10 @@ def build_prompt(audio_desc: str, scene_emotion: str = "") -> str:
 class MuAPISFXGenerator:
     """One sound bed per scene, from the shot's own audio note."""
 
+    #: Read by idea2video's account-lock tracking so a MuAPI refusal is
+    #: recorded against "muapi" specifically, not the job as a whole.
+    provider_name = "muapi"
+
     def __init__(self, api_key: str, demo: bool = False):
         self.demo = demo
         self.client = MuAPIClient(api_key)

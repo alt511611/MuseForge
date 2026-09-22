@@ -1244,8 +1244,17 @@ async def generate(
         _enforce_plan_scene_limit(plan, req.num_scenes)
 
         # Optional background music — Creator/Pro only. Free/anonymous requests
-        # that send music_enabled=True are silently ignored, not rejected.
+        # that send music_enabled=True are silently ignored, not rejected --
+        # but the drop is logged, so "0 music layer(s)" in the render log has
+        # a reason next to it instead of looking like a failed generation
+        # (foley and lip sync each log why they produced nothing; music did
+        # not).
         music_enabled = bool(req.music_enabled) and plan in ("creator", "pro")
+        if req.music_enabled and not music_enabled:
+            logger.info(
+                "Music was requested but plan '%s' does not carry it (Creator/Pro only) -- dropping, not charging.",
+                plan,
+            )
         # Dialogue is intentionally Pro-only. Both the deployment-level feature
         # flag and the per-request opt-in must be enabled.
         dialogue_enabled = (

@@ -41,7 +41,13 @@ from tools.character_qa import (
     verify_frame,
 )
 from tools.muapi_image_generator import MuAPIImageGenerator
-from tools.t5_budget import MAX_PROMPT_TOKENS, count_tokens, tokenizer_is_real
+from tools.t5_budget import (
+    MAX_PROMPT_TOKENS,
+    count_tokens,
+    encoder_family,
+    tokenizer_is_real,
+    window_label,
+)
 from tools.muapi_video_generator import MuAPIVideoGenerator
 from tools.muapi_client import MuAPICancelled
 from tools.provider_choice import resolve_provider
@@ -196,6 +202,20 @@ MAX_IMAGE_PROMPT_TOKENS = MAX_PROMPT_TOKENS
 #: literal.
 REQUIRED = 0
 OPTIONAL_DIRECTION = 6
+
+#: Where the cast-closure and face-visibility clauses move to when NO
+#: reference image backs this frame (see UNBACKED_IDENTITY_* below for why).
+#: Strictly between the continuity tier (setting/plate, REQUIRED-or-1) and
+#: the acted-expression tier (2): more protected than the performance, which
+#: is nuance a viewer forgives, less protected than the room or the anchor,
+#: which are what the story is actually about. `fit_image_prompt`'s ranks are
+#: compared, not enumerated, so a value between two integers is exactly as
+#: valid a place in the ladder as either -- not a REQUIRED-style exemption
+#: (still droppable as a genuine last resort), just a stronger claim on the
+#: budget than the rank these clauses hold when a reference image is doing
+#: the same job.
+UNBACKED_CAST_CLOSURE = 1.3
+UNBACKED_FACE_VISIBILITY = 1.6
 
 
 #: What one shot's own description may spend of the frame prompt.
@@ -369,19 +389,19 @@ def _trim_to_token_window(kept: list, token_limit: int) -> list:
             # on, because the next pass would cut the same clause to the same
             # place.
             logger.warning(
-                "Frame prompt at %d tokens against the %d-token T5 window and "
+                "Frame prompt at %d tokens against the %d-token %s window and "
                 "its longest required clause will not trim further — the "
                 "window will cut the tail. %d chars: %.80s...",
-                used, token_limit, len("".join(t for _, t in kept)),
+                used, token_limit, window_label(), len("".join(t for _, t in kept)),
                 "".join(t for _, t in kept),
             )
             break
         logger.warning(
-            "Frame prompt at %d tokens against the %d-token T5 window with "
+            "Frame prompt at %d tokens against the %d-token %s window with "
             "nothing optional left to drop — trimming its longest REQUIRED "
             "clause from %d to %d tokens, rather than letting the window cut "
             "the tail where the mouth and framing clauses sit (%.60s...).",
-            used, token_limit, sizes[idx], count_tokens(trimmed), longest,
+            used, token_limit, window_label(), sizes[idx], count_tokens(trimmed), longest,
         )
         kept[idx] = (prio, trimmed)
     return kept
@@ -421,7 +441,7 @@ def fit_image_prompt(
     kept = _drop_to(
         kept,
         token_limit,
-        "the %d-token T5 window" % token_limit,
+        "the %d-token %s window" % (token_limit, window_label()),
         measure=lambda texts: count_tokens("".join(texts)),
     )
     prompt = "".join(t for _, t in kept)
@@ -1467,6 +1487,7 @@ def build_frame_prompt(
     world_change: str = "",
     world_state: str = "",
     has_location_plate: bool = False,
+    has_reference: bool = False,
 ) -> str:
     """Build the image prompt for a shot, injecting locked setting when present.
 
@@ -1477,6 +1498,12 @@ def build_frame_prompt(
     storyboard artist instead (a text model that can reason about "three hard
     cuts", "24fps", "clean dry audio"); pasting it into an image prompt would
     only crowd out this shot's own description in a fixed token budget.
+
+    ``has_reference`` is whether this shot is ALSO sending a reference image
+    (resolve_frame_references came back non-empty) -- not whether one exists
+    somewhere, but whether THIS call is backed by one. It decides how hard
+    the cast-closure and face-visibility clauses fight to survive the
+    ladder: see their promotion to REQUIRED below when it is False.
     """
     parts = [
         p.strip()
@@ -2050,7 +2077,28 @@ def build_frame_prompt(
     ladder = [
         (REQUIRED, identity_clause),
         (2, expression_clause),
-        (4, face_clause),
+        # Rank 4 ordinarily -- worth keeping, survivable without, because a
+        # reference image is doing the same job as this sentence: holding the
+        # face on screen. Job 5abefcaf-7a49 is what happens when that backup
+        # is not there. Its third frame ran on MUSEFORGE_IMAGE_PROVIDER=
+        # falai_multiref with no character reference sent (a text-only
+        # establishing angle), the ladder dropped this clause under budget
+        # pressure exactly as rank 4 says it may, and only luck kept the
+        # rendered face lit instead of the silhouette this sentence exists to
+        # forbid.
+        #
+        # Promoted to UNBACKED_FACE_VISIBILITY (between the continuity tier
+        # and the acted expression) when there is nothing else anchoring the
+        # face -- NOT to REQUIRED. That was tried first and undid more than
+        # it fixed: with both this clause and the cast clause exempted from
+        # ever being dropped, a crowded scene ran clean out of droppable
+        # weight in the cosmetic tiers and started eating the ACTUAL
+        # continuity clauses instead -- test_the_place_outlives_its_lighting_
+        # plan lost "Setting:" itself, the one sentence the rank-1 tier below
+        # exists to protect. An unbacked frame should spend the acted
+        # expression before it touches the room; it should not be allowed to
+        # spend the room at all.
+        (UNBACKED_FACE_VISIBILITY if not has_reference else 4, face_clause),
         (dialogue_rank, dialogue_clause),
         # Rank 5, above the lighting plan, and the two swapped places when the
         # budget stopped being characters and started being tokens.
@@ -2070,7 +2118,13 @@ def build_frame_prompt(
         # photograph of how this place is lit. There is no photograph of which
         # side of the axis these two people stand on.
         (5, direction_clause),
-        (3, cast_clause),
+        # Same promotion, same reason as face_clause above, at
+        # UNBACKED_CAST_CLOSURE rather than UNBACKED_FACE_VISIBILITY so the
+        # two keep the relative order they already had (cast, at 3, was
+        # already worth more than face, at 4). Rank 3 assumes a reference
+        # image is backing the cast up; without one, "Cast is closed" is the
+        # only thing keeping a stray extra out of a text-only frame.
+        (UNBACKED_CAST_CLOSURE if not has_reference else 3, cast_clause),
         # RANK, not wording -- the same distinction the mouth clause turned on
         # above. Ordinarily this clause is continuity: worth keeping, and a
         # frame is still the right frame without it, so it sits one rung above
@@ -2134,23 +2188,40 @@ def build_frame_prompt(
     used = count_tokens(prompt)
     if used > MAX_IMAGE_PROMPT_TOKENS:
         logger.warning(
-            "Frame prompt is %d tokens against a %d-token window after every "
-            "optional clause was dropped AND its longest required clauses were "
-            "trimmed (_trim_to_token_window) — the shot description or the "
-            "cast has outgrown what the model can read, and FLUX will now cut "
-            "the tail itself. %d chars: %.80s...",
-            used, MAX_IMAGE_PROMPT_TOKENS, len(prompt), prompt,
+            "Frame prompt is %d tokens against a %d-token %s window after "
+            "every optional clause was dropped AND its longest required "
+            "clauses were trimmed (_trim_to_token_window) — the shot "
+            "description or the cast has outgrown what the model can read, "
+            "and the encoder will now cut the tail itself. %d chars: %.80s...",
+            used, MAX_IMAGE_PROMPT_TOKENS, window_label(), len(prompt), prompt,
         )
     elif not tokenizer_is_real():
         # Said once per frame rather than once per process, because this is
         # the line that explains why a frame came out sized differently than
         # the same frame on a working deployment.
-        logger.warning(
-            "Frame prompt budgeted from an estimate (%d chars) — the T5 "
-            "tokenizer did not load, so this frame's %d-token window was not "
-            "measured. See tools/t5_budget.",
-            len(prompt), MAX_IMAGE_PROMPT_TOKENS,
-        )
+        #
+        # Two different reasons share this branch now. On the T5 family it
+        # still means what it always meant: sentencepiece did not load, so
+        # the vendored vocabulary sat unused. On the Mistral family (FLUX.2 --
+        # fal-ai/flux-2-pro/edit, MuAPI's flux-2-pro) it means something else
+        # entirely: no vendored Mistral tokenizer EXISTS to load, so every
+        # prompt on that encoder is estimated, always, regardless of what is
+        # installed -- see tools/t5_budget.MISTRAL_FALLBACK_CHARS_PER_TOKEN.
+        if encoder_family() == "mistral":
+            logger.warning(
+                "Frame prompt budgeted from an estimate (%d chars) — the "
+                "active image encoder is Mistral (FLUX.2), which this repo "
+                "has no vendored tokenizer for, so this frame's %d-token "
+                "window was estimated, not measured. See tools/t5_budget.",
+                len(prompt), MAX_IMAGE_PROMPT_TOKENS,
+            )
+        else:
+            logger.warning(
+                "Frame prompt budgeted from an estimate (%d chars) — the T5 "
+                "tokenizer did not load, so this frame's %d-token window was "
+                "not measured. See tools/t5_budget.",
+                len(prompt), MAX_IMAGE_PROMPT_TOKENS,
+            )
     return prompt
 
 
@@ -3696,7 +3767,7 @@ class Script2VideoPipeline:
         working_dir: str,
         aspect_ratio: str,
         scene_idx: int,
-        frame_prompt_for,
+        frame_prompt_for,  # (anchor, has_reference) -> prompt str
         generate_audio: bool,
         scene_dialogue: str = "",
         is_cancelled=None,
@@ -3737,7 +3808,7 @@ class Script2VideoPipeline:
         # who, and a lead who is a different woman in a different outfit in
         # each of three scenes -- which is precisely the drift the per-shot
         # path resolves first in order to avoid.
-        frame_prompt = frame_prompt_for(matched_char)
+        frame_prompt = frame_prompt_for(matched_char, bool(frame_references))
         if frame_references:
             start_image = await self.image_gen.generate_image_with_reference(
                 frame_prompt, frame_references, aspect_ratio, is_cancelled=is_cancelled
@@ -4366,7 +4437,7 @@ class Script2VideoPipeline:
                 # inside, by the same resolve_frame_references the per-shot
                 # path calls before it builds its prompt, and the prompt
                 # cannot be built correctly without it.
-                frame_prompt_for=lambda anchor: build_frame_prompt(
+                frame_prompt_for=lambda anchor, has_ref: build_frame_prompt(
                     style,
                     opening,
                     setting_location=setting_location,
@@ -4391,6 +4462,7 @@ class Script2VideoPipeline:
                     # be describing the only one -- pointing the model at a
                     # second photograph it was never sent.
                     has_location_plate=bool(location_plate_url) and anchor is not None,
+                    has_reference=has_ref,
                 ),
                 generate_audio=take_speaks,
                 scene_dialogue=scene_dialogue,
@@ -4466,6 +4538,7 @@ class Script2VideoPipeline:
                         # [1:] is "sent, and not as the anchor".
                         has_location_plate=bool(location_plate_url)
                         and location_plate_url in frame_references[1:],
+                        has_reference=bool(frame_references),
                     )
 
                     # fal.ai reference-to-video binds character identity in a
