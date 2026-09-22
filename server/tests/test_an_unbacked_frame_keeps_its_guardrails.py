@@ -128,8 +128,39 @@ def test_a_referenced_frame_keeps_the_ordinary_ladder():
     """With a reference image doing the same job, the clauses stay at their
     ordinary rank (3 / 4) -- droppable before the acted expression, exactly
     as they were before this fix. Nothing about a backed frame should
-    change."""
-    prompt = _crowded_prompt(has_reference=True)
+    change.
+
+    Needs a heavier overflow than _crowded_prompt's: with the REAL T5
+    tokenizer measuring (not the char-count estimate this repo falls back
+    to without sentencepiece installed), that fixture's shortfall is small
+    enough that cast/face survive on their ORDINARY rank too, which proves
+    nothing about whether the promotion is what is protecting them.
+
+    A longer shot description does not buy the overflow: build_frame_prompt
+    compacts visual_desc toward its own floor before the token ladder ever
+    runs, so padding the input just gets proportionally trimmed back out.
+    What does NOT compact away is the per-character identity clause -- more
+    named faces is more REQUIRED text with a hard floor -- so a bigger
+    ensemble (10, not 8) is what actually raises the baseline the ladder has
+    to fit everything else around. Picked at the size that costs exactly
+    cast and face and nothing else (measured against the real T5 tokenizer):
+    enough ensemble to need both of them, not so much that expression or
+    the room get pulled in too and the comparison stops being about rank.
+    """
+    characters = _characters(10)
+    heavy_shot = _long_shot()
+    prompt = build_frame_prompt(
+        style="Sci-Fi",
+        shot=heavy_shot,
+        setting_location=CROWDED_LOCATION,
+        setting_time_of_day="night",
+        setting_era="present day",
+        has_dialogue=True,
+        lipsync_enabled=True,
+        characters=characters,
+        matched_char=characters[0],
+        has_reference=True,
+    )
     assert "Cast is closed" not in prompt
     assert "lit and readable, not a silhouette" not in prompt
     # What their ordinary rank buys back: the acted expression, worth more
