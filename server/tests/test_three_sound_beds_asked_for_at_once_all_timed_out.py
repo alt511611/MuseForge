@@ -139,7 +139,7 @@ async def _run_foley(scenes, paths):
     pipe = pipeline.Idea2VideoPipeline.__new__(pipeline.Idea2VideoPipeline)
     pipe.demo = False
     pipe.api_key = "k"
-    pipe.account_locked = False
+    pipe.locked_providers = set()
     return await pipe._generate_foley(scenes, paths)
 
 

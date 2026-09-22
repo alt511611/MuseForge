@@ -95,6 +95,10 @@ def make_lipsync(demo: bool = False):
 
 
 class MuAPILipsync:
+    #: Read by idea2video's account-lock tracking so a MuAPI refusal is
+    #: recorded against "muapi" specifically, not the job as a whole.
+    provider_name = "muapi"
+
     def __init__(self, api_key: str = "", demo: bool = False):
         self.demo = demo
         self.api_key = (api_key or os.environ.get("MUAPI_KEY", "")).strip()

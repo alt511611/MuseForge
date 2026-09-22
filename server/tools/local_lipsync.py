@@ -106,6 +106,11 @@ def _is_url(value: str) -> bool:
 
 
 class LocalLipsync:
+    #: Self-hosted, no vendor account to lock -- kept only so idea2video's
+    #: account-lock tracking has a name to compare against instead of a
+    #: missing attribute.
+    provider_name = "local"
+
     def __init__(self, base_url: str = "", demo: bool = False):
         self.demo = demo
         self.base_url = (
