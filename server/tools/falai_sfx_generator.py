@@ -56,6 +56,10 @@ SFX_ENDPOINT = os.environ.get("FALAI_SFX_MODEL", "fal-ai/mmaudio-v2/text-to-audi
 class FalAISFXGenerator:
     """One sound bed per scene, from the shot's own audio note."""
 
+    #: Read by idea2video's account-lock tracking so a fal.ai refusal is
+    #: recorded against "falai" specifically, not the job as a whole.
+    provider_name = "falai"
+
     def __init__(self, api_key: str = "", demo: bool = False):
         self.demo = demo
         self.api_key = (api_key or os.environ.get("FAL_KEY", "")).strip()

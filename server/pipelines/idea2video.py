@@ -4032,13 +4032,24 @@ class Idea2VideoPipeline:
     def __init__(self, api_key: str, demo: bool = False):
         self.api_key = api_key
         self.demo = demo
-        #: Set once the provider has refused a paid call because the ACCOUNT
-        #: cannot pay. Job-scoped, because the pipeline is: every optional
-        #: stage after it would be refused the same way, and each one of them
-        #: fails open on its own, so without somewhere to write this down a
-        #: locked account reads as several unrelated shrugs. See
-        #: tools.muapi_client.MuAPIAccountLocked.
-        self.account_locked = False
+        #: Which vendor(s) have refused a paid call because the ACCOUNT
+        #: cannot pay -- not a single job-wide bool, because foley and lip
+        #: sync each pick their own backend (MUSEFORGE_SFX_PROVIDER /
+        #: MUSEFORGE_LIPSYNC_PROVIDER) and a deployment that has moved one of
+        #: them to fal.ai still has a perfectly solvent fal.ai account when
+        #: MuAPI's runs dry. A bare bool used to skip lip sync on a locked
+        #: MuAPI foley call even when lip sync itself was configured for
+        #: fal.ai and had never been asked for a cent -- refusing a call the
+        #: account could have paid for, on the strength of a different
+        #: vendor's refusal. Job-scoped, because within ONE vendor the
+        #: pipeline is right that every later paid call to it would be
+        #: refused the same way. See tools.muapi_client.MuAPIAccountLocked.
+        self.locked_providers: set = set()
+        #: True only when lip sync itself was actually skipped because its
+        #: OWN configured provider was in ``locked_providers`` -- not merely
+        #: because some other stage's vendor ran dry. Lets the end-of-job
+        #: warning name lip sync only when it was really the one refused.
+        self._lipsync_skipped_for_locked_account = False
         self.screenwriter = ScreenwriterAgent(demo=demo)
         self.image_gen = _make_image_generator(api_key, demo=demo)
         self.script2video = Script2VideoPipeline(api_key, demo=demo)
@@ -4319,14 +4330,28 @@ class Idea2VideoPipeline:
                 "so there is no speech to drive a mouth from."
             )
             return []
-        if self.account_locked:
-            # Not a fifth reason mouths stay shut -- the same one, already
-            # answered. Job 930f11de-4b0 spent 16 seconds and three paid
-            # requests here after foley had already been refused three times
-            # for an exhausted balance, and got three identical refusals.
+        # Not a fifth reason mouths stay shut -- the same one, already
+        # answered, but only when lip sync would have HIT the same vendor.
+        # Job 930f11de-4b0 spent 16 seconds and three paid requests here
+        # after foley had already been refused three times for an exhausted
+        # balance, and got three identical refusals -- both stages were on
+        # MuAPI. A deployment that has moved lip sync to fal.ai
+        # (MUSEFORGE_LIPSYNC_PROVIDER=falai) has a fal.ai account that this
+        # job's MuAPI foley failures say nothing about; skipping it on the
+        # strength of a different vendor's lock would refuse a call the
+        # account could still pay for.
+        lipsync_provider = resolve_provider(
+            "MUSEFORGE_LIPSYNC_PROVIDER",
+            ("muapi", "falai", "local"),
+            default="muapi",
+            stage="Lip sync",
+        )
+        if lipsync_provider in self.locked_providers:
+            self._lipsync_skipped_for_locked_account = True
             logger.warning(
-                "Lip sync skipped: the provider account was already refusing "
-                "paid calls earlier in this job — mouths will not be driven."
+                "Lip sync skipped: %s was already refusing paid calls earlier "
+                "in this job — mouths will not be driven.",
+                lipsync_provider,
             )
             return []
 
@@ -6121,7 +6146,9 @@ class Idea2VideoPipeline:
                     )
             except Exception as exc:
                 if is_account_locked(exc):
-                    self.account_locked = True
+                    self.locked_providers.add(
+                        getattr(generator, "provider_name", "muapi")
+                    )
                 logger.warning(
                     "Foley failed for scene %s, continuing without it: %s",
                     scene.get("index"),
@@ -7503,12 +7530,21 @@ class Idea2VideoPipeline:
             # alone, and the sum of those correct decisions was a silent film
             # over unsynced mouths delivered as a success. The user cannot fix
             # a toggle here; somebody has to top the account up.
-            if self.account_locked:
+            #
+            # Named per-stage rather than as one blanket "extras" sentence:
+            # foley and lip sync each pick their own vendor, and a deployment
+            # that has split them across two accounts can have one run dry
+            # while the other never placed a call. Blaming both unconditionally
+            # told a customer whose lip sync was actually fine that it wasn't.
+            if self.locked_providers:
+                extras = ["the sound-effect beds"]
+                if self._lipsync_skipped_for_locked_account:
+                    extras.append("the lip sync")
                 warnings.append(
-                    "Some of this video's paid extras — the sound-effect beds "
-                    "and the lip sync — could not be generated because the "
-                    "video provider account ran out of balance partway through "
-                    "this job. The picture and the spoken lines are unaffected."
+                    f"Some of this video's paid extras — {' and '.join(extras)} "
+                    "— could not be generated because the provider account "
+                    "ran out of balance partway through this job. The picture "
+                    "and the spoken lines are unaffected."
                 )
 
             # Persist final video to Supabase Storage (signed URL) when available.

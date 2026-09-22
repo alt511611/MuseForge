@@ -80,7 +80,7 @@ def _pipeline():
 
 
 def test_a_fresh_job_has_not_seen_a_locked_account():
-    assert _pipeline().account_locked is False
+    assert _pipeline().locked_providers == set()
 
 
 @pytest.mark.asyncio
@@ -94,8 +94,10 @@ async def test_lip_sync_is_not_attempted_after_the_account_has_refused(
     # cleared first: this deployment has the feature on and the job asked.
     monkeypatch.setenv("MUSEFORGE_LIPSYNC_ENABLED", "1")
 
+    # Lip sync defaults to MuAPI (MUSEFORGE_LIPSYNC_PROVIDER unset), the same
+    # vendor foley locked -- so this is the case the latch must still catch.
     pipeline = _pipeline()
-    pipeline.account_locked = True
+    pipeline.locked_providers = {"muapi"}
 
     with caplog.at_level(logging.WARNING):
         result = await pipeline._lipsync_scenes(
@@ -110,6 +112,41 @@ async def test_lip_sync_is_not_attempted_after_the_account_has_refused(
 
     assert result == []
     assert "already refusing" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_muapi_lock_does_not_close_a_mouth_synced_on_fal(
+    caplog, tmp_path, monkeypatch
+):
+    """Foley and lip sync each pick their own vendor. A deployment that has
+    moved lip sync to fal.ai (MUSEFORGE_LIPSYNC_PROVIDER=falai) has a fal.ai
+    account this job's MuAPI foley failures say nothing about -- so the
+    latch above must not spend it on a lock that belongs to a different
+    vendor's balance."""
+    import logging
+
+    monkeypatch.setenv("MUSEFORGE_LIPSYNC_ENABLED", "1")
+    monkeypatch.setenv("MUSEFORGE_LIPSYNC_PROVIDER", "falai")
+
+    pipeline = _pipeline()
+    # Only MuAPI (foley's vendor) is locked; fal.ai never took a call yet.
+    pipeline.locked_providers = {"muapi"}
+
+    with caplog.at_level(logging.WARNING):
+        result = await pipeline._lipsync_scenes(
+            scene_paths=["/tmp/does-not-matter.mp4"],
+            dialogue_tracks=[
+                {"scene_index": 0, "audio_url": "https://example.test/line.mp3"}
+            ],
+            working_dir=str(tmp_path),
+            progress=_no_progress,
+            requested=True,
+        )
+
+    # Declined for lacking a fal.ai key in this test environment, not because
+    # of MuAPI's lock -- the latch must not have fired at all.
+    assert "already refusing" not in caplog.text
+    assert result == []
 
 
 @pytest.mark.asyncio
