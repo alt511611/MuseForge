@@ -129,12 +129,23 @@ class FalAILipsync:
         video_path_or_url: str,
         audio_url: str,
         is_cancelled: Optional[Callable[[], bool]] = None,
+        on_submitted: Optional[Callable[[str], None]] = None,
     ) -> Optional[str]:
         """Return a URL to the lip-synced clip, or None if it could not be done.
 
         ``video_path_or_url`` may be a local file (the assembled scene clip on
         disk) — it is uploaded to fal's storage first, because the API fetches
         the video by URL.
+
+        ``on_submitted``, when given, fires with fal's ``request_id`` the
+        instant this stage's ticket is issued -- before the poll. The caller
+        (idea2video's per-scene lip-sync step) always passes this kwarg when
+        it is wired for job-submitted tracking, on whichever provider is
+        active; a signature without it raised ``TypeError`` here every time
+        the fal.ai lip-sync provider was selected, so this stage never
+        actually delivered a synced mouth on that provider -- it failed open,
+        silently, into the unsynced take (see MuAPILipsync.sync's identical
+        parameter, which this mirrors).
         """
         if not self.available() or not audio_url or not video_path_or_url:
             return None
@@ -164,6 +175,17 @@ class FalAILipsync:
                 arguments=build_payload(video_url, audio_url, ENDPOINT),
             )
             request_id = handle.request_id
+            if on_submitted:
+                try:
+                    on_submitted(request_id)
+                except Exception as exc:
+                    logger.warning(
+                        "on_submitted callback failed for %s request_id=%s; "
+                        "continuing without it: %s",
+                        ENDPOINT,
+                        request_id,
+                        exc,
+                    )
 
             for _ in range(DEFAULT_MAX_POLLS):
                 if is_cancelled and is_cancelled():
