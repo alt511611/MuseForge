@@ -40,6 +40,8 @@ from tools.character_qa import (
     is_character_qa_enabled,
     verify_frame,
 )
+from interfaces import frame_choice
+from tools.frame_judge import is_frame_judge_enabled, judge_frame
 from tools.muapi_image_generator import MuAPIImageGenerator
 from tools.t5_budget import (
     MAX_PROMPT_TOKENS,
@@ -65,6 +67,13 @@ class PipelineCancelled(Exception):
     """Raised cooperatively when a job is cancelled mid-flight."""
 
 
+#: Every value MUSEFORGE_VIDEO_PROVIDER accepts. One list because the factory
+#: and the estimate's `configured_scene_take_backend` must agree on it, and a
+#: value known to one and not the other is a deployment that renders on a
+#: vendor the quote never priced.
+VIDEO_PROVIDERS = ("muapi", "falai", "falai_reference", "falai_multishot", "falai_vidu")
+
+
 def _make_video_generator(api_key: str, demo: bool):
     """Pick the video-generation backend. Defaults to the existing MuAPI
     path unchanged. Imported lazily so the default path never requires
@@ -77,6 +86,8 @@ def _make_video_generator(api_key: str, demo: bool):
         (one-step character-consistent video; skips separate frame gen)
       - "falai_multishot" — fal.ai Kling v3, a whole SCENE per generation with
         its cuts inside it (interfaces/scene_take)
+      - "falai_vidu" — fal.ai Vidu Q4 reference-to-video (one-step, per shot,
+        like falai_reference; a candidate to measure against Kling)
 
     "falai_multishot" is a separate value rather than a capability the "falai"
     path discovers for itself, and deliberately so: the two render a scene by
@@ -86,7 +97,7 @@ def _make_video_generator(api_key: str, demo: bool):
     """
     provider = resolve_provider(
         "MUSEFORGE_VIDEO_PROVIDER",
-        ("muapi", "falai", "falai_reference", "falai_multishot"),
+        VIDEO_PROVIDERS,
         default="muapi",
         stage="Video generation",
     )
@@ -102,6 +113,10 @@ def _make_video_generator(api_key: str, demo: bool):
         from tools.falai_reference_video_generator import FalAIReferenceVideoGenerator
 
         return FalAIReferenceVideoGenerator(os.environ.get("FAL_KEY", ""), demo=demo)
+    if provider == "falai_vidu":
+        from tools.falai_vidu_video_generator import FalAIViduVideoGenerator
+
+        return FalAIViduVideoGenerator(os.environ.get("FAL_KEY", ""), demo=demo)
     return MuAPIVideoGenerator(api_key, demo=demo)
 
 
@@ -982,7 +997,7 @@ def configured_scene_take_backend():
     """
     provider = resolve_provider(
         "MUSEFORGE_VIDEO_PROVIDER",
-        ("muapi", "falai", "falai_reference", "falai_multishot"),
+        VIDEO_PROVIDERS,
         default="muapi",
         stage="Video generation",
     )
@@ -3771,6 +3786,7 @@ class Script2VideoPipeline:
         generate_audio: bool,
         scene_dialogue: str = "",
         is_cancelled=None,
+        expected_setting: str = "",
     ) -> Dict[str, Any]:
         """Render a whole scene in ONE generation, cuts included.
 
@@ -3944,16 +3960,54 @@ class Script2VideoPipeline:
                 aspect_ratio,
                 aspect_ratio,
             )
-        video_url = await self.video_gen.generate_scene_take(
-            take,
-            is_cancelled=is_cancelled,
-            generate_audio=generate_audio,
-            # Said, not inferred. The endpoint defaults to 16:9 and reads the
-            # rest off the start image; a vertical film that says nothing is a
-            # landscape order, and what came back was conformed to 9:16 by
-            # discarding 44% of every frame.
-            aspect_ratio=aspect_ratio if backend.accepts_aspect_ratio(aspect_ratio) else "",
-        )
+        # Phase 0 of best-of-N frame selection: MEASURE the opening frame the
+        # whole take is about to be built on. It runs beside the video call, not
+        # before it, so it adds no wall-clock time, and it can only log -- a
+        # judge that fails or is declined returns None and the take is
+        # unaffected. See tools/frame_judge.py.
+        judge_task = None
+        if is_frame_judge_enabled() and not self.demo:
+            judge_task = asyncio.ensure_future(
+                judge_frame(
+                    start_image,
+                    frame_references or [],
+                    matched_char.static_features if matched_char else "",
+                    getattr(matched_char, "wardrobe", "") if matched_char else "",
+                    expected_setting,
+                    os.environ.get("ANTHROPIC_API_KEY", ""),
+                )
+            )
+        try:
+            video_url = await self.video_gen.generate_scene_take(
+                take,
+                is_cancelled=is_cancelled,
+                generate_audio=generate_audio,
+                # Said, not inferred. The endpoint defaults to 16:9 and reads
+                # the rest off the start image; a vertical film that says
+                # nothing is a landscape order, and what came back was
+                # conformed to 9:16 by discarding 44% of every frame.
+                aspect_ratio=aspect_ratio if backend.accepts_aspect_ratio(aspect_ratio) else "",
+            )
+        except BaseException:
+            if judge_task is not None:
+                judge_task.cancel()
+            raise
+        judged = None
+        if judge_task is not None:
+            try:
+                judged = await judge_task
+            except Exception as exc:
+                logger.warning("frame judge task failed (no score): %s", exc)
+        if judged:
+            scores = judged["scores"]
+            logger.info(
+                "Frame judge scene %s: %s would_reject=%s weak=%s note=%r",
+                scene_idx + 1,
+                scores,
+                frame_choice.would_reject(scores),
+                frame_choice.weak_dimensions(scores),
+                judged.get("note", ""),
+            )
         output_path = os.path.join(working_dir, "scene_output.mp4")
         await download_video(video_url, output_path)
 
@@ -4002,6 +4056,12 @@ class Script2VideoPipeline:
             }
             for i, beat in enumerate(take.beats)
         ]
+        if judged and shot_meta:
+            shot_meta[0]["frame_judge"] = {
+                **judged["scores"],
+                "would_reject": frame_choice.would_reject(judged["scores"]),
+                "note": judged.get("note", ""),
+            }
         return {
             "path": output_path,
             "url": video_url,
@@ -4467,6 +4527,7 @@ class Script2VideoPipeline:
                 generate_audio=take_speaks,
                 scene_dialogue=scene_dialogue,
                 is_cancelled=is_cancelled,
+                expected_setting=expected_setting,
             )
             await progress(
                 "scene_complete",
