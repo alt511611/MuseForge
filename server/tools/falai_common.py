@@ -53,6 +53,17 @@ def make_fal_client(api_key: str, demo: bool = False) -> fal_client.AsyncClient:
     return fal_client.AsyncClient(key=key or None)
 
 
+class ContentFlagged(RuntimeError):
+    """fal's content checker refused this input.
+
+    A type, not a phrase in the message: the retry in `fal_generate` used to
+    look for "content_policy_violation" in the text, and the translation that
+    makes the message readable removes exactly that text -- so the retry never
+    fired on a single flag, while the friendly sentence made it look as if it
+    had.
+    """
+
+
 #: A false-positive content-policy flag was observed to clear on a plain
 #: resubmit of the SAME arguments (fal's checker is not fully deterministic
 #: run to run), so one automatic retry is worth it before making the caller
@@ -88,8 +99,8 @@ async def fal_generate(
                 poll_interval=poll_interval,
                 max_polls=max_polls,
             )
-        except RuntimeError as exc:
-            if "content_policy_violation" not in str(exc) or attempt == attempts - 1:
+        except ContentFlagged:
+            if attempt == attempts - 1:
                 raise
             logger.warning(
                 "fal.ai flagged %s as a content policy violation on attempt "
@@ -121,9 +132,11 @@ async def _submit_and_wait(
         status = await client.status(endpoint, request_id, with_logs=False)
         if isinstance(status, fal_client.Completed):
             if status.error:
-                raise _translate(RuntimeError(
-                    f"fal.ai job {request_id} failed: {status.error}"
-                ))
+                raise _translate(
+                    RuntimeError(f"fal.ai job {request_id} failed: {status.error}"),
+                    endpoint,
+                    arguments,
+                )
             break
 
         if is_cancelled and is_cancelled():
@@ -137,10 +150,10 @@ async def _submit_and_wait(
     try:
         return await client.result(endpoint, request_id)
     except Exception as exc:
-        raise _translate(exc) from exc
+        raise _translate(exc, endpoint, arguments) from exc
 
 
-def _translate(exc: Exception) -> Exception:
+def _translate(exc: Exception, endpoint: str = "", arguments: Optional[dict] = None) -> Exception:
     """Fal's raw content-policy error into one worth showing a person.
 
     The same translation falai_video_generator.py's own ``_run`` carries,
@@ -152,14 +165,34 @@ def _translate(exc: Exception) -> Exception:
     error: [...]", unreadable and with no hint that a retry usually clears
     it. Returned, not raised, so both call sites above can attach their own
     ``from exc``.
+
+    The raw error is also the ONLY place the flagged prompt and reference
+    URLs were ever written down: fal echoes its input back. Replacing it with
+    a friendly sentence made a flag that survives its retry impossible to
+    diagnose -- the person is told to change "the prompt wording" and neither
+    they nor the log can say which words, or which stage. So the evidence is
+    logged here, once, before it is discarded, and the stage is named in the
+    message.
     """
-    if "content_policy_violation" in str(exc):
-        return RuntimeError(
-            "fal.ai flagged this content automatically (often a false "
-            "positive). Try regenerating -- a new reference image or "
-            "prompt wording may not trigger the same flag."
-        )
-    return exc
+    if "content_policy_violation" not in str(exc):
+        return exc
+    args = arguments or {}
+    refs = [
+        str(u)
+        for key in ("image_urls", "reference_image_urls", "image_url", "start_image_url")
+        for u in ([args[key]] if isinstance(args.get(key), str) else args.get(key) or [])
+    ]
+    logger.warning(
+        "fal.ai content flag on %s. prompt=%r references=%s",
+        endpoint or "?",
+        str(args.get("prompt", ""))[:2000],
+        refs,
+    )
+    return ContentFlagged(
+        f"fal.ai flagged this content automatically on {endpoint or 'a generation'} "
+        "(often a false positive). Try regenerating -- a new reference image or "
+        "prompt wording may not trigger the same flag."
+    )
 
 
 async def _cancel(
