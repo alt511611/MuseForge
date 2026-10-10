@@ -1126,6 +1126,40 @@ def resolve_frame_references(
     return matched_char, reference_url, frame_references
 
 
+def label_frame_references(
+    frame_references,
+    shot,
+    characters,
+    portraits,
+    matched_char=None,
+    location_plate_url=None,
+) -> list:
+    """Who or what each picture in a reference set is, in the set's order.
+
+    ``resolve_frame_references`` returns the pictures and nothing about them,
+    which is enough for an image model told "the first reference is X" in
+    prose. A backend that addresses its references by position and takes them
+    as a set (Vidu) has to be told which position is whom, or the second face
+    is a stranger it was merely shown. "" for a picture nothing identifies.
+    """
+    by_url = {}
+    for character in characters_in_frame(shot, characters, matched_char):
+        url = (portraits or {}).get(getattr(character, "name", ""))
+        if url:
+            by_url.setdefault(url, character.name)
+    labels = []
+    for index, url in enumerate(frame_references or []):
+        if index == 0 and matched_char is not None:
+            # By position, not by URL: with dynamic references on, the anchor
+            # is the character's latest frame, which is nobody's portrait.
+            labels.append(matched_char.name)
+        elif url == location_plate_url:
+            labels.append("the empty set")
+        else:
+            labels.append(by_url.get(url, ""))
+    return labels
+
+
 def build_character_identity_clause(
     characters, matched_char=None, limit=None, allow_undressed: bool = True
 ) -> str:
@@ -4775,6 +4809,24 @@ class Script2VideoPipeline:
                     # TypeError on a keyword that would have been None anyway.
                     if end_frame_url:
                         video_kwargs["last_image"] = end_frame_url
+                    # The whole ordered set, for a one-step backend that can
+                    # bind it. Anchor-only left the other face in a two-hander
+                    # to the prompt's prose (job 79a25db0: a woman topknotted
+                    # in one scene and shaven in the next).
+                    if (
+                        one_step_reference_video
+                        and frame_references
+                        and getattr(self.video_gen, "accepts_reference_set", False)
+                    ):
+                        video_kwargs["reference_images"] = list(frame_references)
+                        video_kwargs["reference_labels"] = label_frame_references(
+                            frame_references,
+                            shot,
+                            characters,
+                            portraits,
+                            matched_char=matched_char,
+                            location_plate_url=location_plate_url,
+                        )
                     video_url = await self.video_gen.generate_video_from_image(
                         prompt=video_prompt,
                         image_url=frame_url if not one_step_reference_video else reference_url,
