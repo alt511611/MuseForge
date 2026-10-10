@@ -38,7 +38,7 @@ TTS pass and mixed afterwards, and a model-made track on top would double it.
 from __future__ import annotations
 
 import os
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 from tools.falai_common import fal_generate, make_fal_client
 from tools.falai_reference_video_generator import DEMO_VIDEO_URL
@@ -48,6 +48,7 @@ ENDPOINT_DEFAULT = "fal-ai/vidu/q4/reference-to-video"
 MIN_DURATION_SECONDS = 3
 MAX_DURATION_SECONDS = 16
 MAX_PROMPT_CHARS = 5000
+MAX_REFERENCE_IMAGES = 12
 VALID_ASPECT_RATIOS = {"16:9", "9:16", "4:3", "3:4", "1:1"}
 VALID_RESOLUTIONS = ("540p", "720p", "1080p", "2K", "4K")
 DEFAULT_RESOLUTION = "720p"
@@ -78,14 +79,41 @@ def _resolution() -> str:
     return DEFAULT_RESOLUTION
 
 
+def _reference_set(image_url: str, reference_images: Optional[Sequence[str]]) -> list:
+    """The anchor first, then the rest, de-duplicated and capped at what the
+    endpoint reads. ``image_url`` leads even when the set omits it: it is the
+    reference the caller resolved for this shot."""
+    ordered = [image_url, *(reference_images or [])]
+    return list(dict.fromkeys(u for u in ordered if u))[:MAX_REFERENCE_IMAGES]
+
+
+def _prompt(prompt: str, references: list, labels: Optional[Sequence[str]]) -> str:
+    """The prompt, with each reference named by the position this endpoint
+    addresses it by. Without a label the old bare ``[@reference_image_1]``."""
+    named = [
+        f"[@reference_image_{i}] is {label.strip()}."
+        for i, label in enumerate(labels or [], start=1)
+        if i <= len(references) and (label or "").strip()
+    ]
+    head = " ".join(named) if named else "[@reference_image_1]"
+    return f"{head} {prompt}"[:MAX_PROMPT_CHARS]
+
+
 class FalAIViduVideoGenerator:
     """Drop-in for MuAPIVideoGenerator.generate_video_from_image.
 
     ``uses_character_reference_to_video`` tells script2video to skip the
     separate frame step and treat ``image_url`` as the character reference.
+
+    ``accepts_reference_set`` tells it this backend can be handed the WHOLE
+    ordered set the frame step would have drawn from (the anchor's portrait,
+    the other faces in the shot, the empty set) rather than only the anchor.
+    Declared, not assumed: the call site is duck-typed and the other
+    one-step provider takes a single reference.
     """
 
     uses_character_reference_to_video = True
+    accepts_reference_set = True
 
     def __init__(self, api_key: str, demo: bool = False):
         self.demo = demo
@@ -106,16 +134,33 @@ class FalAIViduVideoGenerator:
         is_cancelled: Optional[Callable[[], bool]] = None,
         shot_profile: Optional[str] = None,
         last_image: Optional[str] = None,
+        reference_images: Optional[Sequence[str]] = None,
+        reference_labels: Optional[Sequence[str]] = None,
     ) -> str:
+        """``reference_images``, when given, is the ordered set to bind (anchor
+        first); ``reference_labels`` says who or what each one is, in the same
+        order. Without them this is the single-portrait call it always was.
+
+        The set exists because a two-hander sent only the anchor's portrait
+        leaves the other face to the prompt's prose, and prose draws somebody
+        who fits the description, not the same person twice -- the failure
+        job 79a25db0 delivered: a woman who is topknotted in one scene and
+        shaven in the next, a man who is silver-haired and then bald.
+        """
         # plan, shot_profile and last_image: signature parity only -- no HD
         # mode, no MuAPI-style routing, and no end-frame field on this schema.
         _ = (plan, shot_profile, last_image)
         if self.demo:
             return DEMO_VIDEO_URL
 
+        references = _reference_set(image_url, reference_images)
+        # Labels travel with their picture, not their position: de-duplicating
+        # or capping the set must not hand one face another face's name.
+        label_of = dict(zip(reference_images or [], reference_labels or []))
+        aligned = [label_of.get(u, "") for u in references]
         payload = {
-            "prompt": f"[@reference_image_1] {prompt}"[:MAX_PROMPT_CHARS],
-            "reference_image_urls": [image_url],
+            "prompt": _prompt(prompt, references, aligned),
+            "reference_image_urls": references,
             "duration": _duration(duration),
             "resolution": _resolution(),
             "aspect_ratio": _aspect_ratio(aspect_ratio),
