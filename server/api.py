@@ -2895,6 +2895,21 @@ class PortalRequest(BaseModel):
     return_url: str
 
 
+def _embedded_checkout_session_id(url) -> Optional[str]:
+    """The Whop checkout-configuration id, only when the on-site form is on.
+
+    Off by default. The legacy embed (@whop/checkout, whop.com/embedded/
+    checkout/<id>/) answered "This checkout is no longer available" for every
+    fresh configuration -- plan, session and bare-plan URLs alike -- while the
+    same configuration's hosted purchase_url loaded fine. A button that opens
+    that dead modal sells nothing, so the redirect is the default and the
+    embed is opt-in (MUSEFORGE_WHOP_EMBED=1) until it is moved to Whop Elements.
+    """
+    if os.environ.get("MUSEFORGE_WHOP_EMBED", "").strip().lower() not in ("1", "true", "yes", "on"):
+        return None
+    return getattr(url, "session_id", None)
+
+
 @app.post("/api/create-checkout-session")
 async def create_checkout_session(
     req: CheckoutRequest,
@@ -2926,7 +2941,7 @@ async def create_checkout_session(
             )
             # `session_id` lets the site embed Whop's form instead of leaving;
             # `url` stays as the redirect fallback.
-            return {"url": url, "session_id": getattr(url, "session_id", None)}
+            return {"url": url, "session_id": _embedded_checkout_session_id(url)}
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
@@ -2998,7 +3013,7 @@ async def buy_credits(
             )
             return {
                 "url": url,
-                "session_id": getattr(url, "session_id", None),
+                "session_id": _embedded_checkout_session_id(url),
                 "package": pkg_key,
                 "credits": CREDIT_PACKAGES[pkg_key]["credits"],
             }
