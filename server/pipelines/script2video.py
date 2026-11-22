@@ -45,6 +45,7 @@ from tools.frame_judge import is_frame_judge_enabled, judge_frame
 from tools.muapi_image_generator import MuAPIImageGenerator, normalise_references
 from tools.t5_budget import (
     MAX_PROMPT_TOKENS,
+    max_prompt_chars,
     max_prompt_tokens,
     count_tokens,
     encoder_family,
@@ -205,6 +206,10 @@ IMAGE_QUALITY_SUFFIX = PHOTOREAL_RENDER
 #: unnoticed while the screenwriter was failing to the deterministic template,
 #: whose one undescribed "Alex" produced a short prompt every time.
 MAX_IMAGE_PROMPT_CHARS = 3000
+#: ...for the FLUX families. It is the DEFAULT, not the only value: the gate
+#: that binds a given frame is tools.t5_budget.max_prompt_chars(), which is
+#: 8000 when the active reference endpoint is Gemini (Nano Banana). Nothing
+#: in this module should size a frame against this constant directly.
 
 #: The OTHER budget, and the one that actually decides what the model reads.
 #:
@@ -444,7 +449,7 @@ def _trim_to_token_window(kept: list, token_limit: int) -> list:
 
 def fit_image_prompt(
     segments: list,
-    limit: int = MAX_IMAGE_PROMPT_CHARS,
+    limit: Optional[int] = None,
     token_limit: Optional[int] = None,
 ) -> str:
     """Assemble a prompt that respects the provider's character budget.
@@ -460,6 +465,8 @@ def fit_image_prompt(
     cut mid-word and could sever the character lock -- the frame would still
     render, just of somebody else.
     """
+    if limit is None:
+        limit = max_prompt_chars()
     if token_limit is None:
         token_limit = max_prompt_tokens()
     kept = [(prio, text) for prio, text in segments if text]
@@ -1949,7 +1956,7 @@ def build_frame_prompt(
     # A clause is worth shortening for the window when shortening it puts
     # another one INSIDE. This one does not, so it keeps its full share.
     identity_budget = (
-        MAX_IMAGE_PROMPT_CHARS
+        max_prompt_chars()
         - len(style_prefix)
         - len(setting_clause)
         - len(lighting_clause)
@@ -2119,6 +2126,33 @@ def build_frame_prompt(
                     max_prompt_tokens(), len(identity_characters),
                 )
                 identity_clause = undressed
+    # SAID, because a shrunk identity sentence was invisible until it was
+    # suspected. Job d7fde8c8's night scene drew "a bald man in a leather
+    # jacket" and "a long-haired woman in a bandana" where the script wrote
+    # something else, and the log held nothing to confirm or rule out that the
+    # identity clause had been cut to fit: neither the reserve above nor the
+    # token loop prints a word. A reserve that silently squeezes the one
+    # clause keeping a face the same face has to be checkable from a job id.
+    #
+    # Measured against the clause UNLIMITED, not against the budget, so the
+    # line fires on any shortening (reserve, token window, or undressing) and
+    # carries both ends of it.
+    if identity_clause:
+        identity_full = build_character_identity_clause(
+            identity_characters, matched_char
+        )
+        if len(identity_clause) < len(identity_full):
+            logger.info(
+                "Identity clause shrunk from %d to %d chars for %d "
+                "character(s): %d chars left for it after the other clauses "
+                "against the %d-char gate (floor %d), %d-token %s window. "
+                "Shot: %.60s",
+                len(identity_full), len(identity_clause),
+                len(identity_characters), identity_budget,
+                max_prompt_chars(), IDENTITY_SHRINK_FLOOR,
+                max_prompt_tokens(), window_label(),
+                getattr(shot, "visual_desc", "") or "",
+            )
     # (priority, text) in READING order. Priority 0 is required: the style,
     # the shot itself, its framing, and the character lock -- without the
     # first there is no frame, without the last the frame renders a stranger,
