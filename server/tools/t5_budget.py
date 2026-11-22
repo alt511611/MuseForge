@@ -78,6 +78,15 @@ MISTRAL_FALLBACK_CHARS_PER_TOKEN = 3.5
 #: on separately.
 _MISTRAL_ENDPOINT_MARKERS = ("flux-2-pro", "flux-2-flex", "flux-2-dev")
 
+#: Nano Banana is a Gemini model: it reads the prompt with Gemini's own
+#: tokenizer, not T5 and not Mistral's. There is no 512-token window to overrun
+#: (its context is orders of magnitude larger), so the shared MAX_PROMPT_TOKENS
+#: is kept only as a conservative ceiling that costs a long prompt its cheapest
+#: clauses rather than anything it needs. No Gemini tokenizer is vendored, so
+#: the count is an estimate, shaded pessimistic like the others.
+GEMINI_FALLBACK_CHARS_PER_TOKEN = 3.5
+_GEMINI_ENDPOINT_MARKERS = ("nano-banana", "gemini")
+
 
 def _reference_endpoint() -> str:
     """The endpoint that will actually receive a frame prompt.
@@ -92,6 +101,8 @@ def _reference_endpoint() -> str:
     reason to load.
     """
     provider = os.environ.get("MUSEFORGE_IMAGE_PROVIDER", "").strip().lower()
+    if provider == "falai_nanobanana":
+        return os.environ.get("FALAI_NANOBANANA_EDIT_MODEL", "google/nano-banana-2.1/edit")
     if provider == "falai_multiref":
         return os.environ.get("FALAI_FLUX2_EDIT_MODEL", "fal-ai/flux-2-pro/edit")
     if provider == "falai":
@@ -104,6 +115,8 @@ def encoder_family() -> str:
     reference/edit endpoint conditions on, and therefore which budget this
     frame prompt is actually being measured against."""
     endpoint = _reference_endpoint().strip().lower()
+    if any(marker in endpoint for marker in _GEMINI_ENDPOINT_MARKERS):
+        return "gemini"
     if any(marker in endpoint for marker in _MISTRAL_ENDPOINT_MARKERS):
         return "mistral"
     return "t5"
@@ -111,7 +124,7 @@ def encoder_family() -> str:
 
 def window_label() -> str:
     """"T5" or "Mistral", for a log line that says which window this is."""
-    return "Mistral" if encoder_family() == "mistral" else "T5"
+    return {"mistral": "Mistral", "gemini": "Gemini"}.get(encoder_family(), "T5")
 
 
 _lock = threading.Lock()
@@ -182,8 +195,11 @@ def count_tokens(text: str) -> int:
     """
     if not text:
         return 0
-    if encoder_family() == "mistral":
+    family = encoder_family()
+    if family == "mistral":
         return int(len(text) / MISTRAL_FALLBACK_CHARS_PER_TOKEN) + 1
+    if family == "gemini":
+        return int(len(text) / GEMINI_FALLBACK_CHARS_PER_TOKEN) + 1
     sp = _tokenizer()
     if sp is None:
         return int(len(text) / FALLBACK_CHARS_PER_TOKEN) + 1
