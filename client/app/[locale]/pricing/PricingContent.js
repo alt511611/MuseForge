@@ -182,7 +182,12 @@ function PricingContent() {
   const { user, getAccessToken } = useAuth();
   const { t } = useLanguage();
   const searchParams = useSearchParams();
-  const success = searchParams.get("success");
+  // Whop appends `status` when an off-site payment step (3-D Secure, a bank
+  // page) sends the buyer back, and it lands here whatever the outcome. A
+  // declined one must not be congratulated.
+  const paymentStatus = searchParams.get("status");
+  const success =
+    searchParams.get("success") && paymentStatus !== "failed" && paymentStatus !== "canceled";
   const creditsBought = searchParams.get("credits");
   const successPlan = searchParams.get("plan");
   const [confetti, setConfetti] = useState(false);
