@@ -67,21 +67,34 @@ def is_lipsync_enabled() -> bool:
     return os.environ.get("MUSEFORGE_LIPSYNC_ENABLED", "").strip().lower() in TRUTHY
 
 
+#: Every value MUSEFORGE_LIPSYNC_PROVIDER may take, in one place: the factory
+#: below and idea2video's account-lock check both resolve against it, and a
+#: provider added to one and not the other silently falls back to "muapi".
+LIPSYNC_PROVIDERS = ("muapi", "falai", "falai_h3", "local")
+
+
 def make_lipsync(demo: bool = False):
     """The configured lip-sync backend.
 
     MUSEFORGE_LIPSYNC_PROVIDER:
       - "muapi" (default) — this module, no second vendor key needed
       - "falai" — fal.ai Sync Lipsync, which exposes sync_mode directly
+      - "falai_h3" — fal.ai MiniMax H3 Max Lip Sync: REDRAWS the scene from
+        its first frame and the audio instead of editing the given clip
+        (see tools/falai_h3_lipsync for what that costs and buys)
       - "local" — a self-hosted LatentSync service; no key, no per-scene bill,
         and sync_mode is ours to set rather than the vendor's to withhold
     """
     provider = resolve_provider(
         "MUSEFORGE_LIPSYNC_PROVIDER",
-        ("muapi", "falai", "local"),
+        LIPSYNC_PROVIDERS,
         default="muapi",
         stage="Lip sync",
     )
+    if provider == "falai_h3":
+        from tools.falai_h3_lipsync import FalAIH3Lipsync
+
+        return FalAIH3Lipsync(os.environ.get("FAL_KEY", ""), demo=demo)
     if provider == "falai":
         # Lazy: the default path must never require fal-client to be installed.
         from tools.falai_lipsync import FalAILipsync
