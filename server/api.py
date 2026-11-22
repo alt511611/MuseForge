@@ -2923,7 +2923,9 @@ async def create_checkout_session(
                 user_email=current_user.email,
                 success_url=req.success_url,
             )
-            return {"url": url}
+            # `session_id` lets the site embed Whop's form instead of leaving;
+            # `url` stays as the redirect fallback.
+            return {"url": url, "session_id": getattr(url, "session_id", None)}
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
@@ -2993,7 +2995,12 @@ async def buy_credits(
                 # id -- the same thing `credit_package` does on Stripe.
                 metadata={"credit_package": pkg_key},
             )
-            return {"url": url, "package": pkg_key, "credits": CREDIT_PACKAGES[pkg_key]["credits"]}
+            return {
+                "url": url,
+                "session_id": getattr(url, "session_id", None),
+                "package": pkg_key,
+                "credits": CREDIT_PACKAGES[pkg_key]["credits"],
+            }
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 

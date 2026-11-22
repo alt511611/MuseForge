@@ -7,6 +7,7 @@ import { Loader2 } from "lucide-react";
 import { API_BASE } from "../lib/apiBase";
 import { useLanguage } from "../contexts/LanguageContext";
 import { friendlyError } from "../utils/errorMessages";
+import CheckoutModal from "./CheckoutModal";
 
 export default function CheckoutButton({ plan, interval = "annual", children, className = "", style = {} }) {
   const { user, getAccessToken } = useAuth();
@@ -14,6 +15,7 @@ export default function CheckoutButton({ plan, interval = "annual", children, cl
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [embed, setEmbed] = useState(null);
 
   const handleClick = async () => {
     if (!user) {
@@ -50,7 +52,17 @@ export default function CheckoutButton({ plan, interval = "annual", children, cl
         throw new Error(err.detail || t("checkout_failed"));
       }
 
-      const { url } = await res.json();
+      const { url, session_id } = await res.json();
+      if (session_id) {
+        // Whop: take the payment on this page. Stripe (no session_id) and any
+        // failure to mount the form still fall back to the hosted redirect.
+        setEmbed({
+          sessionId: session_id,
+          successUrl: `${origin}/pricing?success=1&plan=${plan}`,
+        });
+        setLoading(false);
+        return;
+      }
       window.location.href = url;
     } catch (err) {
       setError(friendlyError(err.message));
@@ -69,6 +81,15 @@ export default function CheckoutButton({ plan, interval = "annual", children, cl
         {loading ? <Loader2 size={16} className="animate-spin" /> : null}
         {children}
       </button>
+      {embed && (
+        <CheckoutModal
+          sessionId={embed.sessionId}
+          email={user?.email}
+          returnUrl={embed.successUrl}
+          successUrl={embed.successUrl}
+          onClose={() => setEmbed(null)}
+        />
+      )}
       {error && (
         <p className="text-xs mt-2 text-center" style={{ color: "var(--mf-err-soft)" }}>{error}</p>
       )}
