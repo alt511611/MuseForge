@@ -71,7 +71,14 @@ class PipelineCancelled(Exception):
 #: and the estimate's `configured_scene_take_backend` must agree on it, and a
 #: value known to one and not the other is a deployment that renders on a
 #: vendor the quote never priced.
-VIDEO_PROVIDERS = ("muapi", "falai", "falai_reference", "falai_multishot", "falai_vidu")
+VIDEO_PROVIDERS = (
+    "muapi",
+    "falai",
+    "falai_reference",
+    "falai_multishot",
+    "falai_vidu",
+    "falai_minimax",
+)
 
 
 def _make_video_generator(api_key: str, demo: bool):
@@ -88,6 +95,9 @@ def _make_video_generator(api_key: str, demo: bool):
         its cuts inside it (interfaces/scene_take)
       - "falai_vidu" — fal.ai Vidu Q4 reference-to-video (one-step, per shot,
         like falai_reference; a candidate to measure against Kling)
+      - "falai_minimax" — fal.ai MiniMax H3 Max reference-to-video: first frame,
+        last frame and a reference set in one call (FALAI_MINIMAX_MODE=frame, the
+        default, animates the rendered opening frame; =reference skips it)
 
     "falai_multishot" is a separate value rather than a capability the "falai"
     path discovers for itself, and deliberately so: the two render a scene by
@@ -117,6 +127,10 @@ def _make_video_generator(api_key: str, demo: bool):
         from tools.falai_vidu_video_generator import FalAIViduVideoGenerator
 
         return FalAIViduVideoGenerator(os.environ.get("FAL_KEY", ""), demo=demo)
+    if provider == "falai_minimax":
+        from tools.falai_minimax_video_generator import FalAIMiniMaxVideoGenerator
+
+        return FalAIMiniMaxVideoGenerator(os.environ.get("FAL_KEY", ""), demo=demo)
     return MuAPIVideoGenerator(api_key, demo=demo)
 
 
@@ -4809,14 +4823,15 @@ class Script2VideoPipeline:
                     # TypeError on a keyword that would have been None anyway.
                     if end_frame_url:
                         video_kwargs["last_image"] = end_frame_url
-                    # The whole ordered set, for a one-step backend that can
-                    # bind it. Anchor-only left the other face in a two-hander
-                    # to the prompt's prose (job 79a25db0: a woman topknotted
-                    # in one scene and shaven in the next).
-                    if (
-                        one_step_reference_video
-                        and frame_references
-                        and getattr(self.video_gen, "accepts_reference_set", False)
+                    # The whole ordered set, for a backend that can bind it.
+                    # Anchor-only left the other face in a two-hander to the
+                    # prompt's prose (job 79a25db0: a woman topknotted in one
+                    # scene and shaven in the next). Not only the one-step path:
+                    # a backend that takes a first frame AND references
+                    # (falai_minimax in frame mode) is owed the set as well, and
+                    # an undeclared backend still sees exactly what it did.
+                    if frame_references and getattr(
+                        self.video_gen, "accepts_reference_set", False
                     ):
                         video_kwargs["reference_images"] = list(frame_references)
                         video_kwargs["reference_labels"] = label_frame_references(
