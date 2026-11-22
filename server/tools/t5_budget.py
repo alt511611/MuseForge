@@ -86,14 +86,30 @@ _MISTRAL_ENDPOINT_MARKERS = ("flux-2-pro", "flux-2-flex", "flux-2-dev")
 #: the count is an estimate, shaded pessimistic like the others.
 GEMINI_FALLBACK_CHARS_PER_TOKEN = 3.5
 
-#: The ceiling a prompt bound for Nano Banana is held to. Fal's schema gives
+#: The ceilings a prompt bound for Nano Banana is held to. Fal's schema gives
 #: ``prompt`` a ``maxLength`` of 50,000 characters, so there is no 512-token
 #: window to protect -- and holding the prompt to one anyway is not free: on a
 #: six-character scene it dropped every wardrobe, the lighting lock, the
 #: face-visibility and cast-closure guardrails, none of which Nano Banana
-#: needed to lose. 2048 is a sanity bound, not a read window; the 3000-char
-#: gate in script2video (MuAPI's validator) is what binds first.
-GEMINI_MAX_PROMPT_TOKENS = 2048
+#: needed to lose. Neither number is a read window; both are sanity bounds.
+#:
+#: 2048 tokens / 3000 characters was the first cut (#161) and it was still the
+#: FLUX shape: the 3000-char gate is MuAPI's validator, and Nano Banana never
+#: goes through it. Job d7fde8c8's two crowded frames (3066 and 3169 chars)
+#: each dropped 262 characters of direction against that gate, and the same
+#: gate sizes the identity reserve, so a scene of three or more described
+#: characters had its identity sentence squeezed toward the 200-char floor to
+#: fit a limit the endpoint does not have. 4000 tokens / 8000 characters
+#: (3.5 chars per token on both, so the two agree) leaves a five-character
+#: night scene room for every face, garment and lock, and is still far inside
+#: what the endpoint accepts.
+GEMINI_MAX_PROMPT_TOKENS = 4000
+GEMINI_MAX_PROMPT_CHARS = 8000
+
+#: MuAPI's validator: a `positivePrompt` outside 2..3000 characters is a 400,
+#: raised at GENERATION time. It binds the T5 and Mistral families, which are
+#: the ones MuAPI (and fal's FLUX endpoints) serve.
+MAX_PROMPT_CHARS = 3000
 _GEMINI_ENDPOINT_MARKERS = ("nano-banana", "gemini")
 
 
@@ -139,6 +155,14 @@ def max_prompt_tokens() -> int:
     window. Read at call time so a provider switch needs no restart.
     """
     return GEMINI_MAX_PROMPT_TOKENS if encoder_family() == "gemini" else MAX_PROMPT_TOKENS
+
+
+def max_prompt_chars() -> int:
+    """The character gate for a frame prompt on the active reference/edit
+    endpoint: 8000 for Gemini, MuAPI's 3000 for every other family. Read at
+    call time, like max_prompt_tokens(), so a provider switch needs no
+    restart."""
+    return GEMINI_MAX_PROMPT_CHARS if encoder_family() == "gemini" else MAX_PROMPT_CHARS
 
 
 def window_label() -> str:
