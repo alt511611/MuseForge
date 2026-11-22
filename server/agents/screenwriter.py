@@ -7,6 +7,7 @@ import os
 import re
 from typing import Any, List, Optional
 
+from interfaces import cast_count, cast_marks
 from interfaces import gender as gender_of
 from interfaces.character import (
     CharacterProfile,
@@ -346,6 +347,21 @@ across the back of a jacket in a two-second push-in, and FICST LOU on a name pat
 on screen in every shot of the drama — and writing is the one thing in a frame a viewer
 tries to read, so a misspelled word costs more than the plain patch it replaced.
 
+A MARK THAT SURVIVES A CUT. Give every character a "mark": the ONE thing a viewer
+can tell them by in any frame, at any size, in poor light. Take it from the head, the
+hair, the face or something worn or carried: "a red headband", "a white handlebar
+moustache", "a long grey braid", "a scar through the left eyebrow". A face drifts between
+shots and a mark does not, so a mark is what keeps one person one person. Every character
+gets a DIFFERENT mark, and a group dressed alike (a crew in the same tunic) is told apart
+by the mark alone. Write it as what IS there, in at most eight words, as a shape or a
+colour and never as lettering. The mark is put in front of the wardrobe for you, so do
+not repeat it there.
+
+A GROUP THE BRIEF COUNTS IS THAT MANY PEOPLE. "Three sailors" is three entries in
+"characters", each with their own name, description, wardrobe and mark; give the names
+the brief does not. An action line never says "the sailors" of people the cast does not
+list one by one, because anyone not listed comes back as a different stranger each shot.
+
 WRITE THE WARDROBE FOR THE MODEL THAT READS IT. "description" and "wardrobe"
 are not read by a person. They are pasted into the prompt for an image model,
 once per frame, for every frame of the film -- which is why this brief already
@@ -383,6 +399,7 @@ Respond ONLY with valid JSON matching this schema:
     "name": "string",
     "description": "gender and age FIRST, then face and build - no clothing",
     "wardrobe": "head down: headwear, garment + cut + colour, fastening, pockets, material, markings as SHAPES not words, anything carried",
+    "mark": "the one thing that tells this person from the rest of the cast, at most eight words",
     "role": "protagonist|antagonist|supporting",
     "want": "external goal", "need": "internal truth", "arc": "how they change"
   }],
@@ -830,6 +847,7 @@ into a single scene rather than adding one."""
         """
         script.user_brief = (idea or "").strip()
         cls._apply_brief_gender(script)
+        cls._apply_character_marks(script)
         # BEFORE _apply_brief_event, so the event is restored onto a scene
         # that is still in the film. Run the other way round, a script whose
         # extra scenes are cut could lose the restored world_change with them.
@@ -1121,6 +1139,35 @@ into a single scene rather than adding one."""
         return hits[0] if len(hits) == 1 else ""
 
     @staticmethod
+    def _apply_character_marks(script: DramaScript) -> None:
+        """Put each character's mark in front of their wardrobe, and say what
+        is still undistinguished.
+
+        Folding is deterministic and idempotent. The checks only LOG: a mark
+        invented here for a character the model left plain would be a guess,
+        and two sailors who share one is a thing for the next prompt revision
+        to learn about, not for this to paper over.
+        """
+        characters = list(script.characters or [])
+        for char in characters:
+            char.wardrobe = cast_marks.fold(char.mark, char.wardrobe)
+        plain = cast_marks.unmarked(characters)
+        if plain:
+            logger.warning(
+                "No mark for %s in a cast of %s: nothing but a face tells them "
+                "apart across a cut.",
+                plain,
+                len(characters),
+            )
+        for a, b in cast_marks.collisions(characters):
+            logger.warning(
+                "%r and %r share one look (same mark or near-identical "
+                "wardrobe); a face that drifts will swap them.",
+                a,
+                b,
+            )
+
+    @staticmethod
     def _apply_brief_gender(script: DramaScript) -> None:
         """Write the brief's stated gender into a description that dropped it.
 
@@ -1297,7 +1344,7 @@ into a single scene rather than adding one."""
         text = next((b.text for b in message.content if b.type == "text"), "")
         try:
             data = self._parse_json(text)
-            return self._with_brief(DramaScript(**data), idea, num_scenes)
+            script = self._with_brief(DramaScript(**data), idea, num_scenes)
         except Exception as exc:
             # Include what came back: "No JSON found in response" on its own
             # gives an operator nothing to act on.
@@ -1310,6 +1357,107 @@ into a single scene rather than adding one."""
                 "The script came back in a form we could not read. No credits "
                 "were spent — please try again shortly."
             ) from exc
+
+        missing = cast_count.shortfall(idea, len(script.characters or []))
+        if missing:
+            script = await self._complete_cast(
+                script,
+                text,
+                prompt,
+                missing,
+                idea,
+                num_scenes,
+                language,
+                require_dialogue,
+                narrative_mode,
+                series_brief,
+                lipsync_enabled,
+            )
+        return script
+
+    async def _complete_cast(
+        self,
+        script: DramaScript,
+        first_answer: str,
+        prompt: str,
+        wanted: int,
+        idea: str,
+        num_scenes: int,
+        language: str,
+        require_dialogue: bool,
+        narrative_mode: str,
+        series_brief: str,
+        lipsync_enabled: bool,
+    ) -> DramaScript:
+        """Ask once more when the brief counted people the cast does not list.
+
+        "Three sailors" came back as a cast of one, and the other two were
+        drawn from the scenes' prose -- a new stranger every shot. One
+        correction, naming the count, is cheaper than the video it saves.
+
+        Fails OPEN: any error, or an answer that still lists too few, returns
+        the script as first written. A repair must never be the thing that
+        fails a job that already had a usable script.
+        """
+        listed = len(script.characters or [])
+        logger.warning(
+            "The brief counts %s people but the cast lists %s; asking the "
+            "screenwriter to list every one.",
+            wanted,
+            listed,
+        )
+        correction = (
+            f"The brief counts {wanted} people and \"characters\" lists {listed}. "
+            f"Answer again with the WHOLE script as JSON, listing exactly the "
+            f"people the brief counts as separate characters ({wanted} at "
+            f"least), each with their own name, description, wardrobe and a "
+            f"different mark. Everything else stays as it was."
+        )
+        try:
+            async with self._anthropic().messages.stream(
+                model=self.MODEL,
+                max_tokens=self.MAX_SCRIPT_TOKENS,
+                system=self._system_prompt(
+                    language,
+                    require_dialogue,
+                    narrative_mode,
+                    num_scenes,
+                    bool(series_brief),
+                    lipsync_enabled=lipsync_enabled,
+                ),
+                messages=[
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": first_answer},
+                    {"role": "user", "content": correction},
+                ],
+            ) as stream:
+                message = await asyncio.wait_for(
+                    stream.get_final_message(),
+                    timeout=self.SCRIPT_STREAM_TIMEOUT_SECONDS,
+                )
+            log_usage("screenwriter_cast", self.MODEL, getattr(message, "usage", None))
+            if message.stop_reason in ("max_tokens", "refusal"):
+                raise ValueError(f"stop_reason={message.stop_reason}")
+            text = next((b.text for b in message.content if b.type == "text"), "")
+            repaired = self._with_brief(
+                DramaScript(**self._parse_json(text)), idea, num_scenes
+            )
+        except Exception as exc:
+            logger.warning(
+                "Cast correction failed (%s: %s); keeping the first script.",
+                type(exc).__name__,
+                exc,
+            )
+            return script
+        if len(repaired.characters or []) < wanted:
+            logger.warning(
+                "Cast correction still lists %s of %s; keeping the first script.",
+                len(repaired.characters or []),
+                wanted,
+            )
+            return script
+        logger.info("Cast completed: %s -> %s characters.", listed, len(repaired.characters))
+        return repaired
 
     @staticmethod
     def _failure_message(exc) -> str:
