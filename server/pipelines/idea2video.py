@@ -60,7 +60,7 @@ from interfaces.reframe import describe as describe_reframe
 from interfaces.reframe import anchors_in_cut_order
 from interfaces.reframe import spans_from_durations as reframe_spans_from_durations
 from tools.muapi_client import is_account_locked
-from tools.muapi_lipsync import is_lipsync_enabled, make_lipsync
+from tools.muapi_lipsync import LIPSYNC_PROVIDERS, is_lipsync_enabled, make_lipsync
 from tools.muapi_sfx_generator import is_foley_enabled, make_sfx_generator
 from tools.muapi_voice_generator import MuAPIVoiceGenerator, is_dialogue_enabled
 
@@ -4342,7 +4342,7 @@ class Idea2VideoPipeline:
         # account could still pay for.
         lipsync_provider = resolve_provider(
             "MUSEFORGE_LIPSYNC_PROVIDER",
-            ("muapi", "falai", "local"),
+            LIPSYNC_PROVIDERS,
             default="muapi",
             stage="Lip sync",
         )

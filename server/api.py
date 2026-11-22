@@ -676,6 +676,7 @@ def _lipsync_configured() -> bool:
     provider = (os.environ.get("MUSEFORGE_LIPSYNC_PROVIDER", "muapi") or "").strip().lower()
     required = {
         "falai": "FAL_KEY",
+        "falai_h3": "FAL_KEY",
         "local": "MUSEFORGE_LOCAL_LIPSYNC_URL",
     }.get(provider, "MUAPI_KEY")
     return bool((os.environ.get(required) or "").strip())
