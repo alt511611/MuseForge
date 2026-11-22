@@ -42,9 +42,10 @@ from tools.character_qa import (
 )
 from interfaces import frame_choice
 from tools.frame_judge import is_frame_judge_enabled, judge_frame
-from tools.muapi_image_generator import MuAPIImageGenerator
+from tools.muapi_image_generator import MuAPIImageGenerator, normalise_references
 from tools.t5_budget import (
     MAX_PROMPT_TOKENS,
+    max_prompt_tokens,
     count_tokens,
     encoder_family,
     tokenizer_is_real,
@@ -444,7 +445,7 @@ def _trim_to_token_window(kept: list, token_limit: int) -> list:
 def fit_image_prompt(
     segments: list,
     limit: int = MAX_IMAGE_PROMPT_CHARS,
-    token_limit: int = MAX_IMAGE_PROMPT_TOKENS,
+    token_limit: Optional[int] = None,
 ) -> str:
     """Assemble a prompt that respects the provider's character budget.
 
@@ -459,6 +460,8 @@ def fit_image_prompt(
     cut mid-word and could sever the character lock -- the frame would still
     render, just of somebody else.
     """
+    if token_limit is None:
+        token_limit = max_prompt_tokens()
     kept = [(prio, text) for prio, text in segments if text]
     kept = _drop_to(kept, limit, "the %d-char provider budget" % limit)
     # THE BUDGET THAT DECIDES WHAT IS READ, and it is measured rather than
@@ -1161,19 +1164,34 @@ def label_frame_references(
     as a set (Vidu) has to be told which position is whom, or the second face
     is a stranger it was merely shown. "" for a picture nothing identifies.
     """
+    # Aligned with what a backend ACTUALLY receives: the same strip / drop-empty
+    # / de-duplicate pass the image generators run (normalise_references).
+    # Labelling the raw list let one blank or repeated URL shift every label
+    # after it onto the wrong picture.
+    references = normalise_references(frame_references)
+    plate = (location_plate_url or "").strip()
     by_url = {}
+    others = {}
     for character in characters_in_frame(shot, characters, matched_char):
-        url = (portraits or {}).get(getattr(character, "name", ""))
+        url = ((portraits or {}).get(getattr(character, "name", "")) or "").strip()
         if url:
             by_url.setdefault(url, character.name)
+            if character is not matched_char:
+                others.setdefault(url, character.name)
     labels = []
-    for index, url in enumerate(frame_references or []):
-        if index == 0 and matched_char is not None:
+    for index, url in enumerate(references):
+        if url in others:
+            # Somebody else's portrait is somebody else, even in slot 0: when
+            # the anchor has no picture of their own the set opens with the
+            # next face, and naming that face for the anchor is the one
+            # mistake worse than not naming it at all.
+            labels.append(others[url])
+        elif plate and url == plate:
+            labels.append("the empty set")
+        elif index == 0 and matched_char is not None:
             # By position, not by URL: with dynamic references on, the anchor
             # is the character's latest frame, which is nobody's portrait.
             labels.append(matched_char.name)
-        elif url == location_plate_url:
-            labels.append("the empty set")
         else:
             labels.append(by_url.get(url, ""))
     return labels
@@ -2052,7 +2070,7 @@ def build_frame_prompt(
         # MIN_VISUAL_DESC_CHARS is where that stops: "the first two sentences
         # of a shot description are the shot", and a shot is not allowed to
         # spend the film's continuity on its third.
-        while count_tokens(_assembled()) > MAX_IMAGE_PROMPT_TOKENS and (
+        while count_tokens(_assembled()) > max_prompt_tokens() and (
             shrink > IDENTITY_SHRINK_FLOOR or desc_limit > MIN_VISUAL_DESC_CHARS
         ):
             if shrink > IDENTITY_SHRINK_FLOOR:
@@ -2088,7 +2106,7 @@ def build_frame_prompt(
         # between scenes". Garments are covered by a picture and a costume
         # lock; the room is covered by this sentence and the plate, and only
         # the sentence is in the prompt when the plate was not sent.
-        if count_tokens(_assembled()) > MAX_IMAGE_PROMPT_TOKENS:
+        if count_tokens(_assembled()) > max_prompt_tokens():
             undressed = build_character_identity_clause(
                 identity_characters, matched_char, limit=IDENTITY_SHRINK_FLOOR
             )
@@ -2098,7 +2116,7 @@ def build_frame_prompt(
                     "wardrobe at its shortest and the description at its "
                     "floor — dropping the %d described wardrobe(s) so the "
                     "setting and cast stay inside it.",
-                    MAX_IMAGE_PROMPT_TOKENS, len(identity_characters),
+                    max_prompt_tokens(), len(identity_characters),
                 )
                 identity_clause = undressed
     # (priority, text) in READING order. Priority 0 is required: the style,
@@ -2283,14 +2301,14 @@ def build_frame_prompt(
     # description or the cast has outgrown what the model can read, which is
     # a story-shaped problem, not a ladder one.
     used = count_tokens(prompt)
-    if used > MAX_IMAGE_PROMPT_TOKENS:
+    if used > max_prompt_tokens():
         logger.warning(
             "Frame prompt is %d tokens against a %d-token %s window after "
             "every optional clause was dropped AND its longest required "
             "clauses were trimmed (_trim_to_token_window) — the shot "
             "description or the cast has outgrown what the model can read, "
             "and the encoder will now cut the tail itself. %d chars: %.80s...",
-            used, MAX_IMAGE_PROMPT_TOKENS, window_label(), len(prompt), prompt,
+            used, max_prompt_tokens(), window_label(), len(prompt), prompt,
         )
     elif not tokenizer_is_real():
         # Said once per frame rather than once per process, because this is
@@ -2304,20 +2322,28 @@ def build_frame_prompt(
         # entirely: no vendored Mistral tokenizer EXISTS to load, so every
         # prompt on that encoder is estimated, always, regardless of what is
         # installed -- see tools/t5_budget.MISTRAL_FALLBACK_CHARS_PER_TOKEN.
-        if encoder_family() == "mistral":
+        if encoder_family() == "gemini":
+            # Estimated by design (no Gemini tokenizer is vendored) against a
+            # window that is not a real constraint -- a warning per frame
+            # here, saying the T5 tokenizer failed to load, was wrong twice.
+            logger.debug(
+                "Frame prompt budgeted from an estimate (%d chars) for Gemini.",
+                len(prompt),
+            )
+        elif encoder_family() == "mistral":
             logger.warning(
                 "Frame prompt budgeted from an estimate (%d chars) — the "
                 "active image encoder is Mistral (FLUX.2), which this repo "
                 "has no vendored tokenizer for, so this frame's %d-token "
                 "window was estimated, not measured. See tools/t5_budget.",
-                len(prompt), MAX_IMAGE_PROMPT_TOKENS,
+                len(prompt), max_prompt_tokens(),
             )
         else:
             logger.warning(
                 "Frame prompt budgeted from an estimate (%d chars) — the T5 "
                 "tokenizer did not load, so this frame's %d-token window was "
                 "not measured. See tools/t5_budget.",
-                len(prompt), MAX_IMAGE_PROMPT_TOKENS,
+                len(prompt), max_prompt_tokens(),
             )
     return prompt
 

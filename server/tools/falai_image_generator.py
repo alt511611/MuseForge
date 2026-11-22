@@ -78,7 +78,12 @@ import logging
 import os
 from typing import Callable, Optional
 
-from tools.falai_common import fal_generate, make_fal_client
+from tools.falai_common import (
+    CONTENT_POLICY_RETRIES,
+    ContentFlagged,
+    fal_generate,
+    make_fal_client,
+)
 from tools.muapi_image_generator import normalise_references
 
 ASPECT_RATIO_MAP = {
@@ -121,7 +126,10 @@ NANOBANANA_RESOLUTIONS = ("1K", "2K", "4K")
 NANOBANANA_THINKING_LEVELS = ("minimal", "medium", "high")
 
 FLUX3_ENDPOINT = "blackforestlabs/flux-3/text-to-image"
-FLUX3_ASPECT_RATIOS = {"21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16"}
+FLUX3_ASPECT_RATIOS = {
+    "21:9", "2:1", "16:9", "3:2", "7:5", "4:3", "5:4", "1:1", "4:5", "3:4", "5:7",
+    "2:3", "9:16", "1:2",
+}
 FLUX3_RESOLUTIONS = ("768sq", "1k", "1.5k", "2k", "4k")
 
 
@@ -134,6 +142,23 @@ def _choice(env: str, allowed, default: str) -> str:
         if raw.lower() == known.lower():
             return known
     return default
+
+
+def _ratio_or_default(aspect_ratio: str, allowed, endpoint: str) -> str:
+    """``aspect_ratio`` if the endpoint's enum has it, else 16:9 -- out loud.
+
+    The pipeline only ever asks for 16:9, 9:16 or 1:1 today (api.py validates
+    it), so this should never fire. It is here for the day somebody adds a
+    ratio: a silent 16:9 on a 9:16 project is a wrong-shaped frame that nothing
+    downstream can get the sides back from.
+    """
+    if aspect_ratio in allowed:
+        return aspect_ratio
+    logger.warning(
+        "%s has no %r aspect ratio; drawing 16:9 instead -- the frame will not "
+        "be the shape the project asked for.", endpoint, aspect_ratio,
+    )
+    return "16:9"
 
 
 def _demo_image_url(prompt: str, aspect_ratio: str) -> str:
@@ -186,12 +211,12 @@ class FalAIImageGenerator:
             return _demo_image_url(prompt, aspect_ratio)
 
         endpoint = self.text_endpoint
-        if endpoint.startswith("blackforestlabs/flux-3/"):
+        if "/flux-3" in endpoint:
             # Its own schema: an aspect_ratio and a resolution tier, no
             # image_size, no num_images.
             payload = {
                 "prompt": prompt,
-                "aspect_ratio": aspect_ratio if aspect_ratio in FLUX3_ASPECT_RATIOS else "16:9",
+                "aspect_ratio": _ratio_or_default(aspect_ratio, FLUX3_ASPECT_RATIOS, endpoint),
                 "resolution": _choice("FALAI_FLUX3_RESOLUTION", FLUX3_RESOLUTIONS, "1k"),
                 "output_format": "jpeg",
             }
@@ -222,6 +247,35 @@ class FalAIImageGenerator:
         site is duck-typed on this, as it is for the video backends.
         """
         return self.nanobanana
+
+    @staticmethod
+    def _labels_for_sent(references, labels, sent) -> list:
+        """The labels that belong to ``sent``, or none at all.
+
+        ``references`` goes through ``normalise_references`` (blank and repeated
+        URLs vanish) before it is sent, so a label list indexed against the RAW
+        list slides onto the wrong picture the moment one entry is dropped. The
+        labels are therefore re-paired with their URLs first; if they cannot be
+        paired one-to-one the legend is omitted, because a wrong name is worse
+        than no name -- the model would put a face on the wrong person.
+        """
+        if not labels:
+            return []
+        raw = [references] if isinstance(references, str) else list(references or [])
+        labels = list(labels)
+        if len(labels) != len(raw):
+            logger.warning(
+                "reference_labels (%d) do not line up with the references (%d); "
+                "sending no legend rather than a misaligned one.",
+                len(labels), len(raw),
+            )
+            return []
+        by_url = {}
+        for url, label in zip(raw, labels):
+            url = (url or "").strip() if isinstance(url, str) else ""
+            if url:
+                by_url.setdefault(url, label)
+        return [by_url.get(url, "") for url in sent]
 
     @staticmethod
     def _legend(labels, count: int) -> str:
@@ -283,12 +337,14 @@ class FalAIImageGenerator:
                     held_back, len(ordered),
                 )
             sent = ordered[:NANOBANANA_MAX_REFERENCES]
-            legend = self._legend(reference_labels, len(sent))
+            legend = self._legend(
+                self._labels_for_sent(references, reference_labels, sent), len(sent)
+            )
             payload = {
                 "prompt": f"{legend} {prompt}" if legend else prompt,
                 "image_urls": sent,
-                "aspect_ratio": (
-                    aspect_ratio if aspect_ratio in NANOBANANA_ASPECT_RATIOS else "16:9"
+                "aspect_ratio": _ratio_or_default(
+                    aspect_ratio, NANOBANANA_ASPECT_RATIOS, self.NANOBANANA_ENDPOINT
                 ),
                 "resolution": _choice("FALAI_NANOBANANA_RESOLUTION", NANOBANANA_RESOLUTIONS, "1K"),
                 "thinking_level": _choice(
@@ -296,13 +352,7 @@ class FalAIImageGenerator:
                 ),
                 "output_format": "jpeg",
             }
-            result = await fal_generate(
-                self.client,
-                self.NANOBANANA_ENDPOINT,
-                payload,
-                is_cancelled=is_cancelled,
-            )
-            return self._first_image_url(result)
+            return await self._generate_nanobanana(payload, is_cancelled)
 
         if self.multiref:
             payload = {
@@ -354,3 +404,34 @@ class FalAIImageGenerator:
         if not images or not images[0].get("url"):
             raise RuntimeError(f"fal.ai image completed but no image URL: {result}")
         return images[0]["url"]
+
+    async def _generate_nanobanana(self, payload, is_cancelled) -> str:
+        """Nano Banana, with a text-only answer treated as the refusal it is.
+
+        Gemini declines by answering 200 with an empty ``images`` and a
+        ``description`` of why. That is not an error to fal, so
+        ``fal_generate``'s one resubmit for a content flag (keyed on the
+        policy-violation message) never saw it, and the frame failed the whole
+        scene on the first refusal. A flag is not always deterministic, which is
+        the whole reason that retry exists, so the same single resubmit applies.
+        """
+        for attempt in range(CONTENT_POLICY_RETRIES + 1):
+            result = await fal_generate(
+                self.client, self.NANOBANANA_ENDPOINT, payload,
+                is_cancelled=is_cancelled,
+            )
+            images = (result or {}).get("images") or []
+            if images and images[0].get("url"):
+                return images[0]["url"]
+            reason = str((result or {}).get("description") or "").strip()
+            if attempt < CONTENT_POLICY_RETRIES:
+                logger.warning(
+                    "%s returned no image (%r); resubmitting once.",
+                    self.NANOBANANA_ENDPOINT, reason[:300],
+                )
+                continue
+            raise ContentFlagged(
+                f"{self.NANOBANANA_ENDPOINT} declined to draw this frame"
+                + (f": {reason[:300]}" if reason else " and said nothing")
+                + f". Raw result: {result}"
+            )

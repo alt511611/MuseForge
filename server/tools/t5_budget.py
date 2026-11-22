@@ -85,6 +85,15 @@ _MISTRAL_ENDPOINT_MARKERS = ("flux-2-pro", "flux-2-flex", "flux-2-dev")
 #: clauses rather than anything it needs. No Gemini tokenizer is vendored, so
 #: the count is an estimate, shaded pessimistic like the others.
 GEMINI_FALLBACK_CHARS_PER_TOKEN = 3.5
+
+#: The ceiling a prompt bound for Nano Banana is held to. Fal's schema gives
+#: ``prompt`` a ``maxLength`` of 50,000 characters, so there is no 512-token
+#: window to protect -- and holding the prompt to one anyway is not free: on a
+#: six-character scene it dropped every wardrobe, the lighting lock, the
+#: face-visibility and cast-closure guardrails, none of which Nano Banana
+#: needed to lose. 2048 is a sanity bound, not a read window; the 3000-char
+#: gate in script2video (MuAPI's validator) is what binds first.
+GEMINI_MAX_PROMPT_TOKENS = 2048
 _GEMINI_ENDPOINT_MARKERS = ("nano-banana", "gemini")
 
 
@@ -120,6 +129,16 @@ def encoder_family() -> str:
     if any(marker in endpoint for marker in _MISTRAL_ENDPOINT_MARKERS):
         return "mistral"
     return "t5"
+
+
+def max_prompt_tokens() -> int:
+    """The token window the active reference/edit encoder actually reads.
+
+    512 for T5 and Mistral (a real, silent truncation point); far larger for
+    Gemini, whose prompt field is bounded in characters, not in a 512-token
+    window. Read at call time so a provider switch needs no restart.
+    """
+    return GEMINI_MAX_PROMPT_TOKENS if encoder_family() == "gemini" else MAX_PROMPT_TOKENS
 
 
 def window_label() -> str:
