@@ -35,6 +35,10 @@ class CharacterProfile(BaseModel):
     # between scenes even when the face holds (job 8b8fce47-445: one face,
     # six shots, a slicker that buttoned then zipped then hung open).
     wardrobe: str = ""
+    # The one thing that tells this person from the rest of the cast in any
+    # frame (see interfaces/cast_marks). Folded into the FRONT of `wardrobe`
+    # when the script is read, so it is restated wherever the outfit is.
+    mark: str = ""
     # Performance direction. want = the external goal the character pursues on
     # screen; need = the internal truth they're avoiding; arc = how they change
     # across the drama. These drive how a beat is PLAYED (what the face does),
