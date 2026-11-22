@@ -9,6 +9,7 @@ import { useLanguage } from "../../../contexts/LanguageContext";
 import { createClient } from "../../../lib/supabase";
 import { isLowCredits, isOutOfCredits } from "../../../lib/credits";
 import { API_BASE, resolveJobVideoUrl } from "../../../lib/apiBase";
+import CheckoutModal from "../../../components/CheckoutModal";
 import VideoPlayerModal from "../../../components/VideoPlayerModal";
 import { friendlyError } from "../../../utils/errorMessages";
 import { tr } from "../../../lib/tr";
@@ -116,8 +117,10 @@ function SkeletonCard() {
 
 function BuyCreditsModal({ onClose, getAccessToken, validityDays }) {
   const { t } = useLanguage();
+  const { user } = useAuth();
   const [loading, setLoading] = useState(null);
   const [err, setErr] = useState(null);
+  const [embed, setEmbed] = useState(null);
 
   const PACKAGES = [
     { key: "SMALL",  label: t("pricing_credits_small"), price: "$19", highlight: false },
@@ -139,7 +142,13 @@ function BuyCreditsModal({ onClose, getAccessToken, validityDays }) {
         }),
       });
       if (!res.ok) { const e = await res.json(); throw new Error(e.detail || "Error"); }
-      const { url } = await res.json();
+      const { url, session_id } = await res.json();
+      if (session_id) {
+        const successUrl = `${window.location.origin}/dashboard?credits=bought`;
+        setEmbed({ sessionId: session_id, successUrl });
+        setLoading(null);
+        return;
+      }
       window.location.href = url;
     } catch (e) { setErr(friendlyError(e.message)); setLoading(null); }
   };
@@ -193,6 +202,15 @@ function BuyCreditsModal({ onClose, getAccessToken, validityDays }) {
         </div>
         {err && <p className="text-xs mt-3" style={{ color: "var(--mf-err-soft)" }}>{err}</p>}
       </div>
+      {embed && (
+        <CheckoutModal
+          sessionId={embed.sessionId}
+          email={user?.email}
+          returnUrl={embed.successUrl}
+          successUrl={embed.successUrl}
+          onClose={() => setEmbed(null)}
+        />
+      )}
     </div>
   );
 }
