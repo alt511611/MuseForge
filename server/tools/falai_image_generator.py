@@ -30,9 +30,43 @@ Schemas CONFIRMED against fal.ai's own docs:
            seed, output_format, ...
    output: {"images": [{"url": "...", ...}, ...], "seed": ...}
 
+4) Nano Banana reference frames + FLUX.3 sheets
+   — google/nano-banana-2.1/edit for reference frames and
+   blackforestlabs/flux-3/text-to-image for text-to-image, selected via
+   MUSEFORGE_IMAGE_PROVIDER=falai_nanobanana
+   https://fal.ai/models/google/nano-banana-2.1/edit
+   https://fal.ai/models/blackforestlabs/flux-3/text-to-image
+   edit input: prompt (str, required), image_urls (list[str], up to 14, in
+               "image 1 .. image N" order), aspect_ratio (enum, includes
+               auto|21:9|16:9|3:2|4:3|5:4|1:1|4:5|3:4|2:3|9:16 and the
+               extreme 4:1|1:4|8:1|1:8), resolution (1K|2K|4K),
+               thinking_level (minimal|medium|high), output_format
+   t2i input:  prompt (str, required), aspect_ratio (enum, same family as
+               above, plus 2:1|7:5|5:7|1:2), resolution (768sq|1k|1.5k|2k|4k),
+               output_format (jpeg|png)
+   output: {"images": [{"url": "..."}]} on both.
+
+   Why this provider exists, measured 2026-11-22 (blind, 18 frames, three
+   shots built to split the candidates -- five people and a set, an 85 mm
+   close-up, a reverse two-shot; scored 0-5 before the arm key was opened):
+   Nano Banana 2.1 scored 4.6 against Kling O1 Image's 2.5, and every one of
+   its frames beat every one of Kling's. ``thinking_level`` high scored the
+   same as medium (4.67 vs 4.61), so medium is the default: faster (28 s vs 36 s
+   on the same run) and cheaper. Against FLUX.2 Pro Edit, the model it
+   replaces, FLUX.2 drew two men from three references once in two runs and
+   dropped the headband in the other. flux-pro/v1.1, the text-to-image it
+   replaces for portrait sheets, draws an illustration however firmly the
+   prompt says PHOTOGRAPH; FLUX.3 drew photographs.
+
+   Billing (the fal dashboard, per request at 1K): Nano Banana ~$0.0625 with
+   thinking high -- token-billed, so thinking and resolution move it, not a
+   flat per-image fee -- against $0.048 for FLUX.3 and roughly $0.08-0.10 for
+   a 4-reference flux-2-pro/edit call, which bills its INPUT megapixels too.
+
 NOTE: fal's Kontext uses singular ``image_url``; flux-2-pro/edit uses a
-plural ``image_urls`` list (closer to MuAPI's ``images_list``). Do not
-confuse the three schemas.
+plural ``image_urls`` list (closer to MuAPI's ``images_list``); Nano Banana's
+edit is ``image_urls`` too but addresses them by position in the PROMPT
+("image 2 is ...") and has no ``image_size``. Do not confuse the schemas.
 
 Errors raise (no silent MuAPI fallback).
 """
@@ -77,6 +111,31 @@ KONTEXT_ASPECT_RATIOS = {
 }
 
 
+#: Nano Banana 2.1's ``aspect_ratio`` enum (edit) -- a superset of what the
+#: pipeline asks for, so an unknown ratio is the only thing to guard.
+NANOBANANA_ASPECT_RATIOS = {
+    "21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16",
+}
+NANOBANANA_MAX_REFERENCES = 14
+NANOBANANA_RESOLUTIONS = ("1K", "2K", "4K")
+NANOBANANA_THINKING_LEVELS = ("minimal", "medium", "high")
+
+FLUX3_ENDPOINT = "blackforestlabs/flux-3/text-to-image"
+FLUX3_ASPECT_RATIOS = {"21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16"}
+FLUX3_RESOLUTIONS = ("768sq", "1k", "1.5k", "2k", "4k")
+
+
+def _choice(env: str, allowed, default: str) -> str:
+    """``env`` case-insensitively matched against ``allowed``, else ``default``.
+    An unknown value falls back: fal validates, and a 422 here would fail
+    every frame of every job."""
+    raw = (os.environ.get(env, "") or "").strip()
+    for known in allowed:
+        if raw.lower() == known.lower():
+            return known
+    return default
+
+
 def _demo_image_url(prompt: str, aspect_ratio: str) -> str:
     dims = ASPECT_RATIO_MAP.get(aspect_ratio, ASPECT_RATIO_MAP["16:9"])
     seed = hashlib.sha1(f"{prompt}|{aspect_ratio}".encode()).hexdigest()[:12]
@@ -91,9 +150,26 @@ class FalAIImageGenerator:
     EDIT_ENDPOINT = os.environ.get(
         "FALAI_FLUX2_EDIT_MODEL", "fal-ai/flux-2-pro/edit"
     )
+    NANOBANANA_ENDPOINT = os.environ.get(
+        "FALAI_NANOBANANA_EDIT_MODEL", "google/nano-banana-2.1/edit"
+    )
 
-    def __init__(self, api_key: str, demo: bool = False, multiref: bool = False):
+    def __init__(
+        self,
+        api_key: str,
+        demo: bool = False,
+        multiref: bool = False,
+        nanobanana: bool = False,
+    ):
         self.demo = demo
+        #: True selects Nano Banana 2.1 for reference frames and FLUX.3 for
+        #: text-to-image (portrait sheets and location plates). Implies the
+        #: whole reference set is read, so it is a superset of ``multiref``.
+        #: FALAI_IMAGE_MODEL, when set, still wins for text-to-image: an
+        #: operator who named a model meant it.
+        self.nanobanana = nanobanana
+        if nanobanana:
+            multiref = True
         #: True selects flux-2-pro/edit (the WHOLE reference list), false
         #: keeps the original Kontext/image_url behaviour. A constructor
         #: flag rather than a per-call one: which schema a deployment speaks
@@ -109,20 +185,62 @@ class FalAIImageGenerator:
         if self.demo:
             return _demo_image_url(prompt, aspect_ratio)
 
-        payload = {
-            "prompt": prompt,
-            "image_size": IMAGE_SIZE_ENUM.get(aspect_ratio)
-            or ASPECT_RATIO_MAP.get(aspect_ratio, ASPECT_RATIO_MAP["16:9"]),
-            "num_images": 1,
-            "output_format": "jpeg",
-        }
+        endpoint = self.text_endpoint
+        if endpoint.startswith("blackforestlabs/flux-3/"):
+            # Its own schema: an aspect_ratio and a resolution tier, no
+            # image_size, no num_images.
+            payload = {
+                "prompt": prompt,
+                "aspect_ratio": aspect_ratio if aspect_ratio in FLUX3_ASPECT_RATIOS else "16:9",
+                "resolution": _choice("FALAI_FLUX3_RESOLUTION", FLUX3_RESOLUTIONS, "1k"),
+                "output_format": "jpeg",
+            }
+        else:
+            payload = {
+                "prompt": prompt,
+                "image_size": IMAGE_SIZE_ENUM.get(aspect_ratio)
+                or ASPECT_RATIO_MAP.get(aspect_ratio, ASPECT_RATIO_MAP["16:9"]),
+                "num_images": 1,
+                "output_format": "jpeg",
+            }
         result = await fal_generate(
             self.client,
-            self.TEXT_ENDPOINT,
+            endpoint,
             payload,
             is_cancelled=is_cancelled,
         )
         return self._first_image_url(result)
+
+    @property
+    def accepts_reference_labels(self) -> bool:
+        """Whether ``generate_image_with_reference`` takes ``reference_labels``.
+
+        Nano Banana addresses its references by their position in the PROMPT
+        ("image 2 is ..."), so a call that does not say who each picture is
+        leaves the second face a stranger it was merely shown. The others read
+        the references by order alone and are not sent the argument: the call
+        site is duck-typed on this, as it is for the video backends.
+        """
+        return self.nanobanana
+
+    @staticmethod
+    def _legend(labels, count: int) -> str:
+        """"Image 1 is Mara. Image 2 is the empty set." for the pictures that
+        have a name, in order; "" when none does."""
+        named = [
+            f"Image {i} is {str(label).strip()}."
+            for i, label in enumerate(list(labels or [])[:count], start=1)
+            if str(label or "").strip()
+        ]
+        return " ".join(named)
+
+    @property
+    def text_endpoint(self) -> str:
+        """The text-to-image endpoint: FALAI_IMAGE_MODEL if set, else FLUX.3
+        for the nanobanana provider, else the original flux-pro/v1.1."""
+        if os.environ.get("FALAI_IMAGE_MODEL", "").strip():
+            return self.TEXT_ENDPOINT
+        return FLUX3_ENDPOINT if self.nanobanana else self.TEXT_ENDPOINT
 
     async def generate_image_with_reference(
         self,
@@ -130,6 +248,7 @@ class FalAIImageGenerator:
         references,
         aspect_ratio: str = "16:9",
         is_cancelled: Optional[Callable[[], bool]] = None,
+        reference_labels=None,
     ) -> str:
         """Render a frame from one or more reference images.
 
@@ -153,6 +272,37 @@ class FalAIImageGenerator:
             return await self.generate_image(
                 prompt, aspect_ratio, is_cancelled=is_cancelled
             )
+
+        if self.nanobanana:
+            held_back = len(ordered) - NANOBANANA_MAX_REFERENCES
+            if held_back > 0:
+                logger.warning(
+                    "%s reads at most %d reference images; holding back the "
+                    "last %d of %d.",
+                    self.NANOBANANA_ENDPOINT, NANOBANANA_MAX_REFERENCES,
+                    held_back, len(ordered),
+                )
+            sent = ordered[:NANOBANANA_MAX_REFERENCES]
+            legend = self._legend(reference_labels, len(sent))
+            payload = {
+                "prompt": f"{legend} {prompt}" if legend else prompt,
+                "image_urls": sent,
+                "aspect_ratio": (
+                    aspect_ratio if aspect_ratio in NANOBANANA_ASPECT_RATIOS else "16:9"
+                ),
+                "resolution": _choice("FALAI_NANOBANANA_RESOLUTION", NANOBANANA_RESOLUTIONS, "1K"),
+                "thinking_level": _choice(
+                    "FALAI_NANOBANANA_THINKING", NANOBANANA_THINKING_LEVELS, "medium"
+                ),
+                "output_format": "jpeg",
+            }
+            result = await fal_generate(
+                self.client,
+                self.NANOBANANA_ENDPOINT,
+                payload,
+                is_cancelled=is_cancelled,
+            )
+            return self._first_image_url(result)
 
         if self.multiref:
             payload = {

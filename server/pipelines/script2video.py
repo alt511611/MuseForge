@@ -145,6 +145,10 @@ def _make_image_generator(api_key: str, demo: bool):
       - "falai_multiref" — same text-to-image endpoint, but fal-ai/
         flux-2-pro/edit for reference, which takes the WHOLE list
         (anchor + second character + location plate)
+      - "falai_nanobanana" — Nano Banana 2.1 for reference frames (up to 14,
+        addressed by position in the prompt) and FLUX.3 for text-to-image
+        (portrait sheets, location plates). Measured against Kling O1 Image
+        and FLUX.2 Pro: see tools/falai_image_generator.
 
     "falai_multiref" is a separate value rather than a capability "falai"
     discovers for itself, and deliberately so, matching MUSEFORGE_VIDEO_
@@ -155,17 +159,18 @@ def _make_image_generator(api_key: str, demo: bool):
     """
     provider = resolve_provider(
         "MUSEFORGE_IMAGE_PROVIDER",
-        ("muapi", "falai", "falai_multiref"),
+        ("muapi", "falai", "falai_multiref", "falai_nanobanana"),
         default="muapi",
         stage="Image generation",
     )
-    if provider in ("falai", "falai_multiref"):
+    if provider in ("falai", "falai_multiref", "falai_nanobanana"):
         from tools.falai_image_generator import FalAIImageGenerator
 
         return FalAIImageGenerator(
             os.environ.get("FAL_KEY", ""),
             demo=demo,
             multiref=(provider == "falai_multiref"),
+            nanobanana=(provider == "falai_nanobanana"),
         )
     return MuAPIImageGenerator(api_key, demo=demo)
 
@@ -1172,6 +1177,35 @@ def label_frame_references(
         else:
             labels.append(by_url.get(url, ""))
     return labels
+
+
+def _frame_label_kwargs(
+    image_gen,
+    frame_references,
+    shot,
+    characters,
+    portraits,
+    matched_char=None,
+    location_plate_url=None,
+) -> dict:
+    """``reference_labels`` for an image backend that declares it reads them.
+
+    Nano Banana is told which picture is whom by position in the prompt; the
+    other backends read the set by order and must be called exactly as before,
+    so the argument is sent only to one that says it accepts it.
+    """
+    if not frame_references or not getattr(image_gen, "accepts_reference_labels", False):
+        return {}
+    return {
+        "reference_labels": label_frame_references(
+            frame_references,
+            shot,
+            characters,
+            portraits,
+            matched_char=matched_char,
+            location_plate_url=location_plate_url,
+        )
+    }
 
 
 def build_character_identity_clause(
@@ -3875,7 +3909,11 @@ class Script2VideoPipeline:
         frame_prompt = frame_prompt_for(matched_char, bool(frame_references))
         if frame_references:
             start_image = await self.image_gen.generate_image_with_reference(
-                frame_prompt, frame_references, aspect_ratio, is_cancelled=is_cancelled
+                frame_prompt, frame_references, aspect_ratio, is_cancelled=is_cancelled,
+                **_frame_label_kwargs(
+                    self.image_gen, frame_references, opening, characters, portraits,
+                    matched_char=matched_char, location_plate_url=location_plate_url,
+                ),
             )
         else:
             start_image = await self.image_gen.generate_image(
@@ -4704,7 +4742,11 @@ class Script2VideoPipeline:
                         # a frame we're about to throw away.
                         if frame_references:
                             frame_url = await self.image_gen.generate_image_with_reference(
-                                frame_prompt, frame_references, aspect_ratio, is_cancelled=is_cancelled
+                                frame_prompt, frame_references, aspect_ratio, is_cancelled=is_cancelled,
+                                **_frame_label_kwargs(
+                                    self.image_gen, frame_references, shot, characters, portraits,
+                                    matched_char=matched_char, location_plate_url=location_plate_url,
+                                ),
                             )
                         else:
                             frame_url = await self.image_gen.generate_image(
@@ -4750,6 +4792,11 @@ class Script2VideoPipeline:
                                         frame_references,
                                         aspect_ratio,
                                         is_cancelled=is_cancelled,
+                                        **_frame_label_kwargs(
+                                            self.image_gen, frame_references, shot, characters,
+                                            portraits, matched_char=matched_char,
+                                            location_plate_url=location_plate_url,
+                                        ),
                                     )
                                     shot.frame_url = frame_url
                                 except Exception as exc:
