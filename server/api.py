@@ -2895,6 +2895,20 @@ class PortalRequest(BaseModel):
     return_url: str
 
 
+def _embedded_checkout_session_id(url) -> Optional[str]:
+    """The Whop checkout-configuration id, for the on-site payment form.
+
+    On by default (Whop Elements `Checkout`, mounted from this id). The earlier
+    embed (@whop/checkout) answered "This checkout is no longer available" for
+    every fresh configuration, which is why #163 made it opt-in; that embed is
+    gone, and MUSEFORGE_WHOP_EMBED=0 stays as the kill switch that sends the
+    client back to the hosted purchase_url redirect without a release.
+    """
+    if os.environ.get("MUSEFORGE_WHOP_EMBED", "").strip().lower() in ("0", "false", "no", "off"):
+        return None
+    return getattr(url, "session_id", None)
+
+
 @app.post("/api/create-checkout-session")
 async def create_checkout_session(
     req: CheckoutRequest,
@@ -2926,7 +2940,7 @@ async def create_checkout_session(
             )
             # `session_id` lets the site embed Whop's form instead of leaving;
             # `url` stays as the redirect fallback.
-            return {"url": url, "session_id": getattr(url, "session_id", None)}
+            return {"url": url, "session_id": _embedded_checkout_session_id(url)}
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
@@ -2998,7 +3012,7 @@ async def buy_credits(
             )
             return {
                 "url": url,
-                "session_id": getattr(url, "session_id", None),
+                "session_id": _embedded_checkout_session_id(url),
                 "package": pkg_key,
                 "credits": CREDIT_PACKAGES[pkg_key]["credits"],
             }
