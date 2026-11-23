@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { Checkout, CheckoutElement, WhopElements } from "@whop/elements-react";
 import { loadWhop } from "@whop/elements";
+import { whopAppearance } from "../lib/whopAppearance";
 import { useLanguage } from "../contexts/LanguageContext";
 
 /**
@@ -71,9 +72,7 @@ export default function CheckoutModal({ sessionId, email, returnUrl, successUrl,
               checkoutConfiguration={sessionId}
               returnUrl={returnUrl}
               locale={locale}
-              appearance={{
-                theme: { appearance: "dark", accentColor: "violet" },
-              }}
+              appearance={whopAppearance}
               onComplete={() => { window.location.href = successUrl; }}
             >
               <CheckoutElement buyerEmail={email || ""} />
