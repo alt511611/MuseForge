@@ -1189,6 +1189,17 @@ def _world_state(scenes: List[Any], index: int) -> tuple:
         for scene in scenes[:index]
         if (change := _scene_field(scene, "world_change").strip())
     ]
+    opening = _scene_field(scenes[index], "starts_with").strip() if index < len(scenes) else ""
+    if opening and earlier:
+        # The writer states, per scene, what condition the place is in when
+        # this scene OPENS (interfaces/continuity holds it to the previous
+        # scene's ends_with). That is the scene's own answer to "which of the
+        # earlier changes still stands", and it beats the blanket list: job
+        # 82c56e88's scene 3 declared "the dead radio's light glows red and
+        # fills the hut with a live voice" as its change, and scene 4 -- the
+        # cold dawn, the radio silent -- inherited it as a standing fact and
+        # animated a red-lit radio and a burning stove into an empty room.
+        return current, opening
     return current, "; ".join(earlier)
 
 

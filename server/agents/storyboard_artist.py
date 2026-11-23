@@ -4,12 +4,13 @@ import json
 import logging
 import os
 import re
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from interfaces import acting
 from interfaces.camera import get_director_style
 from interfaces.character import CharacterInScene
 from interfaces.shot import StoryboardShot
+from interfaces.speaker import is_marked_unseen, speaker_key
 from interfaces.shot_plan import (
     MAX_COVERAGE,
     coverage_a_take_affords,
@@ -311,6 +312,15 @@ far out, no boat, no one", "the beach, deserted" — film it as a separate shot 
 shot that has a person in it: "black surf, then the five crawl out" is two shots, not
 one populated shot with the surf as set dressing. These shots are short (3-4 seconds).
 
+THE PICTURE FOLLOWS THE SOUND. Shots are played in the order you write them, and the
+scene's dialogue is played in the order it is given. When a line is a voice only
+(O.S., a radio, a phone, an intercom), the shot under that line is the thing it comes
+out of -- the radio on the table, the handset -- or the face hearing it, never a
+different person's face and never a shot that arrives after the voice is over. When a
+visible character speaks, a shot of THAT character is on screen while they speak.
+Open the scene on the source of the first voice, not on a reaction to a sound the
+audience has not yet heard.
+
 A SHOT CAN BE OF NOBODY. A deserted shore, flames, a wave, an object, weather: when
 the shot has no person in it, set "shows_people": false, leave "expression_desc" as
 an empty string, and describe only the place and what moves in it. Everything below
@@ -466,6 +476,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                 characters=characters,
                 lipsync_enabled=lipsync_enabled,
                 scene_shot_scale=scene_shot_scale,
+                scene_dialogue=scene_dialogue,
             )
 
         prompt = self._build_prompt(
@@ -517,6 +528,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                         characters=characters,
                         lipsync_enabled=lipsync_enabled,
                         scene_shot_scale=scene_shot_scale,
+                        scene_dialogue=scene_dialogue,
                     )
             except Exception as exc:
                 raw_snippet = locals().get("content", "<no content received>")
@@ -559,6 +571,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                     characters=characters,
                     lipsync_enabled=lipsync_enabled,
                     scene_shot_scale=scene_shot_scale,
+                    scene_dialogue=scene_dialogue,
                 )
 
         # 3) Last resort: deterministic template, never crashes generation.
@@ -573,6 +586,7 @@ Respond ONLY with valid JSON array containing a single shot object:
             characters=characters,
             lipsync_enabled=lipsync_enabled,
             scene_shot_scale=scene_shot_scale,
+            scene_dialogue=scene_dialogue,
         )
 
     @classmethod
@@ -710,6 +724,7 @@ Respond ONLY with valid JSON array containing a single shot object:
         characters: Optional[List[CharacterInScene]] = None,
         lipsync_enabled: bool = False,
         scene_shot_scale: str = "",
+        scene_dialogue: str = "",
     ) -> List[StoryboardShot]:
         """Every path's last step: expression, acting beats, angles, durations.
 
@@ -723,7 +738,13 @@ Respond ONLY with valid JSON array containing a single shot object:
         cls._note_scale_drift(shots, scene_shot_scale)
         shots = cls._clamp_durations(shots, is_finale, tension, budget)
         return cls._apply_shot_plan(
-            shots, scene_emotion, tension, characters or [], lipsync_enabled, budget
+            shots,
+            scene_emotion,
+            tension,
+            characters or [],
+            lipsync_enabled,
+            budget,
+            last_speaker=cls._last_visible_speaker(scene_dialogue),
         )
 
     @classmethod
@@ -820,6 +841,25 @@ Respond ONLY with valid JSON array containing a single shot object:
                 people += 1
         return kept
 
+    @staticmethod
+    def _last_visible_speaker(scene_dialogue: str) -> str:
+        """Name that speaks the last line a face is on screen for.
+
+        Heard-only voices (O.S./V.O., or a name the dialogue block marks as a
+        voice) are skipped: they have no face to be under.
+        """
+        for raw in reversed((scene_dialogue or "").splitlines()):
+            line = raw.strip()
+            if ":" not in line:
+                continue
+            head = line.split(":", 1)[0]
+            if re.search(r"\((?:o\.?s\.?|v\.?o\.?)\b", head, re.IGNORECASE):
+                continue
+            name = re.sub(r"\s*\(.*$", "", head).strip()
+            if name and not is_marked_unseen(name):
+                return name
+        return ""
+
     @classmethod
     def _apply_shot_plan(
         cls,
@@ -829,6 +869,7 @@ Respond ONLY with valid JSON array containing a single shot object:
         characters: List[CharacterInScene],
         lipsync_enabled: bool = False,
         budget: float = 0.0,
+        last_speaker: str = "",
     ) -> List[StoryboardShot]:
         """Give a peak scene a second angle, and set generate/deliver lengths.
 
@@ -857,15 +898,34 @@ Respond ONLY with valid JSON array containing a single shot object:
                 shot.deliver_seconds = 0.0
             if not people:
                 return shots
-            first = next(i for i, s in enumerate(shots) if id(s) not in empty_ids)
-            lead = [s for s in shots[:first]]
-            after = [s for s in shots[first:] if id(s) in empty_ids]
             reserve = sum(float(s.duration_seconds or 0.0) for s in empties)
             remaining = max(float(budget or 0.0) - reserve, 4.0) if budget else 0.0
             planned = cls._apply_shot_plan(
-                people, scene_emotion, tension, characters, lipsync_enabled, remaining
+                people,
+                scene_emotion,
+                tension,
+                characters,
+                lipsync_enabled,
+                remaining,
+                last_speaker=last_speaker,
             )
-            return lead + planned + after
+            # Each empty beat goes back where the designer put it: after as
+            # many people shots as came before it. Job 82c56e88 sent every
+            # empty beat to the END of the scene, so the radio that is the
+            # source of the dispatcher's voice was shown after the voice had
+            # finished -- and the voice played over Mira's face.
+            seen = 0
+            slots: Dict[int, List[StoryboardShot]] = {}
+            for shot in shots:
+                if id(shot) in empty_ids:
+                    slots.setdefault(min(seen, len(planned)), []).append(shot)
+                else:
+                    seen += 1
+            out: List[StoryboardShot] = list(slots.get(0, []))
+            for position, shot in enumerate(planned, start=1):
+                out.append(shot)
+                out.extend(slots.get(position, []))
+            return out
         master = shots[0]
         # The plan is the SCENE's, so it is made from the scene's budget --
         # which is no longer the same number as the master's own length once
@@ -888,7 +948,9 @@ Respond ONLY with valid JSON array containing a single shot object:
         # share _clamp_durations gave it was a share of a cut that no longer
         # happens there.
         master.duration_seconds = plan[0].generate_seconds
-        reaction = cls._build_reaction_shot(master, scene_emotion, characters)
+        reaction = cls._build_reaction_shot(
+            master, scene_emotion, characters, last_speaker=last_speaker
+        )
         reaction.duration_seconds = plan[1].generate_seconds
         reaction.deliver_seconds = plan[1].deliver_seconds
         reaction.role = plan[1].role
@@ -906,6 +968,7 @@ Respond ONLY with valid JSON array containing a single shot object:
         master: StoryboardShot,
         scene_emotion: str,
         characters: List[CharacterInScene],
+        last_speaker: str = "",
     ) -> StoryboardShot:
         visible = [c for c in characters if getattr(c, "is_visible", True)]
         master_text = f"{master.visual_desc} {master.motion_desc}".lower()
@@ -918,6 +981,18 @@ Respond ONLY with valid JSON array containing a single shot object:
             (c for c in visible if (c.name or "").lower() in master_text), None
         )
         other = next((c for c in visible if c is not subject), None)
+        if (
+            subject is not None
+            and last_speaker
+            and speaker_key(subject.name) == speaker_key(last_speaker)
+        ):
+            # The cutaway lands on the back half of the scene, which is where
+            # the scene's LAST line is spoken. If that line is the master
+            # subject's own, cutting to the other person puts the speaker's
+            # words under a face that "is listening, not speaking" -- job
+            # 82c56e88 played Mira's "Tell them to stop the search" over eight
+            # seconds of Tomas. Go tighter on the speaker instead.
+            other = None
 
         peak = (getattr(master, "expression_peak_desc", "") or "").strip()
         if other is not None:
