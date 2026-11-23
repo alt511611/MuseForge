@@ -123,3 +123,17 @@ def test_a_populated_shot_is_directed_exactly_as_before():
     prompt = build_motion_prompt(shot, CAST[0])
     assert "Performance arc" in prompt and "facial identity" in prompt
     assert prompt == build_motion_prompt(shot, CAST[0], unpeopled=False)
+
+
+def test_the_empty_frame_is_not_asked_for_a_readable_face():
+    # The storyboard artist writes an emotion into every shot and the acting
+    # pass fills the field unconditionally, so the empty shot arrives with one.
+    shot = _shot("A driftwood fire on the sand", expression="grief, trembling chin")
+    prompt = _frame(shot)
+    assert "Facial expression" not in prompt
+    assert "readable" not in prompt
+
+
+def test_a_populated_frame_still_asks_for_the_face():
+    prompt = _frame(_shot("Yusuf grips the rail", expression="fear"), matched=CAST[0])
+    assert "Facial expression and body language: fear" in prompt

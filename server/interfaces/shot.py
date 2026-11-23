@@ -14,6 +14,11 @@ class StoryboardShot(BaseModel):
     # the image model -- a report of "scene looks neutral/emotionless"
     # traced back to expression never reliably reaching the frame prompt.
     expression_desc: str = ""
+    # Whether any person is in this frame. The storyboard artist is the one
+    # who knows -- it wrote the shot -- and it cannot SAY "empty" in prose
+    # (it is forbidden negations), so it says it here. None means "not stated"
+    # (older scripts, fallback shots) and the pipeline reads the text instead.
+    shows_people: Optional[bool] = None
     # Where the expression LANDS by the end of the shot. Filled deterministically
     # from interfaces/acting, never by the LLM: it is the target of the
     # start-to-end frame interpolation (see the end-frame path in
