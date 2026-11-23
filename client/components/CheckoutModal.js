@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { Checkout, CheckoutElement, WhopElements } from "@whop/elements-react";
 import { loadWhop } from "@whop/elements";
@@ -40,7 +41,11 @@ export default function CheckoutModal({ sessionId, email, returnUrl, successUrl,
     };
   }, [onClose]);
 
-  return (
+  // Portalled to <body>: rendered in place, the modal sits inside the pricing
+  // card, and any transform/filter on an ancestor turns `position: fixed` into
+  // "fixed to that card" -- a form squeezed into one 330px column, with the
+  // rest of the page neither covered nor dimmed.
+  return createPortal(
     <div
       className="fixed inset-0 z-[70] flex items-center justify-center px-3 py-6 overflow-y-auto"
       style={{ backgroundColor: "rgba(0,0,0,0.75)" }}
@@ -49,7 +54,7 @@ export default function CheckoutModal({ sessionId, email, returnUrl, successUrl,
       aria-modal="true"
     >
       <div
-        className="relative w-full max-w-md rounded-2xl p-5 my-auto"
+        className="relative w-full max-w-[480px] rounded-2xl p-5 my-auto"
         style={{ background: "var(--mf-bg)", border: "1px solid rgba(139,92,246,0.35)" }}
       >
         <button
@@ -76,6 +81,7 @@ export default function CheckoutModal({ sessionId, email, returnUrl, successUrl,
           </WhopElements>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
