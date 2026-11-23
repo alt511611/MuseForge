@@ -267,7 +267,7 @@ def test_a_scene_by_scene_plan_is_one_crop_whose_offset_jumps_at_the_cuts():
     )
     crop = crop_filter(960, 960, 540, 960, spans=spans)
 
-    assert crop.startswith("crop=540:960:if(lt(t,5.000)")
+    assert crop.startswith("crop=540:960:if(lt(t\\,5.000)")
     assert crop.count("if(") == 1  # two spans, one switch
 
 
