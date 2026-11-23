@@ -35,6 +35,7 @@ from interfaces.shot_plan import (
     plan_shot_scales,
     shots_the_line_reaches,
 )
+from interfaces.continuity import opening_state
 from interfaces.speaker import is_marked_unseen, speaker_key
 from interfaces.transitions import plan_transitions
 from interfaces.visual_style import resolve as resolve_visual_style
@@ -1030,6 +1031,15 @@ def _format_story_state(scenes: List[Any], index: int) -> tuple:
         for i, scene in enumerate(scenes[index + 1 :], start=index + 1)
         if (line := _scene_beat_line(scene, i + 1))
     ]
+    # The turns say what HAPPENED; this says what is physically so as the scene
+    # opens (interfaces/continuity). Appended to the earlier-scenes block, which
+    # the storyboard artist already treats as binding.
+    opening = opening_state(scenes, index)
+    if opening:
+        before.append(
+            f"THIS SCENE OPENS IN THIS STATE (the first shot must show it; "
+            f"nothing in it resets): {opening}"
+        )
     return "\n".join(before), "\n".join(after)
 
 

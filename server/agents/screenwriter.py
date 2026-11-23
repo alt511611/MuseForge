@@ -9,6 +9,7 @@ from typing import Any, List, Optional
 
 from interfaces import cast_count, cast_marks
 from interfaces import gender as gender_of
+from interfaces.continuity import reconcile as reconcile_continuity
 from interfaces.character import (
     CharacterProfile,
     DialogueLine,
@@ -301,6 +302,18 @@ SPEND THE SCENES ON THE BRIEF. With only three to five of them, a scene invented
 character the brief never mentions is a third of the film spent away from the story it
 asked for. Add a character only when the brief's own action cannot happen without them.
 
+ONE CONTINUOUS EVENT, NOT A LIST OF CLIPS. Every scene is filmed separately and will
+not know what the scene before it looked like, so YOU hand the state across. Set
+"ends_with" to where everything stands when the scene stops — who is where, who is
+wet, hurt or exhausted, what is in whose hands, how much time has passed, what the
+light and weather are doing. Set "starts_with" to the state the scene opens in, and it
+must be the previous scene's "ends_with", carried forward (scene 1 states the opening
+situation). A scene that begins somewhere the last one did not end is a hard cut in
+the story: allow it only when the brief asks for a time jump, and then begin
+"starts_with" with "JUMP:" and say what changed. People who ended a scene soaked
+begin the next one soaked; night does not become day between scenes unless time is
+said to pass.
+
 FIND THE THROUGH-LINE. Give the drama a "theme" (its controlling idea in one sentence)
 and a "visual_motif": one recurring visual element — an object, a gesture, a quality of
 light — that you deliberately restage across scenes so the film reads as a whole.
@@ -413,7 +426,9 @@ Respond ONLY with valid JSON matching this schema:
       "world_change": "climax scene ONLY: what visibly changes about the place itself - otherwise an empty string",
       "subtext": "what they really mean underneath the lines",
       "staging": "blocking: who is where, hands, the object the scene turns on",
-      "tension": 4
+      "tension": 4,
+      "starts_with": "the state this scene opens in (scene 1: the opening situation; otherwise the previous scene's ends_with)",
+      "ends_with": "who is where, wet/hurt, what is held, time passed, light, as this scene stops"
     }
   ]
 }"""
@@ -869,6 +884,7 @@ into a single scene rather than adding one."""
         # extra scenes are cut could lose the restored world_change with them.
         cls._hold_to_scene_count(script, num_scenes)
         cls._apply_brief_event(script)
+        reconcile_continuity(script.scenes)
         return script
 
     #: Scenes that carry the drama's shape and must survive a trim. A cut that
