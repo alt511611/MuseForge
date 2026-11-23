@@ -1375,10 +1375,38 @@ def mentions_an_off_screen_device(text: str) -> bool:
 _OFF_SCREEN_WINDOW = 30
 
 
+#: The markers that are DEVICES, as opposed to words about a voice. A device
+#: next to a name is evidence of a voice only when the text puts the voice
+#: ON it ("Priya, on the intercom", "over the radio", "through the speaker").
+#: A device the person is HOLDING is evidence that they are in the room.
+#:
+#: Job 8d082bf7: "Tomas holds a dead radio against his ear" read as heard-only
+#: because "radio" sat inside the window after his name. Every action line that
+#: named him had a radio near it -- it is a drama about a radio -- so he was
+#: never "seen", was filed as a voice, lost his portrait, was left out of the
+#: closed cast ("Cast is closed: Mira, Ilya"), and was drawn in the same
+#: orange jacket as Mira, clean-shaven, in every shot he stood in.
+_DEVICE_WORDS = (
+    "radio", "intercom", "comms", "headset", "speaker", "earpiece", "walkie",
+    "handset", "phone",
+)
+_VOICE_ON_DEVICE = re.compile(
+    r"\b(?:over|on|through|via|from)\s+(?:the|a|an|his|her|their|its)?\s*"
+    r"(?:\w+\s+)?(?:" + "|".join(_DEVICE_WORDS) + r")\b"
+)
+
+
 def _mention_is_off_screen(text: str, at: int, name_length: int) -> bool:
     """Whether the name at ``at`` is being heard rather than seen."""
     after = text[at + name_length: at + name_length + _OFF_SCREEN_WINDOW]
-    return any(marker in after for marker in _OFF_SCREEN_MARKERS)
+    for marker in _OFF_SCREEN_MARKERS:
+        if marker in after:
+            if marker in _DEVICE_WORDS:
+                if _VOICE_ON_DEVICE.search(after):
+                    return True
+                continue
+            return True
+    return False
 
 
 def on_screen_name_matches(shot_text: str, characters) -> list:
