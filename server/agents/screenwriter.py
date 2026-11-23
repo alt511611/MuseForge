@@ -645,14 +645,30 @@ into a single scene rather than adding one."""
     #: unavailable" even though the model had answered fine. The Anthropic
     #: path streams, so a larger budget costs nothing in wall-clock risk;
     #: unused tokens are not billed.
-    MAX_SCRIPT_TOKENS = 16000
+    #:
+    #: 16000 was then too small for the product's own commonest request, a
+    #: four-scene drama with five described characters and spoken lines.
+    #: Production jobs on 2026-11-22 ended at 14045 and 15165 output tokens and
+    #: the next two hit the ceiling and were thrown away after 204 s and 188 s
+    #: with nothing to show -- the thinking and the JSON share this one number.
+    #: 24000 leaves that script about a third of headroom.
+    #:
+    #: A larger number is only safe next to a larger deadline: see
+    #: SCRIPT_STREAM_TIMEOUT_SECONDS, which this has to stay inside.
+    MAX_SCRIPT_TOKENS = 24000
     #: Named once. It was written out at the call and again in the usage log,
     #: which is how a deployment ends up reporting spend against a model it is
     #: not running.
     MODEL = "claude-sonnet-5"
     #: Ceiling on draining one script stream. Generous -- a 24-scene script
     #: with thinking is a long answer -- but finite.
-    SCRIPT_STREAM_TIMEOUT_SECONDS = 300.0
+    #:
+    #: Measured: 16000 tokens took 188 s, about 85 tokens a second. The whole
+    #: budget therefore takes ~282 s, which the old 300 s left no margin for --
+    #: a stream that merely ran slow would have died at the deadline instead of
+    #: at the budget, and reported itself as an outage rather than a long
+    #: script. 480 s is the full budget at 85 tokens/s plus ~70%.
+    SCRIPT_STREAM_TIMEOUT_SECONDS = 480.0
 
     def __init__(self, api_key: Optional[str] = None, demo: bool = False):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
