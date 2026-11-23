@@ -668,9 +668,16 @@ into a single scene rather than adding one."""
     #: with nothing to show -- the thinking and the JSON share this one number.
     #: 24000 leaves that script about a third of headroom.
     #:
+    #: 24000 was then hit by the SAME brief that had finished at 14365 an hour
+    #: earlier (job 8e1a8dc7 vs 82c56e88: both input=7203 tokens, a four-scene
+    #: drama with three characters). Same prompt, same size, output 14365
+    #: against 24000+ and truncated after 296 s -- adaptive thinking is not a
+    #: function of the brief, so the ceiling has to clear its bad draws, not
+    #: the typical one. 32000 is a third above the failed 24000.
+    #:
     #: A larger number is only safe next to a larger deadline: see
     #: SCRIPT_STREAM_TIMEOUT_SECONDS, which this has to stay inside.
-    MAX_SCRIPT_TOKENS = 24000
+    MAX_SCRIPT_TOKENS = 32000
     #: Named once. It was written out at the call and again in the usage log,
     #: which is how a deployment ends up reporting spend against a model it is
     #: not running.
@@ -683,7 +690,7 @@ into a single scene rather than adding one."""
     #: a stream that merely ran slow would have died at the deadline instead of
     #: at the budget, and reported itself as an outage rather than a long
     #: script. 480 s is the full budget at 85 tokens/s plus ~70%.
-    SCRIPT_STREAM_TIMEOUT_SECONDS = 480.0
+    SCRIPT_STREAM_TIMEOUT_SECONDS = 600.0
 
     def __init__(self, api_key: Optional[str] = None, demo: bool = False):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
