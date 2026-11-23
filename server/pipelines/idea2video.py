@@ -19,6 +19,7 @@ from interfaces.character import CharacterInScene, DramaScript
 from interfaces.shot import StoryboardShot
 from interfaces.film_look import build_film_look_filters
 from interfaces import gender as gender_of
+from interfaces.lighting import is_interior
 from interfaces import micro_drama
 from interfaces.language import DEFAULT_LANGUAGE
 from interfaces import who_speaks
@@ -46,6 +47,7 @@ from pipelines.script2video import (
     apply_color_grade,
     build_delivery_filters,
     resolve_delivery,
+    on_screen_name_matches,
     concatenate_videos,
     concatenate_videos_with_transitions,
     download_video,
@@ -470,6 +472,91 @@ def _has_one_visible_speaker(
         and speaker_key(track.get("character")) not in off_screen
     }
     return len(speakers) <= 1
+
+
+def _shot_declares_nobody(shot: Any) -> bool:
+    return (
+        shot.get("shows_people") if isinstance(shot, dict) else getattr(shot, "shows_people", None)
+    ) is False
+
+
+def _scene_survives_a_redraw(
+    shots: Optional[Sequence[Any]], characters: Optional[Sequence[Any]]
+) -> bool:
+    """Can this scene be thrown away and redrawn from its first frame?
+
+    ``falai_h3`` does not edit a mouth, it generates a new clip from ONE still
+    (tools/falai_h3_lipsync). Whatever else the scene showed is gone. The gate
+    that decided who may be redrawn asked how many people SPEAK, and job
+    7b4b7271 shows what that misses: scene 1 had five survivors on screen and
+    one line, so it passed, and the film's opening became five seconds of Yusuf
+    alone -- the wide of all five and the two-shot were generated, paid for and
+    discarded. Scene 4 lost a shot of Deniz the same way.
+
+    The question that matters is who is SEEN. A scene survives a redraw only if
+    no more than one character appears anywhere in its storyboard, because then
+    the still it is redrawn from is the whole scene.
+
+    Fails OPEN where it cannot tell (no storyboard, no cast), like every other
+    guard in this pass: the same sync it always made.
+    """
+    shots = list(shots or ())
+    cast = [c for c in (characters or ()) if getattr(c, "is_visible", True)]
+    if not shots or not cast:
+        return True
+    seen = set()
+    for shot in shots:
+        if _shot_declares_nobody(shot):
+            # An establishing beat is a shot of its own, and a redraw from the
+            # scene's first frame -- which may be exactly this one -- erases it.
+            return False
+        text = (
+            f"{_shot_field_text(shot, 'visual_desc')} "
+            f"{_shot_field_text(shot, 'motion_desc')}"
+        ).lower()
+        for _, character in on_screen_name_matches(text, cast):
+            seen.add((getattr(character, "name", "") or "").casefold())
+        if len(seen) > 1:
+            return False
+    return True
+
+
+def _location_plate_prompt(
+    location: str, time_of_day: str, era: str, style: str, look: Any
+) -> str:
+    """The prompt the drama's one empty set is drawn from.
+
+    Says what the place CONTAINS as well as that nobody is in it. "rocky coastal
+    shoreline with jagged rocks and a shingle beach" came back from FLUX.3 as a
+    seaside promenade -- railing, a footpath, street lamps down the bay, a
+    shelter -- and the plate is one of the reference images of every shot, so
+    job 7b4b7271's "deserted shore" had a promenade in all eight clips. An
+    image model fills a bare place with the furniture a place like that usually
+    has; a sentence saying the set holds only what is named takes that away
+    without a negation to misread.
+    """
+    outdoors = is_interior(location) is False
+    contents = (
+        "The set holds only what is named above; the ground, the water, the "
+        "horizon and the sky are natural and untouched, and nothing built "
+        "stands on them unless the setting names it. "
+        if outdoors
+        else "The set holds only what is named above, and nothing else is "
+        "furnished or added. "
+    )
+    return (
+        f"Empty location plate, {style} style. {location}. "
+        f"{('Time of day: ' + time_of_day + '. ') if time_of_day else ''}"
+        f"{('Era: ' + era + '. ') if era else ''}"
+        "Wide establishing view of the space itself, no people, no figures, "
+        "no characters. "
+        f"{contents}"
+        "Consistent architecture, materials, furniture and lighting. High detail."
+        # Same reason as the character portrait: the plate is the set
+        # reference every establishing shot is drawn from, so it has to
+        # be built in the drama's own look.
+        f"{'' if look.is_photoreal else ' ' + look.render_note}"
+    )
 
 
 async def _split_off_tail(
@@ -4240,18 +4327,7 @@ class Idea2VideoPipeline:
         time_of_day = (getattr(script, "setting_time_of_day", "") or "").strip()
         era = (getattr(script, "setting_era", "") or "").strip()
         look = resolve_visual_style(style)
-        prompt = (
-            f"Empty location plate, {style} style. {location}. "
-            f"{('Time of day: ' + time_of_day + '. ') if time_of_day else ''}"
-            f"{('Era: ' + era + '. ') if era else ''}"
-            "Wide establishing view of the space itself, no people, no figures, "
-            "no characters. Consistent architecture, materials, furniture and "
-            "lighting. High detail."
-            # Same reason as the character portrait: the plate is the set
-            # reference every establishing shot is drawn from, so it has to
-            # be built in the drama's own look.
-            f"{'' if look.is_photoreal else ' ' + look.render_note}"
-        )
+        prompt = _location_plate_prompt(location, time_of_day, era, style, look)
         try:
             return await self.image_gen.generate_image(prompt, aspect_ratio=aspect_ratio)
         except Exception as exc:
@@ -4277,6 +4353,7 @@ class Idea2VideoPipeline:
         off_screen: Optional[Set[str]] = None,
         shots_by_clip: Optional[Dict[int, Sequence[Any]]] = None,
         on_provider_job_submitted: Optional[Callable[[int, str], None]] = None,
+        characters: Optional[Sequence[Any]] = None,
     ) -> List[int]:
         """Replace each speaking scene's clip with a lip-synced one, in place.
 
@@ -4517,6 +4594,17 @@ class Idea2VideoPipeline:
                     length > 0 for length in scene_lengths[: scene_index + 1]
                 )
                 drift = speech_anchors.get(scene_index, picture_start) - picture_start
+
+                if getattr(lipsync, "redraws_the_take", False) and not _scene_survives_a_redraw(
+                    (shots_by_clip or {}).get(scene_index), characters
+                ):
+                    logger.info(
+                        "Scene %s shows more than one character, and this lip-sync "
+                        "backend redraws the scene from its first frame, which "
+                        "would discard every other shot; keeping the unsynced take.",
+                        scene_index,
+                    )
+                    return None
 
                 # Asked BEFORE the splits below, which are ffmpeg re-encodes,
                 # and before the provider is called at all: a sync nobody can
@@ -5225,6 +5313,7 @@ class Idea2VideoPipeline:
                     for scene in scenes
                     if scene.get("clip_index") is not None
                 },
+                characters=characters,
             )
 
         # A retake keeps the cut's order, so the foley beds are still keyed to
@@ -7382,6 +7471,7 @@ class Idea2VideoPipeline:
                     for scene in scene_results
                     if scene.get("clip_index") is not None
                 },
+                characters=characters,
                 on_provider_job_submitted=(
                     (lambda idx, rid: on_provider_job_submitted("lipsync", idx, rid))
                     if on_provider_job_submitted

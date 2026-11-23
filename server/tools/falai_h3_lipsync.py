@@ -187,6 +187,11 @@ class FalAIH3Lipsync:
     #: the Sync Lipsync backend, so a fal.ai refusal is one lock, not two.
     provider_name = "falai"
 
+    #: Read by idea2video._lipsync_scenes. This backend REDRAWS the take from
+    #: its first frame (see the module docstring), so every other shot of the
+    #: scene is lost -- the caller must not hand it a scene that has any.
+    redraws_the_take = True
+
     def __init__(self, api_key: str = "", demo: bool = False):
         self.demo = demo
         self.api_key = (api_key or os.environ.get("FAL_KEY", "")).strip()

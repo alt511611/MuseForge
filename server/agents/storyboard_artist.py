@@ -304,6 +304,13 @@ scene. One move, present tense, running from the first frame to the last: "she
 slides the envelope toward him and stops". Not a sequence, not a cut, not a
 second beat.
 
+EVERY EMPTY BEAT IN THE ACTION IS ITS OWN SHOT. When the scene's action or the brief
+names a moment with nobody in it — "the empty shoreline", "the flames alone", "a wave
+far out, no boat, no one", "the beach, deserted" — film it as a separate shot with
+"shows_people": false, in the order the action gives it. Never fold it into the first
+shot that has a person in it: "black surf, then the five crawl out" is two shots, not
+one populated shot with the surf as set dressing. These shots are short (3-4 seconds).
+
 A SHOT CAN BE OF NOBODY. A deserted shore, flames, a wave, an object, weather: when
 the shot has no person in it, set "shows_people": false, leave "expression_desc" as
 an empty string, and describe only the place and what moves in it. Everything below
@@ -502,7 +509,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                     # fallback below, silently defeating the cost fix since
                     # MuAPI is the PRIMARY path, tried first.
                     return self._finish_shots(
-                        shots[:shots_per_scene()],
+                        self._cap_shots(shots, shots_per_scene()),
                         scene_emotion,
                         is_finale,
                         scene_tension,
@@ -544,7 +551,7 @@ Respond ONLY with valid JSON array containing a single shot object:
             if shots:
                 # Cost cap, now configurable -- see DEFAULT_SHOTS_PER_SCENE.
                 return self._finish_shots(
-                    shots[:shots_per_scene()],
+                    self._cap_shots(shots, shots_per_scene()),
                     scene_emotion,
                     is_finale,
                     scene_tension,
@@ -786,6 +793,33 @@ Respond ONLY with valid JSON array containing a single shot object:
         ]
         return " ".join(words)
 
+    #: How many shots of nobody a scene may keep on top of its coverage. They
+    #: are short establishing beats, and the brief rarely names more than two.
+    MAX_EMPTY_SHOTS_PER_SCENE = 2
+
+    @classmethod
+    def _cap_shots(cls, shots: List[StoryboardShot], limit: int) -> List[StoryboardShot]:
+        """Cost cap on a scene's coverage that does not eat its empty beats.
+
+        ``shots[:limit]`` kept the first N shots, and the designer writes the
+        scene in order: an opening beat of nobody ("black surf on wet stones")
+        used up the allowance and a shot of a person fell off the end, or the
+        reverse. Shots that declare ``shows_people: false`` are counted
+        separately, so the brief's empty beats survive the cap and the cap
+        still bounds the shots that show people.
+        """
+        kept: List[StoryboardShot] = []
+        people = empty = 0
+        for shot in shots:
+            if getattr(shot, "shows_people", None) is False:
+                if empty < cls.MAX_EMPTY_SHOTS_PER_SCENE:
+                    kept.append(shot)
+                    empty += 1
+            elif people < limit:
+                kept.append(shot)
+                people += 1
+        return kept
+
     @classmethod
     def _apply_shot_plan(
         cls,
@@ -809,6 +843,29 @@ Respond ONLY with valid JSON array containing a single shot object:
         """
         if not shots:
             return shots
+        empties = [s for s in shots if getattr(s, "shows_people", None) is False]
+        if empties:
+            # Beats of nobody are not coverage of a face, and the machinery
+            # below (a master, a reaction cut on the listener) is built around
+            # one. Plan the shots that show people on what the empty beats
+            # leave of the budget, and put the empty ones back where the
+            # designer had them.
+            empty_ids = {id(s) for s in empties}
+            people = [s for s in shots if id(s) not in empty_ids]
+            for shot in empties:
+                shot.role = "master"
+                shot.deliver_seconds = 0.0
+            if not people:
+                return shots
+            first = next(i for i, s in enumerate(shots) if id(s) not in empty_ids)
+            lead = [s for s in shots[:first]]
+            after = [s for s in shots[first:] if id(s) in empty_ids]
+            reserve = sum(float(s.duration_seconds or 0.0) for s in empties)
+            remaining = max(float(budget or 0.0) - reserve, 4.0) if budget else 0.0
+            planned = cls._apply_shot_plan(
+                people, scene_emotion, tension, characters, lipsync_enabled, remaining
+            )
+            return lead + planned + after
         master = shots[0]
         # The plan is the SCENE's, so it is made from the scene's budget --
         # which is no longer the same number as the master's own length once
