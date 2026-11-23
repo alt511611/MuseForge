@@ -47,6 +47,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 import httpx
 
 from interfaces import acting
+from interfaces.speaker import speaker_key
 from interfaces import gender as gender_of
 from interfaces.language import DEFAULT_LANGUAGE, is_default, normalize
 
@@ -250,7 +251,7 @@ class ElevenLabsVoiceGenerator:
         return dict(self._character_voices)
 
     def voice_id_for_character(self, character: str) -> str:
-        key = (character or "Narrator").strip().casefold()
+        key = speaker_key(character) or "narrator"
         if key in self._character_voices:
             return self._character_voices[key]
         return self._assign(key, self.SYSTEM_VOICE_IDS)

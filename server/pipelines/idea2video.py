@@ -35,6 +35,7 @@ from interfaces.shot_plan import (
     plan_shot_scales,
     shots_the_line_reaches,
 )
+from interfaces.speaker import is_marked_unseen, speaker_key
 from interfaces.transitions import plan_transitions
 from interfaces.visual_style import resolve as resolve_visual_style
 from pipelines.script2video import (
@@ -457,12 +458,15 @@ def _has_one_visible_speaker(
     provider still make the final call in that case.
     """
     off_screen = {str(name).strip().casefold() for name in (off_screen or set())}
+    # A name the script itself marked (O.S.) or (V.O.) is a voice, not a mouth:
+    # "Yusuf (O.S.)" is neither a second face nor a stranger to "Yusuf".
     speakers = {
-        str(track.get("character") or "").strip().casefold()
+        speaker_key(track.get("character"))
         for track in lines or ()
         if str(track.get("line") or "").strip()
         and str(track.get("character") or "").strip()
-        and str(track.get("character") or "").strip().casefold() not in off_screen
+        and not is_marked_unseen(track.get("character"))
+        and speaker_key(track.get("character")) not in off_screen
     }
     return len(speakers) <= 1
 
@@ -611,8 +615,10 @@ def _off_screen_speech_spans(
     spans: List[Tuple[float, float]] = []
     visible_speech = False
     for track in tracks:
-        character = str(track.get("character") or "").strip().casefold()
-        if character and character in off_screen:
+        character = speaker_key(track.get("character"))
+        if character and (
+            character in off_screen or is_marked_unseen(track.get("character"))
+        ):
             if "start_seconds" not in track or "end_seconds" not in track:
                 return [], True
             start = float(track["start_seconds"])
@@ -1159,7 +1165,10 @@ def _format_scene_dialogue(
             line = str(getattr(entry, "line", "") or "").strip()
         if not line:
             continue
-        if character and character.casefold() in heard:
+        if character and is_marked_unseen(character):
+            # Already says what it is; do not append a second marker.
+            lines.append(f"{character}: {line}")
+        elif character and speaker_key(character) in heard:
             lines.append(
                 f"{character} (O.S. — a voice only, heard over comms and never "
                 f"in frame; do not stage them): {line}"
@@ -3911,7 +3920,9 @@ def _heard_but_never_seen(script: DramaScript, cast: List[CharacterInScene]) -> 
                 else getattr(line, "character", "")
             )
             if who:
-                speaks.add(str(who).strip().casefold())
+                # "Arif (O.S.)" is Arif: without this he looked like a speaker
+                # named in no action line and was a candidate to be hidden.
+                speaks.add(speaker_key(who))
 
     # Nobody was named in any action line: the script is written without them,
     # not around one absent voice. Marking the whole cast invisible would
@@ -4630,10 +4641,8 @@ class Idea2VideoPipeline:
                             sum(
                                 1
                                 for t in lines_by_scene.get(scene_index, ())
-                                if str(t.get("character") or "")
-                                .strip()
-                                .casefold()
-                                not in off_screen
+                                if speaker_key(t.get("character")) not in off_screen
+                                and not is_marked_unseen(t.get("character"))
                             ),
                         )
 

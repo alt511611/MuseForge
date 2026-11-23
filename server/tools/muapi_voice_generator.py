@@ -33,6 +33,7 @@ import re
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from interfaces import acting
+from interfaces.speaker import speaker_key
 from interfaces import gender as gender_of
 from interfaces.language import DEFAULT_LANGUAGE, is_default, normalize
 from tools.muapi_client import MuAPICancelled, MuAPIClient
@@ -233,7 +234,7 @@ class MuAPIVoiceGenerator:
 
     def voice_id_for_character(self, character: str) -> str:
         """Return a stable voice ID, assigning it on the character's first line."""
-        key = (character or "Narrator").strip().casefold()
+        key = speaker_key(character) or "narrator"
         if key in self._character_voices:
             return self._character_voices[key]
 
