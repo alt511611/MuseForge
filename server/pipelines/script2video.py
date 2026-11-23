@@ -959,6 +959,8 @@ def characters_in_frame(shot, characters, matched_char=None) -> list:
     also the right answer for an insert or an establishing plate, which get
     the cast they were written with.
     """
+    if getattr(shot, "shows_people", None) is False:
+        return []
     in_frame = [
         character
         for _, character in on_screen_name_matches(
@@ -1081,6 +1083,11 @@ def resolve_frame_references(
     # text describes. Now: whichever known character's name appears FIRST by
     # text position -- narrative order, so "Sam looks at Maria" anchors Sam.
     named_matches = on_screen_name_matches(shot_text, visible_chars)
+    if getattr(shot, "shows_people", None) is False:
+        # Declared empty by the storyboard artist: the plate, not a portrait.
+        # A name in the text is a place or a possession ("Yusuf's boat").
+        named_matches = []
+        scene_subject = None
     if named_matches:
         named_matches.sort(key=lambda pair: pair[0])
         matched_char = named_matches[0][1]
@@ -1480,6 +1487,12 @@ def shot_is_unpeopled(shot, characters, matched_char=None) -> bool:
     then asked the same shot for "eyes closing for a beat" and "characters keep
     facing the same way", and the model supplied faces to do it with.
     """
+    stated = getattr(shot, "shows_people", None)
+    if stated is not None:
+        # The storyboard artist wrote the shot and said so. An anchor does not
+        # override it: a shot declared empty has no one to anchor to, and the
+        # anchor was only ever a guess from the text.
+        return not stated
     if matched_char is not None:
         return False
     text = f"{getattr(shot, 'visual_desc', '') or ''} {getattr(shot, 'motion_desc', '') or ''}".lower()

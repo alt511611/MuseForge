@@ -304,13 +304,21 @@ scene. One move, present tense, running from the first frame to the last: "she
 slides the envelope toward him and stops". Not a sequence, not a cut, not a
 second beat.
 
-SHOW THE EMOTION ON THE FACE. The scene's emotional beat is given to you. "expression_desc"
+A SHOT CAN BE OF NOBODY. A deserted shore, flames, a wave, an object, weather: when
+the shot has no person in it, set "shows_people": false, leave "expression_desc" as
+an empty string, and describe only the place and what moves in it. Everything below
+about faces applies to shots that show people ("shows_people": true) and to those
+alone — an empty shot given a face is how strangers get into the film.
+
+SHOW THE EMOTION ON THE FACE. The scene's emotional beat is given to you. For a shot
+that shows people, "expression_desc"
 must state the concrete, visible facial expression AND body language for the character(s)
 in frame (e.g. "eyes brimming with tears, trembling chin, shoulders finally dropping as
 she exhales"). Never write "neutral", "calm", "expressionless", or a blank value unless
 the scene is genuinely emotionless. Repeat the key expression inside visual_desc too.
 
-SHOW THE CHANGE ON THE FACE, NOT FROM ACROSS THE STREET. When the notes name
+SHOW THE CHANGE ON THE FACE, NOT FROM ACROSS THE STREET. In a shot that shows
+people: when the notes name
 what changes about the place — the lights dying, the water rising, the fire
 taking — that change is mandatory AND it does not license a wide shot. Both
 instructions are live at once, and this is how they resolve: film the change
@@ -322,7 +330,7 @@ correct, dramatically nothing, and the one moment in your drama where nobody
 can see a face is the moment it turns. If the change genuinely cannot be read
 without distance, take the wide AND keep a character large in the foreground.
 
-KEEP FACES READABLE. Faces must be clearly visible and lit well enough to read the
+KEEP FACES READABLE. In a shot that shows people, faces must be clearly visible and lit well enough to read the
 expression — soft key light on the face. Do NOT design pure silhouettes, backlit
 shapes, faces turned away from camera, or faces hidden by shadow; those destroy the
 emotional read. Prefer medium or close-up framing for emotional beats so the face fills
@@ -344,7 +352,7 @@ based on the scene's importance: 4-6 for short transition/action shots, 8-12 for
 emotional/establishing moments, 13-15 for very important finales.
 Respond ONLY with valid JSON array containing a single shot object:
 [{"idx": 0, "visual_desc": "...", "motion_desc": "...", "expression_desc": "...",
-  "audio_desc": "...", "shot_type": "wide|medium|close-up", "camera_movement": "...",
+  "shows_people": true, "audio_desc": "...", "shot_type": "wide|medium|close-up", "camera_movement": "...",
   "lens": "50mm", "duration_seconds": 8}]
 (duration_seconds is an example — vary 3-15 by scene; do not always use 5.)"""
 
@@ -631,6 +639,8 @@ Respond ONLY with valid JSON array containing a single shot object:
         if not emotion:
             return shots
         for shot in shots:
+            if getattr(shot, "shows_people", None) is False:
+                continue
             # getattr/setattr rather than attribute access: shots may be
             # plain objects from callers/tests that predate expression_desc.
             current = (getattr(shot, "expression_desc", "") or "").strip()
@@ -664,6 +674,13 @@ Respond ONLY with valid JSON array containing a single shot object:
           performance is GOING even when no end frame is rendered.
         """
         for shot in shots:
+            if getattr(shot, "shows_people", None) is False:
+                # Nobody to act. Without this the field is filled for every
+                # shot, and "LANDS on: the mouth tightening" is then sent to
+                # a plate of flames.
+                shot.expression_desc = ""
+                shot.expression_peak_desc = ""
+                continue
             try:
                 written = (getattr(shot, "expression_desc", "") or "").strip()
                 shot.expression_desc = acting.onset_expression(scene_emotion, written)
