@@ -226,8 +226,29 @@ _BEATS: Tuple[Tuple[Tuple[str, ...], ActingBeat], ...] = (
         ),
     ),
     (
-        ("suspicion", "doubt", "mistrust", "wary", "guarded", "tense", "confront",
-         "şüphe", "güvensiz", "temkinli", "gergin", "yüzleş"),
+        # Job 82c56e88: scene 2 was tagged "tense confrontation" -- two men
+        # arguing over whether to leave a hut in a blizzard -- and "tense" and
+        # "confront" lived on the suspicion beat, whose peak is "the smile
+        # staying on the mouth". Tomas leaned over the table grinning while he
+        # begged to go down for help, and Ilya grinned at "Nobody goes out in
+        # this". A quarrel is not a poker face. It gets its own beat, and the
+        # beat has no smile in it.
+        ("confront", "argument", "argue", "quarrel", "dispute", "heated",
+         "tense", "standoff", "gergin", "yüzleş", "tartış", "kavga"),
+        ActingBeat(
+            label="confrontation",
+            onset="braced: jaw set, shoulders squared, gaze level and hard on the other person",
+            peak=(
+                "the edge showing: brows drawing down, jaw working, lips thinning "
+                "to a line, chin lifting, breath held, no trace of a smile"
+            ),
+            voice_tag="sharply",
+            stability=0.35,
+        ),
+    ),
+    (
+        ("suspicion", "doubt", "mistrust", "wary", "guarded",
+         "şüphe", "güvensiz", "temkinli"),
         ActingBeat(
             label="suspicion",
             onset="pleasant and blank: the social face, giving nothing",

@@ -1543,9 +1543,13 @@ def build_cast_closure_clause(characters) -> str:
         # figure is allowed to be.
         f"Cast is closed: {'only ' if len(named) == 1 else ''}"
         + ", ".join(named)
-        + f" appear{'s' if len(named) == 1 else ''}. No other recognisable "
-        "face in frame; background figures only if the shot asks, distant and "
-        "unfocused. "
+        + f" appear{'s' if len(named) == 1 else ''}"
+        # Job 82c56e88: Mira sat at the table and a second Mira, same orange
+        # jacket and cap, stood at the stove behind her. Closing the cast says
+        # who may appear; it never said how many of each.
+        + ("" if len(named) == 1 else ", each exactly once") + ". No other "
+        "recognisable face in frame; background figures only if the shot asks, "
+        "distant and unfocused. "
     )
 
 
