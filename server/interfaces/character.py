@@ -100,6 +100,13 @@ class ScriptScene(BaseModel):
     # Dramatic tension 1-10. Shapes the tension curve across the drama and
     # informs shot scale/duration for this beat.
     tension: int = 0
+    # The physical state this scene OPENS in and the one it LEAVES: who is
+    # where, who is wet or hurt, what is in whose hands, how much time has
+    # passed, what the light is doing. Scenes are rendered independently, so
+    # without these the second scene begins from nothing. See
+    # interfaces/continuity.
+    starts_with: str = ""
+    ends_with: str = ""
 
 
 class DramaScript(BaseModel):
