@@ -977,6 +977,10 @@ def characters_in_frame(shot, characters, matched_char=None) -> list:
         in_frame.insert(0, matched_char)
     if in_frame:
         return in_frame
+    if shot_is_unpeopled(shot, characters, matched_char):
+        # Describing the cast to a frame of nobody is how the cast gets drawn
+        # into it. See shot_is_unpeopled.
+        return []
     # The fallback is filtered too. `build_character_identity_clause` drops
     # invisible characters itself, so this changes no prompt -- but the
     # REFERENCE SET reads the same list, and a radio voice with no face is not
@@ -1426,6 +1430,16 @@ _PERSON_CUES = (
     r"\bboy\b", r"\bperson\b", r"\bpeople\b", r"\bfigure\b", r"\bsomeone\b",
     r"\bface\b", r"\beyes\b", r"\bmouth\b", r"\bhand\b", r"\bhands\b",
     r"\bfingers\b", r"\bshoulder\b", r"\bshoulders\b", r"\bsilhouette\b",
+    # The groups and roles a storyboard writes INSTEAD of a name. This list
+    # now also decides when a shot is EMPTY (see shot_is_unpeopled), where a
+    # miss paints a crew out of its own lifeboat, so the cost of a missing word
+    # is higher than it was when a miss only chose the wrong anchor.
+    r"\bcrowd\b", r"\bcrew\b", r"\bsailors?\b", r"\bsurvivors?\b",
+    r"\bpassengers?\b", r"\bworkers?\b", r"\bchild\b", r"\bchildren\b",
+    r"\bkids?\b", r"\bsoldiers?\b", r"\bvillagers?\b", r"\bonlookers?\b",
+    r"\bstrangers?\b", r"\bbod(?:y|ies)\b", r"\bheads?\b", r"\bhair\b",
+    r"\bfeet\b", r"\blegs?\b", r"\barms?\b", r"\bfaces\b", r"\bgroup\b",
+    r"\bfamily\b", r"\bmother\b", r"\bfather\b", r"\bcouple\b",
 )
 
 _PERSON_CUE_RE = re.compile("|".join(_PERSON_CUES))
@@ -1451,6 +1465,36 @@ def shot_shows_a_person(shot_text: str) -> bool:
     whether one is there; the caller decides who.
     """
     return bool(_PERSON_CUE_RE.search(shot_text or ""))
+
+
+def shot_is_unpeopled(shot, characters, matched_char=None) -> bool:
+    """Whether this shot is deliberately EMPTY: a place, an object, weather.
+
+    A shot that names nobody, anchors to nobody and has no person cue in its
+    text. ``characters_in_frame`` used to answer such a shot with the scene's
+    whole cast -- "the right answer for an insert or an establishing plate" --
+    and that answer is the stranger-in-the-empty-shot bug: the opening
+    "deserted shoreline" of a five-person drama was drawn WITH its five
+    people, because the prompt for a frame of nobody carried "Appearance is
+    FIXED" and "Cast is closed: ... appear" for all of them. The video prompt
+    then asked the same shot for "eyes closing for a beat" and "characters keep
+    facing the same way", and the model supplied faces to do it with.
+    """
+    if matched_char is not None:
+        return False
+    text = f"{getattr(shot, 'visual_desc', '') or ''} {getattr(shot, 'motion_desc', '') or ''}".lower()
+    if on_screen_name_matches(text, characters or []):
+        return False
+    return not shot_shows_a_person(text)
+
+
+#: What an empty shot says INSTEAD of a cast. Stated as the picture it is
+#: rather than a prohibition on faces alone, and carried by both the frame and
+#: the video prompt because either model can populate a place by itself.
+EMPTY_SHOT_CLAUSE = (
+    "Nobody is in this shot: no people, no faces, no figures, not even far "
+    "away or blurred -- the place itself is the whole subject. "
+)
 
 
 def build_cast_closure_clause(characters) -> str:
@@ -1882,7 +1926,8 @@ def build_frame_prompt(
     # of it, to recover the last few characters. Delivered job 21e3d767-bce
     # lost it from every frame and its two players swap sides across three of
     # the film's four two-shots.
-    direction_clause = build_screen_direction_clause(characters)
+    unpeopled = shot_is_unpeopled(shot, characters, matched_char)
+    direction_clause = "" if unpeopled else build_screen_direction_clause(characters)
 
     # MAX_VISUAL_DESC_CHARS was measured "for a one-hander", and its own note
     # settles who pays when the frame runs out of room: the description is cut
@@ -1900,7 +1945,9 @@ def build_frame_prompt(
         limit=max(MIN_VISUAL_DESC_CHARS, MAX_VISUAL_DESC_CHARS - len(direction_clause)),
     )
 
-    cast_clause = build_cast_closure_clause(characters)
+    cast_clause = (
+        EMPTY_SHOT_CLAUSE if unpeopled else build_cast_closure_clause(characters)
+    )
     # Ranked with the setting below, because it is the setting's evidence: the
     # setting clause promises the room does not change, and this names the
     # photograph of that room sitting in the same payload. They stand or fall
@@ -2273,7 +2320,12 @@ def build_frame_prompt(
         # already worth more than face, at 4). Rank 3 assumes a reference
         # image is backing the cast up; without one, "Cast is closed" is the
         # only thing keeping a stray extra out of a text-only frame.
-        (UNBACKED_CAST_CLOSURE if not has_reference else 3, cast_clause),
+        (
+            REQUIRED
+            if unpeopled
+            else (UNBACKED_CAST_CLOSURE if not has_reference else 3),
+            cast_clause,
+        ),
         # RANK, not wording -- the same distinction the mouth clause turned on
         # above. Ordinarily this clause is continuity: worth keeping, and a
         # frame is still the right frame without it, so it sits one rung above
@@ -2383,7 +2435,11 @@ def build_frame_prompt(
 
 
 def build_motion_prompt(
-    shot, matched_char=None, world_state: str = "", speaking: bool = True
+    shot,
+    matched_char=None,
+    world_state: str = "",
+    speaking: bool = True,
+    unpeopled: bool = False,
 ) -> str:
     """Build the prompt sent to the video (image-to-video) model.
 
@@ -2416,6 +2472,25 @@ def build_motion_prompt(
     motion = (getattr(shot, "motion_desc", "") or "").strip().rstrip(".")
     if motion:
         parts.append(f"{motion}.")
+    if unpeopled:
+        # ``unpeopled`` is a shot with nobody in it, and everything below is
+        # direction for a person: an arc to perform, a face to keep, a head not
+        # to turn. Handed to an empty plate it is an order to produce one --
+        # job 5b886720's flames shot was told to land on "eyes closing for a
+        # beat, a long breath leaving through parted lips" and came back with
+        # three strangers whose eyes were closed.
+        parts.append(EMPTY_SHOT_CLAUSE.strip())
+        changed = (world_state or "").strip().rstrip(".")
+        if changed:
+            parts.append(
+                f"The world of this shot has already changed: {changed}. Hold "
+                f"that state for the entire clip."
+            )
+        parts.append(
+            "Only the place moves: light, weather, water, smoke, flame, "
+            "cloth. Photographic realism throughout."
+        )
+        return " ".join(parts)
     expression = (getattr(shot, "expression_desc", "") or "").strip().rstrip(".")
     peak = (getattr(shot, "expression_peak_desc", "") or "").strip().rstrip(".")
     if expression and peak:
@@ -4793,6 +4868,7 @@ class Script2VideoPipeline:
                             matched_char,
                             world_state=change_state,
                             speaking=shot_has_dialogue,
+                            unpeopled=shot_is_unpeopled(shot, characters, matched_char),
                         )
                         video_prompt = f"{frame_prompt} {motion_prompt}"
                     else:
@@ -4874,6 +4950,7 @@ class Script2VideoPipeline:
                             matched_char,
                             world_state=change_state,
                             speaking=shot_has_dialogue,
+                            unpeopled=shot_is_unpeopled(shot, characters, matched_char),
                         )
 
                         # The acted PEAK, rendered as a real end frame so the
