@@ -1928,6 +1928,13 @@ def build_frame_prompt(
     # the film's four two-shots.
     unpeopled = shot_is_unpeopled(shot, characters, matched_char)
     direction_clause = "" if unpeopled else build_screen_direction_clause(characters)
+    if unpeopled:
+        # The storyboard artist is told to put an emotion on a face in every
+        # shot, and the acting pass fills the field unconditionally, so an
+        # empty shot arrives with "Facial expression and body language: ..."
+        # and "the face is lit and readable". Those are orders to draw a face.
+        expression_clause = ""
+        face_clause = ""
 
     # MAX_VISUAL_DESC_CHARS was measured "for a one-hander", and its own note
     # settles who pays when the frame runs out of room: the description is cut
