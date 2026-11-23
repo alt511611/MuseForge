@@ -2896,16 +2896,15 @@ class PortalRequest(BaseModel):
 
 
 def _embedded_checkout_session_id(url) -> Optional[str]:
-    """The Whop checkout-configuration id, only when the on-site form is on.
+    """The Whop checkout-configuration id, for the on-site payment form.
 
-    Off by default. The legacy embed (@whop/checkout, whop.com/embedded/
-    checkout/<id>/) answered "This checkout is no longer available" for every
-    fresh configuration -- plan, session and bare-plan URLs alike -- while the
-    same configuration's hosted purchase_url loaded fine. A button that opens
-    that dead modal sells nothing, so the redirect is the default and the
-    embed is opt-in (MUSEFORGE_WHOP_EMBED=1) until it is moved to Whop Elements.
+    On by default (Whop Elements `Checkout`, mounted from this id). The earlier
+    embed (@whop/checkout) answered "This checkout is no longer available" for
+    every fresh configuration, which is why #163 made it opt-in; that embed is
+    gone, and MUSEFORGE_WHOP_EMBED=0 stays as the kill switch that sends the
+    client back to the hosted purchase_url redirect without a release.
     """
-    if os.environ.get("MUSEFORGE_WHOP_EMBED", "").strip().lower() not in ("1", "true", "yes", "on"):
+    if os.environ.get("MUSEFORGE_WHOP_EMBED", "").strip().lower() in ("0", "false", "no", "off"):
         return None
     return getattr(url, "session_id", None)
 

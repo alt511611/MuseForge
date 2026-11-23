@@ -43,12 +43,12 @@ def test_the_session_id_rides_along_on_a_string_url(monkeypatch):
     assert url.session_id == "ch_abc123"
 
 
-def test_the_embed_is_off_unless_asked_for(monkeypatch):
+def test_the_embed_is_on_unless_switched_off(monkeypatch):
     import api
 
     url = wi.CheckoutUrl("https://whop.com/checkout/ch_1/")
     url.session_id = "ch_1"
     monkeypatch.delenv("MUSEFORGE_WHOP_EMBED", raising=False)
-    assert api._embedded_checkout_session_id(url) is None
-    monkeypatch.setenv("MUSEFORGE_WHOP_EMBED", "1")
     assert api._embedded_checkout_session_id(url) == "ch_1"
+    monkeypatch.setenv("MUSEFORGE_WHOP_EMBED", "0")
+    assert api._embedded_checkout_session_id(url) is None
