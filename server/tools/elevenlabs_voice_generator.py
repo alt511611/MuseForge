@@ -34,12 +34,14 @@ Kept deliberately interface-compatible with MuAPIVoiceGenerator: same
 pipeline neither knows nor cares which one it is holding.
 """
 
+import asyncio
 import base64
 import binascii
 import hashlib
 import logging
 import os
 import tempfile
+import weakref
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import httpx
@@ -53,6 +55,53 @@ logger = logging.getLogger(__name__)
 ELEVENLABS_BASE = os.environ.get(
     "ELEVENLABS_BASE", "https://api.elevenlabs.io/v1"
 )
+
+#: How many dialogue requests may be in flight at once, per process.
+#:
+#: The account allows three at a time and answers a fourth with a 429
+#: ("maximum 3 concurrent requests"). A drama renders its scenes' speech
+#: together, and a job on 2026-11-22 lost a whole scene's dialogue that way:
+#: the pipeline treats a missing voice as a silent scene and carries on, so the
+#: film shipped with a line gone and nothing on screen said so. The ceiling is
+#: two, not three, because the account's allowance is shared with every other
+#: job on the server and with anything else using the key.
+def _max_concurrency() -> int:
+    try:
+        return max(1, int(os.environ.get("ELEVENLABS_MAX_CONCURRENCY", "2")))
+    except ValueError:
+        return 2
+
+
+#: A request refused for being over the limit is worth asking again: the
+#: limit clears as soon as one of the requests ahead finishes. Anything else
+#: (a bad voice, a bad key) is not, and is raised at once as before.
+RATE_LIMIT_ATTEMPTS = 4
+RATE_LIMIT_BACKOFF_SECONDS = (2.0, 4.0, 8.0)
+
+# One semaphore per event loop: asyncio primitives bind to the loop they are
+# first used on, and a long-lived process runs jobs on more than one.
+_SLOTS: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_sleep = asyncio.sleep
+
+
+def _slot() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    slot = _SLOTS.get(loop)
+    if slot is None:
+        slot = _SLOTS[loop] = asyncio.Semaphore(_max_concurrency())
+    return slot
+
+
+def _seconds_to_wait(response: Any, attempt: int) -> float:
+    """The provider's own Retry-After when it sent one, else a fixed backoff."""
+    headers = getattr(response, "headers", None) or {}
+    try:
+        return min(30.0, max(0.0, float(headers.get("retry-after"))))
+    except (TypeError, ValueError):
+        return RATE_LIMIT_BACKOFF_SECONDS[
+            min(attempt, len(RATE_LIMIT_BACKOFF_SECONDS) - 1)
+        ]
+
 
 #: Model that has to support text-to-dialogue. Overridable because the id is
 #: the one part of this that the provider revises without warning; ask
@@ -583,11 +632,27 @@ class ElevenLabsVoiceGenerator:
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    f"{ELEVENLABS_BASE}/text-to-dialogue/with-timestamps",
-                    headers=self._headers(),
-                    json=payload,
-                )
+                for attempt in range(RATE_LIMIT_ATTEMPTS):
+                    # The slot is held for the request only, not for the wait
+                    # after a refusal, so the requests that are succeeding are
+                    # not queued behind one that is sleeping.
+                    async with _slot():
+                        response = await client.post(
+                            f"{ELEVENLABS_BASE}/text-to-dialogue/with-timestamps",
+                            headers=self._headers(),
+                            json=payload,
+                        )
+                    if response.status_code != 429 or attempt == RATE_LIMIT_ATTEMPTS - 1:
+                        break
+                    wait = _seconds_to_wait(response, attempt)
+                    logger.warning(
+                        "ElevenLabs refused a dialogue request for concurrency "
+                        "(429); asking again in %.0fs (attempt %d of %d).",
+                        wait, attempt + 1, RATE_LIMIT_ATTEMPTS,
+                    )
+                    await _sleep(wait)
+                    if is_cancelled and is_cancelled():
+                        raise ElevenLabsError("Job cancelled before dialogue generation")
                 response.raise_for_status()
                 data = response.json()
         except httpx.HTTPStatusError as exc:
