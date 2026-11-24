@@ -1555,6 +1555,18 @@ into a single scene rather than adding one."""
         but tells the user to "try again shortly" forever.
         """
         status = getattr(exc, "status_code", None)
+        if "exhausted balance" in str(exc).lower() or "user is locked" in str(exc).lower():
+            # Job 93aa0ac7: our fal account was empty and the customer read
+            # "the script service is not configured correctly -- contact
+            # support". Nothing is misconfigured; the supplier balance is out.
+            logger.error(
+                "PROVIDER BALANCE EXHAUSTED: the script model's account is out "
+                "of credit (%s). Top it up.", str(exc)[:200],
+            )
+            return (
+                "Video generation is temporarily unavailable on our side. "
+                "No credits were spent -- please try again shortly."
+            )
         if status in (401, 403):
             # An operator problem. Say so plainly rather than implying the
             # user should retry into a wall.
