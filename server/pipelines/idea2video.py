@@ -526,6 +526,14 @@ def _shot_declares_nobody(shot: Any) -> bool:
     ) is False
 
 
+#: Below this much speech a redraw costs more picture than it buys mouth.
+_MIN_REDRAW_SPEECH_SECONDS = float(
+    os.environ.get("MUSEFORGE_REDRAW_MIN_SPEECH_SECONDS", "3.0") or 3.0
+)
+#: The lip-sync endpoint's own floor (tools/falai_h3_lipsync.MIN_AUDIO_SECONDS).
+_REDRAW_FLOOR_SECONDS = 5.0
+
+
 def _scene_survives_a_redraw(
     shots: Optional[Sequence[Any]], characters: Optional[Sequence[Any]]
 ) -> bool:
@@ -4677,6 +4685,24 @@ class Idea2VideoPipeline:
                 # see is not worth the round trip OR the CPU behind it.
                 scene_lines = lines_by_scene.get(scene_index, ())
                 spoken = spoken_seconds(list(scene_lines)) or 0.0
+                # A redraw replaces the take's first FIVE seconds at least (the
+                # endpoint pads a shorter line with silence), so a line a
+                # second long buys four seconds of a mouth that has nothing to
+                # say. Job e85c3f62, scene 2: "What is that--", 0.88 s, was the
+                # moment she heaves the container open; the redraw swapped
+                # those seconds for a woman frozen mid-pull with a fixed grin,
+                # and the door never moved. An edit backend has no such cost.
+                if (
+                    getattr(lipsync, "redraws_the_take", False)
+                    and 0.0 < spoken < _MIN_REDRAW_SPEECH_SECONDS
+                ):
+                    logger.info(
+                        "Scene %s speaks for %.2fs, too little to be worth "
+                        "replacing its first %.0fs with a redraw; keeping the "
+                        "unsynced take.",
+                        scene_index, spoken, _REDRAW_FLOOR_SECONDS,
+                    )
+                    return None
                 if not _speaks_in_a_readable_framing(
                     (shots_by_clip or {}).get(scene_index),
                     scene_lines,
