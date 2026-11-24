@@ -1293,28 +1293,59 @@ into a single scene rather than adding one."""
         # story structure, and `max_tokens` covers thinking plus text
         # together, which the raised budget above accounts for.
         client = self._anthropic()
-        try:
+        system_prompt = self._system_prompt(
+            language,
+            require_dialogue,
+            narrative_mode,
+            num_scenes,
+            bool(series_brief),
+            lipsync_enabled=lipsync_enabled,
+        )
+
+        async def _drain(**extra):
             async with client.messages.stream(
                 model=self.MODEL,
                 max_tokens=self.MAX_SCRIPT_TOKENS,
-                system=self._system_prompt(
-                    language,
-                    require_dialogue,
-                    narrative_mode,
-                    num_scenes,
-                    bool(series_brief),
-                    lipsync_enabled=lipsync_enabled,
-                ),
+                system=system_prompt,
                 messages=[{"role": "user", "content": prompt}],
+                **extra,
             ) as stream:
                 # A deadline, because a stream that stalls has no other one:
                 # the SDK's request timeout covers establishing the response,
                 # not draining it, so a connection that goes quiet mid-script
                 # held the job open until the pipeline's own hard timeout.
-                message = await asyncio.wait_for(
+                return await asyncio.wait_for(
                     stream.get_final_message(),
                     timeout=self.SCRIPT_STREAM_TIMEOUT_SECONDS,
                 )
+
+        try:
+            message = await _drain()
+            if message.stop_reason == "max_tokens":
+                # Thinking and the JSON share one ceiling and thinking is
+                # adaptive: the same four-scene brief finished at 14365 output
+                # tokens and, an hour later, was cut off at 24000 after 296 s
+                # (jobs 82c56e88, 8e1a8dc7). A truncated script is unusable
+                # and was thrown away whole. Writing is not helped by more
+                # thinking than the ceiling leaves room for, so the second
+                # attempt gives the whole budget to the answer -- the
+                # "reason, then format" split the structured-output literature
+                # recommends, with the reasoning dropped instead of repeated.
+                logger.warning(
+                    "Screenwriter hit max_tokens (%s output tokens) with "
+                    "thinking on; retrying once with thinking disabled so the "
+                    "whole budget goes to the script.",
+                    getattr(message.usage, "output_tokens", "?"),
+                )
+                try:
+                    message = await _drain(thinking={"type": "disabled"})
+                except anthropic.BadRequestError as exc:
+                    # The model may not accept the switch. Then this is still
+                    # the truncation it was a moment ago, and says so below.
+                    logger.error(
+                        "Retry with thinking disabled was rejected (%s); "
+                        "reporting the original truncation.", exc
+                    )
         except anthropic.APIStatusError as exc:
             # _failure_message already sorts what the USER is told by status.
             # This sorts what the OPERATOR is told, which was one line for
