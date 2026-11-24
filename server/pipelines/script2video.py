@@ -83,6 +83,23 @@ VIDEO_PROVIDERS = (
 )
 
 
+_TIGHT_SHOT = re.compile(r"close[- ]?up", re.I)
+
+
+def wants_first_frame(shot, video_gen) -> bool:
+    """True when this shot should start from a rendered frame, not references.
+
+    Only a close-up, only on a backend that declares ``can_start_from_frame``,
+    and switchable off with MUSEFORGE_CLOSEUP_FIRST_FRAME=0 -- it costs one
+    image generation and a slower clip per shot.
+    """
+    if (os.environ.get("MUSEFORGE_CLOSEUP_FIRST_FRAME", "1") or "").strip() == "0":
+        return False
+    if not getattr(video_gen, "can_start_from_frame", False):
+        return False
+    return bool(_TIGHT_SHOT.search(getattr(shot, "shot_type", "") or ""))
+
+
 def _make_video_generator(api_key: str, demo: bool):
     """Pick the video-generation backend. Defaults to the existing MuAPI
     path unchanged. Imported lazily so the default path never requires
@@ -4888,6 +4905,16 @@ class Script2VideoPipeline:
                         and bool(matched_char)
                         and bool(reference_url)
                     )
+                    # A tight close-up cannot be asked for in a reference-only
+                    # call: the empty plate's wide framing wins and "close-up"
+                    # comes back as a full body, eyes on the lens (job
+                    # 21a87c5a). A rendered first frame IS the framing, so
+                    # such a shot starts from one -- where the endpoint can.
+                    start_from_frame = one_step_reference_video and wants_first_frame(
+                        shot, self.video_gen
+                    )
+                    if start_from_frame:
+                        one_step_reference_video = False
 
                     async with progress_lock:
                         await progress(
@@ -5078,6 +5105,8 @@ class Script2VideoPipeline:
                             matched_char=matched_char,
                             location_plate_url=location_plate_url,
                         )
+                    if start_from_frame:
+                        video_kwargs["by_reference"] = False
                     video_url = await self.video_gen.generate_video_from_image(
                         prompt=video_prompt,
                         image_url=frame_url if not one_step_reference_video else reference_url,
