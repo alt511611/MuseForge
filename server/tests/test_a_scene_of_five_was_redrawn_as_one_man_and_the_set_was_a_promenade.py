@@ -108,7 +108,7 @@ async def test_the_pass_never_calls_a_redrawing_backend_for_a_crowded_scene(monk
     clip.write_bytes(b"original")
     tracks = [{
         "scene_index": 0, "character": "Yusuf", "line": "Count heads.",
-        "audio_url": "https://cdn/a.mp3", "start_seconds": 0.0, "end_seconds": 2.0,
+        "audio_url": "https://cdn/a.mp3", "start_seconds": 0.0, "end_seconds": 4.0,
     }]
 
     async def progress(*a, **k):
