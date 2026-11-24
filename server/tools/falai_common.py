@@ -73,6 +73,22 @@ class ContentFlagged(RuntimeError):
 #: in flight) should not sit doubling its wait on every poll cycle for that.
 CONTENT_POLICY_RETRIES = 1
 
+#: fal reports a runner that died (``Runner connection lost``) as a COMPLETED
+#: status carrying an ``error`` -- and then re-queues the same request itself,
+#: which goes on to finish and is billed. Job 01a2035e-666a-7551-a20f-44e759462b1e
+#: (Vidu Q4, 2026-11-22) did exactly that: we raised on the first status, showed
+#: the person a failure, and fal charged $0.126 for the video we had thrown
+#: away. So a failed status is watched for this long before it is believed.
+#: Seconds, not polls; 0 restores the old "believe it at once".
+FAILED_STATUS_GRACE_SECONDS = float(os.environ.get("FALAI_FAILED_STATUS_GRACE", "30"))
+
+
+def _may_be_requeued(error) -> bool:
+    """Only an infrastructure failure is worth watching; a refusal, a bad
+    input or an empty balance will not turn into a result by waiting."""
+    text = str(error).lower()
+    return any(k in text for k in ("runner", "connection lost", "worker", "timed out", "unavailable", "internal"))
+
 
 #: fal answers `downstream_service_unavailable` (or a bare 502/503/504) when a
 #: model host blinks. Job 782c689e: the script was written and paid for, the
@@ -161,6 +177,7 @@ async def _submit_and_wait(
     """One submit/poll/result cycle -- the retryable unit `fal_generate` wraps."""
     handle = await client.submit(endpoint, arguments=arguments)
     request_id = handle.request_id
+    grace_polls = int(-(-FAILED_STATUS_GRACE_SECONDS // max(poll_interval, 0.001)))
 
     for _ in range(max_polls):
         if is_cancelled and is_cancelled():
@@ -168,6 +185,18 @@ async def _submit_and_wait(
 
         status = await client.status(endpoint, request_id, with_logs=False)
         if isinstance(status, fal_client.Completed):
+            if status.error and grace_polls > 0 and _may_be_requeued(status.error):
+                # May be a request fal is about to re-queue; look again before
+                # giving up. A status that flips back to queued/running, or
+                # to completed without an error, carries on as normal.
+                grace_polls -= 1
+                logger.warning(
+                    "fal.ai job %s reported %r; watching %d more poll(s) in "
+                    "case fal retries it itself.",
+                    request_id, status.error, grace_polls,
+                )
+                await asyncio.sleep(poll_interval)
+                continue
             if status.error:
                 raise _translate(
                     RuntimeError(f"fal.ai job {request_id} failed: {status.error}"),
