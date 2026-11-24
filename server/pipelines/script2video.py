@@ -66,6 +66,36 @@ from interfaces.scene_take import Element, plan_scene_take
 logger = logging.getLogger(__name__)
 
 
+
+async def frame_surviving_a_flag(draw, prompt: str, *, fallback_url: str, label: str = ""):
+    """One shot's frame, without letting one flag end the film.
+
+    Job 5fa6f615: a close-up of a sixteen-year-old was flagged by the image
+    checker (`model_moderated`), flagged again on the resubmit, and that single
+    shot ended a four-scene film after the script, the voices and every
+    storyboard were paid for.
+
+    The flag is respected, not argued with: the prompt is NOT reworded to get
+    past the checker, and nothing is drawn in its place. The shot starts from
+    the locked reference -- the character's portrait, or the empty set -- and
+    the film goes on. ``fallback_url`` empty means there is nothing honest to
+    start from, and the flag is raised as before.
+
+    ``draw(prompt)`` is an async callable. Returns ``(url, flagged)``.
+    """
+    from tools.falai_common import ContentFlagged
+
+    try:
+        return await draw(prompt), False
+    except ContentFlagged:
+        if not fallback_url:
+            raise
+        logger.warning(
+            "Frame for %s was refused by the content checker; the shot starts "
+            "from its locked reference instead and nothing was redrawn.", label,
+        )
+        return fallback_url, True
+
 class PipelineCancelled(Exception):
     """Raised cooperatively when a job is cancelled mid-flight."""
 
@@ -4957,12 +4987,20 @@ class Script2VideoPipeline:
                         # frame is retried without wasting money on animating
                         # a frame we're about to throw away.
                         if frame_references:
-                            frame_url = await self.image_gen.generate_image_with_reference(
-                                frame_prompt, frame_references, aspect_ratio, is_cancelled=is_cancelled,
-                                **_frame_label_kwargs(
-                                    self.image_gen, frame_references, shot, characters, portraits,
-                                    matched_char=matched_char, location_plate_url=location_plate_url,
-                                ),
+                            _labels = _frame_label_kwargs(
+                                self.image_gen, frame_references, shot, characters, portraits,
+                                matched_char=matched_char, location_plate_url=location_plate_url,
+                            )
+
+                            async def _draw(text, _refs=frame_references, _labels=_labels):
+                                return await self.image_gen.generate_image_with_reference(
+                                    text, _refs, aspect_ratio, is_cancelled=is_cancelled, **_labels,
+                                )
+
+                            frame_url, _flagged = await frame_surviving_a_flag(
+                                _draw, frame_prompt,
+                                fallback_url=reference_url or location_plate_url or "",
+                                label=f"shot {i + 1}",
                             )
                         else:
                             frame_url = await self.image_gen.generate_image(
