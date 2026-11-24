@@ -1348,6 +1348,40 @@ async def _record_series_episode(job: Job, result: Dict[str, Any]) -> Dict[str, 
     return result
 
 
+def provider_balance_exhausted(exc: BaseException) -> bool:
+    """True when the failure is OUR supplier's account running dry.
+
+    fal answers `User is locked. Reason: Exhausted balance. Top up your balance
+    at fal.ai/dashboard/billing.` (HTTP 403 on submit, 400 elsewhere). It is a
+    fact about our account, not about the customer's film.
+    """
+    text = str(exc).lower()
+    return "exhausted balance" in text or "user is locked" in text
+
+
+def user_facing_failure(exc: BaseException) -> str:
+    """What the customer is told when a job dies.
+
+    Job b054c5a8 ended with `Internal error: User is locked. Reason: Exhausted
+    balance. Top up your balance at fal.ai/dashboard/billing.` -- the supplier's
+    billing instruction, shown to a customer who cannot act on it and should not
+    learn who it is. The operator still gets the real cause, at ERROR, in a form
+    that can be alerted on.
+    """
+    if provider_balance_exhausted(exc):
+        logger.error(
+            "PROVIDER BALANCE EXHAUSTED: a generation provider refused the job "
+            "because our account is out of credit (%s). Top it up; customers "
+            "are told to retry shortly and their credits are refunded.",
+            str(exc)[:200],
+        )
+        return (
+            "Video generation is temporarily unavailable on our side. Nothing "
+            "was charged -- your credits are back, please try again shortly."
+        )
+    return f"Internal error: {exc}"
+
+
 async def run_generation_job(job: Job, api_key: str):
     """Start a job. If require_script_approval, stop after screenwriting."""
     logger.info("run_generation_job ENTERED for job %s", job.id)
@@ -1617,7 +1651,7 @@ async def run_generation_job(job: Job, api_key: str):
             traceback.format_exc(),
         )
         job.status = JobStatus.FAILED
-        job.error = f"Internal error: {exc}"
+        job.error = user_facing_failure(exc)
         await job_store.emit(job, "error", job.error, 100)
         await job_store.persist(job)
         if job.user_id and not job.demo and not job.require_script_approval:
