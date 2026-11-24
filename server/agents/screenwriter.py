@@ -244,6 +244,12 @@ Then stage every scene only with what that sentence names. A door or window show
 weather and light, never a street, a vehicle or a second place: if the story needs
 somewhere else, it is a different scene with a different location.
 
+EVERY VOICE HAS AN ENTRY. Everyone who speaks a line is in "characters", the one
+heard only over a radio or an intercom included: a voice with no entry is cast by
+a hash and can come back the wrong sex and the wrong age. Give each one gender and
+age first in "description" (a dispatcher in her fifties); for a voice the film never
+shows, say so in the description ("heard only over the radio, never seen").
+
 THE BRIEF'S EVENT IS THE CLIMAX. When the brief states something that HAPPENS — "the
 city's power dies the moment she opens it", "the letter burns", "he misses the train" —
 that event is not background colour, it is the film. Make it the "turn" of the climax
