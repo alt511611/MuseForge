@@ -445,6 +445,24 @@ def _speaks_in_a_readable_framing(
     )
 
 
+def _visible_speaker_names(
+    lines: Sequence[Dict[str, Any]], off_screen: Optional[Set[str]] = None
+) -> List[str]:
+    """The distinct speakers _has_one_visible_speaker counts, by display name."""
+    off_screen = {str(name).strip().casefold() for name in (off_screen or set())}
+    names: Dict[str, str] = {}
+    for track in lines or ():
+        who = str(track.get("character") or "").strip()
+        if (
+            str(track.get("line") or "").strip()
+            and who
+            and not is_marked_unseen(who)
+            and speaker_key(who) not in off_screen
+        ):
+            names.setdefault(speaker_key(who), who)
+    return sorted(names.values())
+
+
 def _has_one_visible_speaker(
     lines: Sequence[Dict[str, Any]], off_screen: Optional[Set[str]] = None
 ) -> bool:
@@ -4518,9 +4536,13 @@ class Idea2VideoPipeline:
                 continue
             logger.info(
                 "Scene %s has multiple visible speakers in one combined "
-                "dialogue track; keeping it as voice-over instead of driving "
-                "the wrong face.",
+                "dialogue track (%s; off-screen: %s); keeping it as voice-over "
+                "instead of driving the wrong face.",
                 scene_index,
+                ", ".join(
+                    _visible_speaker_names(lines_by_scene.get(scene_index, ()), off_screen)
+                ),
+                ", ".join(sorted(off_screen or ())) or "none",
             )
             del audio_by_scene[scene_index]
 
