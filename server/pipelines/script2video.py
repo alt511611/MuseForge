@@ -1937,7 +1937,7 @@ def build_frame_prompt(
         dialogue_rank = REQUIRED
     elif lipsync_enabled:
         dialogue_clause = (
-            "The speaking mouth is fully visible, unobscured and facing camera -- "
+            "The speaking mouth is fully visible and unobscured -- "
             "its lips will be animated to the dialogue. Not hidden by hands, "
             "props or hair. "
         )
