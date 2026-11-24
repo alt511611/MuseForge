@@ -74,6 +74,33 @@ class ContentFlagged(RuntimeError):
 CONTENT_POLICY_RETRIES = 1
 
 
+#: fal answers `downstream_service_unavailable` (or a bare 502/503/504) when a
+#: model host blinks. Job 782c689e: the script was written and paid for, the
+#: first portrait drew that error on result fetch, and the whole job died --
+#: "crashed before/during pipeline" -- because nothing here retried anything
+#: but a content flag. A failed fal job is not billed, so a resubmit costs the
+#: wait and nothing else.
+TRANSIENT_RETRIES = 2
+TRANSIENT_BACKOFF_SECONDS = 4.0
+_TRANSIENT_MARKERS = (
+    "downstream_service_unavailable",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+)
+
+
+def is_transient(exc: Exception) -> bool:
+    """A failure that a second submit of the same arguments can clear."""
+    if isinstance(exc, (MuAPICancelled, ContentFlagged, TimeoutError)):
+        return False
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int) and status in (500, 502, 503, 504):
+        return True
+    text = str(exc).lower()
+    return any(marker in text for marker in _TRANSIENT_MARKERS)
+
+
 async def fal_generate(
     client: fal_client.AsyncClient,
     endpoint: str,
@@ -88,8 +115,9 @@ async def fal_generate(
     No silent MuAPI fallback -- fal.ai is an explicit user choice, so errors
     surface clearly rather than silently masking a wrong provider config.
     """
-    attempts = CONTENT_POLICY_RETRIES + 1
-    for attempt in range(attempts):
+    flag_retries = CONTENT_POLICY_RETRIES
+    outage_retries = TRANSIENT_RETRIES
+    while True:
         try:
             return await _submit_and_wait(
                 client,
@@ -100,16 +128,25 @@ async def fal_generate(
                 max_polls=max_polls,
             )
         except ContentFlagged:
-            if attempt == attempts - 1:
+            if flag_retries <= 0:
                 raise
+            flag_retries -= 1
             logger.warning(
-                "fal.ai flagged %s as a content policy violation on attempt "
-                "%d/%d; resubmitting the same arguments once before giving "
-                "up.",
+                "fal.ai flagged %s as a content policy violation; "
+                "resubmitting the same arguments once before giving up.",
                 endpoint,
-                attempt + 1,
-                attempts,
             )
+        except Exception as exc:
+            if outage_retries <= 0 or not is_transient(exc):
+                raise
+            outage_retries -= 1
+            delay = TRANSIENT_BACKOFF_SECONDS * (TRANSIENT_RETRIES - outage_retries)
+            logger.warning(
+                "fal.ai %s hit a transient failure (%s); resubmitting in "
+                "%.0fs (%d left).",
+                endpoint, str(exc)[:200], delay, outage_retries,
+            )
+            await asyncio.sleep(delay)
 
 
 async def _submit_and_wait(
