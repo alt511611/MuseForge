@@ -25,6 +25,7 @@ from tools.anthropic_request import (
     log_usage,
     refusal_of,
 )
+from tools.llm_provider import api_key as llm_api_key, make_client as make_llm_client
 from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
 
 logger = logging.getLogger(__name__)
@@ -383,7 +384,7 @@ Respond ONLY with valid JSON array containing a single shot object:
     MAX_SHOT_TOKENS = 6000
 
     def __init__(self, api_key: Optional[str] = None, demo: bool = False):
-        self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        self.api_key = api_key or llm_api_key()
         self.muapi_key = os.environ.get("MUAPI_KEY", "")
         self.demo = demo
 
@@ -1483,7 +1484,7 @@ Respond ONLY with valid JSON array containing a single shot object:
             # Filter blocks by type; never index by position. (2) The old
             # flat 60s httpx deadline with no retries turned a slow or busy
             # upstream into the same silent template fallback.
-            client = anthropic.AsyncAnthropic(api_key=self.api_key, max_retries=2)
+            client = make_llm_client(self.api_key, max_retries=2)
             async with client.messages.stream(
                 model="claude-sonnet-5",
                 # Thinking and text share this budget, so the pre-thinking
