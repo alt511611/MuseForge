@@ -166,6 +166,11 @@ class ElevenLabsVoiceGenerator:
         # The gender each character was cast on, kept so verify_cast can
         # re-pick INSIDE the right pool when an id turns out to be unusable.
         self._character_gender: Dict[str, str] = {}
+        # The age bucket (young / middle_aged / old) each character was cast
+        # on, and the voices a library character brought with it, which no
+        # re-casting is allowed to touch.
+        self._character_age: Dict[str, str] = {}
+        self._locked: set = set()
 
     # --- casting (identical rules to the MuAPI path) ---------------------
 
@@ -210,6 +215,7 @@ class ElevenLabsVoiceGenerator:
             voice = str(voice_id or "").strip()
             if key and voice:
                 self._character_voices[key] = voice
+                self._locked.add(key)
 
     def cast_characters(self, characters: Iterable[Any]) -> Dict[str, str]:
         """Assign every named character a gender-matched voice up front."""
@@ -234,6 +240,7 @@ class ElevenLabsVoiceGenerator:
             if pool is None:
                 continue  # hash fallback assigns on the character's first line
             self._character_gender[key] = gender
+            self._character_age[key] = gender_of.infer_age(description)
             self._assign(key, pool)
         # Written down at INFO because a wrong voice is invisible from the
         # code and obvious from the film: a delivered drama whose only
@@ -318,6 +325,70 @@ class ElevenLabsVoiceGenerator:
     def _headers(self) -> Dict[str, str]:
         return {"xi-api-key": self.api_key, "Content-Type": "application/json"}
 
+    def _recast_by_fit(self, available: List[Dict[str, str]]) -> None:
+        """Give each character the voice of their own gender AND age.
+
+        The configured pools are five ids and say nothing about age, so a man in
+        his seventies and a man in his thirties were told apart only by a hash.
+        The account lists every voice with the provider's own age label; this
+        picks, for each character in turn, the unused voice whose gender matches
+        and whose age is closest (an exact match, then the next age over, then
+        the far one), preferring the voices already configured for ties so a
+        deployment's choices still count. Locked voices (a library character's
+        own) are never touched, nobody shares a voice inside one drama, and a
+        character whose gender or age is unknown keeps the cast they have.
+        """
+        order = {gender_of.YOUNG: 0, gender_of.MIDDLE_AGED: 1, gender_of.OLD: 2}
+        configured = list(self.SYSTEM_VOICE_IDS)
+        taken = {v for k, v in self._character_voices.items() if k in self._locked}
+        # Oldest first: the scarcest voices (old ones are few) go to the people
+        # who need them, instead of to whoever happens to be cast first.
+        keys = sorted(
+            (k for k in self._character_voices if k not in self._locked),
+            key=lambda k: (-order.get(self._character_age.get(k, ""), 1), k),
+        )
+        for key in keys:
+            gender = self._character_gender.get(key, "")
+            age = self._character_age.get(key, "")
+            if not gender or not age:
+                taken.add(self._character_voices[key])
+                continue
+            wanted = order[age]
+
+            def distance(v):
+                theirs = order.get(v.get("age", ""), 1)
+                tie = configured.index(v["voice_id"]) if v["voice_id"] in configured else len(configured)
+                digest = hashlib.sha256(f"{key}:{v['voice_id']}".encode()).digest()[0]
+                return (abs(theirs - wanted), tie, digest)
+
+            candidates = [
+                v for v in available
+                if v.get("voice_id") and v.get("gender") == gender
+                and v["voice_id"] not in taken
+            ]
+            if not candidates:
+                taken.add(self._character_voices[key])
+                continue
+            best = min(candidates, key=distance)
+            current = self._character_voices[key]
+            current_row = next((v for v in available if v.get("voice_id") == current), None)
+            # Keep the cast they already have when it is no worse a fit.
+            if (
+                current_row is not None
+                and current not in taken
+                and current_row.get("gender") == gender
+                and distance(current_row)[0] <= distance(best)[0]
+            ):
+                taken.add(current)
+                continue
+            logger.info(
+                "Voice for %r (%s, %s) re-cast %s -> %s (%s, %s) to fit.",
+                key, gender, age, current, best["voice_id"],
+                best.get("name", "?"), best.get("age") or "age unlabelled",
+            )
+            self._character_voices[key] = best["voice_id"]
+            taken.add(best["voice_id"])
+
     async def verify_cast(self) -> Dict[str, str]:
         """Check the cast against what this ACCOUNT can actually speak with.
 
@@ -353,6 +424,8 @@ class ElevenLabsVoiceGenerator:
         names = {v["voice_id"]: v.get("name", "") for v in available}
         if not usable:
             return dict(self._character_voices)
+
+        self._recast_by_fit(available)
 
         for key, voice_id in list(self._character_voices.items()):
             if voice_id in usable:
@@ -451,6 +524,10 @@ class ElevenLabsVoiceGenerator:
                 # on some cloned voices, which is why it is read rather than
                 # required -- an unlabelled voice is still a voice.
                 "gender": str((v.get("labels") or {}).get("gender", "")).strip().lower(),
+                # young / middle_aged / old, as the provider labels it. Casting
+                # on gender alone gave a man in his seventies the register of a
+                # man in his thirties (job bb6c6f1f).
+                "age": str((v.get("labels") or {}).get("age", "")).strip().lower().replace(" ", "_").replace("-", "_"),
             }
             for v in (data.get("voices") or [])
             if v.get("voice_id")

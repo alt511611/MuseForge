@@ -33,6 +33,7 @@ async def test_beatoven_payload_matches_confirmed_openapi(monkeypatch):
     import tools.falai_music_generator as mod
     from tools.falai_music_generator import FalAIMusicGenerator
 
+    monkeypatch.setenv("FALAI_MUSIC_MODEL", "beatoven/music-generation")
     captured = {}
 
     async def fake_fal_generate(client, endpoint, arguments, **_kwargs):
@@ -58,6 +59,7 @@ async def test_duration_clamped_to_5_150(monkeypatch):
     import tools.falai_music_generator as mod
     from tools.falai_music_generator import FalAIMusicGenerator
 
+    monkeypatch.setenv("FALAI_MUSIC_MODEL", "beatoven/music-generation")
     captured = {}
 
     async def fake_fal_generate(client, endpoint, arguments, **_kwargs):
@@ -79,3 +81,28 @@ async def test_demo_returns_empty_string():
 
     gen = FalAIMusicGenerator(api_key="", demo=True)
     assert await gen.generate_instrumental("cinematic") == ""
+
+
+@pytest.mark.asyncio
+async def test_the_default_music_model_is_elevenlabs_v25_in_its_own_units(monkeypatch):
+    """One fal bill, and a model whose request is in milliseconds with a flag
+    that guarantees no vocals -- not Beatoven's seconds and negative prompt,
+    which ElevenLabs rejects or ignores."""
+    import tools.falai_music_generator as mod
+    from tools.falai_music_generator import FalAIMusicGenerator
+
+    monkeypatch.delenv("FALAI_MUSIC_MODEL", raising=False)
+    captured = {}
+
+    async def fake_fal_generate(client, endpoint, arguments, **_kwargs):
+        captured["endpoint"], captured["arguments"] = endpoint, arguments
+        return {"audio": {"url": "https://fal.media/m.mp3"}}
+
+    monkeypatch.setattr(mod, "fal_generate", fake_fal_generate)
+    gen = FalAIMusicGenerator(api_key="k", demo=False)
+    assert await gen.generate_instrumental(mood="dread", duration=30) == "https://fal.media/m.mp3"
+    assert captured["endpoint"] == "elevenlabs/music/v2.5"
+    args = captured["arguments"]
+    assert args["music_length_ms"] == 30000
+    assert args["force_instrumental"] is True
+    assert "duration" not in args and "negative_prompt" not in args
