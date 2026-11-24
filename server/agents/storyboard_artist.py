@@ -737,7 +737,7 @@ Respond ONLY with valid JSON array containing a single shot object:
         cls._apply_acting_beats(shots, scene_emotion)
         cls._note_scale_drift(shots, scene_shot_scale)
         shots = cls._clamp_durations(shots, is_finale, tension, budget)
-        return cls._apply_shot_plan(
+        planned = cls._apply_shot_plan(
             shots,
             scene_emotion,
             tension,
@@ -745,6 +745,9 @@ Respond ONLY with valid JSON array containing a single shot object:
             lipsync_enabled,
             budget,
             last_speaker=cls._last_visible_speaker(scene_dialogue),
+        )
+        return cls._ensure_speakers_are_shown(
+            planned, characters or [], scene_dialogue, scene_emotion
         )
 
     @classmethod
@@ -840,6 +843,106 @@ Respond ONLY with valid JSON array containing a single shot object:
                 kept.append(shot)
                 people += 1
         return kept
+
+    @staticmethod
+    def _visible_speaker_lines(scene_dialogue: str, characters) -> List[tuple]:
+        """``[(cast name, first line)]`` for each visible character who speaks.
+
+        Heard-only voices (O.S./V.O., a name with no portrait in the cast) are
+        left out: they have no face to be on.
+        """
+        visible = {
+            speaker_key(c.name): c.name
+            for c in (characters or [])
+            if getattr(c, "is_visible", True) and (c.name or "").strip()
+        }
+        found: dict = {}
+        for raw in (scene_dialogue or "").splitlines():
+            if ":" not in raw:
+                continue
+            head, line = raw.split(":", 1)
+            if re.search(r"\((?:o\.?s\.?|v\.?o\.?)\b", head, re.IGNORECASE):
+                continue
+            key = speaker_key(re.sub(r"\s*\(.*$", "", head).strip())
+            if key in visible and key not in found and line.strip():
+                found[key] = (visible[key], line.strip())
+        return list(found.values())
+
+    @classmethod
+    def _ensure_speakers_are_shown(
+        cls,
+        shots: List[StoryboardShot],
+        characters,
+        scene_dialogue: str,
+        scene_emotion: str = "",
+    ) -> List[StoryboardShot]:
+        """A visible character who SPEAKS in a scene is on screen in some shot.
+
+        The prompt says so ("THE PICTURE FOLLOWS THE SOUND") and the model
+        still wrote "Tomas hears Ilya's voice answer from the shadowed
+        doorway" for a character who is in the room and has a portrait: job
+        21a87c5a never shows Ilya, and his "Nobody goes out in this" plays
+        over Tomas's face. A rule a model may ignore is not a guarantee, so it
+        is enforced here.
+
+        Only rewrites; never adds a shot (the scene's count and its seconds
+        are the plan's). The shot repurposed is the LAST one that shows
+        people, because the first is the master the scene is built on. A
+        scene with a single shot is left alone -- rewriting it would remove
+        whoever it already shows. A speaker is "shown" when some shot's own
+        text names them as present (on_screen_name_matches, which does not
+        count "Ilya's voice answers" as a presence).
+        """
+        from pipelines.script2video import on_screen_name_matches
+
+        speakers = cls._visible_speaker_lines(scene_dialogue, characters)
+        if not speakers or len(shots) < 2:
+            return shots
+        cast = [c for c in (characters or []) if getattr(c, "is_visible", True)]
+
+        def shown() -> set:
+            seen = set()
+            for shot in shots:
+                if getattr(shot, "shows_people", None) is False:
+                    continue
+                text = f"{shot.visual_desc} {shot.motion_desc}".lower()
+                for _, character in on_screen_name_matches(text, cast):
+                    seen.add(speaker_key(character.name))
+            return seen
+
+        for name, line in speakers:
+            if speaker_key(name) in shown():
+                continue
+            candidates = [
+                i for i, s in enumerate(shots)
+                if i > 0 and getattr(s, "shows_people", None) is not False
+            ]
+            if not candidates:
+                continue
+            shot = shots[candidates[-1]]
+            spoken = line if len(line) <= 80 else line[:77].rstrip() + "..."
+            shot.visual_desc = (
+                f"Close-up on {name}'s face as {name} speaks to the others in "
+                f"the room: \"{spoken}\""
+            )
+            shot.motion_desc = (
+                f"{name} speaks, the mouth moving with the words; the smallest "
+                f"shift of the head and eyes. Almost still."
+            )
+            shot.shows_people = True
+            shot.shot_type = "close-up"
+            try:
+                shot.expression_desc = acting.onset_expression(scene_emotion, "")
+                shot.expression_peak_desc = acting.peak_expression(scene_emotion)
+            except AttributeError:
+                pass
+            logger.info(
+                "Scene's storyboard never showed %s, who speaks in it; shot %d "
+                "now shows them.",
+                name,
+                candidates[-1] + 1,
+            )
+        return shots
 
     @staticmethod
     def _last_visible_speaker(scene_dialogue: str) -> str:
