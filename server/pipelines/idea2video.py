@@ -445,6 +445,34 @@ def _speaks_in_a_readable_framing(
     )
 
 
+def _heard_only_names(characters: Optional[Sequence[Any]], dialogue: Any = ()) -> Set[str]:
+    """Casefolded speakers the film only HEARS: hidden characters, plus anyone
+    who speaks and has no entry in the cast at all.
+
+    Job bb6c6f1f: a dispatcher named Lena, "heard only over a radio and never
+    seen", was written into the dialogue but not into the cast (a cast entry is
+    a portrait and a face, and she has neither). Every place that decided who
+    is on screen read ``not c.is_visible`` off the cast, so Lena was nobody's
+    off-screen voice and "Lena, Mira" was a two-hander: lip sync was refused on
+    the scene and the surcharge refunded. A speaker with no portrait cannot be
+    shown, so she is heard-only by construction.
+    """
+    cast = list(characters or ())
+    heard = {c.name.casefold() for c in cast if not getattr(c, "is_visible", True)}
+    if not cast:
+        return heard
+    known = {speaker_key(c.name) for c in cast}
+    for entry in dialogue or ():
+        who = (
+            entry.get("character") if isinstance(entry, dict)
+            else getattr(entry, "character", "")
+        )
+        key = speaker_key(who) if who else ""
+        if key and key not in known:
+            heard.add(key)
+    return heard
+
+
 def _visible_speaker_names(
     lines: Sequence[Dict[str, Any]], off_screen: Optional[Set[str]] = None
 ) -> List[str]:
@@ -4528,6 +4556,11 @@ class Idea2VideoPipeline:
         # before ffmpeg splitting, uploads and provider calls, so an
         # intentionally unsupported scene consumes neither render time nor
         # third-party lip-sync spend.
+        if characters:
+            off_screen = set(off_screen or ()) | _heard_only_names(
+                characters,
+                [t for lines in lines_by_scene.values() for t in lines],
+            )
         for scene_index in list(audio_by_scene):
             if _has_one_visible_speaker(
                 lines_by_scene.get(scene_index, ()), off_screen
@@ -5217,9 +5250,9 @@ class Idea2VideoPipeline:
                     scene_emotion=_scene_emotion(scene_script),
                     scene_dialogue=_format_scene_dialogue(
                         _scene_dialogue(scene_script),
-                        off_screen={
-                            c.name.casefold() for c in characters if not c.is_visible
-                        },
+                        off_screen=_heard_only_names(
+                            characters, _scene_dialogue(scene_script)
+                        ),
                     ),
                     scene_direction=_format_scene_direction(scene_script),
                     # A retake replaces one scene inside a cut that already
@@ -7171,9 +7204,7 @@ class Idea2VideoPipeline:
                     # dialogue is what tells the artist which moment matters.
                     scene_dialogue=_format_scene_dialogue(
                         scene_dialogue_lines,
-                        off_screen={
-                            c.name.casefold() for c in characters if not c.is_visible
-                        },
+                        off_screen=_heard_only_names(characters, scene_dialogue_lines),
                     ),
                     # Measured, not counted in words. Decides which angles of
                     # this scene are still under the line when they open --
