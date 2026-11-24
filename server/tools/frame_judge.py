@@ -77,8 +77,9 @@ async def judge_frame(
         import anthropic
 
         from tools.anthropic_request import classify, log_usage, refusal_of
+        from tools.llm_provider import make_client as make_llm_client
 
-        client = anthropic.AsyncAnthropic(api_key=anthropic_api_key, max_retries=2)
+        client = make_llm_client(anthropic_api_key, max_retries=2)
         message = await client.messages.create(
             model=MODEL,
             thinking={"type": "disabled"},

@@ -101,6 +101,7 @@ from interfaces.delivery import resolve_tier as resolve_delivery_tier
 from interfaces.language import normalize as normalize_language
 from interfaces.render_eta import RenderPlan, prior_seconds
 from interfaces.second_budget import SECONDS_PER_CREDIT, total_budget_seconds
+from tools.llm_provider import api_key as llm_api_key
 from tools.muapi_lipsync import is_lipsync_enabled
 from tools.muapi_voice_generator import is_dialogue_enabled
 from jobs import (
@@ -862,7 +863,7 @@ async def health():
         # /api/estimate is stuck at ~5s (that's the demo short-circuit).
         "demo_reason": _demo_reason(),
         "muapi_configured": bool((os.environ.get("MUAPI_KEY") or "").strip()),
-        "claude_configured": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "claude_configured": bool(llm_api_key()),
         # True if the screenwriter/storyboard agents have ANY working LLM
         # path (MuAPI's Claude route tried first, direct Anthropic as
         # fallback) -- distinct from claude_configured, which only reflects
@@ -870,7 +871,7 @@ async def health():
         # is already covering it.
         "creative_llm_available": bool(
             (os.environ.get("MUAPI_KEY") or "").strip()
-            or os.environ.get("ANTHROPIC_API_KEY")
+            or llm_api_key()
         ),
         "auth_configured": bool(SUPABASE_URL),
         # Whether the server will honour dialogue_enabled at all. The client

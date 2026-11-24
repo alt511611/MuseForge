@@ -27,6 +27,7 @@ from interfaces.second_budget import (
     spoken_words_for,
 )
 from tools.anthropic_request import classify, log_usage
+from tools.llm_provider import api_key as llm_api_key
 from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
 
 logger = logging.getLogger(__name__)
@@ -710,7 +711,7 @@ into a single scene rather than adding one."""
     SCRIPT_STREAM_TIMEOUT_SECONDS = 600.0
 
     def __init__(self, api_key: Optional[str] = None, demo: bool = False):
-        self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        self.api_key = api_key or llm_api_key()
         self.muapi_key = os.environ.get("MUAPI_KEY", "")
         self.demo = demo
         self._anthropic_client: Any = None
@@ -724,11 +725,9 @@ into a single scene rather than adding one."""
         without the SDK installed, which the demo and template paths rely on.
         """
         if self._anthropic_client is None:
-            import anthropic
+            from tools.llm_provider import make_client
 
-            self._anthropic_client = anthropic.AsyncAnthropic(
-                api_key=self.api_key, max_retries=2
-            )
+            self._anthropic_client = make_client(self.api_key, max_retries=2)
         return self._anthropic_client
 
     def _system_prompt(

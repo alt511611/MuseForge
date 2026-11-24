@@ -35,6 +35,7 @@ from interfaces.impact import build_impact_filters, plan_impacts
 from interfaces.pacing import plan_internal_cuts
 from interfaces.visual_style import PHOTOREAL_RENDER
 from interfaces.visual_style import resolve as resolve_visual_style
+from tools.llm_provider import api_key as llm_api_key
 from tools.character_qa import (
     format_expected_setting,
     is_character_qa_enabled,
@@ -4264,7 +4265,7 @@ class Script2VideoPipeline:
                     matched_char.static_features if matched_char else "",
                     getattr(matched_char, "wardrobe", "") if matched_char else "",
                     expected_setting,
-                    os.environ.get("ANTHROPIC_API_KEY", ""),
+                    llm_api_key(),
                 )
             )
         try:
@@ -4709,7 +4710,7 @@ class Script2VideoPipeline:
         semaphore = asyncio.Semaphore(int(os.environ.get("MUSEFORGE_SHOT_CONCURRENCY", "2")))
         qa_enabled = is_character_qa_enabled() and not self.demo
         dynamic_reference_enabled = is_dynamic_reference_enabled()
-        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        anthropic_key = llm_api_key()
         expected_setting = format_expected_setting(
             setting_location, setting_time_of_day, setting_era
         )
