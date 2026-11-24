@@ -233,6 +233,17 @@ lines; your job is then to fill in the fields it does not mention, not to rewrit
 If the brief supplies the spoken lines, put them in "dialogue" word for word — never
 replace them with lines of your own and never return an empty dialogue list.
 
+THE ROOM IS ITS CONTENTS. "setting_location" is not a mood, it is the inventory the
+set is built from: one empty plate is drawn from that sentence and every shot is
+filmed against it, and a video model invents whatever a plate lacks -- "turns from
+the stove" over a plate with no stove came back as a kitchen with a steaming pot, a
+fruit bowl and an ambulance at the door. So name, inside "setting_location", the
+fixed furniture and fixtures that ANY scene's action touches (the stove, the table the
+radio stands on, the bunks, the one window, the one door) and nothing no scene uses.
+Then stage every scene only with what that sentence names. A door or window shows
+weather and light, never a street, a vehicle or a second place: if the story needs
+somewhere else, it is a different scene with a different location.
+
 THE BRIEF'S EVENT IS THE CLIMAX. When the brief states something that HAPPENS — "the
 city's power dies the moment she opens it", "the letter burns", "he misses the train" —
 that event is not background colour, it is the film. Make it the "turn" of the climax
@@ -405,7 +416,7 @@ Respond ONLY with valid JSON matching this schema:
   "cliffhanger": "micro-drama mode ONLY: the unanswered question the last frame leaves - otherwise an empty string",
   "mood": "string",
   "estimated_duration_seconds": 30,
-  "setting_location": "e.g. coastal village wooden pier",
+  "setting_location": "the ONE place plus its fixed contents, e.g. coastal village wooden pier with a bollard, a coiled rope and a moored rowboat",
   "setting_time_of_day": "e.g. sunset, night, midday",
   "setting_era": "e.g. present day, 1950s",
   "characters": [{
