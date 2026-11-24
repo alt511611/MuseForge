@@ -865,7 +865,7 @@ into a single scene rather than adding one."""
 
         # 2) Fall back to a direct Anthropic call if a key is configured.
         if self.api_key:
-            return await self._write_with_claude(
+            script = await self._write_with_claude(
                 idea,
                 style,
                 num_scenes,
@@ -877,6 +877,15 @@ into a single scene rather than adding one."""
                 series_brief,
                 lipsync_enabled=lipsync_enabled,
             )
+            from tools import dialogue_editor
+
+            if dialogue_editor.enabled() and not dialogue_editor.customer_wrote_the_lines(
+                idea, user_requirement
+            ):
+                script = await dialogue_editor.edit_dialogue(
+                    script, self._anthropic(), self.MODEL
+                )
+            return script
 
         # 3) No provider answered. The deterministic template is NOT an
         #    acceptable substitute for a paid render -- it discards the user's
