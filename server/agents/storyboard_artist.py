@@ -1051,6 +1051,15 @@ Respond ONLY with valid JSON array containing a single shot object:
         # share _clamp_durations gave it was a share of a cut that no longer
         # happens there.
         master.duration_seconds = plan[0].generate_seconds
+        if cls._subject_speaks_last(master, characters, last_speaker):
+            # The back half of the scene is where the last line is spoken, and
+            # it is the master subject's own. A cutaway there is either the
+            # listener under the speaker's words or a one-person "extreme
+            # close-up" the video model cannot frame (job 21a87c5a came back
+            # as a full body). The master already holds the speaker: let it
+            # carry the whole scene, uncut.
+            master.deliver_seconds = 0.0
+            return [master]
         reaction = cls._build_reaction_shot(
             master, scene_emotion, characters, last_speaker=last_speaker
         )
@@ -1058,6 +1067,27 @@ Respond ONLY with valid JSON array containing a single shot object:
         reaction.deliver_seconds = plan[1].deliver_seconds
         reaction.role = plan[1].role
         return [master, reaction]
+
+    @staticmethod
+    def _subject_speaks_last(
+        master: StoryboardShot,
+        characters: List[CharacterInScene],
+        last_speaker: str,
+    ) -> bool:
+        if not last_speaker:
+            return False
+        text = f"{master.visual_desc} {master.motion_desc}".lower()
+        subject = next(
+            (
+                c
+                for c in characters
+                if getattr(c, "is_visible", True) and (c.name or "").lower() in text
+            ),
+            None,
+        )
+        return subject is not None and speaker_key(subject.name) == speaker_key(
+            last_speaker
+        )
 
     #: Who the cutaway is ON. A drama with two people in the scene cuts to the
     #: OTHER one -- that is what a reaction shot is, and the pipeline can hold

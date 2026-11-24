@@ -48,11 +48,15 @@ def test_a_voice_only_line_is_not_the_last_speaker():
     assert StoryboardArtist._last_visible_speaker(only_radio) == ""
 
 
-def test_the_cutaway_stays_on_the_face_that_is_still_talking(monkeypatch):
+def test_the_master_carries_the_whole_scene_when_its_subject_speaks_last(monkeypatch):
     out = _plan([_shot("Mira's face fills the frame as she keys the radio")], DIALOGUE, monkeypatch)
-    assert len(out) == 2
-    assert "Tomas" not in out[1].visual_desc
-    assert "Mira" in out[1].visual_desc
+    # No cutaway at all: neither Tomas under Mira's words, nor a one-person
+    # "extreme close-up on the eyes and mouth" the model drew as a full body
+    # (job 21a87c5a).
+    assert len(out) == 1
+    assert out[0].deliver_seconds == 0.0
+    assert out[0].duration_seconds == 12.0
+    assert "Extreme close-up" not in out[0].visual_desc
 
 
 def test_the_cutaway_still_goes_to_the_listener_when_the_speaker_is_done(monkeypatch):
