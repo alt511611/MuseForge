@@ -14,7 +14,8 @@ import httpx
 from agents.storyboard_artist import StoryboardArtist
 from interfaces import acting
 from interfaces import who_speaks
-from interfaces import character_sheet
+from interfaces import character_sheet, long_take
+from tools.sheet_views import split_sheet
 from interfaces.camera import get_director_style
 from interfaces.character import CharacterInScene
 from interfaces.color_grade import get_color_grade, palette_for
@@ -4234,6 +4235,7 @@ class Script2VideoPipeline:
         expected_setting: str = "",
         bridge_frame_url: Optional[str] = None,
         on_opening_frame: Optional[Callable[[Optional[str]], None]] = None,
+        world_state: str = "",
     ) -> Dict[str, Any]:
         """Render a whole scene in ONE generation, cuts included.
 
@@ -4342,7 +4344,11 @@ class Script2VideoPipeline:
             elements.append(
                 Element(
                     name=name,
-                    images=(portrait,),
+                    # A sheet goes as the views it was drawn as -- frontal
+                    # first, then three angles -- not as one grid standing in
+                    # for a face (tools/sheet_views). Anything else, or a
+                    # sheet that could not be cut, goes whole as before.
+                    images=(await self._views_of(portrait)) or (portrait,),
                     # The costume, in the take's own words. The portrait is
                     # the face and the face survived; what drifted across a
                     # take seam on a delivered drama was the outfit, which
@@ -4352,12 +4358,35 @@ class Script2VideoPipeline:
                 )
             )
 
+        # The take's LAST frame, drawn, when it is long enough to drift and
+        # the endpoint takes one (interfaces/long_take). Drawn from the
+        # opening frame and the anchor's own reference, at the end of the
+        # scene's last beat.
+        end_image = ""
+        if (
+            matched_char is not None
+            and start_image
+            and "end_image_url" in getattr(backend, "fields", ())
+            and long_take.is_long(scene_seconds)
+        ):
+            end_image = await self._render_long_take_end(
+                start_image,
+                shots[-1],
+                matched_char,
+                aspect_ratio,
+                is_cancelled,
+                portrait=portraits.get(getattr(matched_char, "name", "")),
+                world_state=world_state,
+            ) or ""
+
         take = plan_scene_take(
             scene_seconds,
             shots,
             backend,
             elements=elements,
             start_image=start_image,
+            end_image=end_image,
+            world_state=world_state,
             # The lines, only when this take is the thing that says them. A
             # scene rendered mute is voiced by the TTS pass and lip-synced
             # afterwards, and its words reach the picture that way.
@@ -4673,6 +4702,8 @@ class Script2VideoPipeline:
         matched_char=None,
         aspect_ratio: str = "16:9",
         is_cancelled: Optional[Callable[[], bool]] = None,
+        portrait: Optional[str] = None,
+        world_state: str = "",
     ) -> Optional[str]:
         """Edit this shot's start frame into its acted peak, or return None.
 
@@ -4689,7 +4720,28 @@ class Script2VideoPipeline:
         A shot without an end frame is exactly the shot this pipeline produced
         before any of this existed.
         """
-        if not frame_url or not acting.is_end_frame_enabled():
+        if not frame_url:
+            return None
+        # A take long enough to drift is anchored at its end even when the
+        # acting pass is off (interfaces/long_take). When the acting pass is
+        # on and can run, ITS end frame is used instead: it is an edit of this
+        # same start frame, so it anchors the face just as well, and an
+        # operator who switched it on asked for that performance.
+        acted = (
+            acting.is_end_frame_enabled()
+            and bool((getattr(shot, "expression_peak_desc", "") or "").strip())
+            and getattr(self.image_gen, "edit_image", None) is not None
+        )
+        if (
+            not acted
+            and matched_char is not None
+            and long_take.is_long(getattr(shot, "duration_seconds", 0))
+        ):
+            return await self._render_long_take_end(
+                frame_url, shot, matched_char, aspect_ratio, is_cancelled,
+                portrait=portrait, world_state=world_state,
+            )
+        if not acting.is_end_frame_enabled():
             return None
         # An end frame is a FACE landing somewhere. On an establishing plate or
         # an insert there is no face to act, and asking an edit model to change
@@ -4733,6 +4785,66 @@ class Script2VideoPipeline:
             return None
         logger.info("Shot acted between two frames: peak=%.60s", peak)
         return end_frame_url
+
+    async def _views_of(self, portrait: str) -> Tuple[str, ...]:
+        """A sheet's four views, cut once per sheet per pipeline; () when the
+        flag is off, in demo, or the sheet cannot be cut."""
+        if self.demo or not portrait or not character_sheet.is_enabled():
+            return ()
+        cache = self.__dict__.setdefault("_sheet_views", {})
+        if portrait not in cache:
+            cache[portrait] = await split_sheet(portrait)
+        return cache[portrait]
+
+    async def _render_long_take_end(
+        self,
+        frame_url: str,
+        shot,
+        matched_char,
+        aspect_ratio: str = "16:9",
+        is_cancelled: Optional[Callable[[], bool]] = None,
+        portrait: Optional[str] = None,
+        world_state: str = "",
+    ) -> Optional[str]:
+        """The last frame of a long take, drawn from its first and the face.
+
+        Fail-open like every end frame here: None animates the take from its
+        opening frame alone, exactly as before.
+        """
+        name = getattr(matched_char, "name", "") or ""
+        references = [frame_url] + ([portrait] if portrait and portrait != frame_url else [])
+        prompt = long_take.end_frame_prompt(
+            action=getattr(shot, "motion_desc", "") or getattr(shot, "visual_desc", "") or "",
+            name=name,
+            peak=getattr(shot, "expression_peak_desc", "") or "",
+            world_state=world_state,
+            has_reference=len(references) > 1,
+        )
+        labels = (
+            {"reference_labels": ["the opening frame of this shot", name][: len(references)]}
+            if getattr(self.image_gen, "accepts_reference_labels", False)
+            else {}
+        )
+        try:
+            end_frame_url = await self.image_gen.generate_image_with_reference(
+                prompt, references, aspect_ratio, is_cancelled=is_cancelled, **labels
+            )
+        except MuAPICancelled:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Long-take end frame could not be drawn (%s: %s); the take is "
+                "anchored at its start only.",
+                type(exc).__name__,
+                exc,
+            )
+            return None
+        if end_frame_url:
+            logger.info(
+                "Shot of %ss anchored at both ends (interfaces/long_take).",
+                getattr(shot, "duration_seconds", "?"),
+            )
+        return end_frame_url or None
 
     async def run(
         self,
@@ -4961,6 +5073,9 @@ class Script2VideoPipeline:
             result = await self._render_scene_as_one_take(
                 bridge_frame_url=bridge_url,
                 on_opening_frame=on_opening_frame,
+                # The event, once it has happened: the take's prompt holds it
+                # on every beat (interfaces/scene_take.SceneTake.world_state).
+                world_state=(world_change or "").strip() or (world_state or "").strip(),
                 shots=shots,
                 characters=characters,
                 portraits=portraits,
@@ -5292,6 +5407,10 @@ class Script2VideoPipeline:
                             matched_char=matched_char,
                             aspect_ratio=aspect_ratio,
                             is_cancelled=is_cancelled,
+                            portrait=(
+                                portraits.get(matched_char.name) if matched_char else None
+                            ),
+                            world_state=change_state,
                         )
 
                     # Record this shot's final frame (post-repair, if any)
