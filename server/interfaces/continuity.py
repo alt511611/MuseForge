@@ -39,6 +39,11 @@ _OPPOSED = (
 _DECLARED_JUMP = re.compile(r"^\s*(?:jump|later|time\s*cut|cut\s*to)\b", re.IGNORECASE)
 
 
+def is_declared_jump(starts_with: str) -> bool:
+    """Whether a scene's opening state declares a jump the writer meant."""
+    return bool(_DECLARED_JUMP.match(starts_with or ""))
+
+
 def _field(scene: Any, name: str) -> str:
     if isinstance(scene, dict):
         value = scene.get(name, "")

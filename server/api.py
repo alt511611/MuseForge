@@ -2590,6 +2590,10 @@ async def commission_episode(
         library_characters=series.preset_characters(),
         series_id=series.id,
         series_brief=brief,
+        # The room the series was established in, as a picture. Without it
+        # every episode drew its set from the setting's words alone, and the
+        # same words came back as a different room each time.
+        location_url=series.location_plate_url,
     )
     job.episode_number = series_store.reserve_episode(series, job.id)
     await series_store.save(current_user.user_id, series)
@@ -2777,6 +2781,7 @@ async def admin_retry_job(
         character_image=old.character_image,
         character_name=old.character_name,
         location_image=old.location_image,
+        location_url=old.location_url,
         music_enabled=old.music_enabled,
         dialogue_enabled=old.dialogue_enabled,
         lipsync_enabled=old.lipsync_enabled,

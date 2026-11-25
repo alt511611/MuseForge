@@ -7,7 +7,7 @@ import re
 import shutil
 import tempfile
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 
@@ -16,7 +16,7 @@ from interfaces import acting
 from interfaces import who_speaks
 from interfaces.camera import get_director_style
 from interfaces.character import CharacterInScene
-from interfaces.color_grade import get_color_grade
+from interfaces.color_grade import get_color_grade, palette_for
 from interfaces.delivery import (
     DELIVERY_LADDER,
     SNAP_TO_LADDER_TOLERANCE,
@@ -972,6 +972,27 @@ _PLATE_REFERENCE_NOTE = (
     "materials and light. Nobody in it is a character. "
 )
 
+#: The same sentence when the scene before this one was in the same place and
+#: its opening frame is sent as well (interfaces/cut_bridge).
+#:
+#: It REPLACES the plate note rather than joining it, for the reason the plate
+#: note is kept tight: it is measured into the identity reserve, so a second
+#: sentence at the same rank is paid for out of a face. One sentence naming
+#: both pictures costs the difference and no more.
+#:
+#: What it asks of the bridge is the light and nothing else. That frame has
+#: people in it -- the same people, drawn by a model -- and the documented
+#: failure of feeding a generated frame forward (is_dynamic_reference_enabled)
+#: is a face that drifts a little more each scene. So the faces stay bound to
+#: the portraits ahead of it, and this picture is named for the one thing the
+#: plate cannot carry: what the light was actually doing a cut ago.
+_BRIDGE_AND_PLATE_NOTE = (
+    "The second-to-last reference is the previous scene in this same place: "
+    "match its light and the set's layout, not its people, pose or framing. "
+    "The last reference is this set, empty: take its architecture, "
+    "materials and light. Nobody in it is a character. "
+)
+
 #: What the identity clause costs before a single character is described.
 #: Measured, not guessed, so the reserve tracks the sentences automatically.
 IDENTITY_CLAUSE_OVERHEAD = (
@@ -1109,8 +1130,17 @@ def resolve_frame_references(
     dynamic_reference_enabled: bool = False,
     scene_idx: int = 0,
     shot_idx: int = 0,
+    bridge_frame_url=None,
 ):
     """Which pictures this frame is drawn from: ``(anchor_char, anchor, set)``.
+
+    ``bridge_frame_url`` is the previous scene's opening frame, when this is
+    the opening frame of a scene that continues in the same place
+    (interfaces/cut_bridge). It goes in second to last -- after every face,
+    before the plate -- and only on a frame that has a character anchor AND a
+    plate: the anchor keeps the face bound to the locked portrait, and the
+    plate keeps "the last reference is the set" true for the sentence that
+    says so.
 
     Extracted so a scene rendered as ONE take (interfaces/scene_take) resolves
     its opening frame exactly the way a per-shot render does. The alternative
@@ -1200,6 +1230,8 @@ def resolve_frame_references(
             portrait = portraits.get(getattr(other, "name", ""))
             if portrait:
                 frame_references.append(portrait)
+    if bridge_frame_url and location_plate_url and matched_char is not None:
+        frame_references.append(bridge_frame_url)
     if location_plate_url:
         # Last: the room is the cheapest thing to lose, and the only one a
         # later frame can be corrected against. It is still worth sending --
@@ -1221,6 +1253,7 @@ def label_frame_references(
     portraits,
     matched_char=None,
     location_plate_url=None,
+    bridge_frame_url=None,
 ) -> list:
     """Who or what each picture in a reference set is, in the set's order.
 
@@ -1254,6 +1287,8 @@ def label_frame_references(
             labels.append(others[url])
         elif plate and url == plate:
             labels.append("the empty set")
+        elif bridge_frame_url and url == (bridge_frame_url or "").strip():
+            labels.append("the previous scene, same place")
         elif index == 0 and matched_char is not None:
             # By position, not by URL: with dynamic references on, the anchor
             # is the character's latest frame, which is nobody's portrait.
@@ -1271,6 +1306,7 @@ def _frame_label_kwargs(
     portraits,
     matched_char=None,
     location_plate_url=None,
+    bridge_frame_url=None,
 ) -> dict:
     """``reference_labels`` for an image backend that declares it reads them.
 
@@ -1288,6 +1324,7 @@ def _frame_label_kwargs(
             portraits,
             matched_char=matched_char,
             location_plate_url=location_plate_url,
+            bridge_frame_url=bridge_frame_url,
         )
     }
 
@@ -1747,6 +1784,8 @@ def build_frame_prompt(
     world_state: str = "",
     has_location_plate: bool = False,
     has_reference: bool = False,
+    has_bridge_frame: bool = False,
+    palette: str = "",
 ) -> str:
     """Build the image prompt for a shot, injecting locked setting when present.
 
@@ -2057,8 +2096,15 @@ def build_frame_prompt(
     # rather than folded into the identity block itself: there it would have
     # been subtracted from the cast's own description on every frame,
     # including the frames that have no plate to talk about.
-    plate_clause = _PLATE_REFERENCE_NOTE if has_location_plate else ""
-    style_prefix = f"{style} style. "
+    plate_clause = (
+        (_BRIDGE_AND_PLATE_NOTE if has_bridge_frame else _PLATE_REFERENCE_NOTE)
+        if has_location_plate
+        else ""
+    )
+    # The palette rides the style prefix: REQUIRED, first, and already
+    # measured into the identity reserve below (interfaces/color_grade
+    # .ColorGrade.palette says why it is here at all).
+    style_prefix = f"{style} style. " + (f"{palette.strip()} " if (palette or "").strip() else "")
     framing_clause = f"Shot type: {shot.shot_type}. Lens: {shot.lens}. "
     desc_clause = f"{visual_desc}. "
 
@@ -4104,6 +4150,8 @@ class Script2VideoPipeline:
         scene_dialogue: str = "",
         is_cancelled=None,
         expected_setting: str = "",
+        bridge_frame_url: Optional[str] = None,
+        on_opening_frame: Optional[Callable[[Optional[str]], None]] = None,
     ) -> Dict[str, Any]:
         """Render a whole scene in ONE generation, cuts included.
 
@@ -4129,7 +4177,9 @@ class Script2VideoPipeline:
             dynamic_reference_enabled=dynamic_reference_enabled,
             scene_idx=scene_idx,
             shot_idx=0,
+            bridge_frame_url=bridge_frame_url,
         )
+        bridged = bool(bridge_frame_url) and bridge_frame_url in frame_references
         # Built HERE, not by the caller, because it needs the anchor and the
         # anchor is what resolve_frame_references just worked out. Passed in
         # finished, it could only ever be built with matched_char=None -- and
@@ -4141,19 +4191,26 @@ class Script2VideoPipeline:
         # who, and a lead who is a different woman in a different outfit in
         # each of three scenes -- which is precisely the drift the per-shot
         # path resolves first in order to avoid.
-        frame_prompt = frame_prompt_for(matched_char, bool(frame_references))
+        frame_prompt = (
+            frame_prompt_for(matched_char, bool(frame_references), True)
+            if bridged
+            else frame_prompt_for(matched_char, bool(frame_references))
+        )
         if frame_references:
             start_image = await self.image_gen.generate_image_with_reference(
                 frame_prompt, frame_references, aspect_ratio, is_cancelled=is_cancelled,
                 **_frame_label_kwargs(
                     self.image_gen, frame_references, opening, characters, portraits,
                     matched_char=matched_char, location_plate_url=location_plate_url,
+                    bridge_frame_url=bridge_frame_url if bridged else None,
                 ),
             )
         else:
             start_image = await self.image_gen.generate_image(
                 frame_prompt, aspect_ratio, is_cancelled=is_cancelled
             )
+        if on_opening_frame and start_image:
+            on_opening_frame(start_image)
 
         # The take is generated FROM this frame, and the video endpoint takes
         # no aspect ratio of its own -- it reads the shape off the picture it
@@ -4356,6 +4413,10 @@ class Script2VideoPipeline:
             {
                 "index": i,
                 "frame_url": start_image if i == 0 else None,
+                # Whether the scene's opening frame was shown the previous
+                # scene's (interfaces/cut_bridge). "The cut jumps" is
+                # otherwise a report nobody can attribute from the record.
+                "bridged_from_previous_scene": bridged if i == 0 else False,
                 "video_url": video_url,
                 "seconds": beat.seconds,
                 "shot_type": beat.shot_type,
@@ -4647,9 +4708,23 @@ class Script2VideoPipeline:
         #: on it. So the beat's own record -- the description the model was
         #: given, its framing, its length -- is handed straight back here.
         storyboard_override: Optional[List[Any]] = None,
+        #: The previous scene's opening frame, when this scene continues in
+        #: the same place (interfaces/cut_bridge). A function, not a URL,
+        #: because the scenes render in parallel and that frame may not exist
+        #: yet: it is awaited at the last moment -- just before THIS scene's
+        #: opening frame is drawn, after its storyboard -- so the wait costs
+        #: one frame's latency rather than a whole scene's.
+        bridge_frame: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
+        #: Called with this scene's opening frame the moment it exists, for
+        #: the scene after it to bridge from. Never called on a path that
+        #: draws no opening frame; the caller resolves the wait itself then.
+        on_opening_frame: Optional[Callable[[Optional[str]], None]] = None,
     ) -> Dict[str, Any]:
         os.makedirs(working_dir, exist_ok=True)
         portraits = character_portraits or {}
+        # The colour every frame of this film is drawn toward: the grade it
+        # will be finished in, said up front (interfaces/color_grade).
+        palette = palette_for(director_style)
         # Shared, mutable across scenes (owned by the caller) so a later
         # scene can reference an earlier scene's generated frame instead of
         # only ever the locked portrait. A fresh dict when the caller
@@ -4800,7 +4875,10 @@ class Script2VideoPipeline:
             take_speaks = bool(has_dialogue) and who_speaks.picture_carries_dialogue(
                 take_backend, language or "en"
             )
+            bridge_url = await bridge_frame() if bridge_frame else None
             result = await self._render_scene_as_one_take(
+                bridge_frame_url=bridge_url,
+                on_opening_frame=on_opening_frame,
                 shots=shots,
                 characters=characters,
                 portraits=portraits,
@@ -4818,7 +4896,7 @@ class Script2VideoPipeline:
                 # inside, by the same resolve_frame_references the per-shot
                 # path calls before it builds its prompt, and the prompt
                 # cannot be built correctly without it.
-                frame_prompt_for=lambda anchor, has_ref: build_frame_prompt(
+                frame_prompt_for=lambda anchor, has_ref, has_bridge=False: build_frame_prompt(
                     style,
                     opening,
                     setting_location=setting_location,
@@ -4844,6 +4922,8 @@ class Script2VideoPipeline:
                     # second photograph it was never sent.
                     has_location_plate=bool(location_plate_url) and anchor is not None,
                     has_reference=has_ref,
+                    has_bridge_frame=has_bridge,
+                    palette=palette,
                 ),
                 generate_audio=take_speaks,
                 scene_dialogue=scene_dialogue,
@@ -4865,6 +4945,12 @@ class Script2VideoPipeline:
                 try:
                     _check_cancel()
 
+                    # Only the scene's OPENING frame is bridged: it is the
+                    # frame that follows the cut, and every later angle of
+                    # this scene is held to the same plate already.
+                    bridge_url = (
+                        await bridge_frame() if (bridge_frame and i == 0) else None
+                    )
                     matched_char, reference_url, frame_references = (
                         resolve_frame_references(
                             shot,
@@ -4876,8 +4962,11 @@ class Script2VideoPipeline:
                             dynamic_reference_enabled=dynamic_reference_enabled,
                             scene_idx=scene_idx,
                             shot_idx=i,
+                            bridge_frame_url=bridge_url,
                         )
                     )
+                    if not (bridge_url and bridge_url in frame_references):
+                        bridge_url = None
 
                     # Belt-and-braces: design_storyboard already repairs a
                     # missing/neutral expression, but the frame prompt is the
@@ -4921,6 +5010,8 @@ class Script2VideoPipeline:
                         has_location_plate=bool(location_plate_url)
                         and location_plate_url in frame_references[1:],
                         has_reference=bool(frame_references),
+                        has_bridge_frame=bool(bridge_url),
+                        palette=palette,
                     )
 
                     # fal.ai reference-to-video binds character identity in a
@@ -4973,6 +5064,12 @@ class Script2VideoPipeline:
                         # dynamic-reference chaining.
                         frame_url = reference_url
                         shot.frame_url = frame_url
+                        if i == 0 and on_opening_frame:
+                            # No frame is drawn on this path, and the portrait
+                            # standing in for one is not this place. Said NOW,
+                            # so the next scene is not left waiting out this
+                            # scene's whole video for a frame that never comes.
+                            on_opening_frame(None)
                         motion_prompt = build_motion_prompt(
                             shot,
                             matched_char,
@@ -4990,6 +5087,7 @@ class Script2VideoPipeline:
                             _labels = _frame_label_kwargs(
                                 self.image_gen, frame_references, shot, characters, portraits,
                                 matched_char=matched_char, location_plate_url=location_plate_url,
+                                bridge_frame_url=bridge_url,
                             )
 
                             async def _draw(text, _refs=frame_references, _labels=_labels):
@@ -5008,6 +5106,12 @@ class Script2VideoPipeline:
                             )
 
                         shot.frame_url = frame_url
+                        if i == 0 and on_opening_frame and frame_url:
+                            # Before the QA repair, not after: the next
+                            # scene is waiting on this, and what it needs is
+                            # this place's light, which a correction to a
+                            # face does not change.
+                            on_opening_frame(frame_url)
 
                         # Audit & targeted repair (adapted from Virginia Tech's
                         # "Audit & Repair" technique): on QA failure, fix the
@@ -5071,6 +5175,7 @@ class Script2VideoPipeline:
                                             self.image_gen, frame_references, shot, characters,
                                             portraits, matched_char=matched_char,
                                             location_plate_url=location_plate_url,
+                                            bridge_frame_url=bridge_url,
                                         ),
                                     )
                                     shot.frame_url = frame_url
@@ -5200,6 +5305,8 @@ class Script2VideoPipeline:
                 # dependent and fail-open, so its absence is invisible.
                 meta["end_frame_url"] = end_frame_url
                 meta["acted_interpolation"] = bool(end_frame_url)
+                # See the same key on the one-take path.
+                meta["bridged_from_previous_scene"] = bool(i == 0 and bridge_url)
                 # Which lock actually anchored this shot. Without it, a
                 # "the room keeps changing" report cannot be told apart from
                 # "the wrong character was matched" after the fact.

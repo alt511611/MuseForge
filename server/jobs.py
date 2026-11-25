@@ -476,6 +476,13 @@ class Job:
     character_image: Optional[str] = None
     character_name: str = ""
     location_image: Optional[str] = None
+    #: An already-hosted picture of the set, used as the drama's location
+    #: plate instead of generating one. Where ``location_image`` is a photo the
+    #: user uploaded this time, this is a plate that already EXISTS -- the one
+    #: a series locked from its first episode (interfaces/series
+    #: .location_plate_url) -- so there is nothing to upload and nothing to
+    #: pay for.
+    location_url: str = ""
     music_enabled: bool = False
     dialogue_enabled: bool = False
     lipsync_enabled: bool = False
@@ -736,6 +743,7 @@ class JobStore:
             series_id=(result or {}).get("series_id") or "",
             episode_number=int((result or {}).get("episode_number") or 0),
             series_brief=(result or {}).get("series_brief") or "",
+            location_url=str((result or {}).get("_location_override") or ""),
             library_characters=list((result or {}).get("_library_characters") or []),
             # The flag is not persisted; a job parked awaiting approval was
             # necessarily started with it on, which is the only state in which
@@ -1449,7 +1457,12 @@ async def run_generation_job(job: Job, api_key: str):
         # path can reuse it without re-uploading. Never fatal -- unlike a
         # character photo (whose whole point is "this exact face"), a failed
         # location upload just falls back to a generated plate.
-        location_url: Optional[str] = None
+        location_url: Optional[str] = job.location_url or None
+        if location_url:
+            # Stashed where the approve-script path already looks for an
+            # override, so an episode parked for script approval resumes on
+            # the series' set rather than drawing a new one.
+            job.result = {**(job.result or {}), "_location_override": location_url}
         if job.location_image:
             try:
                 await progress_callback("portraits", "Uploading set reference photo...", 3)

@@ -20,6 +20,9 @@ from interfaces.shot import StoryboardShot
 from interfaces.film_look import build_film_look_filters
 from interfaces import gender as gender_of
 from interfaces.lighting import is_interior
+from interfaces.places import extra_locations, scene_location
+from interfaces import cut_bridge
+from interfaces.color_grade import palette_for
 from interfaces import micro_drama
 from interfaces.language import DEFAULT_LANGUAGE
 from interfaces import who_speaks
@@ -576,7 +579,7 @@ def _scene_survives_a_redraw(
 
 
 def _location_plate_prompt(
-    location: str, time_of_day: str, era: str, style: str, look: Any
+    location: str, time_of_day: str, era: str, style: str, look: Any, palette: str = ""
 ) -> str:
     """The prompt the drama's one empty set is drawn from.
 
@@ -606,11 +609,32 @@ def _location_plate_prompt(
         "no characters. "
         f"{contents}"
         "Consistent architecture, materials, furniture and lighting. High detail."
+        # The plate is the reference every frame takes its light from, so it
+        # is drawn in the palette those frames are (interfaces/color_grade):
+        # a daylight-blue set behind tungsten faces is the mismatch a grade
+        # cannot undo.
+        f"{(' ' + palette.strip()) if (palette or '').strip() else ''}"
         # Same reason as the character portrait: the plate is the set
         # reference every establishing shot is drawn from, so it has to
         # be built in the drama's own look.
         f"{'' if look.is_photoreal else ' ' + look.render_note}"
     )
+
+
+class _SceneLocation:
+    """A stored scene's ``location`` in the shape interfaces/places reads."""
+
+    def __init__(self, location: Any) -> None:
+        self.location = location or ""
+
+
+def _plate_for(
+    place: str, main_location: str, main_plate: Optional[str], plates: Dict[str, str]
+) -> Optional[str]:
+    """The picture of ``place``: its own plate, or the drama's for the drama's
+    own place. A place with neither gets None -- never the drama's room, which
+    is a picture of somewhere this scene is not."""
+    return (plates or {}).get(place) or (main_plate if place == main_location else None)
 
 
 async def _split_off_tail(
@@ -4363,6 +4387,7 @@ class Idea2VideoPipeline:
         style: str = "Cinematic",
         aspect_ratio: str = "16:9",
         location_image_override: Optional[str] = None,
+        palette: str = "",
     ) -> Optional[str]:
         """Generate ONE empty-set plate of the drama's locked setting.
 
@@ -4392,7 +4417,7 @@ class Idea2VideoPipeline:
         time_of_day = (getattr(script, "setting_time_of_day", "") or "").strip()
         era = (getattr(script, "setting_era", "") or "").strip()
         look = resolve_visual_style(style)
-        prompt = _location_plate_prompt(location, time_of_day, era, style, look)
+        prompt = _location_plate_prompt(location, time_of_day, era, style, look, palette)
         try:
             return await self.image_gen.generate_image(prompt, aspect_ratio=aspect_ratio)
         except Exception as exc:
@@ -4404,6 +4429,48 @@ class Idea2VideoPipeline:
                 exc,
             )
             return None
+
+    async def _lock_extra_location_plates(
+        self,
+        script: DramaScript,
+        style: str = "Cinematic",
+        aspect_ratio: str = "16:9",
+        palette: str = "",
+    ) -> Dict[str, str]:
+        """One plate per place a scene moves to, keyed by that place.
+
+        The drama's own place is _lock_location_plate's; this draws the others
+        a scene names in ``location`` (interfaces/places), all at once and with
+        the drama's hour and era, because a story that crosses the street does
+        not change the time on the way.
+
+        Fail-open per place. A place whose plate failed is LEFT OUT rather than
+        given the main plate: a scene set on the pier anchored to a picture of
+        the office is the compromise this exists to remove.
+        """
+        main = (getattr(script, "setting_location", "") or "").strip()
+        places = extra_locations(list(script.scenes or []), main)
+        if not places:
+            return {}
+        time_of_day = (getattr(script, "setting_time_of_day", "") or "").strip()
+        era = (getattr(script, "setting_era", "") or "").strip()
+        look = resolve_visual_style(style)
+
+        async def _one(place: str) -> Optional[str]:
+            prompt = _location_plate_prompt(place, time_of_day, era, style, look, palette)
+            try:
+                return await self.image_gen.generate_image(prompt, aspect_ratio=aspect_ratio)
+            except Exception as exc:
+                logger.warning(
+                    "Plate for %r failed; its scenes keep the words and lose "
+                    "the picture: %s",
+                    place,
+                    exc,
+                )
+                return None
+
+        urls = await asyncio.gather(*(_one(place) for place in places))
+        return {place: url for place, url in zip(places, urls) if url}
 
     async def _lipsync_scenes(
         self,
@@ -5197,12 +5264,58 @@ class Idea2VideoPipeline:
             if location_plate_override is not None
             else previous_result.get("location_plate")
         )
+        main_location = (getattr(script, "setting_location", "") or "").strip()
+        # The other places' plates are reused as they were drawn. An override
+        # is a new picture of the drama's OWN place (a continuity edit of "the
+        # set"), so it replaces that entry and no other.
+        location_plates: Dict[str, str] = {
+            place: url
+            for place, url in (previous_result.get("location_plates") or {}).items()
+            if url
+        }
+        if location_plate and main_location:
+            location_plates[main_location] = location_plate
 
         for index in wanted:
             if index >= len(script.scenes):
                 raise SceneRegenerationUnavailable(
                     f"Scene {index + 1} is not part of this script."
                 )
+
+        # A retaken scene is bridged from the opening frame the scene before it
+        # was DELIVERED with -- the one the viewer actually sees across the cut
+        # (interfaces/cut_bridge). Not when that scene is being re-shot in the
+        # same batch: its delivered frame is about to stop being on screen.
+        retake_places = [scene_location(s, main_location) for s in script.scenes]
+        delivered_openings: Dict[int, str] = {}
+        for record in previous_result.get("scenes") or []:
+            shots_recorded = record.get("shots") or []
+            frame = (shots_recorded[0] or {}).get("frame_url") if shots_recorded else None
+            if frame and "index" in record:
+                delivered_openings[int(record["index"])] = frame
+
+        def _retake_bridge(index: int):
+            frame = delivered_openings.get(index - 1)
+            if (
+                not frame
+                or (index - 1) in wanted
+                or not cut_bridge.bridges(
+                    script.scenes,
+                    index,
+                    retake_places,
+                    has_plate=bool(
+                        _plate_for(
+                            retake_places[index], main_location, location_plate, location_plates
+                        )
+                    ),
+                )
+            ):
+                return None
+
+            async def _delivered() -> Optional[str]:
+                return frame
+
+            return _delivered
 
         durations = state.get("scene_durations") or []
         user_requirement = state.get("user_requirement") or ""
@@ -5267,10 +5380,15 @@ class Idea2VideoPipeline:
                     aspect_ratio=previous_result.get("aspect_ratio", "16:9"),
                     is_cancelled=is_cancelled,
                     plan=previous_result.get("plan", "free"),
-                    setting_location=getattr(script, "setting_location", "") or "",
+                    setting_location=scene_location(scene_script, main_location),
                     setting_time_of_day=getattr(script, "setting_time_of_day", "") or "",
                     setting_era=getattr(script, "setting_era", "") or "",
-                    location_plate_url=location_plate,
+                    location_plate_url=_plate_for(
+                        scene_location(scene_script, main_location),
+                        main_location,
+                        location_plate,
+                        location_plates,
+                    ),
                     has_dialogue=bool(_scene_dialogue(scene_script)),
                     lipsync_enabled=bool(previous_result.get("lipsynced_scenes")),
                     scene_emotion=_scene_emotion(scene_script),
@@ -5309,6 +5427,10 @@ class Idea2VideoPipeline:
                         if window is not None
                         else None
                     ),
+                    # A beat is not the frame after the cut unless it is
+                    # the scene's first, and a beat retake re-shoots
+                    # whichever beat it was asked for.
+                    bridge_frame=_retake_bridge(index) if window is None else None,
                     # The same slice of the second budget as the take it
                     # replaces, so a retake can never quietly lengthen (or
                     # shorten) the paid runtime -- a beat's slice of it when
@@ -5465,6 +5587,7 @@ class Idea2VideoPipeline:
         result = {**previous_result, "scenes": scenes, "_reframe": reframe_plan}
         result["portraits"] = portraits
         result["location_plate"] = location_plate
+        result["location_plates"] = location_plates
         result["_render_state"] = {
             **state,
             "script": script_data,
@@ -5755,6 +5878,21 @@ class Idea2VideoPipeline:
                 previous_result.get("aspect_ratio", "16:9"),
                 is_cancelled=is_cancelled,
             )
+            # Which scenes are IN the set being edited -- read before the
+            # setting's words change below. A scene the story moved somewhere
+            # else (interfaces/places) is not in this room, and re-rendering
+            # it would charge for a scene the edit cannot touch.
+            main_before = str(script_data.get("setting_location") or "")
+            script_scenes = list(script_data.get("scenes") or [])
+
+            def _in_the_set(index: int) -> bool:
+                if index >= len(script_scenes) or isinstance(script_scenes[index], str):
+                    return True
+                place = scene_location(
+                    _SceneLocation(script_scenes[index].get("location", "")), main_before
+                )
+                return place == " ".join(main_before.split())
+
             # Restate the change in the script's setting so every re-rendered
             # scene's prompt agrees with the new plate.
             script_data["setting_location"] = (
@@ -5763,7 +5901,11 @@ class Idea2VideoPipeline:
             affected = (
                 scene_indices
                 if scene_indices is not None
-                else [int(s["index"]) for s in (previous_result.get("scenes") or [])]
+                else [
+                    int(s["index"])
+                    for s in (previous_result.get("scenes") or [])
+                    if _in_the_set(int(s["index"]))
+                ]
             )
         else:
             portraits = previous_result.get("portraits") or {}
@@ -6859,7 +7001,7 @@ class Idea2VideoPipeline:
         # so its framing has to match the frames it will condition.
         _check_cancel()
         await progress("portraits", "Locking cast and set for consistency", 10)
-        portraits, location_plate = await asyncio.gather(
+        portraits, location_plate, extra_plates = await asyncio.gather(
             self._lock_character_portraits(
                 characters, style, character_portraits_override=character_portraits_override
             ),
@@ -6868,8 +7010,19 @@ class Idea2VideoPipeline:
                 style,
                 aspect_ratio=aspect_ratio,
                 location_image_override=location_image_override,
+                palette=palette_for(director_style),
+            ),
+            self._lock_extra_location_plates(
+                script, style, aspect_ratio=aspect_ratio, palette=palette_for(director_style)
             ),
         )
+        # Every place's picture, keyed by the words the scenes name it with.
+        # The drama's own place is keyed too, so a scene's plate is ONE lookup
+        # whichever place it is in.
+        main_location = (getattr(script, "setting_location", "") or "").strip()
+        location_plates: Dict[str, str] = dict(extra_plates or {})
+        if location_plate and main_location:
+            location_plates[main_location] = location_plate
 
         # Dynamic reference selection (adapted from ViMax's "previous
         # timeline" technique): as scenes progress, prefer each character's
@@ -7180,7 +7333,59 @@ class Idea2VideoPipeline:
         progress_lock = asyncio.Lock()
         completed_scenes = 0
 
+        # Each scene's opening frame, for the scene after it to bridge from
+        # (interfaces/cut_bridge). One future per scene, resolved with the
+        # frame or with None -- ALWAYS resolved, in _render_scene's finally,
+        # so a scene that failed or drew no frame releases its neighbour
+        # instead of holding it until the timeout.
+        scene_places = [scene_location(s, main_location) for s in script.scenes]
+        opening_frames: List["asyncio.Future"] = [
+            asyncio.get_running_loop().create_future() for _ in script.scenes
+        ]
+
+        def _bridge_from(idx: int):
+            if not cut_bridge.bridges(
+                script.scenes,
+                idx,
+                scene_places,
+                has_plate=bool(
+                    _plate_for(scene_places[idx], main_location, location_plate, location_plates)
+                ),
+            ):
+                return None
+
+            async def _await_previous() -> Optional[str]:
+                try:
+                    return await asyncio.wait_for(
+                        asyncio.shield(opening_frames[idx - 1]),
+                        timeout=cut_bridge.BRIDGE_WAIT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Scene %s waited %.0fs for scene %s's opening frame and "
+                        "is drawn without the bridge.",
+                        idx + 1,
+                        cut_bridge.BRIDGE_WAIT_SECONDS,
+                        idx,
+                    )
+                    return None
+
+            return _await_previous
+
+        def _opened(idx: int):
+            def _record(url: Optional[str]) -> None:
+                if not opening_frames[idx].done():
+                    opening_frames[idx].set_result(url)
+
+            return _record
+
         async def _render_scene(idx: int, scene: Any) -> None:
+            try:
+                await _render_one_scene(idx, scene)
+            finally:
+                _opened(idx)(None)
+
+        async def _render_one_scene(idx: int, scene: Any) -> None:
             nonlocal completed_scenes
             async with scene_semaphore:
                 _check_cancel()
@@ -7215,10 +7420,18 @@ class Idea2VideoPipeline:
                     aspect_ratio=aspect_ratio,
                     is_cancelled=is_cancelled,
                     plan=plan,
-                    setting_location=getattr(script, "setting_location", "") or "",
+                    # The place THIS scene is in, and that place's picture.
+                    # A scene set somewhere the cap left without a plate gets
+                    # none rather than the drama's room (interfaces/places).
+                    setting_location=scene_location(scene, main_location),
                     setting_time_of_day=getattr(script, "setting_time_of_day", "") or "",
                     setting_era=getattr(script, "setting_era", "") or "",
-                    location_plate_url=location_plate,
+                    location_plate_url=_plate_for(
+                        scene_location(scene, main_location),
+                        main_location,
+                        location_plate,
+                        location_plates,
+                    ),
                     has_dialogue=dialogue_requested and bool(scene_dialogue_lines),
                     # Decides whether the frame is asked to SHOW the mouth or
                     # hide it — opposite instructions, see build_frame_prompt.
@@ -7265,6 +7478,8 @@ class Idea2VideoPipeline:
                     scene_shot_scale=(
                         shot_scales[idx] if idx < len(shot_scales) else ""
                     ),
+                    bridge_frame=_bridge_from(idx),
+                    on_opening_frame=_opened(idx),
                 )
                 async with progress_lock:
                     completed_scenes += 1
@@ -7789,6 +8004,11 @@ class Idea2VideoPipeline:
             "characters": [c.model_dump() for c in characters],
             "portraits": portraits,
             "location_plate": location_plate,
+            # Every place's plate, the drama's own included. "location_plate"
+            # stays the drama's own place on its own, because a series locks
+            # THAT one (interfaces/series.location_plate_url) and a continuity
+            # edit of "the set" edits it.
+            "location_plates": location_plates,
             # Who ended up speaking with which voice, keyed by the character's
             # real name. Written out so a character SAVED to the library after
             # this drama carries the voice this drama gave them: without it the

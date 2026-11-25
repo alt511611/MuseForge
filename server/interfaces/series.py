@@ -154,6 +154,16 @@ class Series:
     setting_location: str = ""
     setting_time_of_day: str = ""
     setting_era: str = ""
+    #: The PICTURE of the setting above: the empty-set plate the episode that
+    #: established the setting was drawn against.
+    #:
+    #: The setting was carried forward and its image was not. Episode two was
+    #: told "Established setting: stone-walled coffeehouse" and then drew that
+    #: coffeehouse from scratch, so the room every frame of the series is
+    #: conditioned on was a different room each episode -- the faces held
+    #: (the cast carries its portrait_url) and the place around them did not.
+    #: A series is the one product where the viewer has seen the room before.
+    location_plate_url: str = ""
     theme: str = ""
     visual_motif: str = ""
     #: The recurring cast, in ORDER. The order is load-bearing: it decides the
@@ -209,6 +219,7 @@ class Series:
             "setting_location": self.setting_location,
             "setting_time_of_day": self.setting_time_of_day,
             "setting_era": self.setting_era,
+            "location_plate_url": self.location_plate_url,
             "theme": self.theme,
             "visual_motif": self.visual_motif,
             "cast": [c.as_dict() for c in self.cast],
@@ -242,6 +253,7 @@ def from_dict(data: Mapping[str, Any]) -> Series:
         setting_location=str(data.get("setting_location") or ""),
         setting_time_of_day=str(data.get("setting_time_of_day") or ""),
         setting_era=str(data.get("setting_era") or ""),
+        location_plate_url=str(data.get("location_plate_url") or ""),
         theme=str(data.get("theme") or ""),
         visual_motif=str(data.get("visual_motif") or ""),
         story_so_far=str(data.get("story_so_far") or ""),
@@ -436,6 +448,20 @@ def _apply_continuity(series: Series, episode: Episode, result: Mapping[str, Any
         script.get("setting_time_of_day") or ""
     )
     series.setting_era = series.setting_era or str(script.get("setting_era") or "")
+    # The plate locks the way the setting does -- once, from the first
+    # confirmed episode that has one -- and ONLY when that episode was set in
+    # the series' own place. A screenwriter can still move an episode
+    # somewhere else despite the brief, and a plate of somewhere else locked
+    # in as "the room" would condition every later episode on the wrong set.
+    episode_location = str(script.get("setting_location") or "").strip()
+    plate = str((result or {}).get("location_plate") or "").strip()
+    if (
+        not series.location_plate_url
+        and plate
+        and episode_location
+        and episode_location.casefold() == series.setting_location.strip().casefold()
+    ):
+        series.location_plate_url = plate
     series.theme = series.theme or str(script.get("theme") or "")
     series.visual_motif = series.visual_motif or str(script.get("visual_motif") or "")
 
