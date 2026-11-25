@@ -14,6 +14,8 @@ import httpx
 from agents.storyboard_artist import StoryboardArtist
 from interfaces import acting
 from interfaces import who_speaks
+from interfaces import character_sheet, long_take
+from tools.sheet_views import split_sheet
 from interfaces.camera import get_director_style
 from interfaces.character import CharacterInScene
 from interfaces.color_grade import get_color_grade, palette_for
@@ -117,16 +119,31 @@ VIDEO_PROVIDERS = (
 _TIGHT_SHOT = re.compile(r"close[- ]?up", re.I)
 
 
-def wants_first_frame(shot, video_gen) -> bool:
+def wants_first_frame(shot, video_gen, has_character: bool = False) -> bool:
     """True when this shot should start from a rendered frame, not references.
 
-    Only a close-up, only on a backend that declares ``can_start_from_frame``,
-    and switchable off with MUSEFORGE_CLOSEUP_FIRST_FRAME=0 -- it costs one
-    image generation and a slower clip per shot.
+    Only on a backend that declares ``can_start_from_frame``, and for one of
+    two reasons, each costing one image generation and a slower clip:
+
+    * a close-up (switch off with MUSEFORGE_CLOSEUP_FIRST_FRAME=0) -- the
+      empty plate's wide framing wins a reference-only call and "close-up"
+      comes back as a full body (job 21a87c5a);
+    * any shot of a person while the identity references are multi-view
+      SHEETS (switch off with MUSEFORGE_SHEET_FIRST_FRAME=0). A sheet's faces
+      are an eighth of the picture high, and a video model given only that
+      redraws the person every generation (interfaces/character_sheet, job
+      6efbb788). The frame model reads the sheet and draws a full-size face,
+      and the take then starts from it.
     """
-    if (os.environ.get("MUSEFORGE_CLOSEUP_FIRST_FRAME", "1") or "").strip() == "0":
-        return False
     if not getattr(video_gen, "can_start_from_frame", False):
+        return False
+    if (
+        has_character
+        and character_sheet.is_enabled()
+        and (os.environ.get("MUSEFORGE_SHEET_FIRST_FRAME", "1") or "").strip() != "0"
+    ):
+        return True
+    if (os.environ.get("MUSEFORGE_CLOSEUP_FIRST_FRAME", "1") or "").strip() == "0":
         return False
     return bool(_TIGHT_SHOT.search(getattr(shot, "shot_type", "") or ""))
 
@@ -993,6 +1010,23 @@ _BRIDGE_AND_PLATE_NOTE = (
     "materials and light. Nobody in it is a character. "
 )
 
+#: The plate sentence once the drama's event has happened.
+#:
+#: The plate is drawn ONCE, before anything happens, so in the scene where the
+#: power dies it is a photograph of every floodlight burning -- and the note
+#: above told the model to take its LIGHT. Job 6efbb788's blackout scene was
+#: sent exactly that: the setting clause said the poles go dark, the plate
+#: said they are lit, and the sentence between them said to copy the plate's
+#: light. The frame came back dark (the repair pass pushed it there); the take
+#: animated from it went dark and then, by second six, lit every pole again.
+#:
+#: What the plate is still right about is the architecture. So it is named
+#: for that and nothing else, and told what time it is from.
+_CHANGED_PLATE_NOTE = (
+    "The last reference is this set BEFORE the change: take its architecture, "
+    "never its light. Nobody in it is a character. "
+)
+
 #: What the identity clause costs before a single character is described.
 #: Measured, not guessed, so the reserve tracks the sentences automatically.
 IDENTITY_CLAUSE_OVERHEAD = (
@@ -1296,6 +1330,50 @@ def label_frame_references(
         else:
             labels.append(by_url.get(url, ""))
     return labels
+
+
+#: What the video model is told the plate is, once the world has changed and
+#: there is no rendered frame to carry the changed set instead.
+CHANGED_PLATE_LABEL = (
+    "the empty set as it was BEFORE the change: its architecture only, never its light"
+)
+
+
+def video_reference_set(
+    references,
+    labels,
+    location_plate_url=None,
+    world_changed: bool = False,
+    starts_from_frame: bool = True,
+):
+    """The references and labels a VIDEO backend is handed for one shot.
+
+    The same set the frame was drawn from, except in one case: after the
+    drama's event, the plate is a picture of the place before it. The frame
+    prompt can say so in a sentence (_CHANGED_PLATE_NOTE); a video endpoint
+    is told only "Image 2 is the empty set", and a picture of every floodlight
+    burning, held for eleven seconds against a prompt saying they are out, is
+    where job 6efbb788's blackout came undone -- dark for six seconds, then
+    every pole lit again.
+
+    * A shot that STARTS from a rendered frame has the changed set in that
+      frame already. The plate is dropped: it has nothing left to add but the
+      light it must not give.
+    * A reference-only shot has no frame, so the plate is the only picture of
+      the place. It stays, renamed for the one thing it is still right about.
+    """
+    references = list(references or [])
+    labels = list(labels or [])
+    labels += [""] * (len(references) - len(labels))
+    plate = (location_plate_url or "").strip()
+    if not (world_changed and plate and plate in references):
+        return references, labels[: len(references)]
+    if starts_from_frame:
+        kept = [(u, l) for u, l in zip(references, labels) if u != plate]
+        return [u for u, _ in kept], [l for _, l in kept]
+    return references, [
+        CHANGED_PLATE_LABEL if u == plate else l for u, l in zip(references, labels)
+    ]
 
 
 def _frame_label_kwargs(
@@ -2096,11 +2174,16 @@ def build_frame_prompt(
     # rather than folded into the identity block itself: there it would have
     # been subtracted from the cast's own description on every frame,
     # including the frames that have no plate to talk about.
-    plate_clause = (
-        (_BRIDGE_AND_PLATE_NOTE if has_bridge_frame else _PLATE_REFERENCE_NOTE)
-        if has_location_plate
-        else ""
-    )
+    if not has_location_plate:
+        plate_clause = ""
+    elif change_now or change_before:
+        plate_clause = (
+            _BRIDGE_AND_PLATE_NOTE.replace(_PLATE_REFERENCE_NOTE, _CHANGED_PLATE_NOTE)
+            if has_bridge_frame
+            else _CHANGED_PLATE_NOTE
+        )
+    else:
+        plate_clause = _BRIDGE_AND_PLATE_NOTE if has_bridge_frame else _PLATE_REFERENCE_NOTE
     # The palette rides the style prefix: REQUIRED, first, and already
     # measured into the identity reserve below (interfaces/color_grade
     # .ColorGrade.palette says why it is here at all).
@@ -4152,6 +4235,7 @@ class Script2VideoPipeline:
         expected_setting: str = "",
         bridge_frame_url: Optional[str] = None,
         on_opening_frame: Optional[Callable[[Optional[str]], None]] = None,
+        world_state: str = "",
     ) -> Dict[str, Any]:
         """Render a whole scene in ONE generation, cuts included.
 
@@ -4260,7 +4344,11 @@ class Script2VideoPipeline:
             elements.append(
                 Element(
                     name=name,
-                    images=(portrait,),
+                    # A sheet goes as the views it was drawn as -- frontal
+                    # first, then three angles -- not as one grid standing in
+                    # for a face (tools/sheet_views). Anything else, or a
+                    # sheet that could not be cut, goes whole as before.
+                    images=(await self._views_of(portrait)) or (portrait,),
                     # The costume, in the take's own words. The portrait is
                     # the face and the face survived; what drifted across a
                     # take seam on a delivered drama was the outfit, which
@@ -4270,12 +4358,35 @@ class Script2VideoPipeline:
                 )
             )
 
+        # The take's LAST frame, drawn, when it is long enough to drift and
+        # the endpoint takes one (interfaces/long_take). Drawn from the
+        # opening frame and the anchor's own reference, at the end of the
+        # scene's last beat.
+        end_image = ""
+        if (
+            matched_char is not None
+            and start_image
+            and "end_image_url" in getattr(backend, "fields", ())
+            and long_take.is_long(scene_seconds)
+        ):
+            end_image = await self._render_long_take_end(
+                start_image,
+                shots[-1],
+                matched_char,
+                aspect_ratio,
+                is_cancelled,
+                portrait=portraits.get(getattr(matched_char, "name", "")),
+                world_state=world_state,
+            ) or ""
+
         take = plan_scene_take(
             scene_seconds,
             shots,
             backend,
             elements=elements,
             start_image=start_image,
+            end_image=end_image,
+            world_state=world_state,
             # The lines, only when this take is the thing that says them. A
             # scene rendered mute is voiced by the TTS pass and lip-synced
             # afterwards, and its words reach the picture that way.
@@ -4591,6 +4702,8 @@ class Script2VideoPipeline:
         matched_char=None,
         aspect_ratio: str = "16:9",
         is_cancelled: Optional[Callable[[], bool]] = None,
+        portrait: Optional[str] = None,
+        world_state: str = "",
     ) -> Optional[str]:
         """Edit this shot's start frame into its acted peak, or return None.
 
@@ -4607,7 +4720,28 @@ class Script2VideoPipeline:
         A shot without an end frame is exactly the shot this pipeline produced
         before any of this existed.
         """
-        if not frame_url or not acting.is_end_frame_enabled():
+        if not frame_url:
+            return None
+        # A take long enough to drift is anchored at its end even when the
+        # acting pass is off (interfaces/long_take). When the acting pass is
+        # on and can run, ITS end frame is used instead: it is an edit of this
+        # same start frame, so it anchors the face just as well, and an
+        # operator who switched it on asked for that performance.
+        acted = (
+            acting.is_end_frame_enabled()
+            and bool((getattr(shot, "expression_peak_desc", "") or "").strip())
+            and getattr(self.image_gen, "edit_image", None) is not None
+        )
+        if (
+            not acted
+            and matched_char is not None
+            and long_take.is_long(getattr(shot, "duration_seconds", 0))
+        ):
+            return await self._render_long_take_end(
+                frame_url, shot, matched_char, aspect_ratio, is_cancelled,
+                portrait=portrait, world_state=world_state,
+            )
+        if not acting.is_end_frame_enabled():
             return None
         # An end frame is a FACE landing somewhere. On an establishing plate or
         # an insert there is no face to act, and asking an edit model to change
@@ -4651,6 +4785,66 @@ class Script2VideoPipeline:
             return None
         logger.info("Shot acted between two frames: peak=%.60s", peak)
         return end_frame_url
+
+    async def _views_of(self, portrait: str) -> Tuple[str, ...]:
+        """A sheet's four views, cut once per sheet per pipeline; () when the
+        flag is off, in demo, or the sheet cannot be cut."""
+        if self.demo or not portrait or not character_sheet.is_enabled():
+            return ()
+        cache = self.__dict__.setdefault("_sheet_views", {})
+        if portrait not in cache:
+            cache[portrait] = await split_sheet(portrait)
+        return cache[portrait]
+
+    async def _render_long_take_end(
+        self,
+        frame_url: str,
+        shot,
+        matched_char,
+        aspect_ratio: str = "16:9",
+        is_cancelled: Optional[Callable[[], bool]] = None,
+        portrait: Optional[str] = None,
+        world_state: str = "",
+    ) -> Optional[str]:
+        """The last frame of a long take, drawn from its first and the face.
+
+        Fail-open like every end frame here: None animates the take from its
+        opening frame alone, exactly as before.
+        """
+        name = getattr(matched_char, "name", "") or ""
+        references = [frame_url] + ([portrait] if portrait and portrait != frame_url else [])
+        prompt = long_take.end_frame_prompt(
+            action=getattr(shot, "motion_desc", "") or getattr(shot, "visual_desc", "") or "",
+            name=name,
+            peak=getattr(shot, "expression_peak_desc", "") or "",
+            world_state=world_state,
+            has_reference=len(references) > 1,
+        )
+        labels = (
+            {"reference_labels": ["the opening frame of this shot", name][: len(references)]}
+            if getattr(self.image_gen, "accepts_reference_labels", False)
+            else {}
+        )
+        try:
+            end_frame_url = await self.image_gen.generate_image_with_reference(
+                prompt, references, aspect_ratio, is_cancelled=is_cancelled, **labels
+            )
+        except MuAPICancelled:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Long-take end frame could not be drawn (%s: %s); the take is "
+                "anchored at its start only.",
+                type(exc).__name__,
+                exc,
+            )
+            return None
+        if end_frame_url:
+            logger.info(
+                "Shot of %ss anchored at both ends (interfaces/long_take).",
+                getattr(shot, "duration_seconds", "?"),
+            )
+        return end_frame_url or None
 
     async def run(
         self,
@@ -4879,6 +5073,9 @@ class Script2VideoPipeline:
             result = await self._render_scene_as_one_take(
                 bridge_frame_url=bridge_url,
                 on_opening_frame=on_opening_frame,
+                # The event, once it has happened: the take's prompt holds it
+                # on every beat (interfaces/scene_take.SceneTake.world_state).
+                world_state=(world_change or "").strip() or (world_state or "").strip(),
                 shots=shots,
                 characters=characters,
                 portraits=portraits,
@@ -5033,7 +5230,7 @@ class Script2VideoPipeline:
                     # 21a87c5a). A rendered first frame IS the framing, so
                     # such a shot starts from one -- where the endpoint can.
                     start_from_frame = one_step_reference_video and wants_first_frame(
-                        shot, self.video_gen
+                        shot, self.video_gen, has_character=matched_char is not None
                     )
                     if start_from_frame:
                         one_step_reference_video = False
@@ -5210,6 +5407,10 @@ class Script2VideoPipeline:
                             matched_char=matched_char,
                             aspect_ratio=aspect_ratio,
                             is_cancelled=is_cancelled,
+                            portrait=(
+                                portraits.get(matched_char.name) if matched_char else None
+                            ),
+                            world_state=change_state,
                         )
 
                     # Record this shot's final frame (post-repair, if any)
@@ -5261,14 +5462,21 @@ class Script2VideoPipeline:
                     if frame_references and getattr(
                         self.video_gen, "accepts_reference_set", False
                     ):
-                        video_kwargs["reference_images"] = list(frame_references)
-                        video_kwargs["reference_labels"] = label_frame_references(
-                            frame_references,
-                            shot,
-                            characters,
-                            portraits,
-                            matched_char=matched_char,
-                            location_plate_url=location_plate_url,
+                        video_kwargs["reference_images"], video_kwargs["reference_labels"] = (
+                            video_reference_set(
+                                frame_references,
+                                label_frame_references(
+                                    frame_references,
+                                    shot,
+                                    characters,
+                                    portraits,
+                                    matched_char=matched_char,
+                                    location_plate_url=location_plate_url,
+                                ),
+                                location_plate_url=location_plate_url,
+                                world_changed=bool(change_state),
+                                starts_from_frame=not one_step_reference_video,
+                            )
                         )
                     if start_from_frame:
                         video_kwargs["by_reference"] = False

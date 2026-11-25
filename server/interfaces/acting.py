@@ -247,8 +247,34 @@ _BEATS: Tuple[Tuple[Tuple[str, ...], ActingBeat], ...] = (
         ),
     ),
     (
-        ("suspicion", "doubt", "mistrust", "wary", "guarded",
-         "şüphe", "güvensiz", "temkinli"),
+        # Job 6efbb788: "wary curiosity" -- a dock worker alone at night,
+        # watching a container leak light, a radio at her face -- matched
+        # "wary" on the suspicion beat below, whose onset is "the social face"
+        # and whose peak keeps "the smile staying on the mouth". That beat is
+        # a poker face held AT somebody; there was nobody there. The video
+        # model played the word it was given, and the one close-up of the
+        # discovery scene is a woman grinning into a walkie-talkie.
+        #
+        # Wariness is attention, not a mask: it is aimed at a THING as often
+        # as at a person, and it has no smile in it. Ahead of suspicion so
+        # "wary" lands here; "suspicion", "doubt" and "mistrust" -- which are
+        # about another person -- still land on the poker face.
+        ("wary", "wariness", "uneasy", "unease", "alert", "vigilan",
+         "curious", "curiosity", "temkinli", "tedirgin", "merak"),
+        ActingBeat(
+            label="wariness",
+            onset="alert and still: eyes fixed on the thing, brow slightly drawn, breath shallow",
+            peak=(
+                "the attention sharpening: eyes narrowing on one point, head "
+                "drawing back a fraction, jaw tightening, no trace of a smile"
+            ),
+            voice_tag="warily",
+            stability=0.45,
+        ),
+    ),
+    (
+        ("suspicion", "doubt", "mistrust", "guarded",
+         "şüphe", "güvensiz"),
         ActingBeat(
             label="suspicion",
             onset="pleasant and blank: the social face, giving nothing",

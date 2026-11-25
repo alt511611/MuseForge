@@ -21,7 +21,7 @@ from interfaces.film_look import build_film_look_filters
 from interfaces import gender as gender_of
 from interfaces.lighting import is_interior
 from interfaces.places import extra_locations, scene_location
-from interfaces import cut_bridge
+from interfaces import character_sheet, cut_bridge
 from interfaces.color_grade import palette_for
 from interfaces import micro_drama
 from interfaces.language import DEFAULT_LANGUAGE
@@ -1171,8 +1171,16 @@ def _format_scene_direction(scene: Any) -> str:
         ("Dramatic function", "dramatic_function"),
         ("THE TURN — film this moment", "turn"),
         (
+            # The second sentence is job 6efbb788's. Its blackout scene was
+            # given one shot, and the shot drawn was the breath BEFORE the
+            # event -- "braced to pull ... floodlight poles still burn
+            # steadily behind her" -- because the scene opens there and the
+            # tension peaks there. Every other prompt in the scene then said
+            # the poles were dark, and the picture argued with all of them.
             "WHAT CHANGES ABOUT THE PLACE — this is the drama's event and it "
-            "must be VISIBLE in this scene's shots, not implied",
+            "must be VISIBLE in this scene's shots, not implied. If the scene "
+            "has only ONE shot, that shot is the moment AFTER it lands, in the "
+            "changed place — never the moment before it",
             "world_change",
         ),
         ("Subtext (what they really mean)", "subtext"),
@@ -4162,33 +4170,10 @@ def _heard_but_never_seen(script: DramaScript, cast: List[CharacterInScene]) -> 
     return unseen
 
 
-#: Whether a character's lock is a single front-facing portrait or a
-#: multi-angle SHEET.
-#:
-#: OFF by default, and the reason is a real incompatibility rather than
-#: caution. The shipped reference model is flux-pulid, which is an IDENTITY
-#: model: it expects a photograph OF A FACE and returns that face in a picture
-#: of its own choosing. A four-panel contact sheet is not a photograph of a
-#: face, and handing one to PuLID is asking it to lock the identity of a
-#: collage.
-#:
-#: What it is for is the reference models that ask for exactly this. Kling's
-#: element definition takes "up to 4" views of one subject and combines them
-#: into a single locked subject, and Nano Banana Pro reads a multi-view sheet
-#: as evidence about the same person rather than as four people. On those a
-#: sheet is strictly more information than one front view -- a profile is what
-#: stops a character from being redrawn every time the camera moves off axis.
-#:
-#: So this is switched on WITH the backend that can use it, and the pairing is
-#: the operator's to make: there is no reliable way to ask a MuAPI slug what
-#: it does with a grid, and guessing wrong degrades every face in the film.
 def is_character_sheet_enabled() -> bool:
-    return os.environ.get("MUSEFORGE_CHARACTER_SHEET", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    """Whether a character's lock is a multi-angle SHEET rather than a single
+    front-facing portrait. See interfaces/character_sheet for the reasoning."""
+    return character_sheet.is_enabled()
 
 
 #: The sheet's own instruction. Kept beside the flag because the two only ever

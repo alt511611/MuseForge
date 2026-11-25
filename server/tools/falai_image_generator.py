@@ -398,6 +398,27 @@ class FalAIImageGenerator:
         )
         return self._first_image_url(result)
 
+    async def edit_image(
+        self,
+        prompt: str,
+        image_url: str,
+        aspect_ratio: str = "16:9",
+        is_cancelled=None,
+        **_ignored,
+    ) -> str:
+        """Edit one existing image, keeping its composition.
+
+        Every reference endpoint this class speaks IS an edit model (Kontext,
+        FLUX.2 edit, Nano Banana edit), so a one-picture reference call is an
+        edit. Without this method the acting end frame (interfaces/acting) had
+        nothing to call on a fal deployment and silently never rendered.
+        Raises on failure, like the MuAPI edit: a "fallback" would be a
+        different picture, and an end frame from a different picture is a warp.
+        """
+        return await self.generate_image_with_reference(
+            prompt, [image_url], aspect_ratio, is_cancelled=is_cancelled
+        )
+
     @staticmethod
     def _first_image_url(result) -> str:
         images = (result or {}).get("images") or []
