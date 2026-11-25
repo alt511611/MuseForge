@@ -16,7 +16,7 @@ from interfaces import acting
 from interfaces import who_speaks
 from interfaces.camera import get_director_style
 from interfaces.character import CharacterInScene
-from interfaces.color_grade import get_color_grade
+from interfaces.color_grade import get_color_grade, palette_for
 from interfaces.delivery import (
     DELIVERY_LADDER,
     SNAP_TO_LADDER_TOLERANCE,
@@ -1785,6 +1785,7 @@ def build_frame_prompt(
     has_location_plate: bool = False,
     has_reference: bool = False,
     has_bridge_frame: bool = False,
+    palette: str = "",
 ) -> str:
     """Build the image prompt for a shot, injecting locked setting when present.
 
@@ -2100,7 +2101,10 @@ def build_frame_prompt(
         if has_location_plate
         else ""
     )
-    style_prefix = f"{style} style. "
+    # The palette rides the style prefix: REQUIRED, first, and already
+    # measured into the identity reserve below (interfaces/color_grade
+    # .ColorGrade.palette says why it is here at all).
+    style_prefix = f"{style} style. " + (f"{palette.strip()} " if (palette or "").strip() else "")
     framing_clause = f"Shot type: {shot.shot_type}. Lens: {shot.lens}. "
     desc_clause = f"{visual_desc}. "
 
@@ -4718,6 +4722,9 @@ class Script2VideoPipeline:
     ) -> Dict[str, Any]:
         os.makedirs(working_dir, exist_ok=True)
         portraits = character_portraits or {}
+        # The colour every frame of this film is drawn toward: the grade it
+        # will be finished in, said up front (interfaces/color_grade).
+        palette = palette_for(director_style)
         # Shared, mutable across scenes (owned by the caller) so a later
         # scene can reference an earlier scene's generated frame instead of
         # only ever the locked portrait. A fresh dict when the caller
@@ -4916,6 +4923,7 @@ class Script2VideoPipeline:
                     has_location_plate=bool(location_plate_url) and anchor is not None,
                     has_reference=has_ref,
                     has_bridge_frame=has_bridge,
+                    palette=palette,
                 ),
                 generate_audio=take_speaks,
                 scene_dialogue=scene_dialogue,
@@ -5003,6 +5011,7 @@ class Script2VideoPipeline:
                         and location_plate_url in frame_references[1:],
                         has_reference=bool(frame_references),
                         has_bridge_frame=bool(bridge_url),
+                        palette=palette,
                     )
 
                     # fal.ai reference-to-video binds character identity in a

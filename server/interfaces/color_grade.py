@@ -29,6 +29,22 @@ class ColorGrade:
     #: Fraction of the graded image kept when blended over the ungraded
     #: original, in [0, 1]. 1.0 applies the chain at full strength.
     strength: float = 1.0
+    #: The same look, in the words an IMAGE model reads -- stated on every
+    #: frame and every plate, so the picture is drawn toward the grade it is
+    #: going to get instead of being bent into it afterwards.
+    #:
+    #: The grade was the only place the film's colour was decided, and it
+    #: runs last, on the finished master. Every frame before it was free to
+    #: pick its own white balance: one scene warm, the next cool, a plate in
+    #: daylight blue behind a face in tungsten. A filter chain can shift a
+    #: whole film; it cannot make six differently-lit frames agree with each
+    #: other, and at the strengths faces need (0.75-0.85 above) it does not
+    #: try. So the agreement has to be asked for where the frames are made.
+    #:
+    #: Short on purpose: it rides the style prefix, which is REQUIRED and is
+    #: measured into the identity reserve, so every character here is taken
+    #: from the cast's own description. A test holds each one under 90.
+    palette: str = ""
 
 
 #: Applied when a style names a grade that does not exist here.
@@ -43,6 +59,7 @@ COLOR_GRADES: Dict[str, ColorGrade] = {
         label="Natural",
         filter_chain="eq=contrast=1.04:saturation=1.06:gamma=1.01",
         strength=1.0,
+        palette="True-to-life colour, one neutral white balance throughout.",
     ),
     # Classic prestige-drama look: pull overall saturation down, then push
     # shadows toward teal and highlights toward orange via colorbalance.
@@ -55,6 +72,7 @@ COLOR_GRADES: Dict[str, ColorGrade] = {
             "colorbalance=rs=-0.06:bs=0.10:rh=0.07:bh=-0.06"
         ),
         strength=0.80,
+        palette="Muted palette: teal-leaning shadows, warm skin and highlights.",
     ),
     # Punchy and graphic for action. Contrast does the work; saturation only
     # nudges up so the extra contrast doesn't read as oversaturated.
@@ -62,6 +80,7 @@ COLOR_GRADES: Dict[str, ColorGrade] = {
         label="High Contrast",
         filter_chain="eq=contrast=1.22:saturation=1.10:gamma=0.98",
         strength=0.75,
+        palette="Punchy high-contrast palette: deep blacks, clean bright highlights.",
     ),
     # Soft, warm and close. Slightly lifted gamma opens the shadows so
     # close-ups on faces stay readable, which is what this style is for.
@@ -72,6 +91,7 @@ COLOR_GRADES: Dict[str, ColorGrade] = {
             "colorbalance=rm=0.07:gm=0.02:bm=-0.06"
         ),
         strength=0.85,
+        palette="Warm soft palette: amber light, gentle open shadows.",
     ),
     # Monochrome noir. Runs near full strength on purpose: blending colour
     # back in would defeat a black-and-white look. Contrast is raised but
@@ -80,12 +100,19 @@ COLOR_GRADES: Dict[str, ColorGrade] = {
         label="Noir B&W",
         filter_chain="hue=s=0,eq=contrast=1.28:gamma=0.97",
         strength=0.95,
+        # NOT "black and white". The grade removes the colour; asking the
+        # frame for it as well would hand the video model a monochrome start
+        # frame beside colour portraits it is told to match, which is two
+        # instructions about skin that cannot both be kept. What the frame
+        # can usefully carry is the contrast and the shadow the grade expects.
+        palette="Low-saturation palette, hard shadows, strong light-dark contrast.",
     ),
     # Bold, poster-like colour for the anime style.
     "vivid_saturated": ColorGrade(
         label="Vivid",
         filter_chain="eq=contrast=1.12:saturation=1.45:gamma=1.02",
         strength=0.80,
+        palette="Vivid saturated palette, bold clean colour blocking.",
     ),
 }
 
@@ -97,3 +124,16 @@ def get_color_grade(name: str) -> ColorGrade:
     style definition degrades to a sane picture instead of failing a render.
     """
     return COLOR_GRADES.get((name or "").strip(), COLOR_GRADES[FALLBACK_GRADE])
+
+
+def palette_for(director_style: str) -> str:
+    """The palette sentence for a director style's grade.
+
+    Keyed on the DIRECTOR style because that is what decides the grade
+    (DirectorStyle.color_grade) -- and the director style is a production
+    lock of a series (interfaces/series), so every episode is drawn toward
+    the same colour, not just graded into it.
+    """
+    from interfaces.camera import get_director_style
+
+    return get_color_grade(get_director_style(director_style).color_grade).palette

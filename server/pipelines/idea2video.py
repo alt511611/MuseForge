@@ -22,6 +22,7 @@ from interfaces import gender as gender_of
 from interfaces.lighting import is_interior
 from interfaces.places import extra_locations, scene_location
 from interfaces import cut_bridge
+from interfaces.color_grade import palette_for
 from interfaces import micro_drama
 from interfaces.language import DEFAULT_LANGUAGE
 from interfaces import who_speaks
@@ -578,7 +579,7 @@ def _scene_survives_a_redraw(
 
 
 def _location_plate_prompt(
-    location: str, time_of_day: str, era: str, style: str, look: Any
+    location: str, time_of_day: str, era: str, style: str, look: Any, palette: str = ""
 ) -> str:
     """The prompt the drama's one empty set is drawn from.
 
@@ -608,6 +609,11 @@ def _location_plate_prompt(
         "no characters. "
         f"{contents}"
         "Consistent architecture, materials, furniture and lighting. High detail."
+        # The plate is the reference every frame takes its light from, so it
+        # is drawn in the palette those frames are (interfaces/color_grade):
+        # a daylight-blue set behind tungsten faces is the mismatch a grade
+        # cannot undo.
+        f"{(' ' + palette.strip()) if (palette or '').strip() else ''}"
         # Same reason as the character portrait: the plate is the set
         # reference every establishing shot is drawn from, so it has to
         # be built in the drama's own look.
@@ -4381,6 +4387,7 @@ class Idea2VideoPipeline:
         style: str = "Cinematic",
         aspect_ratio: str = "16:9",
         location_image_override: Optional[str] = None,
+        palette: str = "",
     ) -> Optional[str]:
         """Generate ONE empty-set plate of the drama's locked setting.
 
@@ -4410,7 +4417,7 @@ class Idea2VideoPipeline:
         time_of_day = (getattr(script, "setting_time_of_day", "") or "").strip()
         era = (getattr(script, "setting_era", "") or "").strip()
         look = resolve_visual_style(style)
-        prompt = _location_plate_prompt(location, time_of_day, era, style, look)
+        prompt = _location_plate_prompt(location, time_of_day, era, style, look, palette)
         try:
             return await self.image_gen.generate_image(prompt, aspect_ratio=aspect_ratio)
         except Exception as exc:
@@ -4428,6 +4435,7 @@ class Idea2VideoPipeline:
         script: DramaScript,
         style: str = "Cinematic",
         aspect_ratio: str = "16:9",
+        palette: str = "",
     ) -> Dict[str, str]:
         """One plate per place a scene moves to, keyed by that place.
 
@@ -4449,7 +4457,7 @@ class Idea2VideoPipeline:
         look = resolve_visual_style(style)
 
         async def _one(place: str) -> Optional[str]:
-            prompt = _location_plate_prompt(place, time_of_day, era, style, look)
+            prompt = _location_plate_prompt(place, time_of_day, era, style, look, palette)
             try:
                 return await self.image_gen.generate_image(prompt, aspect_ratio=aspect_ratio)
             except Exception as exc:
@@ -7002,8 +7010,11 @@ class Idea2VideoPipeline:
                 style,
                 aspect_ratio=aspect_ratio,
                 location_image_override=location_image_override,
+                palette=palette_for(director_style),
             ),
-            self._lock_extra_location_plates(script, style, aspect_ratio=aspect_ratio),
+            self._lock_extra_location_plates(
+                script, style, aspect_ratio=aspect_ratio, palette=palette_for(director_style)
+            ),
         )
         # Every place's picture, keyed by the words the scenes name it with.
         # The drama's own place is keyed too, so a scene's plate is ONE lookup
