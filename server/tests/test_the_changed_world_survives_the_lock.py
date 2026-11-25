@@ -120,7 +120,11 @@ async def test_the_frame_check_is_told_what_the_story_did_to_the_place(
                 idx=0,
                 visual_desc="Mara Voss staggers back from the open container",
                 motion_desc="handheld",
-                duration_seconds=8.0,
+                # Short: a long one-shot take of the event now OPENS before
+                # it and is checked against the place as it was
+                # (long_take.event_spans_take; see
+                # test_the_event_was_already_over_when_the_take_began).
+                duration_seconds=5.0,
             )
         ]
 

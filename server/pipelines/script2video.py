@@ -2669,6 +2669,7 @@ def build_motion_prompt(
     world_state: str = "",
     speaking: bool = True,
     unpeopled: bool = False,
+    event_in_take: bool = False,
 ) -> str:
     """Build the prompt sent to the video (image-to-video) model.
 
@@ -2740,7 +2741,18 @@ def build_motion_prompt(
             f"The character's expression stays true to the beat: {expression}."
         )
     changed = (world_state or "").strip().rstrip(".")
-    if changed:
+    if changed and event_in_take:
+        # The take that CARRIES the event (long_take.event_spans_take): it
+        # opens on the world before and is drawn to end on the world after,
+        # so telling it the change has "already" happened would contradict
+        # its own first frame. It is told when, instead -- and that the
+        # change is one way.
+        parts.append(
+            f"THIS is the shot the story's event happens in: {changed}. The "
+            f"clip opens on the world as it was and ends on it changed; once "
+            f"it changes it never changes back."
+        )
+    elif changed:
         parts.append(
             f"The world of this shot has already changed: {changed}. Hold that "
             f"state for the entire clip — it must not revert, recover or "
@@ -4236,8 +4248,15 @@ class Script2VideoPipeline:
         bridge_frame_url: Optional[str] = None,
         on_opening_frame: Optional[Callable[[Optional[str]], None]] = None,
         world_state: str = "",
+        event_action: str = "",
     ) -> Dict[str, Any]:
         """Render a whole scene in ONE generation, cuts included.
+
+        ``event_action`` is the scene's action when the drama's event happens
+        IN this scene. If the take can carry it -- long enough, a face to
+        anchor the end to, an endpoint that takes an end image -- it opens on
+        the world before and is drawn to end on the world after
+        (long_take.event_spans_take).
 
         What this replaces, per scene: one image and one video generation PER
         ANGLE, the concat that joined them, and the timescale repair that
@@ -4264,6 +4283,13 @@ class Script2VideoPipeline:
             bridge_frame_url=bridge_frame_url,
         )
         bridged = bool(bridge_frame_url) and bridge_frame_url in frame_references
+        event_in_take = bool(event_action) and long_take.event_spans_take(
+            world_state,
+            1,
+            scene_seconds,
+            has_character=matched_char is not None,
+            draws_frames="end_image_url" in getattr(backend, "fields", ()),
+        )
         # Built HERE, not by the caller, because it needs the anchor and the
         # anchor is what resolve_frame_references just worked out. Passed in
         # finished, it could only ever be built with matched_char=None -- and
@@ -4276,7 +4302,9 @@ class Script2VideoPipeline:
         # each of three scenes -- which is precisely the drift the per-shot
         # path resolves first in order to avoid.
         frame_prompt = (
-            frame_prompt_for(matched_char, bool(frame_references), True)
+            frame_prompt_for(matched_char, bool(frame_references), bridged, before=True)
+            if event_in_take
+            else frame_prompt_for(matched_char, bool(frame_references), True)
             if bridged
             else frame_prompt_for(matched_char, bool(frame_references))
         )
@@ -4377,6 +4405,7 @@ class Script2VideoPipeline:
                 is_cancelled,
                 portrait=portraits.get(getattr(matched_char, "name", "")),
                 world_state=world_state,
+                action=event_action if event_in_take else "",
             ) or ""
 
         take = plan_scene_take(
@@ -4387,6 +4416,9 @@ class Script2VideoPipeline:
             start_image=start_image,
             end_image=end_image,
             world_state=world_state,
+            # Only when the drawn end actually exists: without it the take
+            # would be told the event happens and given nothing to end on.
+            event_in_take=event_in_take and bool(end_image),
             # The lines, only when this take is the thing that says them. A
             # scene rendered mute is voiced by the TTS pass and lip-synced
             # afterwards, and its words reach the picture that way.
@@ -4704,8 +4736,15 @@ class Script2VideoPipeline:
         is_cancelled: Optional[Callable[[], bool]] = None,
         portrait: Optional[str] = None,
         world_state: str = "",
+        event_action: str = "",
     ) -> Optional[str]:
         """Edit this shot's start frame into its acted peak, or return None.
+
+        ``event_action`` is set when this take carries the drama's event
+        (long_take.event_spans_take): the end frame is then the world AFTER
+        the event, drawn from the scene's own action, and it is drawn whatever
+        else is configured -- an acting edit keeps the set exactly as the
+        opening frame has it, which is the world before.
 
         The peak comes from interfaces/acting, not from the LLM, so it is the
         same on every render of the same scene. The EDIT (rather than a second
@@ -4732,14 +4771,13 @@ class Script2VideoPipeline:
             and bool((getattr(shot, "expression_peak_desc", "") or "").strip())
             and getattr(self.image_gen, "edit_image", None) is not None
         )
-        if (
-            not acted
-            and matched_char is not None
-            and long_take.is_long(getattr(shot, "duration_seconds", 0))
+        if matched_char is not None and (
+            event_action
+            or (not acted and long_take.is_long(getattr(shot, "duration_seconds", 0)))
         ):
             return await self._render_long_take_end(
                 frame_url, shot, matched_char, aspect_ratio, is_cancelled,
-                portrait=portrait, world_state=world_state,
+                portrait=portrait, world_state=world_state, action=event_action,
             )
         if not acting.is_end_frame_enabled():
             return None
@@ -4805,8 +4843,13 @@ class Script2VideoPipeline:
         is_cancelled: Optional[Callable[[], bool]] = None,
         portrait: Optional[str] = None,
         world_state: str = "",
+        action: str = "",
     ) -> Optional[str]:
         """The last frame of a long take, drawn from its first and the face.
+
+        ``action`` overrides the shot's own motion line: the take that carries
+        the drama's event ends where the SCENE ends, not where its storyboard
+        line (written for the moment before) does.
 
         Fail-open like every end frame here: None animates the take from its
         opening frame alone, exactly as before.
@@ -4814,7 +4857,10 @@ class Script2VideoPipeline:
         name = getattr(matched_char, "name", "") or ""
         references = [frame_url] + ([portrait] if portrait and portrait != frame_url else [])
         prompt = long_take.end_frame_prompt(
-            action=getattr(shot, "motion_desc", "") or getattr(shot, "visual_desc", "") or "",
+            action=(action or "").strip()[:500]
+            or getattr(shot, "motion_desc", "")
+            or getattr(shot, "visual_desc", "")
+            or "",
             name=name,
             peak=getattr(shot, "expression_peak_desc", "") or "",
             world_state=world_state,
@@ -5020,6 +5066,9 @@ class Script2VideoPipeline:
         # place looks wrong, until the lights come back on. The vision check
         # has to be told what the story did to the place.
         changed_state = (world_change or "").strip() or (world_state or "").strip()
+        # What an opening frame drawn BEFORE the event is checked against
+        # (long_take.event_spans_take): the place as it was.
+        expected_setting_before = expected_setting
         if expected_setting and changed_state:
             expected_setting += f" -- but in this scene: {changed_state}"
 
@@ -5076,6 +5125,7 @@ class Script2VideoPipeline:
                 # The event, once it has happened: the take's prompt holds it
                 # on every beat (interfaces/scene_take.SceneTake.world_state).
                 world_state=(world_change or "").strip() or (world_state or "").strip(),
+                event_action=script if (world_change or "").strip() else "",
                 shots=shots,
                 characters=characters,
                 portraits=portraits,
@@ -5093,7 +5143,7 @@ class Script2VideoPipeline:
                 # inside, by the same resolve_frame_references the per-shot
                 # path calls before it builds its prompt, and the prompt
                 # cannot be built correctly without it.
-                frame_prompt_for=lambda anchor, has_ref, has_bridge=False: build_frame_prompt(
+                frame_prompt_for=lambda anchor, has_ref, has_bridge=False, before=False: build_frame_prompt(
                     style,
                     opening,
                     setting_location=setting_location,
@@ -5109,8 +5159,10 @@ class Script2VideoPipeline:
                     lipsync_enabled=lipsync_enabled and not take_speaks,
                     characters=characters,
                     matched_char=anchor,
-                    world_change=world_change,
-                    world_state=world_state,
+                    # ``before``: this take carries the event, so it opens on
+                    # the world as it was (long_take.event_spans_take).
+                    world_change="" if before else world_change,
+                    world_state="" if before else world_state,
                     # Only when the plate is a SECOND picture. With no anchor
                     # the plate IS the anchor (resolve_frame_references falls
                     # back to it for an establishing shot or an insert), and
@@ -5187,29 +5239,32 @@ class Script2VideoPipeline:
                     # never touch it is how the silence gets performed.
                     shot_has_dialogue = has_dialogue and line_reaches[i]
 
-                    frame_prompt = build_frame_prompt(
-                        style,
-                        shot,
-                        setting_location=setting_location,
-                        setting_time_of_day=setting_time_of_day,
-                        setting_era=setting_era,
-                        has_dialogue=shot_has_dialogue,
-                        lipsync_enabled=lipsync_enabled,
-                        characters=characters,
-                        matched_char=matched_char,
-                        world_change=world_change,
-                        world_state=world_state,
-                        # Read off the set that is actually going, not off
-                        # `location_plate_url` being non-empty: the plate is
-                        # de-duplicated against the anchor, so on a
-                        # characterless shot the two are one URL in one slot.
-                        # [1:] is "sent, and not as the anchor".
-                        has_location_plate=bool(location_plate_url)
-                        and location_plate_url in frame_references[1:],
-                        has_reference=bool(frame_references),
-                        has_bridge_frame=bool(bridge_url),
-                        palette=palette,
-                    )
+                    def _frame_prompt(change, state):
+                        return build_frame_prompt(
+                            style,
+                            shot,
+                            setting_location=setting_location,
+                            setting_time_of_day=setting_time_of_day,
+                            setting_era=setting_era,
+                            has_dialogue=shot_has_dialogue,
+                            lipsync_enabled=lipsync_enabled,
+                            characters=characters,
+                            matched_char=matched_char,
+                            world_change=change,
+                            world_state=state,
+                            # Read off the set that is actually going, not off
+                            # `location_plate_url` being non-empty: the plate is
+                            # de-duplicated against the anchor, so on a
+                            # characterless shot the two are one URL in one slot.
+                            # [1:] is "sent, and not as the anchor".
+                            has_location_plate=bool(location_plate_url)
+                            and location_plate_url in frame_references[1:],
+                            has_reference=bool(frame_references),
+                            has_bridge_frame=bool(bridge_url),
+                            palette=palette,
+                        )
+
+                    frame_prompt = _frame_prompt(world_change, world_state)
 
                     # fal.ai reference-to-video binds character identity in a
                     # SINGLE call (elements + prompt), so the separate
@@ -5234,6 +5289,21 @@ class Script2VideoPipeline:
                     )
                     if start_from_frame:
                         one_step_reference_video = False
+
+                    # The scene the event happens IN, as one long take: its
+                    # opening frame is the world BEFORE and its drawn end
+                    # frame the world AFTER, so the take plays the event
+                    # instead of starting after it (interfaces/long_take
+                    # .event_spans_take, jobs 6efbb788 and d91a4172).
+                    event_in_take = long_take.event_spans_take(
+                        world_change,
+                        len(shots),
+                        getattr(shot, "duration_seconds", 0),
+                        has_character=matched_char is not None,
+                        draws_frames=not one_step_reference_video,
+                    )
+                    if event_in_take:
+                        frame_prompt = _frame_prompt("", "")
 
                     async with progress_lock:
                         await progress(
@@ -5322,7 +5392,11 @@ class Script2VideoPipeline:
                             qa_result = await verify_frame(
                                 frame_url=frame_url,
                                 expected_character_desc=char_desc,
-                                expected_setting=expected_setting,
+                                expected_setting=(
+                                    expected_setting_before
+                                    if event_in_take
+                                    else expected_setting
+                                ),
                                 anthropic_api_key=anthropic_key,
                             )
                             qa_failed = not qa_result.get(
@@ -5392,6 +5466,7 @@ class Script2VideoPipeline:
                             world_state=change_state,
                             speaking=shot_has_dialogue,
                             unpeopled=shot_is_unpeopled(shot, characters, matched_char),
+                            event_in_take=event_in_take,
                         )
 
                         # The acted PEAK, rendered as a real end frame so the
@@ -5411,6 +5486,9 @@ class Script2VideoPipeline:
                                 portraits.get(matched_char.name) if matched_char else None
                             ),
                             world_state=change_state,
+                            # The end of the EVENT, in the scene's own words:
+                            # the shot's motion line is the moment before it.
+                            event_action=script if event_in_take else "",
                         )
 
                     # Record this shot's final frame (post-repair, if any)
@@ -5515,6 +5593,9 @@ class Script2VideoPipeline:
                 meta["acted_interpolation"] = bool(end_frame_url)
                 # See the same key on the one-take path.
                 meta["bridged_from_previous_scene"] = bool(i == 0 and bridge_url)
+                # Whether this take opened before the event and was drawn to
+                # end after it (long_take.event_spans_take).
+                meta["event_in_take"] = bool(event_in_take)
                 # Which lock actually anchored this shot. Without it, a
                 # "the room keeps changing" report cannot be told apart from
                 # "the wrong character was matched" after the fact.

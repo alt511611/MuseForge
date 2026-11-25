@@ -109,3 +109,39 @@ def end_frame_prompt(
         "the camera. Photographic, continuous with the first image."
     )
     return " ".join(parts)
+
+
+def event_spans_take(
+    world_change: str,
+    shot_count: int,
+    seconds: Any,
+    has_character: bool,
+    draws_frames: bool,
+) -> bool:
+    """Whether the drama's event should HAPPEN across this take.
+
+    The pipeline treated the scene the event happens in exactly like every
+    scene after it: changed from its first frame. That is right for a scene
+    that inherits the blackout and wrong for the one that causes it, and two
+    delivered jobs show what it costs. Both briefs were "the city's power dies
+    the moment she opens it"; both climaxes were one long close-up; in both
+    the opening frame was already dark, so the doors never opened, no light
+    poured out, and nothing went out -- the film's event was over before the
+    shot began. Job d91a4172 then lit the floodlights again mid-take, between
+    two dark anchors, because nothing in the take was the change.
+
+    A take with both ends drawn can carry the change itself: open on the
+    world BEFORE, end on the world AFTER, and the video model has to
+    interpolate the event. That needs a take long enough to hold it, a face
+    to anchor its end frame to, frames to draw at all, and a scene that is
+    ONE shot -- a scene covered in several is left as it was, every angle
+    changed, because which angle the event falls in is not something this
+    can know.
+    """
+    return (
+        bool((world_change or "").strip())
+        and int(shot_count or 0) == 1
+        and has_character
+        and draws_frames
+        and is_long(seconds)
+    )
