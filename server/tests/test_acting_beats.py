@@ -173,12 +173,17 @@ def _pipeline(image_gen):
 
 @pytest.mark.asyncio
 async def test_end_frame_is_off_by_default(monkeypatch):
-    """It costs an extra generation per shot, so it is opted into."""
+    """It costs an extra generation per shot, so it is opted into.
+
+    On a SHORT shot: a long take is anchored at its end regardless
+    (interfaces/long_take, job 6efbb788), which is a different end frame for
+    a different reason.
+    """
     monkeypatch.delenv("MUSEFORGE_ACTING_END_FRAME", raising=False)
     image_gen = _RecordingImageGen()
     result = await _pipeline(image_gen)._render_end_frame(
         frame_url="https://cdn/start.png",
-        shot=_shot(expression_peak_desc="tears breaking over the lid"),
+        shot=_shot(expression_peak_desc="tears breaking over the lid", duration_seconds=5.0),
         matched_char=CharacterInScene(idx=0, name="Ayse", static_features="50s woman"),
     )
     assert result is None

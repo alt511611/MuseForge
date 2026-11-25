@@ -187,7 +187,13 @@ async def test_all_four_phases_render_one_scene_together(monkeypatch, tmp_path):
     # what beat 1 shows -- Vivian and the room. Handing it Julian's sheet would
     # push a face into a framing the storyboard wrote without him, which is the
     # mistake Phase 1's own plate branch exists to undo.
-    assert len(frame_calls) == 1, "one frame for the scene, not one per angle"
+    # Two drawings for the whole scene, however many angles it has: the
+    # opening, and -- because twelve seconds is long enough to drift -- the
+    # take's last frame, drawn from the opening and the anchor's own sheet
+    # (interfaces/long_take, job 6efbb788).
+    assert len(frame_calls) == 2, "one opening and one end for the scene, not one per angle"
+    assert frame_calls[1]["references"][1:] == ["https://cdn/vivian-sheet.png"]
+    assert generator.takes[0]["take"].end_image, "the drawn end reaches the take"
     assert frame_calls[0]["references"] == [
         "https://cdn/vivian-sheet.png",
         "https://cdn/basement-plate.png",

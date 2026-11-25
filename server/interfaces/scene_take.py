@@ -103,6 +103,13 @@ def _as_spoken(line: str) -> str:
 #: nowhere -- the model fills the seconds with whatever the last frame implied.
 MIN_BEAT_DESCRIPTION = 140
 
+#: The changed-world sentence's cap (SceneTake.state_clause). Long enough for
+#: "every floodlight pole along the harbour goes dark, leaving the open
+#: container's glow as the only light on the dock" (115), short enough that a
+#: first beat carrying it AND the cast clause still leaves the description its
+#: floor inside a 512-character budget.
+MAX_STATE_CHARS = 120
+
 #: Held back from every declared prompt budget. See _fit_beat_prompt.
 #:
 #: This is not a rounding allowance. It is the margin for the fact that
@@ -524,7 +531,7 @@ class Beat:
     #: filled when the take carries its own audio -- see plan_scene_take.
     dialogue: Tuple[str, ...] = ()
 
-    def as_prompt(self, cast: str = "", limit: int = 0) -> str:
+    def as_prompt(self, cast: str = "", limit: int = 0, state: str = "") -> str:
         """What this beat SHOWS, inside ``limit`` characters.
 
         The seconds used to be written into the text as "Shot 1 (3s): ...",
@@ -546,18 +553,21 @@ class Beat:
         # comes from the script and says something else, so the viewer both
         # hears and reads the scene, differently.
         framing = f"{self.shot_type}. " if self.shot_type else ""
+        # The changed world rides the head with the framing, which never
+        # gives: it is the one sentence a late beat must not lose (see
+        # SceneTake.world_state).
         return _fit_beat_prompt(
-            cast, framing, self.description, self.dialogue, limit
+            cast, f"{state}{framing}", self.description, self.dialogue, limit
         )
 
-    def as_payload(self, cast: str = "", limit: int = 0) -> dict:
+    def as_payload(self, cast: str = "", limit: int = 0, state: str = "") -> dict:
         """One entry of `multi_prompt`.
 
         `duration` is a STRING enum ("1".."15"), not an integer -- sending the
         number is a 422, and a 422 on this endpoint is the whole take.
         """
         return {
-            "prompt": self.as_prompt(cast=cast, limit=limit),
+            "prompt": self.as_prompt(cast=cast, limit=limit, state=state),
             "duration": str(self.seconds),
         }
 
@@ -595,6 +605,30 @@ class SceneTake:
     #: should be ("a new visual beat every 5-7 seconds"), which is what the
     #: scene's seconds do when there is one fewer beat to spend them on.
     undescribed_shots: int = 0
+    #: The drama's event, once it has happened in or before this scene.
+    #:
+    #: The per-shot path has said this to the video model since a blackout
+    #: was animated back to light (script2video.build_motion_prompt: "Hold
+    #: that state for the entire clip"). The take never did: its beats were
+    #: shot descriptions and a cast clause, and the only carrier of the event
+    #: was the opening frame -- one frame, against twelve seconds of a model
+    #: whose prior for "night harbour" is floodlights. Job 6efbb788 showed
+    #: what a lone first frame buys on the per-shot path, where at least the
+    #: prompt agreed with it: six seconds, then every pole lit again.
+    #:
+    #: Said on EVERY beat, not the first: it is the late beats that revert.
+    world_state: str = ""
+
+    def state_clause(self) -> str:
+        """The changed world as one short sentence, or "".
+
+        Capped, because it rides the part of each beat that is never cut and
+        an overrun on this endpoint is a 422 on the whole scene.
+        """
+        state = " ".join((self.world_state or "").split()).rstrip(".")
+        if not state:
+            return ""
+        return f"The world has changed and stays so: {_trim(state, MAX_STATE_CHARS)} "
 
     @property
     def beat_count(self) -> int:
@@ -629,10 +663,12 @@ class SceneTake:
         the same person twice.
         """
         cast = self.cast_clause()
+        state = self.state_clause()
         return [
             self.cited(beat).as_payload(
                 cast=cast if index == 0 else "",
                 limit=self.max_prompt_chars,
+                state=state,
             )
             for index, beat in enumerate(self.beats)
         ]
@@ -904,6 +940,7 @@ def plan_scene_take(
     start_image: str = "",
     end_image: str = "",
     dialogue: Sequence[str] = (),
+    world_state: str = "",
 ) -> Optional[SceneTake]:
     """This scene as ONE request, or None when the backend cannot cut.
 
@@ -967,4 +1004,5 @@ def plan_scene_take(
         end_image=end_image,
         max_prompt_chars=int(getattr(backend, "max_prompt_chars", 0) or 0),
         undescribed_shots=max(0, len(list(shots or [])) - len(usable)),
+        world_state=world_state,
     )
