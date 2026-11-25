@@ -21,6 +21,7 @@ from interfaces.film_look import build_film_look_filters
 from interfaces import gender as gender_of
 from interfaces.lighting import is_interior
 from interfaces.places import extra_locations, scene_location
+from interfaces import cut_bridge
 from interfaces import micro_drama
 from interfaces.language import DEFAULT_LANGUAGE
 from interfaces import who_speaks
@@ -5273,6 +5274,41 @@ class Idea2VideoPipeline:
                     f"Scene {index + 1} is not part of this script."
                 )
 
+        # A retaken scene is bridged from the opening frame the scene before it
+        # was DELIVERED with -- the one the viewer actually sees across the cut
+        # (interfaces/cut_bridge). Not when that scene is being re-shot in the
+        # same batch: its delivered frame is about to stop being on screen.
+        retake_places = [scene_location(s, main_location) for s in script.scenes]
+        delivered_openings: Dict[int, str] = {}
+        for record in previous_result.get("scenes") or []:
+            shots_recorded = record.get("shots") or []
+            frame = (shots_recorded[0] or {}).get("frame_url") if shots_recorded else None
+            if frame and "index" in record:
+                delivered_openings[int(record["index"])] = frame
+
+        def _retake_bridge(index: int):
+            frame = delivered_openings.get(index - 1)
+            if (
+                not frame
+                or (index - 1) in wanted
+                or not cut_bridge.bridges(
+                    script.scenes,
+                    index,
+                    retake_places,
+                    has_plate=bool(
+                        _plate_for(
+                            retake_places[index], main_location, location_plate, location_plates
+                        )
+                    ),
+                )
+            ):
+                return None
+
+            async def _delivered() -> Optional[str]:
+                return frame
+
+            return _delivered
+
         durations = state.get("scene_durations") or []
         user_requirement = state.get("user_requirement") or ""
         # A retake that ignores the note is just another roll of the dice.
@@ -5383,6 +5419,10 @@ class Idea2VideoPipeline:
                         if window is not None
                         else None
                     ),
+                    # A beat is not the frame after the cut unless it is
+                    # the scene's first, and a beat retake re-shoots
+                    # whichever beat it was asked for.
+                    bridge_frame=_retake_bridge(index) if window is None else None,
                     # The same slice of the second budget as the take it
                     # replaces, so a retake can never quietly lengthen (or
                     # shorten) the paid runtime -- a beat's slice of it when
@@ -7282,7 +7322,59 @@ class Idea2VideoPipeline:
         progress_lock = asyncio.Lock()
         completed_scenes = 0
 
+        # Each scene's opening frame, for the scene after it to bridge from
+        # (interfaces/cut_bridge). One future per scene, resolved with the
+        # frame or with None -- ALWAYS resolved, in _render_scene's finally,
+        # so a scene that failed or drew no frame releases its neighbour
+        # instead of holding it until the timeout.
+        scene_places = [scene_location(s, main_location) for s in script.scenes]
+        opening_frames: List["asyncio.Future"] = [
+            asyncio.get_running_loop().create_future() for _ in script.scenes
+        ]
+
+        def _bridge_from(idx: int):
+            if not cut_bridge.bridges(
+                script.scenes,
+                idx,
+                scene_places,
+                has_plate=bool(
+                    _plate_for(scene_places[idx], main_location, location_plate, location_plates)
+                ),
+            ):
+                return None
+
+            async def _await_previous() -> Optional[str]:
+                try:
+                    return await asyncio.wait_for(
+                        asyncio.shield(opening_frames[idx - 1]),
+                        timeout=cut_bridge.BRIDGE_WAIT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Scene %s waited %.0fs for scene %s's opening frame and "
+                        "is drawn without the bridge.",
+                        idx + 1,
+                        cut_bridge.BRIDGE_WAIT_SECONDS,
+                        idx,
+                    )
+                    return None
+
+            return _await_previous
+
+        def _opened(idx: int):
+            def _record(url: Optional[str]) -> None:
+                if not opening_frames[idx].done():
+                    opening_frames[idx].set_result(url)
+
+            return _record
+
         async def _render_scene(idx: int, scene: Any) -> None:
+            try:
+                await _render_one_scene(idx, scene)
+            finally:
+                _opened(idx)(None)
+
+        async def _render_one_scene(idx: int, scene: Any) -> None:
             nonlocal completed_scenes
             async with scene_semaphore:
                 _check_cancel()
@@ -7375,6 +7467,8 @@ class Idea2VideoPipeline:
                     scene_shot_scale=(
                         shot_scales[idx] if idx < len(shot_scales) else ""
                     ),
+                    bridge_frame=_bridge_from(idx),
+                    on_opening_frame=_opened(idx),
                 )
                 async with progress_lock:
                     completed_scenes += 1
