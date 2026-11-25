@@ -14,6 +14,7 @@ import httpx
 from agents.storyboard_artist import StoryboardArtist
 from interfaces import acting
 from interfaces import who_speaks
+from interfaces import character_sheet
 from interfaces.camera import get_director_style
 from interfaces.character import CharacterInScene
 from interfaces.color_grade import get_color_grade, palette_for
@@ -117,16 +118,31 @@ VIDEO_PROVIDERS = (
 _TIGHT_SHOT = re.compile(r"close[- ]?up", re.I)
 
 
-def wants_first_frame(shot, video_gen) -> bool:
+def wants_first_frame(shot, video_gen, has_character: bool = False) -> bool:
     """True when this shot should start from a rendered frame, not references.
 
-    Only a close-up, only on a backend that declares ``can_start_from_frame``,
-    and switchable off with MUSEFORGE_CLOSEUP_FIRST_FRAME=0 -- it costs one
-    image generation and a slower clip per shot.
+    Only on a backend that declares ``can_start_from_frame``, and for one of
+    two reasons, each costing one image generation and a slower clip:
+
+    * a close-up (switch off with MUSEFORGE_CLOSEUP_FIRST_FRAME=0) -- the
+      empty plate's wide framing wins a reference-only call and "close-up"
+      comes back as a full body (job 21a87c5a);
+    * any shot of a person while the identity references are multi-view
+      SHEETS (switch off with MUSEFORGE_SHEET_FIRST_FRAME=0). A sheet's faces
+      are an eighth of the picture high, and a video model given only that
+      redraws the person every generation (interfaces/character_sheet, job
+      6efbb788). The frame model reads the sheet and draws a full-size face,
+      and the take then starts from it.
     """
-    if (os.environ.get("MUSEFORGE_CLOSEUP_FIRST_FRAME", "1") or "").strip() == "0":
-        return False
     if not getattr(video_gen, "can_start_from_frame", False):
+        return False
+    if (
+        has_character
+        and character_sheet.is_enabled()
+        and (os.environ.get("MUSEFORGE_SHEET_FIRST_FRAME", "1") or "").strip() != "0"
+    ):
+        return True
+    if (os.environ.get("MUSEFORGE_CLOSEUP_FIRST_FRAME", "1") or "").strip() == "0":
         return False
     return bool(_TIGHT_SHOT.search(getattr(shot, "shot_type", "") or ""))
 
@@ -993,6 +1009,23 @@ _BRIDGE_AND_PLATE_NOTE = (
     "materials and light. Nobody in it is a character. "
 )
 
+#: The plate sentence once the drama's event has happened.
+#:
+#: The plate is drawn ONCE, before anything happens, so in the scene where the
+#: power dies it is a photograph of every floodlight burning -- and the note
+#: above told the model to take its LIGHT. Job 6efbb788's blackout scene was
+#: sent exactly that: the setting clause said the poles go dark, the plate
+#: said they are lit, and the sentence between them said to copy the plate's
+#: light. The frame came back dark (the repair pass pushed it there); the take
+#: animated from it went dark and then, by second six, lit every pole again.
+#:
+#: What the plate is still right about is the architecture. So it is named
+#: for that and nothing else, and told what time it is from.
+_CHANGED_PLATE_NOTE = (
+    "The last reference is this set BEFORE the change: take its architecture, "
+    "never its light. Nobody in it is a character. "
+)
+
 #: What the identity clause costs before a single character is described.
 #: Measured, not guessed, so the reserve tracks the sentences automatically.
 IDENTITY_CLAUSE_OVERHEAD = (
@@ -1296,6 +1329,50 @@ def label_frame_references(
         else:
             labels.append(by_url.get(url, ""))
     return labels
+
+
+#: What the video model is told the plate is, once the world has changed and
+#: there is no rendered frame to carry the changed set instead.
+CHANGED_PLATE_LABEL = (
+    "the empty set as it was BEFORE the change: its architecture only, never its light"
+)
+
+
+def video_reference_set(
+    references,
+    labels,
+    location_plate_url=None,
+    world_changed: bool = False,
+    starts_from_frame: bool = True,
+):
+    """The references and labels a VIDEO backend is handed for one shot.
+
+    The same set the frame was drawn from, except in one case: after the
+    drama's event, the plate is a picture of the place before it. The frame
+    prompt can say so in a sentence (_CHANGED_PLATE_NOTE); a video endpoint
+    is told only "Image 2 is the empty set", and a picture of every floodlight
+    burning, held for eleven seconds against a prompt saying they are out, is
+    where job 6efbb788's blackout came undone -- dark for six seconds, then
+    every pole lit again.
+
+    * A shot that STARTS from a rendered frame has the changed set in that
+      frame already. The plate is dropped: it has nothing left to add but the
+      light it must not give.
+    * A reference-only shot has no frame, so the plate is the only picture of
+      the place. It stays, renamed for the one thing it is still right about.
+    """
+    references = list(references or [])
+    labels = list(labels or [])
+    labels += [""] * (len(references) - len(labels))
+    plate = (location_plate_url or "").strip()
+    if not (world_changed and plate and plate in references):
+        return references, labels[: len(references)]
+    if starts_from_frame:
+        kept = [(u, l) for u, l in zip(references, labels) if u != plate]
+        return [u for u, _ in kept], [l for _, l in kept]
+    return references, [
+        CHANGED_PLATE_LABEL if u == plate else l for u, l in zip(references, labels)
+    ]
 
 
 def _frame_label_kwargs(
@@ -2096,11 +2173,16 @@ def build_frame_prompt(
     # rather than folded into the identity block itself: there it would have
     # been subtracted from the cast's own description on every frame,
     # including the frames that have no plate to talk about.
-    plate_clause = (
-        (_BRIDGE_AND_PLATE_NOTE if has_bridge_frame else _PLATE_REFERENCE_NOTE)
-        if has_location_plate
-        else ""
-    )
+    if not has_location_plate:
+        plate_clause = ""
+    elif change_now or change_before:
+        plate_clause = (
+            _BRIDGE_AND_PLATE_NOTE.replace(_PLATE_REFERENCE_NOTE, _CHANGED_PLATE_NOTE)
+            if has_bridge_frame
+            else _CHANGED_PLATE_NOTE
+        )
+    else:
+        plate_clause = _BRIDGE_AND_PLATE_NOTE if has_bridge_frame else _PLATE_REFERENCE_NOTE
     # The palette rides the style prefix: REQUIRED, first, and already
     # measured into the identity reserve below (interfaces/color_grade
     # .ColorGrade.palette says why it is here at all).
@@ -5033,7 +5115,7 @@ class Script2VideoPipeline:
                     # 21a87c5a). A rendered first frame IS the framing, so
                     # such a shot starts from one -- where the endpoint can.
                     start_from_frame = one_step_reference_video and wants_first_frame(
-                        shot, self.video_gen
+                        shot, self.video_gen, has_character=matched_char is not None
                     )
                     if start_from_frame:
                         one_step_reference_video = False
@@ -5261,14 +5343,21 @@ class Script2VideoPipeline:
                     if frame_references and getattr(
                         self.video_gen, "accepts_reference_set", False
                     ):
-                        video_kwargs["reference_images"] = list(frame_references)
-                        video_kwargs["reference_labels"] = label_frame_references(
-                            frame_references,
-                            shot,
-                            characters,
-                            portraits,
-                            matched_char=matched_char,
-                            location_plate_url=location_plate_url,
+                        video_kwargs["reference_images"], video_kwargs["reference_labels"] = (
+                            video_reference_set(
+                                frame_references,
+                                label_frame_references(
+                                    frame_references,
+                                    shot,
+                                    characters,
+                                    portraits,
+                                    matched_char=matched_char,
+                                    location_plate_url=location_plate_url,
+                                ),
+                                location_plate_url=location_plate_url,
+                                world_changed=bool(change_state),
+                                starts_from_frame=not one_step_reference_video,
+                            )
                         )
                     if start_from_frame:
                         video_kwargs["by_reference"] = False

@@ -28,7 +28,10 @@ def test_a_confrontation_is_not_acted_with_a_smile():
 
 def test_suspicion_still_has_its_poker_face():
     assert acting.resolve("suspicion").label == "suspicion"
-    assert "smile" in acting.resolve("wary").peak
+    assert "smile" in acting.resolve("mistrust").peak
+    # "wary" moved off it: job 6efbb788 -- see
+    # test_a_woman_alone_with_a_glowing_container_grinned_into_her_radio.
+    assert acting.resolve("wary").label == "wariness"
 
 
 def _scene(**kw):
