@@ -5028,6 +5028,27 @@ class Script2VideoPipeline:
                                 "character_ok", True
                             ) or not qa_result.get("setting_ok", True)
                             issue = (qa_result.get("issue") or "").strip()
+                            # Said out loud. Job 3570bab0 ran this check five times
+                            # and two replies were long enough to carry an issue,
+                            # yet nothing in the log said whether a frame passed,
+                            # failed, was repaired or was kept -- so a scene whose
+                            # room changed between shots (concrete cellar, then a
+                            # painted-brick one) could not be traced to a verdict.
+                            if qa_failed:
+                                logger.info(
+                                    "Frame QA failed shot %s: character_ok=%s "
+                                    "setting_ok=%s issue=%r -- %s",
+                                    i,
+                                    qa_result.get("character_ok", True),
+                                    qa_result.get("setting_ok", True),
+                                    issue,
+                                    "repairing from the reference"
+                                    if (reference_url and issue)
+                                    else "no reference or no stated issue, "
+                                    "keeping the frame as drawn",
+                                )
+                            else:
+                                logger.info("Frame QA passed shot %s.", i)
                             if qa_failed and reference_url and issue:
                                 _check_cancel()
                                 repair_prompt = (
