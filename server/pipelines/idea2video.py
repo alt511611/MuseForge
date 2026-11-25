@@ -537,6 +537,30 @@ _MIN_REDRAW_SPEECH_SECONDS = float(
 _REDRAW_FLOOR_SECONDS = 5.0
 
 
+def _edit_backend_for_crowded_scenes(lipsync):
+    """The backend that syncs a scene the redrawing one cannot take, or None.
+
+    ``falai_h3`` redraws a scene from its first frame, so a scene with two
+    people in it is skipped (job 3570bab0: all three scenes of a two-hander
+    kept their unsynced mouths and the lip-sync fee was refunded). Sync
+    Lipsync v2 EDITS the given clip, so every shot survives: tried once on that
+    job's first scene it kept all cuts and moved the speaking mouth, but left a
+    small red mark above the lip and the test audio was the mixed master, not
+    clean dialogue. Unproven, so it is opt-in:
+    ``MUSEFORGE_LIPSYNC_MULTI_FALLBACK=1``. Only ever stands in for a backend
+    that redraws, and only where a FAL_KEY exists.
+    """
+    flag = (os.environ.get("MUSEFORGE_LIPSYNC_MULTI_FALLBACK", "") or "").strip().lower()
+    if flag not in ("1", "true", "yes", "on"):
+        return None
+    if not getattr(lipsync, "redraws_the_take", False):
+        return None
+    from tools.falai_lipsync import FalAILipsync
+
+    fallback = FalAILipsync(os.environ.get("FAL_KEY", ""), demo=getattr(lipsync, "demo", False))
+    return fallback if fallback.available() else None
+
+
 def _scene_survives_a_redraw(
     shots: Optional[Sequence[Any]], characters: Optional[Sequence[Any]]
 ) -> bool:
@@ -4592,6 +4616,7 @@ class Idea2VideoPipeline:
                 type(lipsync).__name__,
             )
             return []
+        edit_fallback = _edit_backend_for_crowded_scenes(lipsync)
 
         # One request per SCENE, keyed off the track that actually carries the
         # audio (the voice generator returns one combined file per scene and
@@ -4736,16 +4761,25 @@ class Idea2VideoPipeline:
                 )
                 drift = speech_anchors.get(scene_index, picture_start) - picture_start
 
+                driver = lipsync
                 if getattr(lipsync, "redraws_the_take", False) and not _scene_survives_a_redraw(
                     (shots_by_clip or {}).get(scene_index), characters
                 ):
+                    if edit_fallback is None:
+                        logger.info(
+                            "Scene %s shows more than one character, and this lip-sync "
+                            "backend redraws the scene from its first frame, which "
+                            "would discard every other shot; keeping the unsynced take.",
+                            scene_index,
+                        )
+                        return None
                     logger.info(
-                        "Scene %s shows more than one character, and this lip-sync "
-                        "backend redraws the scene from its first frame, which "
-                        "would discard every other shot; keeping the unsynced take.",
+                        "Scene %s shows more than one character; the redrawing "
+                        "lip-sync backend would discard every other shot, so this "
+                        "scene is synced by an editing backend instead.",
                         scene_index,
                     )
-                    return None
+                    driver = edit_fallback
 
                 # Asked BEFORE the splits below, which are ffmpeg re-encodes,
                 # and before the provider is called at all: a sync nobody can
@@ -4760,7 +4794,7 @@ class Idea2VideoPipeline:
                 # those seconds for a woman frozen mid-pull with a fixed grin,
                 # and the door never moved. An edit backend has no such cost.
                 if (
-                    getattr(lipsync, "redraws_the_take", False)
+                    getattr(driver, "redraws_the_take", False)
                     and 0.0 < spoken < _MIN_REDRAW_SPEECH_SECONDS
                 ):
                     logger.info(
@@ -4912,7 +4946,7 @@ class Idea2VideoPipeline:
                     sync_kwargs["on_submitted"] = (
                         lambda rid, _idx=scene_index: on_provider_job_submitted(_idx, rid)
                     )
-                synced_url = await lipsync.sync(
+                synced_url = await driver.sync(
                     sync_source, guide_url, is_cancelled=is_cancelled, **sync_kwargs
                 )
                 if not synced_url:
