@@ -20,6 +20,7 @@ from interfaces.shot import StoryboardShot
 from interfaces.film_look import build_film_look_filters
 from interfaces import gender as gender_of
 from interfaces.lighting import is_interior
+from interfaces.places import extra_locations, scene_location
 from interfaces import micro_drama
 from interfaces.language import DEFAULT_LANGUAGE
 from interfaces import who_speaks
@@ -611,6 +612,22 @@ def _location_plate_prompt(
         # be built in the drama's own look.
         f"{'' if look.is_photoreal else ' ' + look.render_note}"
     )
+
+
+class _SceneLocation:
+    """A stored scene's ``location`` in the shape interfaces/places reads."""
+
+    def __init__(self, location: Any) -> None:
+        self.location = location or ""
+
+
+def _plate_for(
+    place: str, main_location: str, main_plate: Optional[str], plates: Dict[str, str]
+) -> Optional[str]:
+    """The picture of ``place``: its own plate, or the drama's for the drama's
+    own place. A place with neither gets None -- never the drama's room, which
+    is a picture of somewhere this scene is not."""
+    return (plates or {}).get(place) or (main_plate if place == main_location else None)
 
 
 async def _split_off_tail(
@@ -4405,6 +4422,47 @@ class Idea2VideoPipeline:
             )
             return None
 
+    async def _lock_extra_location_plates(
+        self,
+        script: DramaScript,
+        style: str = "Cinematic",
+        aspect_ratio: str = "16:9",
+    ) -> Dict[str, str]:
+        """One plate per place a scene moves to, keyed by that place.
+
+        The drama's own place is _lock_location_plate's; this draws the others
+        a scene names in ``location`` (interfaces/places), all at once and with
+        the drama's hour and era, because a story that crosses the street does
+        not change the time on the way.
+
+        Fail-open per place. A place whose plate failed is LEFT OUT rather than
+        given the main plate: a scene set on the pier anchored to a picture of
+        the office is the compromise this exists to remove.
+        """
+        main = (getattr(script, "setting_location", "") or "").strip()
+        places = extra_locations(list(script.scenes or []), main)
+        if not places:
+            return {}
+        time_of_day = (getattr(script, "setting_time_of_day", "") or "").strip()
+        era = (getattr(script, "setting_era", "") or "").strip()
+        look = resolve_visual_style(style)
+
+        async def _one(place: str) -> Optional[str]:
+            prompt = _location_plate_prompt(place, time_of_day, era, style, look)
+            try:
+                return await self.image_gen.generate_image(prompt, aspect_ratio=aspect_ratio)
+            except Exception as exc:
+                logger.warning(
+                    "Plate for %r failed; its scenes keep the words and lose "
+                    "the picture: %s",
+                    place,
+                    exc,
+                )
+                return None
+
+        urls = await asyncio.gather(*(_one(place) for place in places))
+        return {place: url for place, url in zip(places, urls) if url}
+
     async def _lipsync_scenes(
         self,
         scene_paths: List[str],
@@ -5197,6 +5255,17 @@ class Idea2VideoPipeline:
             if location_plate_override is not None
             else previous_result.get("location_plate")
         )
+        main_location = (getattr(script, "setting_location", "") or "").strip()
+        # The other places' plates are reused as they were drawn. An override
+        # is a new picture of the drama's OWN place (a continuity edit of "the
+        # set"), so it replaces that entry and no other.
+        location_plates: Dict[str, str] = {
+            place: url
+            for place, url in (previous_result.get("location_plates") or {}).items()
+            if url
+        }
+        if location_plate and main_location:
+            location_plates[main_location] = location_plate
 
         for index in wanted:
             if index >= len(script.scenes):
@@ -5267,10 +5336,15 @@ class Idea2VideoPipeline:
                     aspect_ratio=previous_result.get("aspect_ratio", "16:9"),
                     is_cancelled=is_cancelled,
                     plan=previous_result.get("plan", "free"),
-                    setting_location=getattr(script, "setting_location", "") or "",
+                    setting_location=scene_location(scene_script, main_location),
                     setting_time_of_day=getattr(script, "setting_time_of_day", "") or "",
                     setting_era=getattr(script, "setting_era", "") or "",
-                    location_plate_url=location_plate,
+                    location_plate_url=_plate_for(
+                        scene_location(scene_script, main_location),
+                        main_location,
+                        location_plate,
+                        location_plates,
+                    ),
                     has_dialogue=bool(_scene_dialogue(scene_script)),
                     lipsync_enabled=bool(previous_result.get("lipsynced_scenes")),
                     scene_emotion=_scene_emotion(scene_script),
@@ -5465,6 +5539,7 @@ class Idea2VideoPipeline:
         result = {**previous_result, "scenes": scenes, "_reframe": reframe_plan}
         result["portraits"] = portraits
         result["location_plate"] = location_plate
+        result["location_plates"] = location_plates
         result["_render_state"] = {
             **state,
             "script": script_data,
@@ -5755,6 +5830,21 @@ class Idea2VideoPipeline:
                 previous_result.get("aspect_ratio", "16:9"),
                 is_cancelled=is_cancelled,
             )
+            # Which scenes are IN the set being edited -- read before the
+            # setting's words change below. A scene the story moved somewhere
+            # else (interfaces/places) is not in this room, and re-rendering
+            # it would charge for a scene the edit cannot touch.
+            main_before = str(script_data.get("setting_location") or "")
+            script_scenes = list(script_data.get("scenes") or [])
+
+            def _in_the_set(index: int) -> bool:
+                if index >= len(script_scenes) or isinstance(script_scenes[index], str):
+                    return True
+                place = scene_location(
+                    _SceneLocation(script_scenes[index].get("location", "")), main_before
+                )
+                return place == " ".join(main_before.split())
+
             # Restate the change in the script's setting so every re-rendered
             # scene's prompt agrees with the new plate.
             script_data["setting_location"] = (
@@ -5763,7 +5853,11 @@ class Idea2VideoPipeline:
             affected = (
                 scene_indices
                 if scene_indices is not None
-                else [int(s["index"]) for s in (previous_result.get("scenes") or [])]
+                else [
+                    int(s["index"])
+                    for s in (previous_result.get("scenes") or [])
+                    if _in_the_set(int(s["index"]))
+                ]
             )
         else:
             portraits = previous_result.get("portraits") or {}
@@ -6859,7 +6953,7 @@ class Idea2VideoPipeline:
         # so its framing has to match the frames it will condition.
         _check_cancel()
         await progress("portraits", "Locking cast and set for consistency", 10)
-        portraits, location_plate = await asyncio.gather(
+        portraits, location_plate, extra_plates = await asyncio.gather(
             self._lock_character_portraits(
                 characters, style, character_portraits_override=character_portraits_override
             ),
@@ -6869,7 +6963,15 @@ class Idea2VideoPipeline:
                 aspect_ratio=aspect_ratio,
                 location_image_override=location_image_override,
             ),
+            self._lock_extra_location_plates(script, style, aspect_ratio=aspect_ratio),
         )
+        # Every place's picture, keyed by the words the scenes name it with.
+        # The drama's own place is keyed too, so a scene's plate is ONE lookup
+        # whichever place it is in.
+        main_location = (getattr(script, "setting_location", "") or "").strip()
+        location_plates: Dict[str, str] = dict(extra_plates or {})
+        if location_plate and main_location:
+            location_plates[main_location] = location_plate
 
         # Dynamic reference selection (adapted from ViMax's "previous
         # timeline" technique): as scenes progress, prefer each character's
@@ -7215,10 +7317,18 @@ class Idea2VideoPipeline:
                     aspect_ratio=aspect_ratio,
                     is_cancelled=is_cancelled,
                     plan=plan,
-                    setting_location=getattr(script, "setting_location", "") or "",
+                    # The place THIS scene is in, and that place's picture.
+                    # A scene set somewhere the cap left without a plate gets
+                    # none rather than the drama's room (interfaces/places).
+                    setting_location=scene_location(scene, main_location),
                     setting_time_of_day=getattr(script, "setting_time_of_day", "") or "",
                     setting_era=getattr(script, "setting_era", "") or "",
-                    location_plate_url=location_plate,
+                    location_plate_url=_plate_for(
+                        scene_location(scene, main_location),
+                        main_location,
+                        location_plate,
+                        location_plates,
+                    ),
                     has_dialogue=dialogue_requested and bool(scene_dialogue_lines),
                     # Decides whether the frame is asked to SHOW the mouth or
                     # hide it — opposite instructions, see build_frame_prompt.
@@ -7789,6 +7899,11 @@ class Idea2VideoPipeline:
             "characters": [c.model_dump() for c in characters],
             "portraits": portraits,
             "location_plate": location_plate,
+            # Every place's plate, the drama's own included. "location_plate"
+            # stays the drama's own place on its own, because a series locks
+            # THAT one (interfaces/series.location_plate_url) and a continuity
+            # edit of "the set" edits it.
+            "location_plates": location_plates,
             # Who ended up speaking with which voice, keyed by the character's
             # real name. Written out so a character SAVED to the library after
             # this drama carries the voice this drama gave them: without it the

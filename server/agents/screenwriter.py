@@ -243,7 +243,11 @@ fixed furniture and fixtures that ANY scene's action touches (the stove, the tab
 radio stands on, the bunks, the one window, the one door) and nothing no scene uses.
 Then stage every scene only with what that sentence names. A door or window shows
 weather and light, never a street, a vehicle or a second place: if the story needs
-somewhere else, it is a different scene with a different location.
+somewhere else, it is a different scene with a different location -- set that
+scene's "location" to the other place plus its fixed contents, in the same terms.
+Leave "location" empty ("") on every scene set in "setting_location". At most
+two places besides "setting_location" in the whole drama: each one is a set
+that has to be built, and a film that moves every scene has no room to return to.
 
 EVERY VOICE HAS AN ENTRY. Everyone who speaks a line is in "characters", the one
 heard only over a radio or an intercom included: a voice with no entry is cast by
@@ -446,7 +450,8 @@ Respond ONLY with valid JSON matching this schema:
       "staging": "blocking: who is where, hands, the object the scene turns on",
       "tension": 4,
       "starts_with": "the state this scene opens in (scene 1: the opening situation; otherwise the previous scene's ends_with)",
-      "ends_with": "who is where, wet/hurt, what is held, time passed, light, as this scene stops"
+      "ends_with": "who is where, wet/hurt, what is held, time passed, light, as this scene stops",
+      "location": "ONLY when this scene is somewhere other than setting_location: that place plus its fixed contents - otherwise an empty string"
     }
   ]
 }"""
@@ -488,7 +493,7 @@ This holds even when the user's brief itself is written in another language.
 WRITE THESE FIELDS IN ENGLISH, whatever the drama's language:
 "setting_location", "setting_time_of_day", "setting_era", "mood", "theme",
 "visual_motif", every character's "description" and "wardrobe", and every
-scene's "emotion" and "world_change".
+scene's "emotion", "world_change" and "location".
 
 No viewer ever reads them. They are pasted straight into the prompts for the
 image, video and music models, none of which is a person and all of which are
