@@ -618,6 +618,10 @@ class SceneTake:
     #:
     #: Said on EVERY beat, not the first: it is the late beats that revert.
     world_state: str = ""
+    #: The take OPENS before ``world_state`` and is drawn to end after it
+    #: (interfaces/long_take.event_spans_take), so the clause says the event
+    #: happens here rather than that it already has.
+    event_in_take: bool = False
 
     def state_clause(self) -> str:
         """The changed world as one short sentence, or "".
@@ -628,6 +632,8 @@ class SceneTake:
         state = " ".join((self.world_state or "").split()).rstrip(".")
         if not state:
             return ""
+        if self.event_in_take:
+            return f"In this take, once and for good: {_trim(state, MAX_STATE_CHARS)} "
         return f"The world has changed and stays so: {_trim(state, MAX_STATE_CHARS)} "
 
     @property
@@ -941,6 +947,7 @@ def plan_scene_take(
     end_image: str = "",
     dialogue: Sequence[str] = (),
     world_state: str = "",
+    event_in_take: bool = False,
 ) -> Optional[SceneTake]:
     """This scene as ONE request, or None when the backend cannot cut.
 
@@ -1005,4 +1012,5 @@ def plan_scene_take(
         max_prompt_chars=int(getattr(backend, "max_prompt_chars", 0) or 0),
         undescribed_shots=max(0, len(list(shots or [])) - len(usable)),
         world_state=world_state,
+        event_in_take=event_in_take,
     )

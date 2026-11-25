@@ -448,6 +448,59 @@ def _speaks_in_a_readable_framing(
     )
 
 
+#: How much of a storyboarded angle a redraw may overwrite before that angle
+#: counts as lost. The rejoined tail keeps whatever is left of it; a second of
+#: an angle under the redraw is a second of the shot the storyboard designed
+#: replaced by a different shot.
+_REDRAW_ANGLE_OVERLAP_SECONDS = 1.0
+
+
+def _redraw_discards_an_angle(shots: Optional[Sequence[Any]], redraw_seconds: float) -> bool:
+    """Would redrawing this scene's first ``redraw_seconds`` erase an angle?
+
+    A redrawing lip sync (tools/falai_h3_lipsync) generates a new clip from
+    the scene's FIRST frame, as long as the line (5 s at least), and the rest
+    of the take is rejoined behind it. Everything the first seconds held
+    besides that first frame is gone. _scene_survives_a_redraw asks how many
+    PEOPLE that is; nothing asked how many SHOTS.
+
+    Job d91a4172: one woman in every scene, so both dialogue scenes passed.
+    Scene 1 was storyboarded wide (4 s), medium (4 s), close-up (3 s); the
+    redraw ran 9.46 s from the wide's first frame, so the medium -- Mara
+    stopping dead, keying the radio -- was replaced by more of the wide, and
+    the close-up kept its last 1.5 s. Scene 2 lost its medium and its close-up
+    the same way. Two of three designed angles, twice, for a mouth synced in a
+    WIDE shot, where it is hardest to see.
+
+    True when any angle after the first starts more than
+    _REDRAW_ANGLE_OVERLAP_SECONDS before the redraw ends. Fails OPEN (False)
+    when there is no storyboard or no durations to place the angles by.
+    """
+    shots = list(shots or ())
+    if len(shots) < 2 or redraw_seconds <= 0:
+        return False
+    start = 0.0
+    for index, shot in enumerate(shots):
+        if index > 0 and start < redraw_seconds - _REDRAW_ANGLE_OVERLAP_SECONDS:
+            return True
+        try:
+            length = float(
+                (shot.get("deliver_seconds") or shot.get("duration_seconds") or 0.0)
+                if isinstance(shot, dict)
+                else (
+                    getattr(shot, "deliver_seconds", 0.0)
+                    or getattr(shot, "duration_seconds", 0.0)
+                    or 0.0
+                )
+            )
+        except (TypeError, ValueError):
+            return False
+        if length <= 0:
+            return False
+        start += length
+    return False
+
+
 def _heard_only_names(characters: Optional[Sequence[Any]], dialogue: Any = ()) -> Set[str]:
     """Casefolded speakers the film only HEARS: hidden characters, plus anyone
     who speaks and has no entry in the cast at all.
@@ -4778,6 +4831,28 @@ class Idea2VideoPipeline:
                 # moment she heaves the container open; the redraw swapped
                 # those seconds for a woman frozen mid-pull with a fixed grin,
                 # and the door never moved. An edit backend has no such cost.
+                if getattr(driver, "redraws_the_take", False) and _redraw_discards_an_angle(
+                    (shots_by_clip or {}).get(scene_index),
+                    max(
+                        _REDRAW_FLOOR_SECONDS,
+                        spoken + (drift if timeline_known else 0.0),
+                    ),
+                ):
+                    if edit_fallback is None:
+                        logger.info(
+                            "Scene %s: a redraw from its first frame would replace "
+                            "storyboarded angles under its first %.1fs; keeping the "
+                            "take with every angle and no lip sync.",
+                            scene_index,
+                            max(_REDRAW_FLOOR_SECONDS, spoken),
+                        )
+                        return None
+                    logger.info(
+                        "Scene %s: a redraw would replace storyboarded angles; "
+                        "synced by an editing backend instead, which keeps them.",
+                        scene_index,
+                    )
+                    driver = edit_fallback
                 if (
                     getattr(driver, "redraws_the_take", False)
                     and 0.0 < spoken < _MIN_REDRAW_SPEECH_SECONDS

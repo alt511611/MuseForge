@@ -95,6 +95,19 @@ TAIL_GUARD_SECONDS = 1.0
 #: reads as cutting between two cameras.
 ZOOM_LADDER = (1.28, 1.14, 1.45, 1.20)
 
+#: The ladder for a shot that is ALREADY tight.
+#:
+#: A punch-in is a crop scaled back up, so a 1.45x zoom on a 1080p clip is
+#: 745 lines of picture stretched over 1080. On a wide that crop finds a face
+#: the wide was too far away to show, which is the point. On a close-up there
+#: is nothing further in to find: the face just gets bigger and softer. Job
+#: d91a4172's climax was an 11-second close-up cut into six framings up to
+#: 1.45x -- the one shot of the film the viewer was meant to look hardest at,
+#: and the softest. Same rhythm, same alternation, at most 1.18x (915 lines).
+TIGHT_ZOOM_LADDER = (1.12, 1.06, 1.18, 1.09)
+
+_TIGHT_SHOT_WORDS = ("close-up", "closeup", "close up", "extreme close")
+
 #: Vertical centre of a punched-in crop, as a fraction of frame height. Eyes
 #: sit near the upper third in a conventionally framed shot.
 FACE_Y_BIAS = 0.40
@@ -227,6 +240,11 @@ def plan_internal_cuts(
 
     hold = _hold_seconds(tension)
     bias = _y_bias(shot_type)
+    ladder = (
+        TIGHT_ZOOM_LADDER
+        if any(word in (shot_type or "").lower() for word in _TIGHT_SHOT_WORDS)
+        else ZOOM_LADDER
+    )
 
     # The establishing hold is capped so it cannot eat a short clip whole:
     # on a 5-second scene it takes 2.2s and leaves 2.8s, which is two more
@@ -245,7 +263,7 @@ def plan_internal_cuts(
             Cut(
                 start=cursor,
                 end=end,
-                zoom=ZOOM_LADDER[ladder_index % len(ZOOM_LADDER)],
+                zoom=ladder[ladder_index % len(ladder)],
                 y_bias=bias,
             )
         )
@@ -260,7 +278,7 @@ def plan_internal_cuts(
         Cut(
             start=cursor,
             end=length,
-            zoom=ZOOM_LADDER[ladder_index % len(ZOOM_LADDER)],
+            zoom=ladder[ladder_index % len(ladder)],
             y_bias=bias,
         )
     )

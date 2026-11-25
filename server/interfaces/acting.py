@@ -74,6 +74,13 @@ class ActingBeat:
 #: LANGUAGE_CLAUSE), and the emotion tag is prose like everything else -- an
 #: English-only table silently degrades every non-English drama to the neutral
 #: fallback, which is precisely the flat face this module exists to prevent.
+#: NO BEAT NAMES THE EXPRESSION IT IS NOT. The video endpoints here have no
+#: negative prompt (see script2video.build_motion_prompt on Kling's schema), so
+#: "no trace of a smile" is the word "smile" in the positive prompt. Job
+#: d91a4172's discovery close-up was sent exactly that peak and came back
+#: smiling -- the second job running to grin at a glowing container, the first
+#: (6efbb788) because the beat asked for a smile and the second because it
+#: forbade one. A face is directed by what its muscles DO.
 _BEATS: Tuple[Tuple[Tuple[str, ...], ActingBeat], ...] = (
     (
         ("tear", "grief", "sorrow", "mourn", "heartbreak", "weep", "cry",
@@ -240,7 +247,7 @@ _BEATS: Tuple[Tuple[Tuple[str, ...], ActingBeat], ...] = (
             onset="braced: jaw set, shoulders squared, gaze level and hard on the other person",
             peak=(
                 "the edge showing: brows drawing down, jaw working, lips thinning "
-                "to a line, chin lifting, breath held, no trace of a smile"
+                "to a line, chin lifting, breath held, the mouth held flat and closed"
             ),
             voice_tag="sharply",
             stability=0.35,
@@ -266,7 +273,7 @@ _BEATS: Tuple[Tuple[Tuple[str, ...], ActingBeat], ...] = (
             onset="alert and still: eyes fixed on the thing, brow slightly drawn, breath shallow",
             peak=(
                 "the attention sharpening: eyes narrowing on one point, head "
-                "drawing back a fraction, jaw tightening, no trace of a smile"
+                "drawing back a fraction, jaw tightening, the mouth held flat and closed"
             ),
             voice_tag="warily",
             stability=0.45,
