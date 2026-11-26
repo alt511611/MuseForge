@@ -501,6 +501,36 @@ def _redraw_discards_an_angle(shots: Optional[Sequence[Any]], redraw_seconds: fl
     return False
 
 
+def _scene_opening(scenes: Sequence[Any], index: int) -> str:
+    """The state scene ``index`` opens in: the previous scene's ending, as
+    continuity reconciles it, or the scene's own ``starts_with`` for the
+    first scene (opening_state has nothing before it to read)."""
+    return opening_state(list(scenes or []), index) or (
+        _scene_field(scenes[index], "starts_with").strip()
+        if 0 <= index < len(scenes or [])
+        else ""
+    )
+
+
+def _carries_the_event(shots: Optional[Sequence[Any]]) -> bool:
+    """Whether this scene's take opens before the drama's event and ends after
+    it (interfaces/long_take.event_spans_take, recorded per shot).
+
+    Such a take must not be REDRAWN for its mouth. Job d9682326: the climax
+    was drawn from "doors shut, floodlights lit" to "doors open, harbour
+    dark", and the lip sync replaced its first 5.4 s with a clip redrawn from
+    the opening frame -- Mara standing at a shut door under lit floodlights,
+    saying "every light on the dock just dropped". What was left of the event
+    was squeezed into the last second and a half of the film. A redraw is a
+    new take from one still; the event IS the change from that still.
+    """
+    for shot in shots or ():
+        flag = shot.get("event_in_take") if isinstance(shot, dict) else getattr(shot, "event_in_take", False)
+        if flag:
+            return True
+    return False
+
+
 def _heard_only_names(characters: Optional[Sequence[Any]], dialogue: Any = ()) -> Set[str]:
     """Casefolded speakers the film only HEARS: hidden characters, plus anyone
     who speaks and has no entry in the cast at all.
@@ -2633,6 +2663,11 @@ def spoken_seconds(dialogue_tracks: Optional[List[Dict[str, Any]]]) -> Optional[
     return end if spoke and end > 0 else None
 
 
+#: Room left after an event scene's line before the next scene (or the end of
+#: the film): the last word lands, and the cut is not on its consonant.
+EVENT_LINE_TAIL_SECONDS = 0.6
+
+
 def plan_scene_speech_anchors(
     dialogue_tracks: Optional[List[Dict[str, Any]]],
     scene_starts: Sequence[float],
@@ -2664,6 +2699,16 @@ def plan_scene_speech_anchors(
       a second opinion about where it drifted to is a desync.
     """
     lengths = _scene_speech_lengths(dialogue_tracks)
+    # Scenes whose take carries the drama's event (long_take.event_spans_take)
+    # speak at their END. Their lines are the reaction -- job d9682326's was
+    # "every light on the dock just dropped" -- and the take is drawn to reach
+    # the changed world at its last frame, so a line anchored at the picture's
+    # start is said before the thing it is about has happened.
+    after_event = {
+        int(track.get("scene_index", 0))
+        for track in dialogue_tracks or []
+        if track.get("after_event")
+    }
     anchors: Dict[int, float] = {}
     floor = 0.0
     for scene_index in sorted(lengths):
@@ -2673,6 +2718,17 @@ def plan_scene_speech_anchors(
             else 0.0
         )
         start = max(picture_start, floor)
+        if scene_index in after_event:
+            picture_end = (
+                float(scene_starts[scene_index + 1])
+                if scene_index + 1 < len(scene_starts)
+                else float(master_duration or 0.0)
+            )
+            if picture_end > picture_start:
+                start = max(
+                    start,
+                    picture_end - lengths[scene_index] - EVENT_LINE_TAIL_SECONDS,
+                )
         if master_duration > 0:
             # Never anchor past the end of the film: a line placed there is a
             # line nobody can hear, and a caption placed there never shows.
@@ -4119,6 +4175,48 @@ async def trim_clip(
         return source_path
 
 
+#: What a screenwriter writes in a character's description when the film only
+#: ever HEARS them. The screenwriter is told to write exactly this
+#: (agents/screenwriter: 'say so in the description ("heard only over the
+#: radio, never seen")'), and nothing downstream read it.
+#:
+#: "never seen" and "unseen" only count where they END the clause ("never
+#: seen", "never seen on screen") -- "a man who has never seen the sea" is a
+#: description of somebody the camera can very well see.
+_VOICE_ONLY_RE = re.compile(
+    r"\b(?:heard only|only heard|voice only|voice-only|never on screen|"
+    r"never appears on screen|off[- ]screen (?:voice|only|throughout))\b"
+    r"|\b(?:never seen|unseen)(?:\s+(?:on[- ]screen|on camera|in frame|in the film))?"
+    r"\s*(?:[,.;:)]|$)",
+    re.IGNORECASE,
+)
+
+
+def _declared_voice_only(character: Any) -> bool:
+    """Whether the script's own description says nobody ever sees them.
+
+    Job d9682326: Sol was written as "man in his sixties, heard only over the
+    radio, never seen on screen". The inference below found his name in an
+    action line -- "her radio crackles with Sol's warning" -- counted that as
+    a presence, and kept him visible. So he was given a portrait, the
+    storyboard was made to show every visible speaker and replaced two of
+    Mara's designed shots with "Close-up on Sol's face", the frame check
+    flagged both ("Do not show the man on screen") and the video model drew
+    him anyway from the portrait it was handed. Both dialogue scenes were then
+    two-handers, and lost their lip sync.
+
+    A writer's explicit statement outranks an inference from action lines:
+    it is the one piece of evidence that is about this question and nothing
+    else. Read from the description and the wardrobe line, which is where the
+    same writer put "not applicable, voice only".
+    """
+    text = " ".join(
+        str(getattr(character, field, "") or "")
+        for field in ("static_features", "description", "wardrobe", "dynamic_features")
+    )
+    return bool(_VOICE_ONLY_RE.search(text))
+
+
 def _heard_but_never_seen(script: DramaScript, cast: List[CharacterInScene]) -> set:
     """Casefolded names of characters the film only ever HEARS.
 
@@ -4178,6 +4276,10 @@ def _heard_but_never_seen(script: DramaScript, cast: List[CharacterInScene]) -> 
         on_screen_name_matches,
     )
 
+    # Said by the writer, in so many words: no inference needed, and none
+    # allowed to overrule it (see _declared_voice_only).
+    declared = {c.name.casefold() for c in cast or [] if _declared_voice_only(c)}
+
     on_screen = set()
     speaks = set()
     for scene in getattr(script, "scenes", None) or []:
@@ -4199,11 +4301,11 @@ def _heard_but_never_seen(script: DramaScript, cast: List[CharacterInScene]) -> 
     # not around one absent voice. Marking the whole cast invisible would
     # leave every frame with no identity lock at all.
     if not on_screen:
-        return set()
+        return declared
 
     unseen = {name for name in speaks if name not in on_screen}
     if not unseen:
-        return set()
+        return declared
 
     if not any(
         mentions_an_off_screen_device(_scene_action(scene))
@@ -4219,8 +4321,8 @@ def _heard_but_never_seen(script: DramaScript, cast: List[CharacterInScene]) -> 
             "handset or O.S.), so they are kept visible.",
             ", ".join(sorted(unseen)),
         )
-        return set()
-    return unseen
+        return declared
+    return unseen | declared
 
 
 def is_character_sheet_enabled() -> bool:
@@ -4831,6 +4933,23 @@ class Idea2VideoPipeline:
                 # moment she heaves the container open; the redraw swapped
                 # those seconds for a woman frozen mid-pull with a fixed grin,
                 # and the door never moved. An edit backend has no such cost.
+                if getattr(driver, "redraws_the_take", False) and _carries_the_event(
+                    (shots_by_clip or {}).get(scene_index)
+                ):
+                    if edit_fallback is None:
+                        logger.info(
+                            "Scene %s carries the drama's event across its take; a "
+                            "redraw from its first frame would erase it, so it keeps "
+                            "the take and no lip sync.",
+                            scene_index,
+                        )
+                        return None
+                    logger.info(
+                        "Scene %s carries the drama's event; synced by an editing "
+                        "backend, which keeps the take.",
+                        scene_index,
+                    )
+                    driver = edit_fallback
                 if getattr(driver, "redraws_the_take", False) and _redraw_discards_an_angle(
                     (shots_by_clip or {}).get(scene_index),
                     max(
@@ -5525,6 +5644,7 @@ class Idea2VideoPipeline:
                     # the scene's first, and a beat retake re-shoots
                     # whichever beat it was asked for.
                     bridge_frame=_retake_bridge(index) if window is None else None,
+                    scene_opening=_scene_opening(script.scenes, index),
                     # The same slice of the second budget as the take it
                     # replaces, so a retake can never quietly lengthen (or
                     # shorten) the paid runtime -- a beat's slice of it when
@@ -7574,6 +7694,7 @@ class Idea2VideoPipeline:
                     ),
                     bridge_frame=_bridge_from(idx),
                     on_opening_frame=_opened(idx),
+                    scene_opening=_scene_opening(script.scenes, idx),
                 )
                 async with progress_lock:
                     completed_scenes += 1
@@ -7706,12 +7827,17 @@ class Idea2VideoPipeline:
                     # is both free and, unlike a list of trigger words, in
                     # whatever language the drama is in.
                     turn = _scene_field(script.scenes[scene_number], "turn")
+                    # Spoken after the event when the take carries it (see
+                    # plan_scene_speech_anchors).
+                    slot = scene_slots[scene_number] if scene_number < len(scene_slots) else None
+                    after_event = _carries_the_event((slot or {}).get("shots"))
                     for track in generated_tracks:
                         dialogue_tracks.append(
                             {
                                 **track,
                                 "scene_index": assembled_scene_index,
                                 "emphasis": turn,
+                                **({"after_event": True} if after_event else {}),
                             }
                         )
                 except Exception as exc:
