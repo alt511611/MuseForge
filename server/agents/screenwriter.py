@@ -220,6 +220,25 @@ class ScriptGenerationFailed(Exception):
 
 
 class ScreenwriterAgent:
+    #: Two of the rules below came from comparing this prompt with how the
+    #: vertical-drama format is written in 2026 (Scenemixer's and Scenepaper's
+    #: format guides, OpenMicroDrama's, Genra's hook formulas). Neither is an
+    #: official platform rule -- ReelShort and DramaBox publish none -- but
+    #: every guide agrees on both, and this pipeline's own output broke both.
+    #:
+    #: OPEN INSIDE THE STORY. The guides put the conflict in the first three to
+    #: five seconds and list "no establishing walk to the front door" among the
+    #: commonest mistakes. This prompt only said so in micro-drama mode
+    #: (interfaces/micro_drama), and the cinematic default opened where a
+    #: writer naturally starts: jobs 6efbb788, d91a4172 and d9682326 -- one
+    #: brief, three renders -- all spend their first four to nine seconds on a
+    #: dock worker walking a patrol before anything happens.
+    #:
+    #: ONE THOUGHT A LINE (in DIALOGUE_CLAUSE). A single line capped at about
+    #: twenty words, because it is a subtitle on a phone, often watched muted;
+    #: every line pushes the conflict or shows pressure; no exposition; each
+    #: character in their own voice. The dialogue editor enforces the length
+    #: (tools/dialogue_editor.MAX_LINE_WORDS).
     SYSTEM_PROMPT = """You are an award-winning writer-director of micro-dramas and cinematic short films.
 You are not summarizing a plot — you are directing a film. Work like a director:
 
@@ -319,6 +338,13 @@ inciting incident off screen and leaves the drama with nothing to have caused it
 same goes for the objects: a thing the brief makes the story turn on (an address on an
 envelope, a key, a name) has to be something the camera looks at, in its own moment, or
 the audience is asked to take the pipeline's word for it.
+
+OPEN INSIDE THE STORY. A viewer decides in the first three seconds whether the rest
+exists, so scene 1 does not open on someone arriving, walking, patrolling, waking up
+or looking around. Its first beat is already the disturbance the drama is about —
+the light leaking from the seam, the knock, the wrong name on the envelope — or a
+line that pulls against something. Whatever setup the brief needs happens INSIDE
+that moment, not in front of it.
 
 SPEND THE SCENES ON THE BRIEF. With only three to five of them, a scene invented around a
 character the brief never mentions is a third of the film spent away from the story it
@@ -537,7 +563,15 @@ the choice is legible. Never leave two scenes silent, and never leave a scene
 silent because you could not think of a line.
 
 Keep lines short, speakable and few (one to three per scene) — this is film
-dialogue over a picture, not a radio play. The climax's stated event still has to
+dialogue over a picture, not a radio play.
+
+ONE THOUGHT A LINE, TWENTY WORDS AT MOST. Every line is burned into the picture as a
+subtitle and read in the time it is spoken, on a phone, often with the sound off. A
+longer thought is two lines, or a line and a look. Every line either pushes the
+conflict or shows someone under pressure; a line that tells the other person what
+they both already know is exposition, and it is cut. Each character sounds like
+themselves — their own vocabulary, rhythm and evasions — so a line could not be
+handed to anyone else in the scene unchanged. The climax's stated event still has to
 be SEEN, not merely narrated: never replace the event with a character describing
 it.
 
