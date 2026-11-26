@@ -387,7 +387,9 @@ character after the first scene, and give each one a SPECIFIC "wardrobe" (garmen
 colour) that they wear for the whole drama. Never write a costume change unless the brief
 asks for one, and never describe the same person's clothing differently in two scenes.
 Dress them from the HEAD DOWN: "wardrobe" must settle what is on their head — name the
-hat, helmet or hood if they wear one, and write "bare-headed" if they do not. Leaving it
+hat, helmet or hood if they wear one, and write "bare-headed" if they do not. A garment
+WITH a hood is not a hood worn: say "hood up" or "hood down", because "a hooded slicker"
+leaves it to every shot to decide. Leaving it
 unsaid is how the same worker ends up in a beanie, then a hard hat, then neither: the
 render only holds what the wardrobe named, and invents the rest afresh every scene.
 
@@ -950,6 +952,7 @@ into a single scene rather than adding one."""
         script.user_brief = (idea or "").strip()
         cls._apply_brief_gender(script)
         cls._apply_character_marks(script)
+        cls._settle_the_hood(script)
         # BEFORE _apply_brief_event, so the event is restored onto a scene
         # that is still in the film. Run the other way round, a script whose
         # extra scenes are cut could lose the restored world_change with them.
@@ -1269,6 +1272,42 @@ into a single scene rather than adding one."""
                 a,
                 b,
             )
+
+    #: A hood's STATE, in the words a wardrobe uses for it.
+    _HOOD_STATE = re.compile(
+        r"\bhood(?:s)?\s+(?:up|down|raised|lowered|pulled up|pushed back|thrown back|back|off)\b"
+        r"|\b(?:hood(?:ed)?\s+)?(?:up|down)\s+hood\b",
+        re.IGNORECASE,
+    )
+    _HOOD = re.compile(r"\bhood(?:ed|s)?\b", re.IGNORECASE)
+
+    @classmethod
+    def _settle_the_hood(cls, script: DramaScript) -> None:
+        """Say whether a hooded garment's hood is up, where the writer did not.
+
+        Job 93be3d88: Nadia's wardrobe read "yellow hooded rain slicker", which
+        names a garment with a hood and says nothing about wearing it. Every
+        stage then answered for itself. The storyboard wrote "water drips from
+        her hood" and scenes 1 and 2 drew it up; the character sheet drew it
+        down; the climax, drawn from the scene's opening state and the sheet,
+        had it down -- the lead took her hood off on the cut into the film's
+        most important shot. Job 01a0a502 did the same thing within one scene
+        ("up, then up, then pushed back").
+
+        "hood up" is written in, at the front where the head is settled,
+        because the stage most likely to mention the hood is the storyboard
+        describing rain on it -- and once the wardrobe says it, the sheet, every
+        frame prompt and the costume lock all read the same words. A wardrobe
+        that already says up or down is left exactly as it is.
+        """
+        for char in list(script.characters or []):
+            worn = getattr(char, "wardrobe", "") or ""
+            if cls._HOOD.search(worn) and not cls._HOOD_STATE.search(worn):
+                char.wardrobe = f"hood up, {worn}"
+                logger.info(
+                    "%s wears a hooded garment with no hood state; settled as hood up.",
+                    char.name,
+                )
 
     @staticmethod
     def _apply_brief_gender(script: DramaScript) -> None:
