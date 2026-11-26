@@ -1,6 +1,7 @@
 """Per-scene script-to-video pipeline."""
 
 import asyncio
+import copy
 import logging
 import os
 import re
@@ -1152,6 +1153,32 @@ def configured_scene_take_backend():
             generate_scene_take=FalAIVideoGenerator.generate_scene_take,
         )
     )
+
+
+def shot_at_the_opening(shot, opening: str):
+    """``shot`` described as the scene's OPENING state instead of its own line.
+
+    For the take that carries the drama's event (long_take.event_spans_take),
+    whose first frame has to be the world before. The storyboard writes that
+    shot's description about the event -- job d9682326: "Mara hauls the
+    container door wide ... a hairline seam exploding into blinding
+    blue-white light" -- so a frame drawn from it, told only to leave the
+    world unchanged, came back with the door already open and the light
+    already out of it, and the take had half its event before its first
+    frame. The scene's own opening state is the writer's answer to exactly
+    this question ("Mara's hand closing on the container's door handle,
+    floodlights still lit"). The shot's framing, lens and everything else are
+    kept; only what it SHOWS is replaced.
+    """
+    text = (opening or "").strip()
+    if not text:
+        return shot
+    clone = copy.copy(shot)
+    try:
+        clone.visual_desc = text
+    except Exception:
+        return shot
+    return clone
 
 
 def resolve_frame_references(
@@ -4959,6 +4986,10 @@ class Script2VideoPipeline:
         #: the scene after it to bridge from. Never called on a path that
         #: draws no opening frame; the caller resolves the wait itself then.
         on_opening_frame: Optional[Callable[[Optional[str]], None]] = None,
+        #: The state the scene OPENS in, as the script wrote it
+        #: (interfaces/continuity.opening_state). Used for the first frame of
+        #: a take that carries the drama's event -- see shot_at_the_opening.
+        scene_opening: str = "",
     ) -> Dict[str, Any]:
         os.makedirs(working_dir, exist_ok=True)
         portraits = character_portraits or {}
@@ -5145,7 +5176,7 @@ class Script2VideoPipeline:
                 # cannot be built correctly without it.
                 frame_prompt_for=lambda anchor, has_ref, has_bridge=False, before=False: build_frame_prompt(
                     style,
-                    opening,
+                    shot_at_the_opening(opening, scene_opening) if before else opening,
                     setting_location=setting_location,
                     setting_time_of_day=setting_time_of_day,
                     setting_era=setting_era,
@@ -5239,10 +5270,10 @@ class Script2VideoPipeline:
                     # never touch it is how the silence gets performed.
                     shot_has_dialogue = has_dialogue and line_reaches[i]
 
-                    def _frame_prompt(change, state):
+                    def _frame_prompt(change, state, at_opening=False):
                         return build_frame_prompt(
                             style,
-                            shot,
+                            shot_at_the_opening(shot, scene_opening) if at_opening else shot,
                             setting_location=setting_location,
                             setting_time_of_day=setting_time_of_day,
                             setting_era=setting_era,
@@ -5303,7 +5334,7 @@ class Script2VideoPipeline:
                         draws_frames=not one_step_reference_video,
                     )
                     if event_in_take:
-                        frame_prompt = _frame_prompt("", "")
+                        frame_prompt = _frame_prompt("", "", at_opening=True)
 
                     async with progress_lock:
                         await progress(
