@@ -648,7 +648,10 @@ watched. Write no "previously on"; the platform plays the episodes in order.
 DO NOT ANSWER THE SERIES. Resolve enough of this episode's own beat to make it
 worth watching, and leave the series' question open — including the one you
 inherit. Your last scene ends on a NEW open question, written into
-"cliffhanger", so the next episode has somewhere to start.
+"cliffhanger", so the next episode has somewhere to start -- and a different
+KIND of question from the one the last episode ended on: if that was a reveal,
+end on a deadline, a reversal, an arrival or an interruption. The same hook
+twice in a row reads as a trick.
 
 CONTINUITY IS BINDING. Nothing in the brief may be contradicted: the cast's
 descriptions, the setting, the motif and what has already happened are facts
