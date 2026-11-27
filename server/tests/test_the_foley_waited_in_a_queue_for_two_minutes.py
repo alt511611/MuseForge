@@ -100,7 +100,8 @@ async def test_a_scene_with_no_head_start_is_generated_as_before(monkeypatch):
     assert gen.calls[0]["duration"] == 10.0, "the finished clip's own length"
 
 
-def test_demo_and_off_start_nothing(monkeypatch):
+@pytest.mark.asyncio
+async def test_demo_and_off_start_nothing(monkeypatch):
     monkeypatch.setattr(mod, "is_foley_enabled", lambda: False)
     pipeline = mod.Idea2VideoPipeline(api_key="k", demo=False)
     assert pipeline._start_foley(0, [], 8.0, None, asyncio.Semaphore(1)) is None
