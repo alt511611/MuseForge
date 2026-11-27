@@ -135,6 +135,11 @@ async def edit_dialogue(script, client, model: str):
                 # Longer than the cap AND longer than the draft: the edit made
                 # the subtitle worse, so the draft line stays.
                 continue
+            # Both versions, said out loud. Job 265209d6's reveal reached the
+            # film as "Fella I took this from owes you a bad year, Rosa" -- a
+            # line nobody could follow -- and with only a count in the log
+            # there was no telling whether the writer or the editor wrote it.
+            logger.info("Dialogue editor, %s: %r -> %r", old.character, old.line, text)
             old.line = text
             changed += 1
     logger.info("Dialogue editor rewrote %d line(s).", changed)
