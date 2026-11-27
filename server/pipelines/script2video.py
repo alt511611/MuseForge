@@ -2690,6 +2690,43 @@ def build_frame_prompt(
     return prompt
 
 
+def scene_speaker_keys(scene_dialogue: str) -> set:
+    """Who speaks ON SCREEN in a scene, from its "Name: line" dialogue block.
+
+    A line marked (O.S.) or (V.O.) is a voice without a mouth in this frame
+    and is left out, the same reading the storyboard step makes.
+    """
+    from interfaces.speaker import speaker_key
+
+    keys = set()
+    for raw in (scene_dialogue or "").splitlines():
+        if ":" not in raw:
+            continue
+        head, line = raw.split(":", 1)
+        if not line.strip() or re.search(r"\((?:o\.?s\.?|v\.?o\.?)\b", head, re.IGNORECASE):
+            continue
+        keys.add(speaker_key(re.sub(r"\s*\(.*$", "", head).strip()))
+    keys.discard("")
+    return keys
+
+
+def who_talks_in_frame(shot, characters, matched_char, speaker_keys) -> tuple:
+    """``(speakers, listeners)``: the names in this frame who speak in the
+    scene, and those who only listen. Both empty when the frame shows nobody
+    the scene's dialogue can be pinned on either way."""
+    from interfaces.speaker import speaker_key
+
+    if not speaker_keys:
+        return [], []
+    speakers, listeners = [], []
+    for character in characters_in_frame(shot, characters, matched_char):
+        if not getattr(character, "is_visible", True):
+            continue
+        name = getattr(character, "name", "") or ""
+        (speakers if speaker_key(name) in speaker_keys else listeners).append(name)
+    return speakers, listeners
+
+
 def build_motion_prompt(
     shot,
     matched_char=None,
@@ -2697,8 +2734,21 @@ def build_motion_prompt(
     speaking: bool = True,
     unpeopled: bool = False,
     event_in_take: bool = False,
+    speakers: Sequence[str] = (),
+    listeners: Sequence[str] = (),
 ) -> str:
     """Build the prompt sent to the video (image-to-video) model.
+
+    ``speakers`` and ``listeners`` are the people in THIS frame who do and do
+    not speak in the scene (who_talks_in_frame). Job 265209d6, a two-hander at
+    a card table: Victor had every line of scenes 2 and 3, and the video model
+    moved Rosa's mouth through them -- in the raw take, before any lip sync
+    touched it (a sync-3 run with Victor's face selected left her exactly as
+    it found her). Nothing in this prompt said who was talking. Meanwhile
+    Victor delivered his lines through the thumb the script had him drag
+    across his lip, so the one mouth that should move was covered. Both are
+    said now, as what the face DOES: the listener's mouth closed and the
+    reaction in the eyes; the speaker's mouth clear while the words come.
 
     Previously this was ``shot.motion_desc`` alone, which starved the
     animation step of everything else the storyboard decided: the designed
@@ -2787,6 +2837,19 @@ def build_motion_prompt(
         )
     name = (getattr(matched_char, "name", "") or "").strip() if matched_char else ""
     subject = name or "each character"
+    if speaking and listeners:
+        who = " and ".join(listeners)
+        parts.append(
+            f"{who} only listen{'s' if len(listeners) == 1 else ''} in this shot: "
+            f"the mouth closed, the jaw still, the reaction in the eyes and the "
+            f"breath."
+        )
+    if speaking and speakers:
+        who = " and ".join(speakers)
+        parts.append(
+            f"While {who} speak{'s' if len(speakers) == 1 else ''}, the mouth is "
+            f"clear of hands and props, lips plainly moving with the words."
+        )
     if not speaking:
         # Stated as what the shot IS rather than as a prohibition: "does not
         # speak" is a negation, and this model has no negative prompt to put
@@ -5066,6 +5129,9 @@ class Script2VideoPipeline:
         # the SAME "this character is speaking" direction to every angle it
         # bought, including the ones that open after the last word -- see
         # shots_the_line_reaches for what that delivered.
+        # Who speaks on screen in this scene, for the listener / speaker
+        # direction in each shot's motion prompt.
+        scene_speakers = scene_speaker_keys(scene_dialogue)
         line_reaches = shots_the_line_reaches(
             shots, scene_dialogue, line_seconds=scene_line_seconds
         )
@@ -5269,6 +5335,13 @@ class Script2VideoPipeline:
                     # present a mouth to camera for a sync pass that will
                     # never touch it is how the silence gets performed.
                     shot_has_dialogue = has_dialogue and line_reaches[i]
+                    # Who in this frame talks and who only listens (see
+                    # build_motion_prompt).
+                    talk = (
+                        who_talks_in_frame(shot, characters, matched_char, scene_speakers)
+                        if shot_has_dialogue
+                        else ([], [])
+                    )
 
                     def _frame_prompt(change, state, at_opening=False):
                         return build_frame_prompt(
@@ -5374,6 +5447,8 @@ class Script2VideoPipeline:
                             world_state=change_state,
                             speaking=shot_has_dialogue,
                             unpeopled=shot_is_unpeopled(shot, characters, matched_char),
+                            speakers=talk[0],
+                            listeners=talk[1],
                         )
                         video_prompt = f"{frame_prompt} {motion_prompt}"
                     else:
@@ -5498,6 +5573,8 @@ class Script2VideoPipeline:
                             speaking=shot_has_dialogue,
                             unpeopled=shot_is_unpeopled(shot, characters, matched_char),
                             event_in_take=event_in_take,
+                            speakers=talk[0],
+                            listeners=talk[1],
                         )
 
                         # The acted PEAK, rendered as a real end frame so the
