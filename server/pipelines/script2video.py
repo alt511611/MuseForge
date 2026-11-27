@@ -5053,6 +5053,11 @@ class Script2VideoPipeline:
         #: (interfaces/continuity.opening_state). Used for the first frame of
         #: a take that carries the drama's event -- see shot_at_the_opening.
         scene_opening: str = "",
+        #: Called with the scene's storyboard the moment it exists, before any
+        #: frame or video is made. The foley for the scene needs nothing else
+        #: (idea2video._start_foley), and starting it here hides its queue
+        #: behind the video render instead of adding it to the end of the job.
+        on_storyboard: Optional[Callable[[List[Any]], None]] = None,
     ) -> Dict[str, Any]:
         os.makedirs(working_dir, exist_ok=True)
         portraits = character_portraits or {}
@@ -5124,6 +5129,12 @@ class Script2VideoPipeline:
                 # mouth across a cut it never sees.
                 lipsync_enabled=lipsync_enabled,
             )
+
+        if on_storyboard is not None:
+            try:
+                on_storyboard(list(shots))
+            except Exception as exc:  # a head start is never worth a scene
+                logger.warning("Storyboard callback failed, continuing: %s", exc)
 
         # Which angles the words actually reach. A dialogue scene used to hand
         # the SAME "this character is speaking" direction to every angle it
