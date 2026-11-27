@@ -1167,6 +1167,30 @@ DEFAULT_LIPSYNC_CONCURRENCY = 3
 #: without asking the provider to hold a whole film's worth of jobs open.
 DEFAULT_FOLEY_CONCURRENCY = 2
 
+#: How long the mix waits for foley once the picture is done.
+#:
+#: The model answers in about three seconds. fal's own request history for the
+#: two jobs before this change says where the rest of the "foley" stage went:
+#:
+#:     job 93be3d88   sent 18:03:52   started 18:05:55   ran 2.5 s
+#:     job 265209d6   sent 15:13:02   started 15:14:34   ran 10.2 s
+#:                    sent 15:13:02   started 15:14:44   ran 3.7 s
+#:
+#: Ninety seconds to two minutes in fal's queue, every time the model had gone
+#: cold, added straight to the end of a job (154 s and 111 s stages). The
+#: requests now leave as each scene's storyboard exists (_start_foley), so the
+#: queue runs while the video renders. What is still unfinished by the time
+#: the picture is done gets this long, and then the film is mixed without it:
+#: a sound bed is the layer a film can most afford to lose, and a customer
+#: should not wait two minutes for one.
+FOLEY_DEADLINE_SECONDS = 45.0
+
+#: Requested on top of the scene's budgeted length when foley starts before the
+#: clip exists. The take comes back a little long (MiniMax runs ~0.5 s over),
+#: and a bed that ends just after the cut is a crossfade where one that ends
+#: before it is a hole.
+FOLEY_HEAD_START_PAD_SECONDS = 0.5
+
 
 def _foley_concurrency(total_scenes: int) -> int:
     """Resolve how many scenes to generate foley for in parallel."""
@@ -6642,11 +6666,53 @@ class Idea2VideoPipeline:
             for track in tracks
         ]
 
+    def _start_foley(
+        self,
+        scene_index: int,
+        shots: Sequence[Any],
+        seconds: float,
+        scene: Any,
+        semaphore: "asyncio.Semaphore",
+        is_cancelled: Optional[Callable[[], bool]] = None,
+    ) -> Optional["asyncio.Task"]:
+        """Start one scene's foley now, from its storyboard and budget.
+
+        Returns the task, or None when there is nothing to start (demo, off,
+        no provider, no length). Never raises: see _generate_foley.
+        """
+        if self.demo or not is_foley_enabled() or seconds <= 0:
+            return None
+        try:
+            generator = make_sfx_generator(self.api_key, demo=self.demo)
+        except Exception as exc:
+            logger.warning("Foley provider unavailable, continuing without it: %s", exc)
+            return None
+        audio_desc = next(
+            (
+                str(_shot_field_text(s, "audio_desc")).strip()
+                for s in shots
+                if _shot_field_text(s, "audio_desc").strip()
+            ),
+            "",
+        )
+
+        async def _run() -> Optional[str]:
+            async with semaphore:
+                return await generator.generate_scene_sfx(
+                    audio_desc,
+                    duration=seconds + FOLEY_HEAD_START_PAD_SECONDS,
+                    scene_emotion=_scene_emotion(scene),
+                    is_cancelled=is_cancelled,
+                )
+
+        return asyncio.ensure_future(_run())
+
     async def _generate_foley(
         self,
         scene_results: List[Dict[str, Any]],
         scene_paths: List[str],
         is_cancelled: Optional[Callable[[], bool]] = None,
+        early: Optional[Dict[int, "asyncio.Task"]] = None,
     ) -> List[Dict[str, Any]]:
         """A sound bed per scene, or an empty list. Never raises.
 
@@ -6674,11 +6740,26 @@ class Idea2VideoPipeline:
             return []
 
         semaphore = asyncio.Semaphore(_foley_concurrency(len(scene_results)))
+        early = early or {}
 
         async def _one(scene: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             clip_index = scene.get("clip_index")
             if clip_index is None or not (0 <= clip_index < len(scene_paths)):
                 return None
+            started = early.get(int(scene.get("index", -1)))
+            if started is not None:
+                # Started from the storyboard while the picture rendered. Its
+                # failure is the same lost layer as any other foley failure.
+                try:
+                    url = await started
+                except Exception as exc:
+                    logger.warning(
+                        "Foley failed for scene %s, continuing without it: %s",
+                        scene.get("index"),
+                        exc,
+                    )
+                    return None
+                return {"scene_index": int(clip_index), "audio_url": url} if url else None
             shots = scene.get("shots") or []
             # The master shot's note describes the scene; a two-second cutaway
             # of a face has nothing of its own to sound like.
@@ -6715,10 +6796,29 @@ class Idea2VideoPipeline:
                 return None
             return {"scene_index": int(clip_index), "audio_url": url}
 
-        results = await asyncio.gather(
-            *[_one(scene) for scene in scene_results], return_exceptions=True
-        )
-        tracks = [r for r in results if isinstance(r, dict)]
+        pending = [asyncio.ensure_future(_one(scene)) for scene in scene_results]
+        done, late = await asyncio.wait(pending, timeout=FOLEY_DEADLINE_SECONDS)
+        for task in late:
+            task.cancel()
+        for task in early.values():
+            if not task.done():
+                task.cancel()
+        if late:
+            logger.warning(
+                "Foley for %d scene(s) was still in the provider's queue %.0fs "
+                "after the picture was done; mixing without it.",
+                len(late),
+                FOLEY_DEADLINE_SECONDS,
+            )
+        tracks = []
+        for task in done:
+            try:
+                result = task.result()
+            except Exception:
+                continue
+            if isinstance(result, dict):
+                tracks.append(result)
+        tracks.sort(key=lambda t: t["scene_index"])
         if tracks:
             logger.info("Generated foley for %d scene(s).", len(tracks))
         return tracks
@@ -7593,6 +7693,23 @@ class Idea2VideoPipeline:
 
             return _record
 
+        early_foley: Dict[int, "asyncio.Task"] = {}
+        foley_semaphore = asyncio.Semaphore(_foley_concurrency(len(script.scenes)))
+
+        def _foley_from_storyboard(idx: int, scene: Any, shots: Sequence[Any]) -> None:
+            if idx in early_foley:
+                return
+            task = self._start_foley(
+                idx,
+                shots,
+                scene_durations[idx] if idx < len(scene_durations) else 0.0,
+                scene,
+                foley_semaphore,
+                is_cancelled=is_cancelled,
+            )
+            if task is not None:
+                early_foley[idx] = task
+
         async def _render_scene(idx: int, scene: Any) -> None:
             try:
                 await _render_one_scene(idx, scene)
@@ -7678,6 +7795,11 @@ class Idea2VideoPipeline:
                     world_state=world_state,
                     scene_tension=_scene_tension(scene),
                     scene_duration=scene_durations[idx] if idx < len(scene_durations) else 0.0,
+                    # The foley starts here, from the storyboard, so its queue
+                    # runs while the picture renders (FOLEY_DEADLINE_SECONDS).
+                    on_storyboard=lambda shots, _idx=idx, _scene=scene: _foley_from_storyboard(
+                        _idx, _scene, shots
+                    ),
                     character_direction=character_direction,
                     theme=getattr(script, "theme", "") or "",
                     visual_motif=getattr(script, "visual_motif", "") or "",
@@ -7734,6 +7856,10 @@ class Idea2VideoPipeline:
                     # the siblings -- left alone they would keep polling the
                     # provider (and burning credits) behind a failed job.
                     for task in scene_tasks:
+                        task.cancel()
+                    # And the foley those scenes started: a failed job is
+                    # not mixed, so a sound bed still in the queue is waste.
+                    for task in early_foley.values():
                         task.cancel()
                     await asyncio.gather(*scene_tasks, return_exceptions=True)
                     raise
@@ -7811,7 +7937,8 @@ class Idea2VideoPipeline:
             # the FINISHED clip's length, and because a foley failure must not
             # be able to take a rendered scene down with it.
             sfx_tracks = await self._generate_foley(
-                scene_results, scene_paths, is_cancelled=is_cancelled
+                scene_results, scene_paths, is_cancelled=is_cancelled,
+                early=early_foley,
             )
 
             _check_cancel()
