@@ -6,6 +6,6 @@ export default {
   published: "2026-11-28",
   updated: "2026-11-28",
   tags: ["AI movie maker", "AI filmmaking", "FAQ", "free AI video"],
-  related: ["ai-filmmaking", "choosing-an-ai-video-generator", "how-to-make-an-ai-short-film"],
+  related: ["museforge-questions", "ai-filmmaking", "choosing-an-ai-video-generator"],
   locales: { en },
 };

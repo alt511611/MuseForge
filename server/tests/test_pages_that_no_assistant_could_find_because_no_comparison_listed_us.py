@@ -23,15 +23,16 @@ def _read(*parts):
 
 def test_the_comparison_and_the_questions_are_registered_as_articles():
     index = _read(CLIENT, "lib", "content", "index.js")
-    for slug in ("best-ai-short-film-makers", "ai-movie-maker-questions"):
+    for slug in ("best-ai-short-film-makers", "ai-movie-maker-questions", "museforge-questions"):
         assert os.path.isdir(os.path.join(BLOG, slug))
         assert f"content/blog/{slug}" in index, f"{slug} is not imported"
     arr = index.split("export const ARTICLES = [", 1)[1].split("]", 1)[0]
     assert "bestShortFilmMakers" in arr and "movieMakerQuestions" in arr
+    assert "museforgeQuestions" in arr
 
 
 def test_every_question_in_a_faq_block_is_answered_in_a_sentence_that_stands_alone():
-    for slug in ("best-ai-short-film-makers", "ai-movie-maker-questions"):
+    for slug in ("best-ai-short-film-makers", "ai-movie-maker-questions", "museforge-questions"):
         src = _read(BLOG, slug, "en.js")
         pairs = re.findall(r'q: "([^"]+)",\s*a: "((?:[^"\\]|\\.)+)"', src)
         assert pairs, f"{slug} has no FAQ pairs"
