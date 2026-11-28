@@ -4,6 +4,7 @@ import Breadcrumbs from "../../../../components/Breadcrumbs";
 import {
   JsonLd,
   canonical,
+  withMarkdown,
   openGraphFor,
   breadcrumbSchema,
   blogSchema,
@@ -19,6 +20,7 @@ import {
   loadArticle,
   articleCard,
   articlePath,
+  articleCoverPath,
   articlesIn,
   relatedTo,
 } from "../../../../lib/content";
@@ -46,7 +48,13 @@ export function generateMetadata({ params: { locale, slug } }) {
   return {
     title: { absolute: `${article.title} | MuseForge` },
     description: article.description,
-    alternates: canonical(path, locale, article.locales),
+    /* The Markdown route only exists for the locales the article is written
+       in, which is also the only set this page renders for (dynamicParams is
+       off), so `locale` is always one of them. */
+    alternates: withMarkdown(
+      canonical(path, locale, article.locales),
+      `/md/${locale}${path}`
+    ),
     openGraph: openGraphFor({
       title: article.title,
       description: article.description,
@@ -54,6 +62,14 @@ export function generateMetadata({ params: { locale, slug } }) {
       locale,
       type: "article",
       available: article.locales,
+      images: [
+        {
+          url: articleCoverPath(slug, locale),
+          width: 1200,
+          height: 630,
+          alt: article.title,
+        },
+      ],
       article: {
         publishedTime: article.published,
         modifiedTime: article.updated || article.published,
@@ -61,6 +77,9 @@ export function generateMetadata({ params: { locale, slug } }) {
         tags: article.tags,
       },
     }),
+    /* Restated for X: a page-level openGraph does not carry into `twitter`,
+       and without it the card falls back to the site-wide image. */
+    twitter: { card: "summary_large_image", images: [articleCoverPath(slug, locale)] },
   };
 }
 
@@ -112,6 +131,7 @@ export default function ArticlePage({ params: { locale, slug } }) {
             keywords: article.tags,
             wordCount: readingMinutes(article.blocks) * 220,
             summary: article.summary,
+            image: articleCoverPath(slug, locale),
           }),
           ...howTos,
           ...(faq.length ? [faqSchema(faq)] : []),

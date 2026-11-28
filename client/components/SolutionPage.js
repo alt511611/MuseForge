@@ -77,6 +77,12 @@ export default function SolutionPage({
       {/* Use case cards */}
       {useCases.length > 0 && (
         <section className="max-w-5xl mx-auto px-6 py-14">
+          {/* The cards below are h3s, and without this they hung straight off
+              the h1 — a skipped level on all four pages (OpenSEO, 2026-10-08).
+              An answer engine reads the outline to decide what a passage is
+              an answer to; "Use cases" is what these cards are. Visually
+              hidden because the design already says it with the grid. */}
+          <h2 className="sr-only">{t("sol_use_cases_title")}</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
             {useCases.map(({ icon, title, desc, sample }, i) => (
               <div key={i} className="glass rounded-2xl p-6 group hover:border-purple-600/30 transition-all"

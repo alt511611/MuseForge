@@ -66,7 +66,9 @@ export function GET() {
     "Each link is the plain-text edition of the page; the rendered page is the",
     "same path with the /md/<language> prefix removed. The home page and pricing",
     "exist in every language MuseForge is served in — swap the code in the URL.",
-    "The four segment pages are written in English only.",
+    "The four segment pages are written in English only. A request for any",
+    "rendered page that sends `Accept: text/markdown` receives this edition",
+    "directly, and every such page links it as rel=\"alternate\".",
     "",
     ...PRODUCT_PAGES.map(
       ({ key, label, gloss }) => `- [${label}](${abs(mdPath(key, DEFAULT_LOCALE))}): ${gloss}`

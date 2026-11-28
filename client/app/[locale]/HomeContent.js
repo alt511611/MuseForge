@@ -17,6 +17,7 @@ import {
 import { useAuth } from "../../contexts/AuthContext";
 import { useLanguage } from "../../contexts/LanguageContext";
 import { friendlyError } from "../../utils/errorMessages";
+import { HOME_FAQ_KEYS } from "../../lib/faq";
 
 /* A section eyebrow styled like a film slate: "02 / GENRES". Numbering the
    sections gives the long page a sense of running order. */
@@ -201,12 +202,7 @@ export default function HomeContent() {
     { style: "Warm Nostalgia",   mood: "Golden tone, soft focus",  color: "#e8b64c" },
   ];
 
-  const FAQ = [
-    { q: t("faq_1_q"), a: t("faq_1_a") },
-    { q: t("faq_2_q"), a: t("faq_2_a") },
-    { q: t("faq_3_q"), a: t("faq_3_a") },
-    { q: t("faq_4_q"), a: t("faq_4_a") },
-  ];
+  const FAQ = HOME_FAQ_KEYS.map((n) => ({ q: t(`faq_${n}_q`), a: t(`faq_${n}_a`) }));
 
   return (
     <main className="min-h-screen" style={{ backgroundColor: "var(--mf-stage)" }}>

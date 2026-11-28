@@ -39,7 +39,7 @@ export default {
         },
         {
           name: "Storyboard every shot as a still",
-          text: "Generate the frames before the motion. Stills are an order of magnitude cheaper than video, and nearly every mistake you are going to make — wrong wardrobe, wrong room, wrong eyeline, a stranger in the background — is visible in the still. Fix it there.",
+          text: "Generate the frames before the motion. Stills are an order of magnitude cheaper than video, and nearly every mistake you are going to make — wrong wardrobe, wrong room, wrong eyeline, a stranger in the background — is visible in the still. Fix it there; [the storyboard guide](/blog/ai-storyboard-generator) covers what to check.",
         },
         {
           name: "Generate motion only from approved frames",

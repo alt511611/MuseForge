@@ -1,7 +1,8 @@
 import SolutionPage from "../../../../components/SolutionPage";
 import { BookOpen, GraduationCap, Lightbulb, Users } from "lucide-react";
 import Breadcrumbs from "../../../../components/Breadcrumbs";
-import { JsonLd, canonical, breadcrumbSchema, openGraphFor } from "../../../../lib/seo";
+import { JsonLd, canonical, withMarkdown, breadcrumbSchema, openGraphFor } from "../../../../lib/seo";
+import { mdPath } from "../../../../lib/content/pages";
 import { t } from "../../../../lib/i18n/index";
 import { isLocale, withLocale, DEFAULT_LOCALE } from "../../../../lib/i18n/routing";
 import { CONTENT } from "./content";
@@ -37,7 +38,7 @@ export function generateMetadata({ params: { locale } }) {
   return {
     title: { absolute: `${CONTENT.title} | MuseForge` },
     description: CONTENT.description,
-    alternates: canonical(PATH, locale, ONLY_LOCALE),
+    alternates: withMarkdown(canonical(PATH, locale, ONLY_LOCALE), mdPath("education", locale)),
     openGraph: openGraphFor({
       title: CONTENT.title,
       description: CONTENT.description,

@@ -195,6 +195,20 @@ def package_for_plan_id(plan_id: str) -> Optional[str]:
 
 # ── Checkout ──────────────────────────────────────────────────────────────────
 
+class CheckoutUrl(str):
+    """A purchase URL that also remembers the checkout configuration id.
+
+    It stays a plain ``str`` so every caller that redirects to it (and every
+    test that stands in for this function with a string) keeps working. The
+    embedded checkout needs the ``ch_...`` id instead of the URL: passing it as
+    ``sessionId`` is what lets the on-site form carry the same ``metadata``
+    (user id, credit pack) that the hosted page does, so the webhook can still
+    credit the right account.
+    """
+
+    session_id: Optional[str] = None
+
+
 async def create_checkout_session(
     plan_id: str,
     user_id: str,
@@ -243,7 +257,9 @@ async def create_checkout_session(
     url = data.get("purchase_url") or data.get("checkout_url")
     if not url:
         raise ValueError(f"Whop returned no purchase_url: {data}")
-    return url
+    result = CheckoutUrl(url)
+    result.session_id = data.get("id") or None
+    return result
 
 
 def manage_url(membership_id: str = "") -> str:

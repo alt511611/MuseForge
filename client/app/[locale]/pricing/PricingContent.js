@@ -177,22 +177,58 @@ function IntervalToggle({ interval, onChange }) {
   );
 }
 
-// ── Main content ──────────────────────────────────────────────────────────────
-function PricingContent() {
-  const { user, getAccessToken } = useAuth();
+// ── Checkout return banner ────────────────────────────────────────────────────
+/**
+ * The only part of /pricing that reads the query string.
+ *
+ * WHY IT IS ITS OWN COMPONENT. useSearchParams() in a statically prerendered
+ * page makes Next bail out to client rendering up to the nearest Suspense
+ * boundary. When the call sat at the top of PricingContent, that boundary was
+ * the whole page: the prerendered HTML of /pricing, in all twenty locales, was
+ * the navbar and nothing else. OpenSEO's crawl of 2026-10-08 counted two words
+ * and no H1 on every one of them. Googlebot renders JavaScript and eventually
+ * saw the plans; GPTBot, ClaudeBot and PerplexityBot do not, so the page that
+ * answers "how much does MuseForge cost" was blank to every assistant asked.
+ * Fenced in here, the bailout costs a banner that only exists after checkout,
+ * and the plans, prices and FAQ are back in the HTML.
+ */
+function CheckoutSuccess() {
   const { t } = useLanguage();
   const searchParams = useSearchParams();
   const success = searchParams.get("success");
   const creditsBought = searchParams.get("credits");
   const successPlan = searchParams.get("plan");
   const [confetti, setConfetti] = useState(false);
-  // Annual first: it is the cheaper offer, so it is the one that should be on
-  // screen before anyone touches anything.
-  const [interval, setInterval] = useState("annual");
 
   useEffect(() => {
     if (success) { setConfetti(true); setTimeout(() => setConfetti(false), 5000); }
   }, [success]);
+
+  return (
+    <>
+      <Confetti active={confetti} />
+
+      {success && (
+        <div className="py-3 text-center text-sm font-medium animate-fade-in"
+          style={{ background: "linear-gradient(90deg,rgba(52,211,153,0.18),rgba(52,211,153,0.08))", color: "var(--mf-ok)", borderBottom: "1px solid rgba(52,211,153,0.25)" }}>
+          🎉 {creditsBought
+            ? `${creditsBought} credits added to your account!`
+            : successPlan
+              ? `Welcome to ${successPlan.charAt(0).toUpperCase() + successPlan.slice(1)}!`
+              : t("pricing_success")}
+        </div>
+      )}
+    </>
+  );
+}
+
+// ── Main content ──────────────────────────────────────────────────────────────
+function PricingContent() {
+  const { user, getAccessToken } = useAuth();
+  const { t } = useLanguage();
+  // Annual first: it is the cheaper offer, so it is the one that should be on
+  // screen before anyone touches anything.
+  const [interval, setInterval] = useState("annual");
 
   const SEGMENT_LINKS = [
     { icon: Building2, label: t("sol_agencies"),   href: "/solutions/agencies" },
@@ -283,18 +319,10 @@ function PricingContent() {
 
   return (
     <main className="min-h-screen" style={{ backgroundColor: "var(--mf-stage)" }}>
-      <Confetti active={confetti} />
-
-      {success && (
-        <div className="py-3 text-center text-sm font-medium animate-fade-in"
-          style={{ background: "linear-gradient(90deg,rgba(52,211,153,0.18),rgba(52,211,153,0.08))", color: "var(--mf-ok)", borderBottom: "1px solid rgba(52,211,153,0.25)" }}>
-          🎉 {creditsBought
-            ? `${creditsBought} credits added to your account!`
-            : successPlan
-              ? `Welcome to ${successPlan.charAt(0).toUpperCase() + successPlan.slice(1)}!`
-              : t("pricing_success")}
-        </div>
-      )}
+      {/* Its own boundary: see CheckoutSuccess. */}
+      <Suspense fallback={null}>
+        <CheckoutSuccess />
+      </Suspense>
 
       {/* Stage lighting, matching the landing hero so the two pages read as
           one product rather than two templates. */}
