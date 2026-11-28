@@ -1,4 +1,7 @@
 export default {
+  metaTitle: "The AI micro-drama playbook for series",
+  metaDescription:
+    "Vertical micro-dramas run on retention across episodes, not production value. How to plan the cast, the hook and the cliffhanger so a series outlasts one video.",
   title: "The micro-drama playbook: shipping a series instead of a one-off",
   description:
     "Vertical micro-dramas are built on retention across episodes, not production value inside one. What the format actually requires, and why episode two is the one that decides whether you have a series.",

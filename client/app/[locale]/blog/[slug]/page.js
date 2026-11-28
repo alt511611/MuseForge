@@ -46,8 +46,8 @@ export function generateMetadata({ params: { locale, slug } }) {
 
   const path = articlePath(slug);
   return {
-    title: { absolute: `${article.title} | MuseForge` },
-    description: article.description,
+    title: { absolute: `${article.metaTitle} | MuseForge` },
+    description: article.metaDescription,
     /* The Markdown route only exists for the locales the article is written
        in, which is also the only set this page renders for (dynamicParams is
        off), so `locale` is always one of them. */

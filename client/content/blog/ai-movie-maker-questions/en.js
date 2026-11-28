@@ -10,6 +10,9 @@
  * strings, not from memory.
  */
 export default {
+  metaTitle: "AI movie maker questions, answered",
+  metaDescription:
+    "Straight answers on AI movie makers: is there a free one, which is best, can AI make a whole movie, is it legal, who owns the film, and what it costs.",
   title: "AI movie maker questions, answered: free, best, legal, and what it costs",
   description:
     "Straight answers to the questions people ask most about AI movie makers: is there a free one, which is best, can AI make an entire movie, will it replace filmmakers, is it legal, and what it really costs.",
@@ -88,7 +91,7 @@ export default {
       items: [
         {
           q: "How much does AI filmmaking cost?",
-          a: "Tools charge per clip, per second or per credit, and the true cost includes retakes, because roughly one shot in five usually needs regenerating. On MuseForge one credit is about ten seconds of finished film. The Free plan includes 3 credits a month, Creator includes 16 and Pro includes 36; credit packs are available without a subscription, and credits expire 30 days after they are issued. Current prices are on the [pricing page](/pricing).",
+          a: "Tools charge per clip, per second or per credit, and the true cost includes retakes, because roughly one shot in five usually needs regenerating. On MuseForge one credit is about ten seconds of finished film. The Free plan includes 3 credits a month, Creator (from $53 a month) includes 16 and Pro (from $116 a month) includes 36; credit packs are available without a subscription, and credits expire 30 days after they are issued. Current prices are on the [pricing page](/pricing).",
         },
         {
           q: "Can I use AI-generated films commercially?",

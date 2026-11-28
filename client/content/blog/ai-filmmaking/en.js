@@ -1,4 +1,7 @@
 export default {
+  metaTitle: "AI filmmaking: what works, where it breaks",
+  metaDescription:
+    "AI filmmaking stage by stage: what it does well, the four failures that decide whether a film is watchable, and how it differs from a clip generator.",
   title: "AI filmmaking: what it can make today, and where it still breaks",
   description:
     "What AI filmmaking actually means stage by stage, the kinds of film it already does well, the four failures that still decide whether a film is watchable, and the difference between an AI film maker and a clip generator.",

@@ -1,4 +1,7 @@
 export default {
+  metaTitle: "How to write a text-to-video prompt",
+  metaDescription:
+    "Video prompts are not image prompts with a verb added. How to write the camera, subject, action and light so the shot matches what you pictured.",
   title: "How to write a text-to-video prompt that produces the shot you pictured",
   description:
     "Video prompts are not image prompts with a verb added. A shot has a camera, a subject, an action, a light and a duration — and the order you state them in changes what you get.",

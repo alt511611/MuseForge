@@ -1,4 +1,7 @@
 export default {
+  metaTitle: "AI storyboard generators: what to ask of one",
+  metaDescription:
+    "In AI filmmaking the storyboard is where mistakes are still cheap. What an AI storyboard generator is for, and the questions that separate a useful one.",
   title: "AI storyboard generators: what the storyboard is for, and what to ask of one",
   description:
     "In AI filmmaking the storyboard is where mistakes are still cheap. What an AI storyboard generator should do, the six things to check before trusting one, and how to storyboard a scene so the video stage has nothing left to guess.",

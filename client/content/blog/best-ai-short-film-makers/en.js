@@ -13,6 +13,9 @@
  * result. Re-check before updating the date.
  */
 export default {
+  metaTitle: "Best AI short film makers in 2026, compared",
+  metaDescription:
+    "Runway, Flow and Veo, Kling, LTX Studio, OpenArt, Higgsfield and MuseForge compared for short films with recurring characters, and who should pick which.",
   title: "Best AI short film makers in 2026: compared by what they are actually for",
   description:
     "Runway, Google Flow and Veo, Kling, LTX Studio, OpenArt, Higgsfield and MuseForge compared for making a short film with recurring characters: what each is best at, how each handles consistency, and who should pick which.",

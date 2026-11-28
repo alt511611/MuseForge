@@ -1,4 +1,7 @@
 export default {
+  metaTitle: "How to make an AI short film from one idea",
+  metaDescription:
+    "The full path from one sentence to a finished two-minute film: story, cast, shot list, frames, motion, voices, music and edit, with what to check at each step.",
   title: "How to make an AI short film from a single idea",
   description:
     "The full path from one sentence to a finished two-minute film: story, cast, shot list, frames, motion and sound — and the decisions at each stage that decide whether the result looks made or generated.",

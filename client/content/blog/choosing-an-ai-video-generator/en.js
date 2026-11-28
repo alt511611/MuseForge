@@ -1,4 +1,7 @@
 export default {
+  metaTitle: "Choosing an AI video generator: 7 questions",
+  metaDescription:
+    "Resolution is the least important spec. The questions that decide whether you can finish a film: continuity, retake cost, and what survives the render.",
   title: "Choosing an AI video generator: the questions that actually matter",
   description:
     "Resolution and model names are the specs vendors compete on. The things that decide whether you can finish a film are continuity, retake granularity and what happens to your work after the render ends.",

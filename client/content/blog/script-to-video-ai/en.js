@@ -1,4 +1,7 @@
 export default {
+  metaTitle: "Script to video AI: which tool makes a film",
+  metaDescription:
+    "\"Script to video\" names three different products: avatar presenters, stock-footage assemblers and film makers. How to tell which one you need.",
   title: "Script to video AI: three kinds of tool, and which one makes a film",
   description:
     "\"Script to video\" names three different products: avatar presenters, stock-footage editors and generative film makers. What each one turns your script into, how to prepare a script so it survives the trip, and where the script stage usually goes wrong.",

@@ -20,7 +20,7 @@ const FAQ_KEYS = [1, 2, 3, 4];
 
 const EN_TITLE = "Pricing — Plans & Credits";
 const EN_DESCRIPTION =
-  "MuseForge pricing: start free with demo mode, then scale to Creator (from $53/mo) or Pro (from $116/mo) — 10% off when billed yearly. One credit is 10 seconds of finished film. Buy extra credits any time, cancel whenever you like.";
+  "Start free with demo mode, then Creator from $53/mo or Pro from $116/mo (10% off yearly). One credit is 10 seconds of finished film. Cancel anytime.";
 
 export function generateMetadata({ params: { locale } }) {
   if (!isLocale(locale)) return {};
@@ -28,7 +28,9 @@ export function generateMetadata({ params: { locale } }) {
      page strings — weaker as a snippet, but it matches what the URL serves. */
   const title = locale === DEFAULT_LOCALE ? EN_TITLE : t(locale, "nav_pricing");
   const description =
-    locale === DEFAULT_LOCALE ? EN_DESCRIPTION : t(locale, "pricing_sub");
+    locale === DEFAULT_LOCALE
+      ? EN_DESCRIPTION
+      : `${t(locale, "pricing_sub")} ${t(locale, "plan_free_desc")}`;
   return {
     title,
     description,

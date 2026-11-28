@@ -93,6 +93,10 @@ export function loadArticle(slug, locale) {
     title: body.title,
     headline: body.headline || body.title,
     description: body.description,
+    /* What the SERP shows, when the on-page title or lead is longer than a
+       result line holds (~60 / ~160 characters). H1 and schema keep the long form. */
+    metaTitle: body.metaTitle || body.title,
+    metaDescription: body.metaDescription || body.description,
     blocks,
     minutes: readingMinutes(blocks),
     summary: leadSummary(blocks) || body.description,

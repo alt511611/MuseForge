@@ -1,6 +1,9 @@
 const title = "Why AI video characters change between shots — and how to lock them";
 
 export default {
+  metaTitle: "Consistent characters in AI video",
+  metaDescription:
+    "Why a face drifts between scenes, why a reference image holds and a text description does not, and how to lock a character, wardrobe and lighting across a film.",
   title,
   description:
     "A face that drifts between scene 2 and scene 3 is the single most common reason an AI short film looks fake. Here is what causes the drift, and the four techniques that actually stop it.",
