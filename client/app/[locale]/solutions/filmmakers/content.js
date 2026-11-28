@@ -18,7 +18,7 @@
  */
 
 export const CONTENT = {
-  title: "AI Previsualization & Storyboard Tool for Filmmakers",
+  title: "AI Previsualization & Storyboard Tool",
   description: "Use MuseForge for shot previsualization, animatics, and storyboard generation on indie film projects — no storyboard artist required.",
   badge: "Independent Filmmakers",
   /* The visible h1, in the two halves page.js styles it as: the lead

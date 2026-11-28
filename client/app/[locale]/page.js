@@ -28,13 +28,24 @@ const EN_TITLE = "AI Movie Maker — Turn One Idea into a Short Film | MuseForge
 const EN_DESCRIPTION =
   "MuseForge is an AI film maker: type one idea and AI agents write the script, storyboard every shot, keep characters consistent and cut a finished short film.";
 
+/* A result line holds about 60 characters of title and 160 of description
+   (OpenSEO flagged 39 titles and 13 descriptions over, 2026-10-08). The
+   translated hero_sub is "<promise> — <what it is>"; the promise is what a
+   searcher reads, so the tail is what goes. */
+function clip(text, max) {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max - 1);
+  const at = cut.lastIndexOf(" ");
+  return `${(at > max * 0.6 ? cut.slice(0, at) : cut).replace(/[\s,;:.—-]+$/, "")}…`;
+}
+
 export function generateMetadata({ params: { locale } }) {
   if (!isLocale(locale)) return {};
   const english = locale === DEFAULT_LOCALE;
   const title = english
     ? { absolute: EN_TITLE }
-    : `MuseForge — ${t(locale, "hero_sub")}`;
-  const description = english ? EN_DESCRIPTION : t(locale, "hero_desc");
+    : `MuseForge — ${t(locale, "hero_sub").split(" — ")[0]}`;
+  const description = english ? EN_DESCRIPTION : clip(t(locale, "hero_desc"), 160);
   const social = english ? EN_TITLE : title;
   return {
     title,
