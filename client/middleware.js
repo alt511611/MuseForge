@@ -39,6 +39,51 @@ function isLikelyCrawler(request) {
 // reachable by anonymous visitors (demo mode generates videos without an
 // account). Only the actual generation results page and admin are gated.
 // Paths here are locale-stripped, so "/tr/generate/123" matches "/generate".
+/**
+ * The Markdown edition of `path`, when the request asked for Markdown and one
+ * exists. Null otherwise.
+ *
+ * WHY NEGOTIATE AT ALL, when every page already links its edition with
+ * <link rel="alternate" type="text/markdown">. Because the agents that would
+ * use it most do not parse the HTML first: a fetch tool that sends
+ * `Accept: text/markdown, text/html;q=0.9` is saying, before it has read a
+ * byte, that it would rather not. Answering that with 120 KB of React and
+ * letting it strip the markup itself is the waste the /md routes exist to
+ * prevent. The response is the same file /md/... serves, so there is one
+ * Markdown edition, not two.
+ *
+ * WHEN IT FIRES. Only when text/markdown is preferred over text/html — a
+ * browser's wildcard Accept or a crawler's plain "text/html" never matches,
+ * so nothing a human or Googlebot sees changes. q-values are honoured because
+ * the one thing worse than not negotiating is negotiating wrongly.
+ *
+ * WHICH PATHS. Exactly the families that have an edition: the home page,
+ * /pricing, the four /solutions pages (English only, so always /md/en), and
+ * the articles. The blog index and legal pages have none, and fall through to
+ * HTML rather than to a 404.
+ */
+function markdownTarget(request, locale, path) {
+  const accept = request.headers.get("accept") || "";
+  const weight = (type) => {
+    for (const part of accept.split(",")) {
+      const [raw, ...params] = part.trim().split(";");
+      if (raw.trim().toLowerCase() !== type) continue;
+      const q = params.find((p) => p.trim().startsWith("q="));
+      const n = q ? Number(q.trim().slice(2)) : 1;
+      return Number.isFinite(n) ? n : 0;
+    }
+    return 0;
+  };
+  const md = weight("text/markdown");
+  if (md <= 0 || md < weight("text/html")) return null;
+
+  if (path === "/") return `/md/${locale}`;
+  if (path === "/pricing") return `/md/${locale}/pricing`;
+  if (/^\/solutions\/[a-z]+$/.test(path)) return `/md/${DEFAULT_LOCALE}${path}`;
+  if (/^\/blog\/[a-z0-9-]+$/.test(path)) return `/md/${locale}${path}`;
+  return null;
+}
+
 const PROTECTED = ["/generate"];
 const ADMIN_ONLY = ["/admin"];
 
@@ -67,6 +112,13 @@ export async function middleware(request) {
   if (hasPrefix && locale === DEFAULT_LOCALE) {
     const target = new URL(path + request.nextUrl.search, request.url);
     return NextResponse.redirect(target, 308);
+  }
+
+  const md = markdownTarget(request, locale, path);
+  if (md) {
+    const res = NextResponse.rewrite(new URL(md, request.url));
+    res.headers.set("Vary", "Accept");
+    return res;
   }
 
   // Rebuilt rather than reused: Supabase's cookie writer needs a fresh
@@ -148,6 +200,6 @@ export const config = {
   // on purpose (see UNLOCALIZED_PREFIXES): a rewrite would send /s/x to
   // /en/s/x, which is a route that does not exist.
   matcher: [
-    "/((?!_next/static|_next/image|api/|auth/|md/|s/|embed/|favicon.ico|icon-\\d+\\.png|icon\\.svg|apple-touch-icon\\.png|robots\\.txt|sitemap\\.xml|llms\\.txt|llms-full\\.txt|manifest\\.webmanifest|opengraph-image).*)",
+    "/((?!_next/static|_next/image|api/|auth/|md/|og/|s/|embed/|favicon.ico|icon-\\d+\\.png|icon\\.svg|apple-touch-icon\\.png|robots\\.txt|[0-9a-f]{32}\\.txt|sitemap\\.xml|llms\\.txt|llms-full\\.txt|manifest\\.webmanifest|opengraph-image).*)",
   ],
 };

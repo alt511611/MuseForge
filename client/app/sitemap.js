@@ -67,12 +67,15 @@ const ROUTES = [
   {
     path: "/legal/privacy",
     files: [`${L}/legal/privacy/page.js`, `${L}/legal/privacy/PrivacyContent.js`],
+    /* English body at every prefix, like the segment pages above. */
+    locales: [DEFAULT_LOCALE],
     changeFrequency: "yearly",
     priority: 0.3,
   },
   {
     path: "/legal/terms",
     files: [`${L}/legal/terms/page.js`, `${L}/legal/terms/TermsContent.js`],
+    locales: [DEFAULT_LOCALE],
     changeFrequency: "yearly",
     priority: 0.3,
   },

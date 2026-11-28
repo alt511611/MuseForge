@@ -2,11 +2,13 @@ import PricingContent from "./PricingContent";
 import { t } from "../../../lib/i18n/index";
 import { isLocale, DEFAULT_LOCALE } from "../../../lib/i18n/routing";
 import { PLAN_OFFERS } from "../../../lib/pricing";
+import { mdPath } from "../../../lib/content/pages";
 import {
   JsonLd,
   SITE_URL,
   absoluteUrl,
   canonical,
+  withMarkdown,
   faqSchema,
   openGraphFor,
   organizationSchema,
@@ -30,7 +32,7 @@ export function generateMetadata({ params: { locale } }) {
   return {
     title,
     description,
-    alternates: canonical(PATH, locale),
+    alternates: withMarkdown(canonical(PATH, locale), mdPath("pricing", locale)),
     openGraph: openGraphFor({ title, description, path: PATH, locale }),
   };
 }

@@ -20,6 +20,11 @@ import shortFilm from "../../content/blog/how-to-make-an-ai-short-film";
 import prompting from "../../content/blog/text-to-video-prompt-guide";
 import microDrama from "../../content/blog/micro-drama-series-playbook";
 import choosing from "../../content/blog/choosing-an-ai-video-generator";
+import filmmaking from "../../content/blog/ai-filmmaking";
+import scriptToVideo from "../../content/blog/script-to-video-ai";
+import storyboard from "../../content/blog/ai-storyboard-generator";
+import bestShortFilmMakers from "../../content/blog/best-ai-short-film-makers";
+import movieMakerQuestions from "../../content/blog/ai-movie-maker-questions";
 
 import { DEFAULT_LOCALE } from "../i18n/routing";
 import { withHeadingIds, readingMinutes, leadSummary } from "./blocks";
@@ -33,6 +38,11 @@ import { withHeadingIds, readingMinutes, leadSummary } from "./blocks";
  * the editorial order within a day, and the one to edit when it matters.
  */
 export const ARTICLES = [
+  bestShortFilmMakers,
+  movieMakerQuestions,
+  filmmaking,
+  scriptToVideo,
+  storyboard,
   characterConsistency,
   shortFilm,
   prompting,
@@ -44,6 +54,9 @@ export const BLOG_PATH = "/blog";
 
 /** Site-relative path for an article, before locale prefixing. */
 export const articlePath = (slug) => `${BLOG_PATH}/${slug}`;
+
+/** The 1200x630 cover of one edition — app/og/blog/[locale]/[slug]. */
+export const articleCoverPath = (slug, locale) => `/og/blog/${locale}/${slug}`;
 
 /** The locales an article has a body for, English first. */
 export function localesOf(meta) {

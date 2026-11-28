@@ -26,6 +26,7 @@ import { t } from "../i18n/index";
 import { DEFAULT_LOCALE, LOCALE_CODES } from "../i18n/routing";
 import { blocksToMarkdown } from "./markdown";
 import { PLAN_OFFERS } from "../pricing";
+import { HOME_FAQ_KEYS } from "../faq";
 import { CONTENT as AGENCIES } from "../../app/[locale]/solutions/agencies/content";
 import { CONTENT as CREATORS } from "../../app/[locale]/solutions/creators/content";
 import { CONTENT as EDUCATION } from "../../app/[locale]/solutions/education/content";
@@ -56,7 +57,10 @@ const numbered = (locale, prefix, count, fields) =>
 function homeDoc(locale) {
   const steps = numbered(locale, "how", 4, { name: "title", text: "desc" });
   const features = numbered(locale, "feat", 4, { term: "title", value: "desc" });
-  const faq = numbered(locale, "faq", 4, { q: "q", a: "a" });
+  const faq = HOME_FAQ_KEYS.map((n) => ({
+    q: t(locale, `faq_${n}_q`),
+    a: t(locale, `faq_${n}_a`),
+  }));
 
   return {
     path: "/",

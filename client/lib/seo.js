@@ -71,6 +71,26 @@ export function canonical(path = "/", locale = DEFAULT_LOCALE, available = LOCAL
 }
 
 /**
+ * Adds the page's Markdown edition to an `alternates` block.
+ *
+ * WHY. Every marketing page and every guide has had a plain-text edition at
+ * /md/<locale>/... since llms.txt shipped, and the only way to find one was to
+ * already be reading llms.txt. An agent that lands on /pricing from a search
+ * result — which is how ChatGPT search, Perplexity and Claude's web fetch
+ * actually arrive — had no pointer from the page it was on to the version of
+ * it that was written for it. `<link rel="alternate" type="text/markdown">` is
+ * that pointer, in the vocabulary HTML already has for "this same document,
+ * in another format". The middleware serves the same file to a request that
+ * asks for text/markdown in its Accept header, so a client that negotiates
+ * never needs the link at all.
+ *
+ * `href` is site-relative; metadataBase makes it absolute.
+ */
+export function withMarkdown(alternates, href) {
+  return href ? { ...alternates, types: { "text/markdown": href } } : alternates;
+}
+
+/**
  * openGraph block for a localized page.
  *
  * A page-level `openGraph` replaces the layout's wholesale rather than merging
@@ -85,6 +105,7 @@ export function openGraphFor({
   type = "website",
   available = LOCALE_CODES,
   article,
+  images,
 }) {
   const codes = available.length ? available : LOCALE_CODES;
   /* Same reasoning as canonical()'s canonicalLocale: og:url is itself a
@@ -103,6 +124,9 @@ export function openGraphFor({
     /* og:article:* is only meaningful when type is "article"; Facebook ignores
        the keys otherwise but validators complain about them. */
     ...(type === "article" && article ? article : {}),
+    /* Omitted rather than empty: an absent `images` lets the opengraph-image
+       file convention fill it, an empty array would suppress it. */
+    ...(images ? { images } : {}),
   };
 }
 
@@ -270,6 +294,7 @@ export function articleSchema({
   keywords = [],
   wordCount,
   summary,
+  image,
 }) {
   const url = absoluteUrl(withLocale(path, locale));
   return {
@@ -286,7 +311,13 @@ export function articleSchema({
     inLanguage: LOCALE_CODES.includes(locale) ? locale : DEFAULT_LOCALE,
     author: { "@id": `${SITE_URL}/#organization` },
     publisher: { "@id": `${SITE_URL}/#organization` },
-    image: [absoluteUrl("/icon-512.png")],
+    /* The edition's own 1200x630 cover. The logo is the fallback only for a
+       caller that has none — Google's Article guidance wants an image that
+       represents the article, at least 1200 px wide, and a 512 px square
+       brand mark is neither. */
+    image: image
+      ? [{ "@type": "ImageObject", url: absoluteUrl(image), width: 1200, height: 630 }]
+      : [absoluteUrl("/icon-512.png")],
     ...(section ? { articleSection: section } : {}),
     ...(keywords.length ? { keywords: keywords.join(", ") } : {}),
     ...(wordCount ? { wordCount } : {}),
