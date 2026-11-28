@@ -23,6 +23,7 @@ import choosing from "../../content/blog/choosing-an-ai-video-generator";
 import filmmaking from "../../content/blog/ai-filmmaking";
 import scriptToVideo from "../../content/blog/script-to-video-ai";
 import storyboard from "../../content/blog/ai-storyboard-generator";
+import bestShortFilmMakers from "../../content/blog/best-ai-short-film-makers";
 import movieMakerQuestions from "../../content/blog/ai-movie-maker-questions";
 
 import { DEFAULT_LOCALE } from "../i18n/routing";
@@ -37,6 +38,7 @@ import { withHeadingIds, readingMinutes, leadSummary } from "./blocks";
  * the editorial order within a day, and the one to edit when it matters.
  */
 export const ARTICLES = [
+  bestShortFilmMakers,
   movieMakerQuestions,
   filmmaking,
   scriptToVideo,

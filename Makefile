@@ -1,4 +1,4 @@
-.PHONY: help install server client test lint docker-up docker-down
+.PHONY: help install server client test lint docker-up docker-down indexnow
 
 help:
 	@echo "MuseForge — common tasks"
@@ -6,6 +6,7 @@ help:
 	@echo "  make server       Run the FastAPI backend (:8000)"
 	@echo "  make client       Run the Next.js frontend (:3000)"
 	@echo "  make test         Run the backend test suite"
+	@echo "  make indexnow     Submit every sitemap URL to IndexNow (Bing, Yandex, ...)"
 	@echo "  make docker-up    Build & run the full stack via docker compose"
 	@echo "  make docker-down  Stop the docker compose stack"
 
@@ -27,3 +28,6 @@ docker-up:
 
 docker-down:
 	docker compose down
+
+indexnow:
+	cd client && node scripts/indexnow.mjs
