@@ -34,17 +34,20 @@ Kept deliberately interface-compatible with MuAPIVoiceGenerator: same
 pipeline neither knows nor cares which one it is holding.
 """
 
+import asyncio
 import base64
 import binascii
 import hashlib
 import logging
 import os
 import tempfile
+import weakref
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import httpx
 
 from interfaces import acting
+from interfaces.speaker import speaker_key
 from interfaces import gender as gender_of
 from interfaces.language import DEFAULT_LANGUAGE, is_default, normalize
 
@@ -53,6 +56,53 @@ logger = logging.getLogger(__name__)
 ELEVENLABS_BASE = os.environ.get(
     "ELEVENLABS_BASE", "https://api.elevenlabs.io/v1"
 )
+
+#: How many dialogue requests may be in flight at once, per process.
+#:
+#: The account allows three at a time and answers a fourth with a 429
+#: ("maximum 3 concurrent requests"). A drama renders its scenes' speech
+#: together, and a job on 2026-11-22 lost a whole scene's dialogue that way:
+#: the pipeline treats a missing voice as a silent scene and carries on, so the
+#: film shipped with a line gone and nothing on screen said so. The ceiling is
+#: two, not three, because the account's allowance is shared with every other
+#: job on the server and with anything else using the key.
+def _max_concurrency() -> int:
+    try:
+        return max(1, int(os.environ.get("ELEVENLABS_MAX_CONCURRENCY", "2")))
+    except ValueError:
+        return 2
+
+
+#: A request refused for being over the limit is worth asking again: the
+#: limit clears as soon as one of the requests ahead finishes. Anything else
+#: (a bad voice, a bad key) is not, and is raised at once as before.
+RATE_LIMIT_ATTEMPTS = 4
+RATE_LIMIT_BACKOFF_SECONDS = (2.0, 4.0, 8.0)
+
+# One semaphore per event loop: asyncio primitives bind to the loop they are
+# first used on, and a long-lived process runs jobs on more than one.
+_SLOTS: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_sleep = asyncio.sleep
+
+
+def _slot() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    slot = _SLOTS.get(loop)
+    if slot is None:
+        slot = _SLOTS[loop] = asyncio.Semaphore(_max_concurrency())
+    return slot
+
+
+def _seconds_to_wait(response: Any, attempt: int) -> float:
+    """The provider's own Retry-After when it sent one, else a fixed backoff."""
+    headers = getattr(response, "headers", None) or {}
+    try:
+        return min(30.0, max(0.0, float(headers.get("retry-after"))))
+    except (TypeError, ValueError):
+        return RATE_LIMIT_BACKOFF_SECONDS[
+            min(attempt, len(RATE_LIMIT_BACKOFF_SECONDS) - 1)
+        ]
+
 
 #: Model that has to support text-to-dialogue. Overridable because the id is
 #: the one part of this that the provider revises without warning; ask
@@ -116,6 +166,11 @@ class ElevenLabsVoiceGenerator:
         # The gender each character was cast on, kept so verify_cast can
         # re-pick INSIDE the right pool when an id turns out to be unusable.
         self._character_gender: Dict[str, str] = {}
+        # The age bucket (young / middle_aged / old) each character was cast
+        # on, and the voices a library character brought with it, which no
+        # re-casting is allowed to touch.
+        self._character_age: Dict[str, str] = {}
+        self._locked: set = set()
 
     # --- casting (identical rules to the MuAPI path) ---------------------
 
@@ -160,6 +215,7 @@ class ElevenLabsVoiceGenerator:
             voice = str(voice_id or "").strip()
             if key and voice:
                 self._character_voices[key] = voice
+                self._locked.add(key)
 
     def cast_characters(self, characters: Iterable[Any]) -> Dict[str, str]:
         """Assign every named character a gender-matched voice up front."""
@@ -184,6 +240,7 @@ class ElevenLabsVoiceGenerator:
             if pool is None:
                 continue  # hash fallback assigns on the character's first line
             self._character_gender[key] = gender
+            self._character_age[key] = gender_of.infer_age(description)
             self._assign(key, pool)
         # Written down at INFO because a wrong voice is invisible from the
         # code and obvious from the film: a delivered drama whose only
@@ -201,7 +258,7 @@ class ElevenLabsVoiceGenerator:
         return dict(self._character_voices)
 
     def voice_id_for_character(self, character: str) -> str:
-        key = (character or "Narrator").strip().casefold()
+        key = speaker_key(character) or "narrator"
         if key in self._character_voices:
             return self._character_voices[key]
         return self._assign(key, self.SYSTEM_VOICE_IDS)
@@ -268,6 +325,70 @@ class ElevenLabsVoiceGenerator:
     def _headers(self) -> Dict[str, str]:
         return {"xi-api-key": self.api_key, "Content-Type": "application/json"}
 
+    def _recast_by_fit(self, available: List[Dict[str, str]]) -> None:
+        """Give each character the voice of their own gender AND age.
+
+        The configured pools are five ids and say nothing about age, so a man in
+        his seventies and a man in his thirties were told apart only by a hash.
+        The account lists every voice with the provider's own age label; this
+        picks, for each character in turn, the unused voice whose gender matches
+        and whose age is closest (an exact match, then the next age over, then
+        the far one), preferring the voices already configured for ties so a
+        deployment's choices still count. Locked voices (a library character's
+        own) are never touched, nobody shares a voice inside one drama, and a
+        character whose gender or age is unknown keeps the cast they have.
+        """
+        order = {gender_of.YOUNG: 0, gender_of.MIDDLE_AGED: 1, gender_of.OLD: 2}
+        configured = list(self.SYSTEM_VOICE_IDS)
+        taken = {v for k, v in self._character_voices.items() if k in self._locked}
+        # Oldest first: the scarcest voices (old ones are few) go to the people
+        # who need them, instead of to whoever happens to be cast first.
+        keys = sorted(
+            (k for k in self._character_voices if k not in self._locked),
+            key=lambda k: (-order.get(self._character_age.get(k, ""), 1), k),
+        )
+        for key in keys:
+            gender = self._character_gender.get(key, "")
+            age = self._character_age.get(key, "")
+            if not gender or not age:
+                taken.add(self._character_voices[key])
+                continue
+            wanted = order[age]
+
+            def distance(v):
+                theirs = order.get(v.get("age", ""), 1)
+                tie = configured.index(v["voice_id"]) if v["voice_id"] in configured else len(configured)
+                digest = hashlib.sha256(f"{key}:{v['voice_id']}".encode()).digest()[0]
+                return (abs(theirs - wanted), tie, digest)
+
+            candidates = [
+                v for v in available
+                if v.get("voice_id") and v.get("gender") == gender
+                and v["voice_id"] not in taken
+            ]
+            if not candidates:
+                taken.add(self._character_voices[key])
+                continue
+            best = min(candidates, key=distance)
+            current = self._character_voices[key]
+            current_row = next((v for v in available if v.get("voice_id") == current), None)
+            # Keep the cast they already have when it is no worse a fit.
+            if (
+                current_row is not None
+                and current not in taken
+                and current_row.get("gender") == gender
+                and distance(current_row)[0] <= distance(best)[0]
+            ):
+                taken.add(current)
+                continue
+            logger.info(
+                "Voice for %r (%s, %s) re-cast %s -> %s (%s, %s) to fit.",
+                key, gender, age, current, best["voice_id"],
+                best.get("name", "?"), best.get("age") or "age unlabelled",
+            )
+            self._character_voices[key] = best["voice_id"]
+            taken.add(best["voice_id"])
+
     async def verify_cast(self) -> Dict[str, str]:
         """Check the cast against what this ACCOUNT can actually speak with.
 
@@ -303,6 +424,8 @@ class ElevenLabsVoiceGenerator:
         names = {v["voice_id"]: v.get("name", "") for v in available}
         if not usable:
             return dict(self._character_voices)
+
+        self._recast_by_fit(available)
 
         for key, voice_id in list(self._character_voices.items()):
             if voice_id in usable:
@@ -401,6 +524,10 @@ class ElevenLabsVoiceGenerator:
                 # on some cloned voices, which is why it is read rather than
                 # required -- an unlabelled voice is still a voice.
                 "gender": str((v.get("labels") or {}).get("gender", "")).strip().lower(),
+                # young / middle_aged / old, as the provider labels it. Casting
+                # on gender alone gave a man in his seventies the register of a
+                # man in his thirties (job bb6c6f1f).
+                "age": str((v.get("labels") or {}).get("age", "")).strip().lower().replace(" ", "_").replace("-", "_"),
             }
             for v in (data.get("voices") or [])
             if v.get("voice_id")
@@ -583,11 +710,27 @@ class ElevenLabsVoiceGenerator:
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    f"{ELEVENLABS_BASE}/text-to-dialogue/with-timestamps",
-                    headers=self._headers(),
-                    json=payload,
-                )
+                for attempt in range(RATE_LIMIT_ATTEMPTS):
+                    # The slot is held for the request only, not for the wait
+                    # after a refusal, so the requests that are succeeding are
+                    # not queued behind one that is sleeping.
+                    async with _slot():
+                        response = await client.post(
+                            f"{ELEVENLABS_BASE}/text-to-dialogue/with-timestamps",
+                            headers=self._headers(),
+                            json=payload,
+                        )
+                    if response.status_code != 429 or attempt == RATE_LIMIT_ATTEMPTS - 1:
+                        break
+                    wait = _seconds_to_wait(response, attempt)
+                    logger.warning(
+                        "ElevenLabs refused a dialogue request for concurrency "
+                        "(429); asking again in %.0fs (attempt %d of %d).",
+                        wait, attempt + 1, RATE_LIMIT_ATTEMPTS,
+                    )
+                    await _sleep(wait)
+                    if is_cancelled and is_cancelled():
+                        raise ElevenLabsError("Job cancelled before dialogue generation")
                 response.raise_for_status()
                 data = response.json()
         except httpx.HTTPStatusError as exc:

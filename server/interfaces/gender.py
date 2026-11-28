@@ -97,3 +97,67 @@ def infer_brief(text: Optional[str]) -> str:
 def noun(gender: str) -> str:
     """The English noun to write into a character description."""
     return {FEMALE: "woman", MALE: "man"}.get(gender, "")
+
+
+# ── age ──────────────────────────────────────────────────────────────────────
+#
+# A voice has an age as well as a gender, and a cast that is matched on gender
+# alone gives a man in his seventies the voice of whoever came next in the hash
+# (job bb6c6f1f: Ilya, "old man in his seventies", spoke in the same middle-aged
+# register as a man in his thirties). ElevenLabs labels each voice young,
+# middle_aged or old, so the description is reduced to the same three words.
+
+YOUNG = "young"
+MIDDLE_AGED = "middle_aged"
+OLD = "old"
+
+_DECADES = {
+    "teens": 15, "twenties": 25, "thirties": 35, "forties": 45, "fifties": 55,
+    "sixties": 65, "seventies": 75, "eighties": 85, "nineties": 95,
+}
+_YOUNG_WORDS = frozenset({
+    "child", "kid", "boy", "girl", "teen", "teenage", "teenager", "young",
+    "toddler", "genç", "genc", "çocuk", "cocuk",
+})
+_OLD_WORDS = frozenset({
+    "elderly", "old", "aged", "senior", "grandfather", "grandmother", "grandpa",
+    "grandma", "yaşlı", "yasli", "dede", "babaanne", "anneanne",
+})
+_AGE_NUMBER = re.compile(r"\b(\d{1,3})(?:\s*(?:-|\s)?\s*(?:years?|yrs?|yaş\w*)|s\b|'s\b)", re.I)
+_AGED_NUMBER = re.compile(r"\b(?:aged?|age)\s+(\d{1,3})\b", re.I)
+
+
+def _bucket(years: int) -> str:
+    if years < 30:
+        return YOUNG
+    if years < 60:
+        return MIDDLE_AGED
+    return OLD
+
+
+def infer_age(text: Optional[str]) -> str:
+    """``"young"`` / ``"middle_aged"`` / ``"old"`` / ``""`` for a description.
+
+    Earliest statement wins, for the reason ``infer`` gives: a description leads
+    with who the person is. Numbers beat adjectives written later, and a decade
+    word ("in his seventies") counts like the number it stands for.
+    """
+    raw = (text or "").casefold()
+    found = []  # (position, bucket)
+    for m in _AGE_NUMBER.finditer(raw):
+        years = int(m.group(1))
+        if 5 <= years <= 110:
+            found.append((m.start(), _bucket(years)))
+    for m in _AGED_NUMBER.finditer(raw):
+        years = int(m.group(1))
+        if 5 <= years <= 110:
+            found.append((m.start(), _bucket(years)))
+    for m in _WORD.finditer(raw):
+        word = m.group(0)
+        if word in _DECADES:
+            found.append((m.start(), _bucket(_DECADES[word])))
+        elif word in _YOUNG_WORDS:
+            found.append((m.start(), YOUNG))
+        elif word in _OLD_WORDS:
+            found.append((m.start(), OLD))
+    return min(found)[1] if found else ""

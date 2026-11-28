@@ -9,6 +9,7 @@ from typing import Any, List, Optional
 
 from interfaces import cast_count, cast_marks
 from interfaces import gender as gender_of
+from interfaces.continuity import reconcile as reconcile_continuity
 from interfaces.character import (
     CharacterProfile,
     DialogueLine,
@@ -26,6 +27,7 @@ from interfaces.second_budget import (
     spoken_words_for,
 )
 from tools.anthropic_request import classify, log_usage
+from tools.llm_provider import api_key as llm_api_key
 from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
 
 logger = logging.getLogger(__name__)
@@ -218,6 +220,25 @@ class ScriptGenerationFailed(Exception):
 
 
 class ScreenwriterAgent:
+    #: Two of the rules below came from comparing this prompt with how the
+    #: vertical-drama format is written in 2026 (Scenemixer's and Scenepaper's
+    #: format guides, OpenMicroDrama's, Genra's hook formulas). Neither is an
+    #: official platform rule -- ReelShort and DramaBox publish none -- but
+    #: every guide agrees on both, and this pipeline's own output broke both.
+    #:
+    #: OPEN INSIDE THE STORY. The guides put the conflict in the first three to
+    #: five seconds and list "no establishing walk to the front door" among the
+    #: commonest mistakes. This prompt only said so in micro-drama mode
+    #: (interfaces/micro_drama), and the cinematic default opened where a
+    #: writer naturally starts: jobs 6efbb788, d91a4172 and d9682326 -- one
+    #: brief, three renders -- all spend their first four to nine seconds on a
+    #: dock worker walking a patrol before anything happens.
+    #:
+    #: ONE THOUGHT A LINE (in DIALOGUE_CLAUSE). A single line capped at about
+    #: twenty words, because it is a subtitle on a phone, often watched muted;
+    #: every line pushes the conflict or shows pressure; no exposition; each
+    #: character in their own voice. The dialogue editor enforces the length
+    #: (tools/dialogue_editor.MAX_LINE_WORDS).
     SYSTEM_PROMPT = """You are an award-winning writer-director of micro-dramas and cinematic short films.
 You are not summarizing a plot — you are directing a film. Work like a director:
 
@@ -231,6 +252,27 @@ brief already reads as a shot list, keep its scenes, their order and their spoke
 lines; your job is then to fill in the fields it does not mention, not to rewrite it.
 If the brief supplies the spoken lines, put them in "dialogue" word for word — never
 replace them with lines of your own and never return an empty dialogue list.
+
+THE ROOM IS ITS CONTENTS. "setting_location" is not a mood, it is the inventory the
+set is built from: one empty plate is drawn from that sentence and every shot is
+filmed against it, and a video model invents whatever a plate lacks -- "turns from
+the stove" over a plate with no stove came back as a kitchen with a steaming pot, a
+fruit bowl and an ambulance at the door. So name, inside "setting_location", the
+fixed furniture and fixtures that ANY scene's action touches (the stove, the table the
+radio stands on, the bunks, the one window, the one door) and nothing no scene uses.
+Then stage every scene only with what that sentence names. A door or window shows
+weather and light, never a street, a vehicle or a second place: if the story needs
+somewhere else, it is a different scene with a different location -- set that
+scene's "location" to the other place plus its fixed contents, in the same terms.
+Leave "location" empty ("") on every scene set in "setting_location". At most
+two places besides "setting_location" in the whole drama: each one is a set
+that has to be built, and a film that moves every scene has no room to return to.
+
+EVERY VOICE HAS AN ENTRY. Everyone who speaks a line is in "characters", the one
+heard only over a radio or an intercom included: a voice with no entry is cast by
+a hash and can come back the wrong sex and the wrong age. Give each one gender and
+age first in "description" (a dispatcher in her fifties); for a voice the film never
+shows, say so in the description ("heard only over the radio, never seen").
 
 THE BRIEF'S EVENT IS THE CLIMAX. When the brief states something that HAPPENS — "the
 city's power dies the moment she opens it", "the letter burns", "he misses the train" —
@@ -297,9 +339,28 @@ same goes for the objects: a thing the brief makes the story turn on (an address
 envelope, a key, a name) has to be something the camera looks at, in its own moment, or
 the audience is asked to take the pipeline's word for it.
 
+OPEN INSIDE THE STORY. A viewer decides in the first three seconds whether the rest
+exists, so scene 1 does not open on someone arriving, walking, patrolling, waking up
+or looking around. Its first beat is already the disturbance the drama is about —
+the light leaking from the seam, the knock, the wrong name on the envelope — or a
+line that pulls against something. Whatever setup the brief needs happens INSIDE
+that moment, not in front of it.
+
 SPEND THE SCENES ON THE BRIEF. With only three to five of them, a scene invented around a
 character the brief never mentions is a third of the film spent away from the story it
 asked for. Add a character only when the brief's own action cannot happen without them.
+
+ONE CONTINUOUS EVENT, NOT A LIST OF CLIPS. Every scene is filmed separately and will
+not know what the scene before it looked like, so YOU hand the state across. Set
+"ends_with" to where everything stands when the scene stops — who is where, who is
+wet, hurt or exhausted, what is in whose hands, how much time has passed, what the
+light and weather are doing. Set "starts_with" to the state the scene opens in, and it
+must be the previous scene's "ends_with", carried forward (scene 1 states the opening
+situation). A scene that begins somewhere the last one did not end is a hard cut in
+the story: allow it only when the brief asks for a time jump, and then begin
+"starts_with" with "JUMP:" and say what changed. People who ended a scene soaked
+begin the next one soaked; night does not become day between scenes unless time is
+said to pass.
 
 FIND THE THROUGH-LINE. Give the drama a "theme" (its controlling idea in one sentence)
 and a "visual_motif": one recurring visual element — an object, a gesture, a quality of
@@ -326,7 +387,9 @@ character after the first scene, and give each one a SPECIFIC "wardrobe" (garmen
 colour) that they wear for the whole drama. Never write a costume change unless the brief
 asks for one, and never describe the same person's clothing differently in two scenes.
 Dress them from the HEAD DOWN: "wardrobe" must settle what is on their head — name the
-hat, helmet or hood if they wear one, and write "bare-headed" if they do not. Leaving it
+hat, helmet or hood if they wear one, and write "bare-headed" if they do not. A garment
+WITH a hood is not a hood worn: say "hood up" or "hood down", because "a hooded slicker"
+leaves it to every shot to decide. Leaving it
 unsaid is how the same worker ends up in a beanie, then a hard hat, then neither: the
 render only holds what the wardrobe named, and invents the rest afresh every scene.
 
@@ -392,7 +455,7 @@ Respond ONLY with valid JSON matching this schema:
   "cliffhanger": "micro-drama mode ONLY: the unanswered question the last frame leaves - otherwise an empty string",
   "mood": "string",
   "estimated_duration_seconds": 30,
-  "setting_location": "e.g. coastal village wooden pier",
+  "setting_location": "the ONE place plus its fixed contents, e.g. coastal village wooden pier with a bollard, a coiled rope and a moored rowboat",
   "setting_time_of_day": "e.g. sunset, night, midday",
   "setting_era": "e.g. present day, 1950s",
   "characters": [{
@@ -413,7 +476,10 @@ Respond ONLY with valid JSON matching this schema:
       "world_change": "climax scene ONLY: what visibly changes about the place itself - otherwise an empty string",
       "subtext": "what they really mean underneath the lines",
       "staging": "blocking: who is where, hands, the object the scene turns on",
-      "tension": 4
+      "tension": 4,
+      "starts_with": "the state this scene opens in (scene 1: the opening situation; otherwise the previous scene's ends_with)",
+      "ends_with": "who is where, wet/hurt, what is held, time passed, light, as this scene stops",
+      "location": "ONLY when this scene is somewhere other than setting_location: that place plus its fixed contents - otherwise an empty string"
     }
   ]
 }"""
@@ -455,7 +521,7 @@ This holds even when the user's brief itself is written in another language.
 WRITE THESE FIELDS IN ENGLISH, whatever the drama's language:
 "setting_location", "setting_time_of_day", "setting_era", "mood", "theme",
 "visual_motif", every character's "description" and "wardrobe", and every
-scene's "emotion" and "world_change".
+scene's "emotion", "world_change" and "location".
 
 No viewer ever reads them. They are pasted straight into the prompts for the
 image, video and music models, none of which is a person and all of which are
@@ -499,7 +565,15 @@ the choice is legible. Never leave two scenes silent, and never leave a scene
 silent because you could not think of a line.
 
 Keep lines short, speakable and few (one to three per scene) — this is film
-dialogue over a picture, not a radio play. The climax's stated event still has to
+dialogue over a picture, not a radio play.
+
+ONE THOUGHT A LINE, TWENTY WORDS AT MOST. Every line is burned into the picture as a
+subtitle and read in the time it is spoken, on a phone, often with the sound off. A
+longer thought is two lines, or a line and a look. Every line either pushes the
+conflict or shows someone under pressure; a line that tells the other person what
+they both already know is exposition, and it is cut. Each character sounds like
+themselves — their own vocabulary, rhythm and evasions — so a line could not be
+handed to anyone else in the scene unchanged. The climax's stated event still has to
 be SEEN, not merely narrated: never replace the event with a character describing
 it.
 
@@ -645,17 +719,40 @@ into a single scene rather than adding one."""
     #: unavailable" even though the model had answered fine. The Anthropic
     #: path streams, so a larger budget costs nothing in wall-clock risk;
     #: unused tokens are not billed.
-    MAX_SCRIPT_TOKENS = 16000
+    #:
+    #: 16000 was then too small for the product's own commonest request, a
+    #: four-scene drama with five described characters and spoken lines.
+    #: Production jobs on 2026-11-22 ended at 14045 and 15165 output tokens and
+    #: the next two hit the ceiling and were thrown away after 204 s and 188 s
+    #: with nothing to show -- the thinking and the JSON share this one number.
+    #: 24000 leaves that script about a third of headroom.
+    #:
+    #: 24000 was then hit by the SAME brief that had finished at 14365 an hour
+    #: earlier (job 8e1a8dc7 vs 82c56e88: both input=7203 tokens, a four-scene
+    #: drama with three characters). Same prompt, same size, output 14365
+    #: against 24000+ and truncated after 296 s -- adaptive thinking is not a
+    #: function of the brief, so the ceiling has to clear its bad draws, not
+    #: the typical one. 32000 is a third above the failed 24000.
+    #:
+    #: A larger number is only safe next to a larger deadline: see
+    #: SCRIPT_STREAM_TIMEOUT_SECONDS, which this has to stay inside.
+    MAX_SCRIPT_TOKENS = 32000
     #: Named once. It was written out at the call and again in the usage log,
     #: which is how a deployment ends up reporting spend against a model it is
     #: not running.
     MODEL = "claude-sonnet-5"
     #: Ceiling on draining one script stream. Generous -- a 24-scene script
     #: with thinking is a long answer -- but finite.
-    SCRIPT_STREAM_TIMEOUT_SECONDS = 300.0
+    #:
+    #: Measured: 16000 tokens took 188 s, about 85 tokens a second. The whole
+    #: budget therefore takes ~282 s, which the old 300 s left no margin for --
+    #: a stream that merely ran slow would have died at the deadline instead of
+    #: at the budget, and reported itself as an outage rather than a long
+    #: script. 480 s is the full budget at 85 tokens/s plus ~70%.
+    SCRIPT_STREAM_TIMEOUT_SECONDS = 600.0
 
     def __init__(self, api_key: Optional[str] = None, demo: bool = False):
-        self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        self.api_key = api_key or llm_api_key()
         self.muapi_key = os.environ.get("MUAPI_KEY", "")
         self.demo = demo
         self._anthropic_client: Any = None
@@ -669,11 +766,9 @@ into a single scene rather than adding one."""
         without the SDK installed, which the demo and template paths rely on.
         """
         if self._anthropic_client is None:
-            import anthropic
+            from tools.llm_provider import make_client
 
-            self._anthropic_client = anthropic.AsyncAnthropic(
-                api_key=self.api_key, max_retries=2
-            )
+            self._anthropic_client = make_client(self.api_key, max_retries=2)
         return self._anthropic_client
 
     def _system_prompt(
@@ -811,7 +906,7 @@ into a single scene rather than adding one."""
 
         # 2) Fall back to a direct Anthropic call if a key is configured.
         if self.api_key:
-            return await self._write_with_claude(
+            script = await self._write_with_claude(
                 idea,
                 style,
                 num_scenes,
@@ -823,6 +918,15 @@ into a single scene rather than adding one."""
                 series_brief,
                 lipsync_enabled=lipsync_enabled,
             )
+            from tools import dialogue_editor
+
+            if dialogue_editor.enabled() and not dialogue_editor.customer_wrote_the_lines(
+                idea, user_requirement
+            ):
+                script = await dialogue_editor.edit_dialogue(
+                    script, self._anthropic(), self.MODEL
+                )
+            return script
 
         # 3) No provider answered. The deterministic template is NOT an
         #    acceptable substitute for a paid render -- it discards the user's
@@ -848,11 +952,13 @@ into a single scene rather than adding one."""
         script.user_brief = (idea or "").strip()
         cls._apply_brief_gender(script)
         cls._apply_character_marks(script)
+        cls._settle_the_hood(script)
         # BEFORE _apply_brief_event, so the event is restored onto a scene
         # that is still in the film. Run the other way round, a script whose
         # extra scenes are cut could lose the restored world_change with them.
         cls._hold_to_scene_count(script, num_scenes)
         cls._apply_brief_event(script)
+        reconcile_continuity(script.scenes)
         return script
 
     #: Scenes that carry the drama's shape and must survive a trim. A cut that
@@ -1167,6 +1273,42 @@ into a single scene rather than adding one."""
                 b,
             )
 
+    #: A hood's STATE, in the words a wardrobe uses for it.
+    _HOOD_STATE = re.compile(
+        r"\bhood(?:s)?\s+(?:up|down|raised|lowered|pulled up|pushed back|thrown back|back|off)\b"
+        r"|\b(?:hood(?:ed)?\s+)?(?:up|down)\s+hood\b",
+        re.IGNORECASE,
+    )
+    _HOOD = re.compile(r"\bhood(?:ed|s)?\b", re.IGNORECASE)
+
+    @classmethod
+    def _settle_the_hood(cls, script: DramaScript) -> None:
+        """Say whether a hooded garment's hood is up, where the writer did not.
+
+        Job 93be3d88: Nadia's wardrobe read "yellow hooded rain slicker", which
+        names a garment with a hood and says nothing about wearing it. Every
+        stage then answered for itself. The storyboard wrote "water drips from
+        her hood" and scenes 1 and 2 drew it up; the character sheet drew it
+        down; the climax, drawn from the scene's opening state and the sheet,
+        had it down -- the lead took her hood off on the cut into the film's
+        most important shot. Job 01a0a502 did the same thing within one scene
+        ("up, then up, then pushed back").
+
+        "hood up" is written in, at the front where the head is settled,
+        because the stage most likely to mention the hood is the storyboard
+        describing rain on it -- and once the wardrobe says it, the sheet, every
+        frame prompt and the costume lock all read the same words. A wardrobe
+        that already says up or down is left exactly as it is.
+        """
+        for char in list(script.characters or []):
+            worn = getattr(char, "wardrobe", "") or ""
+            if cls._HOOD.search(worn) and not cls._HOOD_STATE.search(worn):
+                char.wardrobe = f"hood up, {worn}"
+                logger.info(
+                    "%s wears a hooded garment with no hood state; settled as hood up.",
+                    char.name,
+                )
+
     @staticmethod
     def _apply_brief_gender(script: DramaScript) -> None:
         """Write the brief's stated gender into a description that dropped it.
@@ -1254,28 +1396,59 @@ into a single scene rather than adding one."""
         # story structure, and `max_tokens` covers thinking plus text
         # together, which the raised budget above accounts for.
         client = self._anthropic()
-        try:
+        system_prompt = self._system_prompt(
+            language,
+            require_dialogue,
+            narrative_mode,
+            num_scenes,
+            bool(series_brief),
+            lipsync_enabled=lipsync_enabled,
+        )
+
+        async def _drain(**extra):
             async with client.messages.stream(
                 model=self.MODEL,
                 max_tokens=self.MAX_SCRIPT_TOKENS,
-                system=self._system_prompt(
-                    language,
-                    require_dialogue,
-                    narrative_mode,
-                    num_scenes,
-                    bool(series_brief),
-                    lipsync_enabled=lipsync_enabled,
-                ),
+                system=system_prompt,
                 messages=[{"role": "user", "content": prompt}],
+                **extra,
             ) as stream:
                 # A deadline, because a stream that stalls has no other one:
                 # the SDK's request timeout covers establishing the response,
                 # not draining it, so a connection that goes quiet mid-script
                 # held the job open until the pipeline's own hard timeout.
-                message = await asyncio.wait_for(
+                return await asyncio.wait_for(
                     stream.get_final_message(),
                     timeout=self.SCRIPT_STREAM_TIMEOUT_SECONDS,
                 )
+
+        try:
+            message = await _drain()
+            if message.stop_reason == "max_tokens":
+                # Thinking and the JSON share one ceiling and thinking is
+                # adaptive: the same four-scene brief finished at 14365 output
+                # tokens and, an hour later, was cut off at 24000 after 296 s
+                # (jobs 82c56e88, 8e1a8dc7). A truncated script is unusable
+                # and was thrown away whole. Writing is not helped by more
+                # thinking than the ceiling leaves room for, so the second
+                # attempt gives the whole budget to the answer -- the
+                # "reason, then format" split the structured-output literature
+                # recommends, with the reasoning dropped instead of repeated.
+                logger.warning(
+                    "Screenwriter hit max_tokens (%s output tokens) with "
+                    "thinking on; retrying once with thinking disabled so the "
+                    "whole budget goes to the script.",
+                    getattr(message.usage, "output_tokens", "?"),
+                )
+                try:
+                    message = await _drain(thinking={"type": "disabled"})
+                except anthropic.BadRequestError as exc:
+                    # The model may not accept the switch. Then this is still
+                    # the truncation it was a moment ago, and says so below.
+                    logger.error(
+                        "Retry with thinking disabled was rejected (%s); "
+                        "reporting the original truncation.", exc
+                    )
         except anthropic.APIStatusError as exc:
             # _failure_message already sorts what the USER is told by status.
             # This sorts what the OPERATOR is told, which was one line for
@@ -1469,6 +1642,18 @@ into a single scene rather than adding one."""
         but tells the user to "try again shortly" forever.
         """
         status = getattr(exc, "status_code", None)
+        if "exhausted balance" in str(exc).lower() or "user is locked" in str(exc).lower():
+            # Job 93aa0ac7: our fal account was empty and the customer read
+            # "the script service is not configured correctly -- contact
+            # support". Nothing is misconfigured; the supplier balance is out.
+            logger.error(
+                "PROVIDER BALANCE EXHAUSTED: the script model's account is out "
+                "of credit (%s). Top it up.", str(exc)[:200],
+            )
+            return (
+                "Video generation is temporarily unavailable on our side. "
+                "No credits were spent -- please try again shortly."
+            )
         if status in (401, 403):
             # An operator problem. Say so plainly rather than implying the
             # user should retry into a wall.

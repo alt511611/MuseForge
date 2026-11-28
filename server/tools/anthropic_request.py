@@ -164,7 +164,11 @@ def log_usage(label: str, model: str, usage: Any, cached: bool = False) -> None:
         "claude usage: call=%s model=%s input=%d cache_write=%d cache_read=%d "
         "output=%d", label, model, regular, written, read, out,
     )
-    if cached and not read and not written:
+    # fal's chat route reports no cache fields at all, so zero here is not a
+    # fault there -- warning on every call buried the warnings that mean it.
+    from tools.llm_provider import provider
+
+    if cached and not read and not written and provider() == "anthropic":
         logger.warning(
             "claude usage: call=%s asked to cache and neither wrote nor read "
             "-- the prefix is too short or is not identical between calls",

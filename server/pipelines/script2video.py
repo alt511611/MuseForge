@@ -1,22 +1,25 @@
 """Per-scene script-to-video pipeline."""
 
 import asyncio
+import copy
 import logging
 import os
 import re
 import shutil
 import tempfile
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 
 from agents.storyboard_artist import StoryboardArtist
 from interfaces import acting
 from interfaces import who_speaks
+from interfaces import character_sheet, long_take
+from tools.sheet_views import split_sheet
 from interfaces.camera import get_director_style
 from interfaces.character import CharacterInScene
-from interfaces.color_grade import get_color_grade
+from interfaces.color_grade import get_color_grade, palette_for
 from interfaces.delivery import (
     DELIVERY_LADDER,
     SNAP_TO_LADDER_TOLERANCE,
@@ -35,6 +38,7 @@ from interfaces.impact import build_impact_filters, plan_impacts
 from interfaces.pacing import plan_internal_cuts
 from interfaces.visual_style import PHOTOREAL_RENDER
 from interfaces.visual_style import resolve as resolve_visual_style
+from tools.llm_provider import api_key as llm_api_key
 from tools.character_qa import (
     format_expected_setting,
     is_character_qa_enabled,
@@ -42,9 +46,11 @@ from tools.character_qa import (
 )
 from interfaces import frame_choice
 from tools.frame_judge import is_frame_judge_enabled, judge_frame
-from tools.muapi_image_generator import MuAPIImageGenerator
+from tools.muapi_image_generator import MuAPIImageGenerator, normalise_references
 from tools.t5_budget import (
     MAX_PROMPT_TOKENS,
+    max_prompt_chars,
+    max_prompt_tokens,
     count_tokens,
     encoder_family,
     tokenizer_is_real,
@@ -63,6 +69,36 @@ from interfaces.scene_take import Element, plan_scene_take
 logger = logging.getLogger(__name__)
 
 
+
+async def frame_surviving_a_flag(draw, prompt: str, *, fallback_url: str, label: str = ""):
+    """One shot's frame, without letting one flag end the film.
+
+    Job 5fa6f615: a close-up of a sixteen-year-old was flagged by the image
+    checker (`model_moderated`), flagged again on the resubmit, and that single
+    shot ended a four-scene film after the script, the voices and every
+    storyboard were paid for.
+
+    The flag is respected, not argued with: the prompt is NOT reworded to get
+    past the checker, and nothing is drawn in its place. The shot starts from
+    the locked reference -- the character's portrait, or the empty set -- and
+    the film goes on. ``fallback_url`` empty means there is nothing honest to
+    start from, and the flag is raised as before.
+
+    ``draw(prompt)`` is an async callable. Returns ``(url, flagged)``.
+    """
+    from tools.falai_common import ContentFlagged
+
+    try:
+        return await draw(prompt), False
+    except ContentFlagged:
+        if not fallback_url:
+            raise
+        logger.warning(
+            "Frame for %s was refused by the content checker; the shot starts "
+            "from its locked reference instead and nothing was redrawn.", label,
+        )
+        return fallback_url, True
+
 class PipelineCancelled(Exception):
     """Raised cooperatively when a job is cancelled mid-flight."""
 
@@ -79,6 +115,38 @@ VIDEO_PROVIDERS = (
     "falai_vidu",
     "falai_minimax",
 )
+
+
+_TIGHT_SHOT = re.compile(r"close[- ]?up", re.I)
+
+
+def wants_first_frame(shot, video_gen, has_character: bool = False) -> bool:
+    """True when this shot should start from a rendered frame, not references.
+
+    Only on a backend that declares ``can_start_from_frame``, and for one of
+    two reasons, each costing one image generation and a slower clip:
+
+    * a close-up (switch off with MUSEFORGE_CLOSEUP_FIRST_FRAME=0) -- the
+      empty plate's wide framing wins a reference-only call and "close-up"
+      comes back as a full body (job 21a87c5a);
+    * any shot of a person while the identity references are multi-view
+      SHEETS (switch off with MUSEFORGE_SHEET_FIRST_FRAME=0). A sheet's faces
+      are an eighth of the picture high, and a video model given only that
+      redraws the person every generation (interfaces/character_sheet, job
+      6efbb788). The frame model reads the sheet and draws a full-size face,
+      and the take then starts from it.
+    """
+    if not getattr(video_gen, "can_start_from_frame", False):
+        return False
+    if (
+        has_character
+        and character_sheet.is_enabled()
+        and (os.environ.get("MUSEFORGE_SHEET_FIRST_FRAME", "1") or "").strip() != "0"
+    ):
+        return True
+    if (os.environ.get("MUSEFORGE_CLOSEUP_FIRST_FRAME", "1") or "").strip() == "0":
+        return False
+    return bool(_TIGHT_SHOT.search(getattr(shot, "shot_type", "") or ""))
 
 
 def _make_video_generator(api_key: str, demo: bool):
@@ -145,6 +213,10 @@ def _make_image_generator(api_key: str, demo: bool):
       - "falai_multiref" — same text-to-image endpoint, but fal-ai/
         flux-2-pro/edit for reference, which takes the WHOLE list
         (anchor + second character + location plate)
+      - "falai_nanobanana" — Nano Banana 2.1 for reference frames (up to 14,
+        addressed by position in the prompt) and FLUX.3 for text-to-image
+        (portrait sheets, location plates). Measured against Kling O1 Image
+        and FLUX.2 Pro: see tools/falai_image_generator.
 
     "falai_multiref" is a separate value rather than a capability "falai"
     discovers for itself, and deliberately so, matching MUSEFORGE_VIDEO_
@@ -155,17 +227,18 @@ def _make_image_generator(api_key: str, demo: bool):
     """
     provider = resolve_provider(
         "MUSEFORGE_IMAGE_PROVIDER",
-        ("muapi", "falai", "falai_multiref"),
+        ("muapi", "falai", "falai_multiref", "falai_nanobanana"),
         default="muapi",
         stage="Image generation",
     )
-    if provider in ("falai", "falai_multiref"):
+    if provider in ("falai", "falai_multiref", "falai_nanobanana"):
         from tools.falai_image_generator import FalAIImageGenerator
 
         return FalAIImageGenerator(
             os.environ.get("FAL_KEY", ""),
             demo=demo,
             multiref=(provider == "falai_multiref"),
+            nanobanana=(provider == "falai_nanobanana"),
         )
     return MuAPIImageGenerator(api_key, demo=demo)
 
@@ -199,6 +272,10 @@ IMAGE_QUALITY_SUFFIX = PHOTOREAL_RENDER
 #: unnoticed while the screenwriter was failing to the deterministic template,
 #: whose one undescribed "Alex" produced a short prompt every time.
 MAX_IMAGE_PROMPT_CHARS = 3000
+#: ...for the FLUX families. It is the DEFAULT, not the only value: the gate
+#: that binds a given frame is tools.t5_budget.max_prompt_chars(), which is
+#: 8000 when the active reference endpoint is Gemini (Nano Banana). Nothing
+#: in this module should size a frame against this constant directly.
 
 #: The OTHER budget, and the one that actually decides what the model reads.
 #:
@@ -438,8 +515,8 @@ def _trim_to_token_window(kept: list, token_limit: int) -> list:
 
 def fit_image_prompt(
     segments: list,
-    limit: int = MAX_IMAGE_PROMPT_CHARS,
-    token_limit: int = MAX_IMAGE_PROMPT_TOKENS,
+    limit: Optional[int] = None,
+    token_limit: Optional[int] = None,
 ) -> str:
     """Assemble a prompt that respects the provider's character budget.
 
@@ -454,6 +531,10 @@ def fit_image_prompt(
     cut mid-word and could sever the character lock -- the frame would still
     render, just of somebody else.
     """
+    if limit is None:
+        limit = max_prompt_chars()
+    if token_limit is None:
+        token_limit = max_prompt_tokens()
     kept = [(prio, text) for prio, text in segments if text]
     kept = _drop_to(kept, limit, "the %d-char provider budget" % limit)
     # THE BUDGET THAT DECIDES WHAT IS READ, and it is measured rather than
@@ -909,6 +990,44 @@ _PLATE_REFERENCE_NOTE = (
     "materials and light. Nobody in it is a character. "
 )
 
+#: The same sentence when the scene before this one was in the same place and
+#: its opening frame is sent as well (interfaces/cut_bridge).
+#:
+#: It REPLACES the plate note rather than joining it, for the reason the plate
+#: note is kept tight: it is measured into the identity reserve, so a second
+#: sentence at the same rank is paid for out of a face. One sentence naming
+#: both pictures costs the difference and no more.
+#:
+#: What it asks of the bridge is the light and nothing else. That frame has
+#: people in it -- the same people, drawn by a model -- and the documented
+#: failure of feeding a generated frame forward (is_dynamic_reference_enabled)
+#: is a face that drifts a little more each scene. So the faces stay bound to
+#: the portraits ahead of it, and this picture is named for the one thing the
+#: plate cannot carry: what the light was actually doing a cut ago.
+_BRIDGE_AND_PLATE_NOTE = (
+    "The second-to-last reference is the previous scene in this same place: "
+    "match its light and the set's layout, not its people, pose or framing. "
+    "The last reference is this set, empty: take its architecture, "
+    "materials and light. Nobody in it is a character. "
+)
+
+#: The plate sentence once the drama's event has happened.
+#:
+#: The plate is drawn ONCE, before anything happens, so in the scene where the
+#: power dies it is a photograph of every floodlight burning -- and the note
+#: above told the model to take its LIGHT. Job 6efbb788's blackout scene was
+#: sent exactly that: the setting clause said the poles go dark, the plate
+#: said they are lit, and the sentence between them said to copy the plate's
+#: light. The frame came back dark (the repair pass pushed it there); the take
+#: animated from it went dark and then, by second six, lit every pole again.
+#:
+#: What the plate is still right about is the architecture. So it is named
+#: for that and nothing else, and told what time it is from.
+_CHANGED_PLATE_NOTE = (
+    "The last reference is this set BEFORE the change: take its architecture, "
+    "never its light. Nobody in it is a character. "
+)
+
 #: What the identity clause costs before a single character is described.
 #: Measured, not guessed, so the reserve tracks the sentences automatically.
 IDENTITY_CLAUSE_OVERHEAD = (
@@ -944,6 +1063,8 @@ def characters_in_frame(shot, characters, matched_char=None) -> list:
     also the right answer for an insert or an establishing plate, which get
     the cast they were written with.
     """
+    if getattr(shot, "shows_people", None) is False:
+        return []
     in_frame = [
         character
         for _, character in on_screen_name_matches(
@@ -962,6 +1083,10 @@ def characters_in_frame(shot, characters, matched_char=None) -> list:
         in_frame.insert(0, matched_char)
     if in_frame:
         return in_frame
+    if shot_is_unpeopled(shot, characters, matched_char):
+        # Describing the cast to a frame of nobody is how the cast gets drawn
+        # into it. See shot_is_unpeopled.
+        return []
     # The fallback is filtered too. `build_character_identity_clause` drops
     # invisible characters itself, so this changes no prompt -- but the
     # REFERENCE SET reads the same list, and a radio voice with no face is not
@@ -1030,6 +1155,32 @@ def configured_scene_take_backend():
     )
 
 
+def shot_at_the_opening(shot, opening: str):
+    """``shot`` described as the scene's OPENING state instead of its own line.
+
+    For the take that carries the drama's event (long_take.event_spans_take),
+    whose first frame has to be the world before. The storyboard writes that
+    shot's description about the event -- job d9682326: "Mara hauls the
+    container door wide ... a hairline seam exploding into blinding
+    blue-white light" -- so a frame drawn from it, told only to leave the
+    world unchanged, came back with the door already open and the light
+    already out of it, and the take had half its event before its first
+    frame. The scene's own opening state is the writer's answer to exactly
+    this question ("Mara's hand closing on the container's door handle,
+    floodlights still lit"). The shot's framing, lens and everything else are
+    kept; only what it SHOWS is replaced.
+    """
+    text = (opening or "").strip()
+    if not text:
+        return shot
+    clone = copy.copy(shot)
+    try:
+        clone.visual_desc = text
+    except Exception:
+        return shot
+    return clone
+
+
 def resolve_frame_references(
     shot,
     characters,
@@ -1040,8 +1191,17 @@ def resolve_frame_references(
     dynamic_reference_enabled: bool = False,
     scene_idx: int = 0,
     shot_idx: int = 0,
+    bridge_frame_url=None,
 ):
     """Which pictures this frame is drawn from: ``(anchor_char, anchor, set)``.
+
+    ``bridge_frame_url`` is the previous scene's opening frame, when this is
+    the opening frame of a scene that continues in the same place
+    (interfaces/cut_bridge). It goes in second to last -- after every face,
+    before the plate -- and only on a frame that has a character anchor AND a
+    plate: the anchor keeps the face bound to the locked portrait, and the
+    plate keeps "the last reference is the set" true for the sentence that
+    says so.
 
     Extracted so a scene rendered as ONE take (interfaces/scene_take) resolves
     its opening frame exactly the way a per-shot render does. The alternative
@@ -1062,6 +1222,11 @@ def resolve_frame_references(
     # text describes. Now: whichever known character's name appears FIRST by
     # text position -- narrative order, so "Sam looks at Maria" anchors Sam.
     named_matches = on_screen_name_matches(shot_text, visible_chars)
+    if getattr(shot, "shows_people", None) is False:
+        # Declared empty by the storyboard artist: the plate, not a portrait.
+        # A name in the text is a place or a possession ("Yusuf's boat").
+        named_matches = []
+        scene_subject = None
     if named_matches:
         named_matches.sort(key=lambda pair: pair[0])
         matched_char = named_matches[0][1]
@@ -1126,6 +1291,8 @@ def resolve_frame_references(
             portrait = portraits.get(getattr(other, "name", ""))
             if portrait:
                 frame_references.append(portrait)
+    if bridge_frame_url and location_plate_url and matched_char is not None:
+        frame_references.append(bridge_frame_url)
     if location_plate_url:
         # Last: the room is the cheapest thing to lose, and the only one a
         # later frame can be corrected against. It is still worth sending --
@@ -1147,6 +1314,7 @@ def label_frame_references(
     portraits,
     matched_char=None,
     location_plate_url=None,
+    bridge_frame_url=None,
 ) -> list:
     """Who or what each picture in a reference set is, in the set's order.
 
@@ -1156,22 +1324,114 @@ def label_frame_references(
     as a set (Vidu) has to be told which position is whom, or the second face
     is a stranger it was merely shown. "" for a picture nothing identifies.
     """
+    # Aligned with what a backend ACTUALLY receives: the same strip / drop-empty
+    # / de-duplicate pass the image generators run (normalise_references).
+    # Labelling the raw list let one blank or repeated URL shift every label
+    # after it onto the wrong picture.
+    references = normalise_references(frame_references)
+    plate = (location_plate_url or "").strip()
     by_url = {}
+    others = {}
     for character in characters_in_frame(shot, characters, matched_char):
-        url = (portraits or {}).get(getattr(character, "name", ""))
+        url = ((portraits or {}).get(getattr(character, "name", "")) or "").strip()
         if url:
             by_url.setdefault(url, character.name)
+            if character is not matched_char:
+                others.setdefault(url, character.name)
     labels = []
-    for index, url in enumerate(frame_references or []):
-        if index == 0 and matched_char is not None:
+    for index, url in enumerate(references):
+        if url in others:
+            # Somebody else's portrait is somebody else, even in slot 0: when
+            # the anchor has no picture of their own the set opens with the
+            # next face, and naming that face for the anchor is the one
+            # mistake worse than not naming it at all.
+            labels.append(others[url])
+        elif plate and url == plate:
+            labels.append("the empty set")
+        elif bridge_frame_url and url == (bridge_frame_url or "").strip():
+            labels.append("the previous scene, same place")
+        elif index == 0 and matched_char is not None:
             # By position, not by URL: with dynamic references on, the anchor
             # is the character's latest frame, which is nobody's portrait.
             labels.append(matched_char.name)
-        elif url == location_plate_url:
-            labels.append("the empty set")
         else:
             labels.append(by_url.get(url, ""))
     return labels
+
+
+#: What the video model is told the plate is, once the world has changed and
+#: there is no rendered frame to carry the changed set instead.
+CHANGED_PLATE_LABEL = (
+    "the empty set as it was BEFORE the change: its architecture only, never its light"
+)
+
+
+def video_reference_set(
+    references,
+    labels,
+    location_plate_url=None,
+    world_changed: bool = False,
+    starts_from_frame: bool = True,
+):
+    """The references and labels a VIDEO backend is handed for one shot.
+
+    The same set the frame was drawn from, except in one case: after the
+    drama's event, the plate is a picture of the place before it. The frame
+    prompt can say so in a sentence (_CHANGED_PLATE_NOTE); a video endpoint
+    is told only "Image 2 is the empty set", and a picture of every floodlight
+    burning, held for eleven seconds against a prompt saying they are out, is
+    where job 6efbb788's blackout came undone -- dark for six seconds, then
+    every pole lit again.
+
+    * A shot that STARTS from a rendered frame has the changed set in that
+      frame already. The plate is dropped: it has nothing left to add but the
+      light it must not give.
+    * A reference-only shot has no frame, so the plate is the only picture of
+      the place. It stays, renamed for the one thing it is still right about.
+    """
+    references = list(references or [])
+    labels = list(labels or [])
+    labels += [""] * (len(references) - len(labels))
+    plate = (location_plate_url or "").strip()
+    if not (world_changed and plate and plate in references):
+        return references, labels[: len(references)]
+    if starts_from_frame:
+        kept = [(u, l) for u, l in zip(references, labels) if u != plate]
+        return [u for u, _ in kept], [l for _, l in kept]
+    return references, [
+        CHANGED_PLATE_LABEL if u == plate else l for u, l in zip(references, labels)
+    ]
+
+
+def _frame_label_kwargs(
+    image_gen,
+    frame_references,
+    shot,
+    characters,
+    portraits,
+    matched_char=None,
+    location_plate_url=None,
+    bridge_frame_url=None,
+) -> dict:
+    """``reference_labels`` for an image backend that declares it reads them.
+
+    Nano Banana is told which picture is whom by position in the prompt; the
+    other backends read the set by order and must be called exactly as before,
+    so the argument is sent only to one that says it accepts it.
+    """
+    if not frame_references or not getattr(image_gen, "accepts_reference_labels", False):
+        return {}
+    return {
+        "reference_labels": label_frame_references(
+            frame_references,
+            shot,
+            characters,
+            portraits,
+            matched_char=matched_char,
+            location_plate_url=location_plate_url,
+            bridge_frame_url=bridge_frame_url,
+        )
+    }
 
 
 def build_character_identity_clause(
@@ -1305,10 +1565,38 @@ def mentions_an_off_screen_device(text: str) -> bool:
 _OFF_SCREEN_WINDOW = 30
 
 
+#: The markers that are DEVICES, as opposed to words about a voice. A device
+#: next to a name is evidence of a voice only when the text puts the voice
+#: ON it ("Priya, on the intercom", "over the radio", "through the speaker").
+#: A device the person is HOLDING is evidence that they are in the room.
+#:
+#: Job 8d082bf7: "Tomas holds a dead radio against his ear" read as heard-only
+#: because "radio" sat inside the window after his name. Every action line that
+#: named him had a radio near it -- it is a drama about a radio -- so he was
+#: never "seen", was filed as a voice, lost his portrait, was left out of the
+#: closed cast ("Cast is closed: Mira, Ilya"), and was drawn in the same
+#: orange jacket as Mira, clean-shaven, in every shot he stood in.
+_DEVICE_WORDS = (
+    "radio", "intercom", "comms", "headset", "speaker", "earpiece", "walkie",
+    "handset", "phone",
+)
+_VOICE_ON_DEVICE = re.compile(
+    r"\b(?:over|on|through|via|from)\s+(?:the|a|an|his|her|their|its)?\s*"
+    r"(?:\w+\s+)?(?:" + "|".join(_DEVICE_WORDS) + r")\b"
+)
+
+
 def _mention_is_off_screen(text: str, at: int, name_length: int) -> bool:
     """Whether the name at ``at`` is being heard rather than seen."""
     after = text[at + name_length: at + name_length + _OFF_SCREEN_WINDOW]
-    return any(marker in after for marker in _OFF_SCREEN_MARKERS)
+    for marker in _OFF_SCREEN_MARKERS:
+        if marker in after:
+            if marker in _DEVICE_WORDS:
+                if _VOICE_ON_DEVICE.search(after):
+                    return True
+                continue
+            return True
+    return False
 
 
 def on_screen_name_matches(shot_text: str, characters) -> list:
@@ -1367,6 +1655,16 @@ _PERSON_CUES = (
     r"\bboy\b", r"\bperson\b", r"\bpeople\b", r"\bfigure\b", r"\bsomeone\b",
     r"\bface\b", r"\beyes\b", r"\bmouth\b", r"\bhand\b", r"\bhands\b",
     r"\bfingers\b", r"\bshoulder\b", r"\bshoulders\b", r"\bsilhouette\b",
+    # The groups and roles a storyboard writes INSTEAD of a name. This list
+    # now also decides when a shot is EMPTY (see shot_is_unpeopled), where a
+    # miss paints a crew out of its own lifeboat, so the cost of a missing word
+    # is higher than it was when a miss only chose the wrong anchor.
+    r"\bcrowd\b", r"\bcrew\b", r"\bsailors?\b", r"\bsurvivors?\b",
+    r"\bpassengers?\b", r"\bworkers?\b", r"\bchild\b", r"\bchildren\b",
+    r"\bkids?\b", r"\bsoldiers?\b", r"\bvillagers?\b", r"\bonlookers?\b",
+    r"\bstrangers?\b", r"\bbod(?:y|ies)\b", r"\bheads?\b", r"\bhair\b",
+    r"\bfeet\b", r"\blegs?\b", r"\barms?\b", r"\bfaces\b", r"\bgroup\b",
+    r"\bfamily\b", r"\bmother\b", r"\bfather\b", r"\bcouple\b",
 )
 
 _PERSON_CUE_RE = re.compile("|".join(_PERSON_CUES))
@@ -1392,6 +1690,42 @@ def shot_shows_a_person(shot_text: str) -> bool:
     whether one is there; the caller decides who.
     """
     return bool(_PERSON_CUE_RE.search(shot_text or ""))
+
+
+def shot_is_unpeopled(shot, characters, matched_char=None) -> bool:
+    """Whether this shot is deliberately EMPTY: a place, an object, weather.
+
+    A shot that names nobody, anchors to nobody and has no person cue in its
+    text. ``characters_in_frame`` used to answer such a shot with the scene's
+    whole cast -- "the right answer for an insert or an establishing plate" --
+    and that answer is the stranger-in-the-empty-shot bug: the opening
+    "deserted shoreline" of a five-person drama was drawn WITH its five
+    people, because the prompt for a frame of nobody carried "Appearance is
+    FIXED" and "Cast is closed: ... appear" for all of them. The video prompt
+    then asked the same shot for "eyes closing for a beat" and "characters keep
+    facing the same way", and the model supplied faces to do it with.
+    """
+    stated = getattr(shot, "shows_people", None)
+    if stated is not None:
+        # The storyboard artist wrote the shot and said so. An anchor does not
+        # override it: a shot declared empty has no one to anchor to, and the
+        # anchor was only ever a guess from the text.
+        return not stated
+    if matched_char is not None:
+        return False
+    text = f"{getattr(shot, 'visual_desc', '') or ''} {getattr(shot, 'motion_desc', '') or ''}".lower()
+    if on_screen_name_matches(text, characters or []):
+        return False
+    return not shot_shows_a_person(text)
+
+
+#: What an empty shot says INSTEAD of a cast. Stated as the picture it is
+#: rather than a prohibition on faces alone, and carried by both the frame and
+#: the video prompt because either model can populate a place by itself.
+EMPTY_SHOT_CLAUSE = (
+    "Nobody is in this shot: no people, no faces, no figures, not even far "
+    "away or blurred -- the place itself is the whole subject. "
+)
 
 
 def build_cast_closure_clause(characters) -> str:
@@ -1427,9 +1761,13 @@ def build_cast_closure_clause(characters) -> str:
         # figure is allowed to be.
         f"Cast is closed: {'only ' if len(named) == 1 else ''}"
         + ", ".join(named)
-        + f" appear{'s' if len(named) == 1 else ''}. No other recognisable "
-        "face in frame; background figures only if the shot asks, distant and "
-        "unfocused. "
+        + f" appear{'s' if len(named) == 1 else ''}"
+        # Job 82c56e88: Mira sat at the table and a second Mira, same orange
+        # jacket and cap, stood at the stove behind her. Closing the cast says
+        # who may appear; it never said how many of each.
+        + ("" if len(named) == 1 else ", each exactly once") + ". No other "
+        "recognisable face in frame; background figures only if the shot asks, "
+        "distant and unfocused. "
     )
 
 
@@ -1551,6 +1889,8 @@ def build_frame_prompt(
     world_state: str = "",
     has_location_plate: bool = False,
     has_reference: bool = False,
+    has_bridge_frame: bool = False,
+    palette: str = "",
 ) -> str:
     """Build the image prompt for a shot, injecting locked setting when present.
 
@@ -1741,7 +2081,7 @@ def build_frame_prompt(
         dialogue_rank = REQUIRED
     elif lipsync_enabled:
         dialogue_clause = (
-            "The speaking mouth is fully visible, unobscured and facing camera -- "
+            "The speaking mouth is fully visible and unobscured -- "
             "its lips will be animated to the dialogue. Not hidden by hands, "
             "props or hair. "
         )
@@ -1823,7 +2163,15 @@ def build_frame_prompt(
     # of it, to recover the last few characters. Delivered job 21e3d767-bce
     # lost it from every frame and its two players swap sides across three of
     # the film's four two-shots.
-    direction_clause = build_screen_direction_clause(characters)
+    unpeopled = shot_is_unpeopled(shot, characters, matched_char)
+    direction_clause = "" if unpeopled else build_screen_direction_clause(characters)
+    if unpeopled:
+        # The storyboard artist is told to put an emotion on a face in every
+        # shot, and the acting pass fills the field unconditionally, so an
+        # empty shot arrives with "Facial expression and body language: ..."
+        # and "the face is lit and readable". Those are orders to draw a face.
+        expression_clause = ""
+        face_clause = ""
 
     # MAX_VISUAL_DESC_CHARS was measured "for a one-hander", and its own note
     # settles who pays when the frame runs out of room: the description is cut
@@ -1841,7 +2189,9 @@ def build_frame_prompt(
         limit=max(MIN_VISUAL_DESC_CHARS, MAX_VISUAL_DESC_CHARS - len(direction_clause)),
     )
 
-    cast_clause = build_cast_closure_clause(characters)
+    cast_clause = (
+        EMPTY_SHOT_CLAUSE if unpeopled else build_cast_closure_clause(characters)
+    )
     # Ranked with the setting below, because it is the setting's evidence: the
     # setting clause promises the room does not change, and this names the
     # photograph of that room sitting in the same payload. They stand or fall
@@ -1851,8 +2201,20 @@ def build_frame_prompt(
     # rather than folded into the identity block itself: there it would have
     # been subtracted from the cast's own description on every frame,
     # including the frames that have no plate to talk about.
-    plate_clause = _PLATE_REFERENCE_NOTE if has_location_plate else ""
-    style_prefix = f"{style} style. "
+    if not has_location_plate:
+        plate_clause = ""
+    elif change_now or change_before:
+        plate_clause = (
+            _BRIDGE_AND_PLATE_NOTE.replace(_PLATE_REFERENCE_NOTE, _CHANGED_PLATE_NOTE)
+            if has_bridge_frame
+            else _CHANGED_PLATE_NOTE
+        )
+    else:
+        plate_clause = _BRIDGE_AND_PLATE_NOTE if has_bridge_frame else _PLATE_REFERENCE_NOTE
+    # The palette rides the style prefix: REQUIRED, first, and already
+    # measured into the identity reserve below (interfaces/color_grade
+    # .ColorGrade.palette says why it is here at all).
+    style_prefix = f"{style} style. " + (f"{palette.strip()} " if (palette or "").strip() else "")
     framing_clause = f"Shot type: {shot.shot_type}. Lens: {shot.lens}. "
     desc_clause = f"{visual_desc}. "
 
@@ -1897,7 +2259,7 @@ def build_frame_prompt(
     # A clause is worth shortening for the window when shortening it puts
     # another one INSIDE. This one does not, so it keeps its full share.
     identity_budget = (
-        MAX_IMAGE_PROMPT_CHARS
+        max_prompt_chars()
         - len(style_prefix)
         - len(setting_clause)
         - len(lighting_clause)
@@ -2018,7 +2380,7 @@ def build_frame_prompt(
         # MIN_VISUAL_DESC_CHARS is where that stops: "the first two sentences
         # of a shot description are the shot", and a shot is not allowed to
         # spend the film's continuity on its third.
-        while count_tokens(_assembled()) > MAX_IMAGE_PROMPT_TOKENS and (
+        while count_tokens(_assembled()) > max_prompt_tokens() and (
             shrink > IDENTITY_SHRINK_FLOOR or desc_limit > MIN_VISUAL_DESC_CHARS
         ):
             if shrink > IDENTITY_SHRINK_FLOOR:
@@ -2054,7 +2416,7 @@ def build_frame_prompt(
         # between scenes". Garments are covered by a picture and a costume
         # lock; the room is covered by this sentence and the plate, and only
         # the sentence is in the prompt when the plate was not sent.
-        if count_tokens(_assembled()) > MAX_IMAGE_PROMPT_TOKENS:
+        if count_tokens(_assembled()) > max_prompt_tokens():
             undressed = build_character_identity_clause(
                 identity_characters, matched_char, limit=IDENTITY_SHRINK_FLOOR
             )
@@ -2064,9 +2426,36 @@ def build_frame_prompt(
                     "wardrobe at its shortest and the description at its "
                     "floor — dropping the %d described wardrobe(s) so the "
                     "setting and cast stay inside it.",
-                    MAX_IMAGE_PROMPT_TOKENS, len(identity_characters),
+                    max_prompt_tokens(), len(identity_characters),
                 )
                 identity_clause = undressed
+    # SAID, because a shrunk identity sentence was invisible until it was
+    # suspected. Job d7fde8c8's night scene drew "a bald man in a leather
+    # jacket" and "a long-haired woman in a bandana" where the script wrote
+    # something else, and the log held nothing to confirm or rule out that the
+    # identity clause had been cut to fit: neither the reserve above nor the
+    # token loop prints a word. A reserve that silently squeezes the one
+    # clause keeping a face the same face has to be checkable from a job id.
+    #
+    # Measured against the clause UNLIMITED, not against the budget, so the
+    # line fires on any shortening (reserve, token window, or undressing) and
+    # carries both ends of it.
+    if identity_clause:
+        identity_full = build_character_identity_clause(
+            identity_characters, matched_char
+        )
+        if len(identity_clause) < len(identity_full):
+            logger.info(
+                "Identity clause shrunk from %d to %d chars for %d "
+                "character(s): %d chars left for it after the other clauses "
+                "against the %d-char gate (floor %d), %d-token %s window. "
+                "Shot: %.60s",
+                len(identity_full), len(identity_clause),
+                len(identity_characters), identity_budget,
+                max_prompt_chars(), IDENTITY_SHRINK_FLOOR,
+                max_prompt_tokens(), window_label(),
+                getattr(shot, "visual_desc", "") or "",
+            )
     # (priority, text) in READING order. Priority 0 is required: the style,
     # the shot itself, its framing, and the character lock -- without the
     # first there is no frame, without the last the frame renders a stranger,
@@ -2187,7 +2576,12 @@ def build_frame_prompt(
         # already worth more than face, at 4). Rank 3 assumes a reference
         # image is backing the cast up; without one, "Cast is closed" is the
         # only thing keeping a stray extra out of a text-only frame.
-        (UNBACKED_CAST_CLOSURE if not has_reference else 3, cast_clause),
+        (
+            REQUIRED
+            if unpeopled
+            else (UNBACKED_CAST_CLOSURE if not has_reference else 3),
+            cast_clause,
+        ),
         # RANK, not wording -- the same distinction the mouth clause turned on
         # above. Ordinarily this clause is continuity: worth keeping, and a
         # frame is still the right frame without it, so it sits one rung above
@@ -2249,14 +2643,14 @@ def build_frame_prompt(
     # description or the cast has outgrown what the model can read, which is
     # a story-shaped problem, not a ladder one.
     used = count_tokens(prompt)
-    if used > MAX_IMAGE_PROMPT_TOKENS:
+    if used > max_prompt_tokens():
         logger.warning(
             "Frame prompt is %d tokens against a %d-token %s window after "
             "every optional clause was dropped AND its longest required "
             "clauses were trimmed (_trim_to_token_window) — the shot "
             "description or the cast has outgrown what the model can read, "
             "and the encoder will now cut the tail itself. %d chars: %.80s...",
-            used, MAX_IMAGE_PROMPT_TOKENS, window_label(), len(prompt), prompt,
+            used, max_prompt_tokens(), window_label(), len(prompt), prompt,
         )
     elif not tokenizer_is_real():
         # Said once per frame rather than once per process, because this is
@@ -2270,28 +2664,91 @@ def build_frame_prompt(
         # entirely: no vendored Mistral tokenizer EXISTS to load, so every
         # prompt on that encoder is estimated, always, regardless of what is
         # installed -- see tools/t5_budget.MISTRAL_FALLBACK_CHARS_PER_TOKEN.
-        if encoder_family() == "mistral":
+        if encoder_family() == "gemini":
+            # Estimated by design (no Gemini tokenizer is vendored) against a
+            # window that is not a real constraint -- a warning per frame
+            # here, saying the T5 tokenizer failed to load, was wrong twice.
+            logger.debug(
+                "Frame prompt budgeted from an estimate (%d chars) for Gemini.",
+                len(prompt),
+            )
+        elif encoder_family() == "mistral":
             logger.warning(
                 "Frame prompt budgeted from an estimate (%d chars) — the "
                 "active image encoder is Mistral (FLUX.2), which this repo "
                 "has no vendored tokenizer for, so this frame's %d-token "
                 "window was estimated, not measured. See tools/t5_budget.",
-                len(prompt), MAX_IMAGE_PROMPT_TOKENS,
+                len(prompt), max_prompt_tokens(),
             )
         else:
             logger.warning(
                 "Frame prompt budgeted from an estimate (%d chars) — the T5 "
                 "tokenizer did not load, so this frame's %d-token window was "
                 "not measured. See tools/t5_budget.",
-                len(prompt), MAX_IMAGE_PROMPT_TOKENS,
+                len(prompt), max_prompt_tokens(),
             )
     return prompt
 
 
+def scene_speaker_keys(scene_dialogue: str) -> set:
+    """Who speaks ON SCREEN in a scene, from its "Name: line" dialogue block.
+
+    A line marked (O.S.) or (V.O.) is a voice without a mouth in this frame
+    and is left out, the same reading the storyboard step makes.
+    """
+    from interfaces.speaker import speaker_key
+
+    keys = set()
+    for raw in (scene_dialogue or "").splitlines():
+        if ":" not in raw:
+            continue
+        head, line = raw.split(":", 1)
+        if not line.strip() or re.search(r"\((?:o\.?s\.?|v\.?o\.?)\b", head, re.IGNORECASE):
+            continue
+        keys.add(speaker_key(re.sub(r"\s*\(.*$", "", head).strip()))
+    keys.discard("")
+    return keys
+
+
+def who_talks_in_frame(shot, characters, matched_char, speaker_keys) -> tuple:
+    """``(speakers, listeners)``: the names in this frame who speak in the
+    scene, and those who only listen. Both empty when the frame shows nobody
+    the scene's dialogue can be pinned on either way."""
+    from interfaces.speaker import speaker_key
+
+    if not speaker_keys:
+        return [], []
+    speakers, listeners = [], []
+    for character in characters_in_frame(shot, characters, matched_char):
+        if not getattr(character, "is_visible", True):
+            continue
+        name = getattr(character, "name", "") or ""
+        (speakers if speaker_key(name) in speaker_keys else listeners).append(name)
+    return speakers, listeners
+
+
 def build_motion_prompt(
-    shot, matched_char=None, world_state: str = "", speaking: bool = True
+    shot,
+    matched_char=None,
+    world_state: str = "",
+    speaking: bool = True,
+    unpeopled: bool = False,
+    event_in_take: bool = False,
+    speakers: Sequence[str] = (),
+    listeners: Sequence[str] = (),
 ) -> str:
     """Build the prompt sent to the video (image-to-video) model.
+
+    ``speakers`` and ``listeners`` are the people in THIS frame who do and do
+    not speak in the scene (who_talks_in_frame). Job 265209d6, a two-hander at
+    a card table: Victor had every line of scenes 2 and 3, and the video model
+    moved Rosa's mouth through them -- in the raw take, before any lip sync
+    touched it (a sync-3 run with Victor's face selected left her exactly as
+    it found her). Nothing in this prompt said who was talking. Meanwhile
+    Victor delivered his lines through the thumb the script had him drag
+    across his lip, so the one mouth that should move was covered. Both are
+    said now, as what the face DOES: the listener's mouth closed and the
+    reaction in the eyes; the speaker's mouth clear while the words come.
 
     Previously this was ``shot.motion_desc`` alone, which starved the
     animation step of everything else the storyboard decided: the designed
@@ -2322,6 +2779,25 @@ def build_motion_prompt(
     motion = (getattr(shot, "motion_desc", "") or "").strip().rstrip(".")
     if motion:
         parts.append(f"{motion}.")
+    if unpeopled:
+        # ``unpeopled`` is a shot with nobody in it, and everything below is
+        # direction for a person: an arc to perform, a face to keep, a head not
+        # to turn. Handed to an empty plate it is an order to produce one --
+        # job 5b886720's flames shot was told to land on "eyes closing for a
+        # beat, a long breath leaving through parted lips" and came back with
+        # three strangers whose eyes were closed.
+        parts.append(EMPTY_SHOT_CLAUSE.strip())
+        changed = (world_state or "").strip().rstrip(".")
+        if changed:
+            parts.append(
+                f"The world of this shot has already changed: {changed}. Hold "
+                f"that state for the entire clip."
+            )
+        parts.append(
+            "Only the place moves: light, weather, water, smoke, flame, "
+            "cloth. Photographic realism throughout."
+        )
+        return " ".join(parts)
     expression = (getattr(shot, "expression_desc", "") or "").strip().rstrip(".")
     peak = (getattr(shot, "expression_peak_desc", "") or "").strip().rstrip(".")
     if expression and peak:
@@ -2342,7 +2818,18 @@ def build_motion_prompt(
             f"The character's expression stays true to the beat: {expression}."
         )
     changed = (world_state or "").strip().rstrip(".")
-    if changed:
+    if changed and event_in_take:
+        # The take that CARRIES the event (long_take.event_spans_take): it
+        # opens on the world before and is drawn to end on the world after,
+        # so telling it the change has "already" happened would contradict
+        # its own first frame. It is told when, instead -- and that the
+        # change is one way.
+        parts.append(
+            f"THIS is the shot the story's event happens in: {changed}. The "
+            f"clip opens on the world as it was and ends on it changed; once "
+            f"it changes it never changes back."
+        )
+    elif changed:
         parts.append(
             f"The world of this shot has already changed: {changed}. Hold that "
             f"state for the entire clip — it must not revert, recover or "
@@ -2350,6 +2837,19 @@ def build_motion_prompt(
         )
     name = (getattr(matched_char, "name", "") or "").strip() if matched_char else ""
     subject = name or "each character"
+    if speaking and listeners:
+        who = " and ".join(listeners)
+        parts.append(
+            f"{who} only listen{'s' if len(listeners) == 1 else ''} in this shot: "
+            f"the mouth closed, the jaw still, the reaction in the eyes and the "
+            f"breath."
+        )
+    if speaking and speakers:
+        who = " and ".join(speakers)
+        parts.append(
+            f"While {who} speak{'s' if len(speakers) == 1 else ''}, the mouth is "
+            f"clear of hands and props, lips plainly moving with the words."
+        )
     if not speaking:
         # Stated as what the shot IS rather than as a prohibition: "does not
         # speak" is a negation, and this model has no negative prompt to put
@@ -3835,8 +4335,18 @@ class Script2VideoPipeline:
         scene_dialogue: str = "",
         is_cancelled=None,
         expected_setting: str = "",
+        bridge_frame_url: Optional[str] = None,
+        on_opening_frame: Optional[Callable[[Optional[str]], None]] = None,
+        world_state: str = "",
+        event_action: str = "",
     ) -> Dict[str, Any]:
         """Render a whole scene in ONE generation, cuts included.
+
+        ``event_action`` is the scene's action when the drama's event happens
+        IN this scene. If the take can carry it -- long enough, a face to
+        anchor the end to, an endpoint that takes an end image -- it opens on
+        the world before and is drawn to end on the world after
+        (long_take.event_spans_take).
 
         What this replaces, per scene: one image and one video generation PER
         ANGLE, the concat that joined them, and the timescale repair that
@@ -3860,6 +4370,15 @@ class Script2VideoPipeline:
             dynamic_reference_enabled=dynamic_reference_enabled,
             scene_idx=scene_idx,
             shot_idx=0,
+            bridge_frame_url=bridge_frame_url,
+        )
+        bridged = bool(bridge_frame_url) and bridge_frame_url in frame_references
+        event_in_take = bool(event_action) and long_take.event_spans_take(
+            world_state,
+            1,
+            scene_seconds,
+            has_character=matched_char is not None,
+            draws_frames="end_image_url" in getattr(backend, "fields", ()),
         )
         # Built HERE, not by the caller, because it needs the anchor and the
         # anchor is what resolve_frame_references just worked out. Passed in
@@ -3872,15 +4391,28 @@ class Script2VideoPipeline:
         # who, and a lead who is a different woman in a different outfit in
         # each of three scenes -- which is precisely the drift the per-shot
         # path resolves first in order to avoid.
-        frame_prompt = frame_prompt_for(matched_char, bool(frame_references))
+        frame_prompt = (
+            frame_prompt_for(matched_char, bool(frame_references), bridged, before=True)
+            if event_in_take
+            else frame_prompt_for(matched_char, bool(frame_references), True)
+            if bridged
+            else frame_prompt_for(matched_char, bool(frame_references))
+        )
         if frame_references:
             start_image = await self.image_gen.generate_image_with_reference(
-                frame_prompt, frame_references, aspect_ratio, is_cancelled=is_cancelled
+                frame_prompt, frame_references, aspect_ratio, is_cancelled=is_cancelled,
+                **_frame_label_kwargs(
+                    self.image_gen, frame_references, opening, characters, portraits,
+                    matched_char=matched_char, location_plate_url=location_plate_url,
+                    bridge_frame_url=bridge_frame_url if bridged else None,
+                ),
             )
         else:
             start_image = await self.image_gen.generate_image(
                 frame_prompt, aspect_ratio, is_cancelled=is_cancelled
             )
+        if on_opening_frame and start_image:
+            on_opening_frame(start_image)
 
         # The take is generated FROM this frame, and the video endpoint takes
         # no aspect ratio of its own -- it reads the shape off the picture it
@@ -3930,7 +4462,11 @@ class Script2VideoPipeline:
             elements.append(
                 Element(
                     name=name,
-                    images=(portrait,),
+                    # A sheet goes as the views it was drawn as -- frontal
+                    # first, then three angles -- not as one grid standing in
+                    # for a face (tools/sheet_views). Anything else, or a
+                    # sheet that could not be cut, goes whole as before.
+                    images=(await self._views_of(portrait)) or (portrait,),
                     # The costume, in the take's own words. The portrait is
                     # the face and the face survived; what drifted across a
                     # take seam on a delivered drama was the outfit, which
@@ -3940,12 +4476,39 @@ class Script2VideoPipeline:
                 )
             )
 
+        # The take's LAST frame, drawn, when it is long enough to drift and
+        # the endpoint takes one (interfaces/long_take). Drawn from the
+        # opening frame and the anchor's own reference, at the end of the
+        # scene's last beat.
+        end_image = ""
+        if (
+            matched_char is not None
+            and start_image
+            and "end_image_url" in getattr(backend, "fields", ())
+            and long_take.is_long(scene_seconds)
+        ):
+            end_image = await self._render_long_take_end(
+                start_image,
+                shots[-1],
+                matched_char,
+                aspect_ratio,
+                is_cancelled,
+                portrait=portraits.get(getattr(matched_char, "name", "")),
+                world_state=world_state,
+                action=event_action if event_in_take else "",
+            ) or ""
+
         take = plan_scene_take(
             scene_seconds,
             shots,
             backend,
             elements=elements,
             start_image=start_image,
+            end_image=end_image,
+            world_state=world_state,
+            # Only when the drawn end actually exists: without it the take
+            # would be told the event happens and given nothing to end on.
+            event_in_take=event_in_take and bool(end_image),
             # The lines, only when this take is the thing that says them. A
             # scene rendered mute is voiced by the TTS pass and lip-synced
             # afterwards, and its words reach the picture that way.
@@ -4022,7 +4585,7 @@ class Script2VideoPipeline:
                     matched_char.static_features if matched_char else "",
                     getattr(matched_char, "wardrobe", "") if matched_char else "",
                     expected_setting,
-                    os.environ.get("ANTHROPIC_API_KEY", ""),
+                    llm_api_key(),
                 )
             )
         try:
@@ -4083,6 +4646,10 @@ class Script2VideoPipeline:
             {
                 "index": i,
                 "frame_url": start_image if i == 0 else None,
+                # Whether the scene's opening frame was shown the previous
+                # scene's (interfaces/cut_bridge). "The cut jumps" is
+                # otherwise a report nobody can attribute from the record.
+                "bridged_from_previous_scene": bridged if i == 0 else False,
                 "video_url": video_url,
                 "seconds": beat.seconds,
                 "shot_type": beat.shot_type,
@@ -4257,8 +4824,17 @@ class Script2VideoPipeline:
         matched_char=None,
         aspect_ratio: str = "16:9",
         is_cancelled: Optional[Callable[[], bool]] = None,
+        portrait: Optional[str] = None,
+        world_state: str = "",
+        event_action: str = "",
     ) -> Optional[str]:
         """Edit this shot's start frame into its acted peak, or return None.
+
+        ``event_action`` is set when this take carries the drama's event
+        (long_take.event_spans_take): the end frame is then the world AFTER
+        the event, drawn from the scene's own action, and it is drawn whatever
+        else is configured -- an acting edit keeps the set exactly as the
+        opening frame has it, which is the world before.
 
         The peak comes from interfaces/acting, not from the LLM, so it is the
         same on every render of the same scene. The EDIT (rather than a second
@@ -4273,7 +4849,27 @@ class Script2VideoPipeline:
         A shot without an end frame is exactly the shot this pipeline produced
         before any of this existed.
         """
-        if not frame_url or not acting.is_end_frame_enabled():
+        if not frame_url:
+            return None
+        # A take long enough to drift is anchored at its end even when the
+        # acting pass is off (interfaces/long_take). When the acting pass is
+        # on and can run, ITS end frame is used instead: it is an edit of this
+        # same start frame, so it anchors the face just as well, and an
+        # operator who switched it on asked for that performance.
+        acted = (
+            acting.is_end_frame_enabled()
+            and bool((getattr(shot, "expression_peak_desc", "") or "").strip())
+            and getattr(self.image_gen, "edit_image", None) is not None
+        )
+        if matched_char is not None and (
+            event_action
+            or (not acted and long_take.is_long(getattr(shot, "duration_seconds", 0)))
+        ):
+            return await self._render_long_take_end(
+                frame_url, shot, matched_char, aspect_ratio, is_cancelled,
+                portrait=portrait, world_state=world_state, action=event_action,
+            )
+        if not acting.is_end_frame_enabled():
             return None
         # An end frame is a FACE landing somewhere. On an establishing plate or
         # an insert there is no face to act, and asking an edit model to change
@@ -4317,6 +4913,74 @@ class Script2VideoPipeline:
             return None
         logger.info("Shot acted between two frames: peak=%.60s", peak)
         return end_frame_url
+
+    async def _views_of(self, portrait: str) -> Tuple[str, ...]:
+        """A sheet's four views, cut once per sheet per pipeline; () when the
+        flag is off, in demo, or the sheet cannot be cut."""
+        if self.demo or not portrait or not character_sheet.is_enabled():
+            return ()
+        cache = self.__dict__.setdefault("_sheet_views", {})
+        if portrait not in cache:
+            cache[portrait] = await split_sheet(portrait)
+        return cache[portrait]
+
+    async def _render_long_take_end(
+        self,
+        frame_url: str,
+        shot,
+        matched_char,
+        aspect_ratio: str = "16:9",
+        is_cancelled: Optional[Callable[[], bool]] = None,
+        portrait: Optional[str] = None,
+        world_state: str = "",
+        action: str = "",
+    ) -> Optional[str]:
+        """The last frame of a long take, drawn from its first and the face.
+
+        ``action`` overrides the shot's own motion line: the take that carries
+        the drama's event ends where the SCENE ends, not where its storyboard
+        line (written for the moment before) does.
+
+        Fail-open like every end frame here: None animates the take from its
+        opening frame alone, exactly as before.
+        """
+        name = getattr(matched_char, "name", "") or ""
+        references = [frame_url] + ([portrait] if portrait and portrait != frame_url else [])
+        prompt = long_take.end_frame_prompt(
+            action=(action or "").strip()[:500]
+            or getattr(shot, "motion_desc", "")
+            or getattr(shot, "visual_desc", "")
+            or "",
+            name=name,
+            peak=getattr(shot, "expression_peak_desc", "") or "",
+            world_state=world_state,
+            has_reference=len(references) > 1,
+        )
+        labels = (
+            {"reference_labels": ["the opening frame of this shot", name][: len(references)]}
+            if getattr(self.image_gen, "accepts_reference_labels", False)
+            else {}
+        )
+        try:
+            end_frame_url = await self.image_gen.generate_image_with_reference(
+                prompt, references, aspect_ratio, is_cancelled=is_cancelled, **labels
+            )
+        except MuAPICancelled:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Long-take end frame could not be drawn (%s: %s); the take is "
+                "anchored at its start only.",
+                type(exc).__name__,
+                exc,
+            )
+            return None
+        if end_frame_url:
+            logger.info(
+                "Shot of %ss anchored at both ends (interfaces/long_take).",
+                getattr(shot, "duration_seconds", "?"),
+            )
+        return end_frame_url or None
 
     async def run(
         self,
@@ -4374,9 +5038,32 @@ class Script2VideoPipeline:
         #: on it. So the beat's own record -- the description the model was
         #: given, its framing, its length -- is handed straight back here.
         storyboard_override: Optional[List[Any]] = None,
+        #: The previous scene's opening frame, when this scene continues in
+        #: the same place (interfaces/cut_bridge). A function, not a URL,
+        #: because the scenes render in parallel and that frame may not exist
+        #: yet: it is awaited at the last moment -- just before THIS scene's
+        #: opening frame is drawn, after its storyboard -- so the wait costs
+        #: one frame's latency rather than a whole scene's.
+        bridge_frame: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
+        #: Called with this scene's opening frame the moment it exists, for
+        #: the scene after it to bridge from. Never called on a path that
+        #: draws no opening frame; the caller resolves the wait itself then.
+        on_opening_frame: Optional[Callable[[Optional[str]], None]] = None,
+        #: The state the scene OPENS in, as the script wrote it
+        #: (interfaces/continuity.opening_state). Used for the first frame of
+        #: a take that carries the drama's event -- see shot_at_the_opening.
+        scene_opening: str = "",
+        #: Called with the scene's storyboard the moment it exists, before any
+        #: frame or video is made. The foley for the scene needs nothing else
+        #: (idea2video._start_foley), and starting it here hides its queue
+        #: behind the video render instead of adding it to the end of the job.
+        on_storyboard: Optional[Callable[[List[Any]], None]] = None,
     ) -> Dict[str, Any]:
         os.makedirs(working_dir, exist_ok=True)
         portraits = character_portraits or {}
+        # The colour every frame of this film is drawn toward: the grade it
+        # will be finished in, said up front (interfaces/color_grade).
+        palette = palette_for(director_style)
         # Shared, mutable across scenes (owned by the caller) so a later
         # scene can reference an earlier scene's generated frame instead of
         # only ever the locked portrait. A fresh dict when the caller
@@ -4443,10 +5130,19 @@ class Script2VideoPipeline:
                 lipsync_enabled=lipsync_enabled,
             )
 
+        if on_storyboard is not None:
+            try:
+                on_storyboard(list(shots))
+            except Exception as exc:  # a head start is never worth a scene
+                logger.warning("Storyboard callback failed, continuing: %s", exc)
+
         # Which angles the words actually reach. A dialogue scene used to hand
         # the SAME "this character is speaking" direction to every angle it
         # bought, including the ones that open after the last word -- see
         # shots_the_line_reaches for what that delivered.
+        # Who speaks on screen in this scene, for the listener / speaker
+        # direction in each shot's motion prompt.
+        scene_speakers = scene_speaker_keys(scene_dialogue)
         line_reaches = shots_the_line_reaches(
             shots, scene_dialogue, line_seconds=scene_line_seconds
         )
@@ -4467,7 +5163,7 @@ class Script2VideoPipeline:
         semaphore = asyncio.Semaphore(int(os.environ.get("MUSEFORGE_SHOT_CONCURRENCY", "2")))
         qa_enabled = is_character_qa_enabled() and not self.demo
         dynamic_reference_enabled = is_dynamic_reference_enabled()
-        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        anthropic_key = llm_api_key()
         expected_setting = format_expected_setting(
             setting_location, setting_time_of_day, setting_era
         )
@@ -4478,6 +5174,9 @@ class Script2VideoPipeline:
         # place looks wrong, until the lights come back on. The vision check
         # has to be told what the story did to the place.
         changed_state = (world_change or "").strip() or (world_state or "").strip()
+        # What an opening frame drawn BEFORE the event is checked against
+        # (long_take.event_spans_take): the place as it was.
+        expected_setting_before = expected_setting
         if expected_setting and changed_state:
             expected_setting += f" -- but in this scene: {changed_state}"
 
@@ -4527,7 +5226,14 @@ class Script2VideoPipeline:
             take_speaks = bool(has_dialogue) and who_speaks.picture_carries_dialogue(
                 take_backend, language or "en"
             )
+            bridge_url = await bridge_frame() if bridge_frame else None
             result = await self._render_scene_as_one_take(
+                bridge_frame_url=bridge_url,
+                on_opening_frame=on_opening_frame,
+                # The event, once it has happened: the take's prompt holds it
+                # on every beat (interfaces/scene_take.SceneTake.world_state).
+                world_state=(world_change or "").strip() or (world_state or "").strip(),
+                event_action=script if (world_change or "").strip() else "",
                 shots=shots,
                 characters=characters,
                 portraits=portraits,
@@ -4545,9 +5251,9 @@ class Script2VideoPipeline:
                 # inside, by the same resolve_frame_references the per-shot
                 # path calls before it builds its prompt, and the prompt
                 # cannot be built correctly without it.
-                frame_prompt_for=lambda anchor, has_ref: build_frame_prompt(
+                frame_prompt_for=lambda anchor, has_ref, has_bridge=False, before=False: build_frame_prompt(
                     style,
-                    opening,
+                    shot_at_the_opening(opening, scene_opening) if before else opening,
                     setting_location=setting_location,
                     setting_time_of_day=setting_time_of_day,
                     setting_era=setting_era,
@@ -4561,8 +5267,10 @@ class Script2VideoPipeline:
                     lipsync_enabled=lipsync_enabled and not take_speaks,
                     characters=characters,
                     matched_char=anchor,
-                    world_change=world_change,
-                    world_state=world_state,
+                    # ``before``: this take carries the event, so it opens on
+                    # the world as it was (long_take.event_spans_take).
+                    world_change="" if before else world_change,
+                    world_state="" if before else world_state,
                     # Only when the plate is a SECOND picture. With no anchor
                     # the plate IS the anchor (resolve_frame_references falls
                     # back to it for an establishing shot or an insert), and
@@ -4571,6 +5279,8 @@ class Script2VideoPipeline:
                     # second photograph it was never sent.
                     has_location_plate=bool(location_plate_url) and anchor is not None,
                     has_reference=has_ref,
+                    has_bridge_frame=has_bridge,
+                    palette=palette,
                 ),
                 generate_audio=take_speaks,
                 scene_dialogue=scene_dialogue,
@@ -4592,6 +5302,12 @@ class Script2VideoPipeline:
                 try:
                     _check_cancel()
 
+                    # Only the scene's OPENING frame is bridged: it is the
+                    # frame that follows the cut, and every later angle of
+                    # this scene is held to the same plate already.
+                    bridge_url = (
+                        await bridge_frame() if (bridge_frame and i == 0) else None
+                    )
                     matched_char, reference_url, frame_references = (
                         resolve_frame_references(
                             shot,
@@ -4603,8 +5319,11 @@ class Script2VideoPipeline:
                             dynamic_reference_enabled=dynamic_reference_enabled,
                             scene_idx=scene_idx,
                             shot_idx=i,
+                            bridge_frame_url=bridge_url,
                         )
                     )
+                    if not (bridge_url and bridge_url in frame_references):
+                        bridge_url = None
 
                     # Belt-and-braces: design_storyboard already repairs a
                     # missing/neutral expression, but the frame prompt is the
@@ -4627,28 +5346,40 @@ class Script2VideoPipeline:
                     # present a mouth to camera for a sync pass that will
                     # never touch it is how the silence gets performed.
                     shot_has_dialogue = has_dialogue and line_reaches[i]
-
-                    frame_prompt = build_frame_prompt(
-                        style,
-                        shot,
-                        setting_location=setting_location,
-                        setting_time_of_day=setting_time_of_day,
-                        setting_era=setting_era,
-                        has_dialogue=shot_has_dialogue,
-                        lipsync_enabled=lipsync_enabled,
-                        characters=characters,
-                        matched_char=matched_char,
-                        world_change=world_change,
-                        world_state=world_state,
-                        # Read off the set that is actually going, not off
-                        # `location_plate_url` being non-empty: the plate is
-                        # de-duplicated against the anchor, so on a
-                        # characterless shot the two are one URL in one slot.
-                        # [1:] is "sent, and not as the anchor".
-                        has_location_plate=bool(location_plate_url)
-                        and location_plate_url in frame_references[1:],
-                        has_reference=bool(frame_references),
+                    # Who in this frame talks and who only listens (see
+                    # build_motion_prompt).
+                    talk = (
+                        who_talks_in_frame(shot, characters, matched_char, scene_speakers)
+                        if shot_has_dialogue
+                        else ([], [])
                     )
+
+                    def _frame_prompt(change, state, at_opening=False):
+                        return build_frame_prompt(
+                            style,
+                            shot_at_the_opening(shot, scene_opening) if at_opening else shot,
+                            setting_location=setting_location,
+                            setting_time_of_day=setting_time_of_day,
+                            setting_era=setting_era,
+                            has_dialogue=shot_has_dialogue,
+                            lipsync_enabled=lipsync_enabled,
+                            characters=characters,
+                            matched_char=matched_char,
+                            world_change=change,
+                            world_state=state,
+                            # Read off the set that is actually going, not off
+                            # `location_plate_url` being non-empty: the plate is
+                            # de-duplicated against the anchor, so on a
+                            # characterless shot the two are one URL in one slot.
+                            # [1:] is "sent, and not as the anchor".
+                            has_location_plate=bool(location_plate_url)
+                            and location_plate_url in frame_references[1:],
+                            has_reference=bool(frame_references),
+                            has_bridge_frame=bool(bridge_url),
+                            palette=palette,
+                        )
+
+                    frame_prompt = _frame_prompt(world_change, world_state)
 
                     # fal.ai reference-to-video binds character identity in a
                     # SINGLE call (elements + prompt), so the separate
@@ -4663,6 +5394,31 @@ class Script2VideoPipeline:
                         and bool(matched_char)
                         and bool(reference_url)
                     )
+                    # A tight close-up cannot be asked for in a reference-only
+                    # call: the empty plate's wide framing wins and "close-up"
+                    # comes back as a full body, eyes on the lens (job
+                    # 21a87c5a). A rendered first frame IS the framing, so
+                    # such a shot starts from one -- where the endpoint can.
+                    start_from_frame = one_step_reference_video and wants_first_frame(
+                        shot, self.video_gen, has_character=matched_char is not None
+                    )
+                    if start_from_frame:
+                        one_step_reference_video = False
+
+                    # The scene the event happens IN, as one long take: its
+                    # opening frame is the world BEFORE and its drawn end
+                    # frame the world AFTER, so the take plays the event
+                    # instead of starting after it (interfaces/long_take
+                    # .event_spans_take, jobs 6efbb788 and d91a4172).
+                    event_in_take = long_take.event_spans_take(
+                        world_change,
+                        len(shots),
+                        getattr(shot, "duration_seconds", 0),
+                        has_character=matched_char is not None,
+                        draws_frames=not one_step_reference_video,
+                    )
+                    if event_in_take:
+                        frame_prompt = _frame_prompt("", "", at_opening=True)
 
                     async with progress_lock:
                         await progress(
@@ -4690,11 +5446,20 @@ class Script2VideoPipeline:
                         # dynamic-reference chaining.
                         frame_url = reference_url
                         shot.frame_url = frame_url
+                        if i == 0 and on_opening_frame:
+                            # No frame is drawn on this path, and the portrait
+                            # standing in for one is not this place. Said NOW,
+                            # so the next scene is not left waiting out this
+                            # scene's whole video for a frame that never comes.
+                            on_opening_frame(None)
                         motion_prompt = build_motion_prompt(
                             shot,
                             matched_char,
                             world_state=change_state,
                             speaking=shot_has_dialogue,
+                            unpeopled=shot_is_unpeopled(shot, characters, matched_char),
+                            speakers=talk[0],
+                            listeners=talk[1],
                         )
                         video_prompt = f"{frame_prompt} {motion_prompt}"
                     else:
@@ -4703,8 +5468,21 @@ class Script2VideoPipeline:
                         # frame is retried without wasting money on animating
                         # a frame we're about to throw away.
                         if frame_references:
-                            frame_url = await self.image_gen.generate_image_with_reference(
-                                frame_prompt, frame_references, aspect_ratio, is_cancelled=is_cancelled
+                            _labels = _frame_label_kwargs(
+                                self.image_gen, frame_references, shot, characters, portraits,
+                                matched_char=matched_char, location_plate_url=location_plate_url,
+                                bridge_frame_url=bridge_url,
+                            )
+
+                            async def _draw(text, _refs=frame_references, _labels=_labels):
+                                return await self.image_gen.generate_image_with_reference(
+                                    text, _refs, aspect_ratio, is_cancelled=is_cancelled, **_labels,
+                                )
+
+                            frame_url, _flagged = await frame_surviving_a_flag(
+                                _draw, frame_prompt,
+                                fallback_url=reference_url or location_plate_url or "",
+                                label=f"shot {i + 1}",
                             )
                         else:
                             frame_url = await self.image_gen.generate_image(
@@ -4712,6 +5490,12 @@ class Script2VideoPipeline:
                             )
 
                         shot.frame_url = frame_url
+                        if i == 0 and on_opening_frame and frame_url:
+                            # Before the QA repair, not after: the next
+                            # scene is waiting on this, and what it needs is
+                            # this place's light, which a correction to a
+                            # face does not change.
+                            on_opening_frame(frame_url)
 
                         # Audit & targeted repair (adapted from Virginia Tech's
                         # "Audit & Repair" technique): on QA failure, fix the
@@ -4725,13 +5509,38 @@ class Script2VideoPipeline:
                             qa_result = await verify_frame(
                                 frame_url=frame_url,
                                 expected_character_desc=char_desc,
-                                expected_setting=expected_setting,
+                                expected_setting=(
+                                    expected_setting_before
+                                    if event_in_take
+                                    else expected_setting
+                                ),
                                 anthropic_api_key=anthropic_key,
                             )
                             qa_failed = not qa_result.get(
                                 "character_ok", True
                             ) or not qa_result.get("setting_ok", True)
                             issue = (qa_result.get("issue") or "").strip()
+                            # Said out loud. Job 3570bab0 ran this check five times
+                            # and two replies were long enough to carry an issue,
+                            # yet nothing in the log said whether a frame passed,
+                            # failed, was repaired or was kept -- so a scene whose
+                            # room changed between shots (concrete cellar, then a
+                            # painted-brick one) could not be traced to a verdict.
+                            if qa_failed:
+                                logger.info(
+                                    "Frame QA failed shot %s: character_ok=%s "
+                                    "setting_ok=%s issue=%r -- %s",
+                                    i,
+                                    qa_result.get("character_ok", True),
+                                    qa_result.get("setting_ok", True),
+                                    issue,
+                                    "repairing from the reference"
+                                    if (reference_url and issue)
+                                    else "no reference or no stated issue, "
+                                    "keeping the frame as drawn",
+                                )
+                            else:
+                                logger.info("Frame QA passed shot %s.", i)
                             if qa_failed and reference_url and issue:
                                 _check_cancel()
                                 repair_prompt = (
@@ -4750,6 +5559,12 @@ class Script2VideoPipeline:
                                         frame_references,
                                         aspect_ratio,
                                         is_cancelled=is_cancelled,
+                                        **_frame_label_kwargs(
+                                            self.image_gen, frame_references, shot, characters,
+                                            portraits, matched_char=matched_char,
+                                            location_plate_url=location_plate_url,
+                                            bridge_frame_url=bridge_url,
+                                        ),
                                     )
                                     shot.frame_url = frame_url
                                 except Exception as exc:
@@ -4767,6 +5582,10 @@ class Script2VideoPipeline:
                             matched_char,
                             world_state=change_state,
                             speaking=shot_has_dialogue,
+                            unpeopled=shot_is_unpeopled(shot, characters, matched_char),
+                            event_in_take=event_in_take,
+                            speakers=talk[0],
+                            listeners=talk[1],
                         )
 
                         # The acted PEAK, rendered as a real end frame so the
@@ -4782,6 +5601,13 @@ class Script2VideoPipeline:
                             matched_char=matched_char,
                             aspect_ratio=aspect_ratio,
                             is_cancelled=is_cancelled,
+                            portrait=(
+                                portraits.get(matched_char.name) if matched_char else None
+                            ),
+                            world_state=change_state,
+                            # The end of the EVENT, in the scene's own words:
+                            # the shot's motion line is the moment before it.
+                            event_action=script if event_in_take else "",
                         )
 
                     # Record this shot's final frame (post-repair, if any)
@@ -4833,15 +5659,24 @@ class Script2VideoPipeline:
                     if frame_references and getattr(
                         self.video_gen, "accepts_reference_set", False
                     ):
-                        video_kwargs["reference_images"] = list(frame_references)
-                        video_kwargs["reference_labels"] = label_frame_references(
-                            frame_references,
-                            shot,
-                            characters,
-                            portraits,
-                            matched_char=matched_char,
-                            location_plate_url=location_plate_url,
+                        video_kwargs["reference_images"], video_kwargs["reference_labels"] = (
+                            video_reference_set(
+                                frame_references,
+                                label_frame_references(
+                                    frame_references,
+                                    shot,
+                                    characters,
+                                    portraits,
+                                    matched_char=matched_char,
+                                    location_plate_url=location_plate_url,
+                                ),
+                                location_plate_url=location_plate_url,
+                                world_changed=bool(change_state),
+                                starts_from_frame=not one_step_reference_video,
+                            )
                         )
+                    if start_from_frame:
+                        video_kwargs["by_reference"] = False
                     video_url = await self.video_gen.generate_video_from_image(
                         prompt=video_prompt,
                         image_url=frame_url if not one_step_reference_video else reference_url,
@@ -4875,6 +5710,11 @@ class Script2VideoPipeline:
                 # dependent and fail-open, so its absence is invisible.
                 meta["end_frame_url"] = end_frame_url
                 meta["acted_interpolation"] = bool(end_frame_url)
+                # See the same key on the one-take path.
+                meta["bridged_from_previous_scene"] = bool(i == 0 and bridge_url)
+                # Whether this take opened before the event and was drawn to
+                # end after it (long_take.event_spans_take).
+                meta["event_in_take"] = bool(event_in_take)
                 # Which lock actually anchored this shot. Without it, a
                 # "the room keeps changing" report cannot be told apart from
                 # "the wrong character was matched" after the fact.

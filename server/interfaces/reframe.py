@@ -428,6 +428,16 @@ def _switch_expression(axis: str, spans: Sequence[Tuple[float, float, float]]) -
     -- the offset simply jumps at the cut, which is where a change of framing
     belongs anyway.
     """
+    # Spans that frame identically are one span: a film whose scenes all want
+    # the same offset needs no switch at all, and a switch is a comma-laden
+    # expression that has to survive a filtergraph.
+    merged: List[Tuple[float, float, float]] = []
+    for start, end, fraction in spans:
+        if merged and abs(merged[-1][2] - fraction) < 1e-4:
+            merged[-1] = (merged[-1][0], end, merged[-1][2])
+        else:
+            merged.append((start, end, fraction))
+    spans = merged
     expression = _fraction_expression(axis, spans[-1][2])
     for _start, end, fraction in reversed(spans[:-1]):
         expression = (
@@ -480,7 +490,12 @@ def crop_filter(
         for start, end, span_anchor in (spans or [])
     ]
     if resolved and any(abs(f - 0.5) > MIN_OFFSET for _s, _e, f in resolved):
-        offset = _switch_expression(axis, resolved)
+        # Escaped for the filtergraph. This string is joined into -vf with
+        # commas between filters, and an unescaped comma inside if(lt(t,7.88),..)
+        # ends the crop filter there. Job 8d082bf7: the finishing pass died with
+        # "No such filter: '7.880)'" and the film shipped through the slower
+        # fallback passes.
+        offset = _switch_expression(axis, resolved).replace(",", "\\,")
     else:
         fraction = crop_fraction(
             anchor.y if vertical else anchor.x, anchor.confidence, frame, window

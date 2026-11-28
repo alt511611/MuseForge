@@ -4,12 +4,13 @@ import json
 import logging
 import os
 import re
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from interfaces import acting
 from interfaces.camera import get_director_style
 from interfaces.character import CharacterInScene
 from interfaces.shot import StoryboardShot
+from interfaces.speaker import is_marked_unseen, speaker_key
 from interfaces.shot_plan import (
     MAX_COVERAGE,
     coverage_a_take_affords,
@@ -24,6 +25,7 @@ from tools.anthropic_request import (
     log_usage,
     refusal_of,
 )
+from tools.llm_provider import api_key as llm_api_key, make_client as make_llm_client
 from tools.claude_via_muapi import complete_via_muapi, is_muapi_llm_enabled
 
 logger = logging.getLogger(__name__)
@@ -304,13 +306,37 @@ scene. One move, present tense, running from the first frame to the last: "she
 slides the envelope toward him and stops". Not a sequence, not a cut, not a
 second beat.
 
-SHOW THE EMOTION ON THE FACE. The scene's emotional beat is given to you. "expression_desc"
+EVERY EMPTY BEAT IN THE ACTION IS ITS OWN SHOT. When the scene's action or the brief
+names a moment with nobody in it — "the empty shoreline", "the flames alone", "a wave
+far out, no boat, no one", "the beach, deserted" — film it as a separate shot with
+"shows_people": false, in the order the action gives it. Never fold it into the first
+shot that has a person in it: "black surf, then the five crawl out" is two shots, not
+one populated shot with the surf as set dressing. These shots are short (3-4 seconds).
+
+THE PICTURE FOLLOWS THE SOUND. Shots are played in the order you write them, and the
+scene's dialogue is played in the order it is given. When a line is a voice only
+(O.S., a radio, a phone, an intercom), the shot under that line is the thing it comes
+out of -- the radio on the table, the handset -- or the face hearing it, never a
+different person's face and never a shot that arrives after the voice is over. When a
+visible character speaks, a shot of THAT character is on screen while they speak.
+Open the scene on the source of the first voice, not on a reaction to a sound the
+audience has not yet heard.
+
+A SHOT CAN BE OF NOBODY. A deserted shore, flames, a wave, an object, weather: when
+the shot has no person in it, set "shows_people": false, leave "expression_desc" as
+an empty string, and describe only the place and what moves in it. Everything below
+about faces applies to shots that show people ("shows_people": true) and to those
+alone — an empty shot given a face is how strangers get into the film.
+
+SHOW THE EMOTION ON THE FACE. The scene's emotional beat is given to you. For a shot
+that shows people, "expression_desc"
 must state the concrete, visible facial expression AND body language for the character(s)
 in frame (e.g. "eyes brimming with tears, trembling chin, shoulders finally dropping as
 she exhales"). Never write "neutral", "calm", "expressionless", or a blank value unless
 the scene is genuinely emotionless. Repeat the key expression inside visual_desc too.
 
-SHOW THE CHANGE ON THE FACE, NOT FROM ACROSS THE STREET. When the notes name
+SHOW THE CHANGE ON THE FACE, NOT FROM ACROSS THE STREET. In a shot that shows
+people: when the notes name
 what changes about the place — the lights dying, the water rising, the fire
 taking — that change is mandatory AND it does not license a wide shot. Both
 instructions are live at once, and this is how they resolve: film the change
@@ -322,7 +348,7 @@ correct, dramatically nothing, and the one moment in your drama where nobody
 can see a face is the moment it turns. If the change genuinely cannot be read
 without distance, take the wide AND keep a character large in the foreground.
 
-KEEP FACES READABLE. Faces must be clearly visible and lit well enough to read the
+KEEP FACES READABLE. In a shot that shows people, faces must be clearly visible and lit well enough to read the
 expression — soft key light on the face. Do NOT design pure silhouettes, backlit
 shapes, faces turned away from camera, or faces hidden by shadow; those destroy the
 emotional read. Prefer medium or close-up framing for emotional beats so the face fills
@@ -344,7 +370,7 @@ based on the scene's importance: 4-6 for short transition/action shots, 8-12 for
 emotional/establishing moments, 13-15 for very important finales.
 Respond ONLY with valid JSON array containing a single shot object:
 [{"idx": 0, "visual_desc": "...", "motion_desc": "...", "expression_desc": "...",
-  "audio_desc": "...", "shot_type": "wide|medium|close-up", "camera_movement": "...",
+  "shows_people": true, "audio_desc": "...", "shot_type": "wide|medium|close-up", "camera_movement": "...",
   "lens": "50mm", "duration_seconds": 8}]
 (duration_seconds is an example — vary 3-15 by scene; do not always use 5.)"""
 
@@ -358,7 +384,7 @@ Respond ONLY with valid JSON array containing a single shot object:
     MAX_SHOT_TOKENS = 6000
 
     def __init__(self, api_key: Optional[str] = None, demo: bool = False):
-        self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        self.api_key = api_key or llm_api_key()
         self.muapi_key = os.environ.get("MUAPI_KEY", "")
         self.demo = demo
 
@@ -451,6 +477,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                 characters=characters,
                 lipsync_enabled=lipsync_enabled,
                 scene_shot_scale=scene_shot_scale,
+                scene_dialogue=scene_dialogue,
             )
 
         prompt = self._build_prompt(
@@ -494,7 +521,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                     # fallback below, silently defeating the cost fix since
                     # MuAPI is the PRIMARY path, tried first.
                     return self._finish_shots(
-                        shots[:shots_per_scene()],
+                        self._cap_shots(shots, shots_per_scene()),
                         scene_emotion,
                         is_finale,
                         scene_tension,
@@ -502,6 +529,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                         characters=characters,
                         lipsync_enabled=lipsync_enabled,
                         scene_shot_scale=scene_shot_scale,
+                        scene_dialogue=scene_dialogue,
                     )
             except Exception as exc:
                 raw_snippet = locals().get("content", "<no content received>")
@@ -536,7 +564,7 @@ Respond ONLY with valid JSON array containing a single shot object:
             if shots:
                 # Cost cap, now configurable -- see DEFAULT_SHOTS_PER_SCENE.
                 return self._finish_shots(
-                    shots[:shots_per_scene()],
+                    self._cap_shots(shots, shots_per_scene()),
                     scene_emotion,
                     is_finale,
                     scene_tension,
@@ -544,6 +572,7 @@ Respond ONLY with valid JSON array containing a single shot object:
                     characters=characters,
                     lipsync_enabled=lipsync_enabled,
                     scene_shot_scale=scene_shot_scale,
+                    scene_dialogue=scene_dialogue,
                 )
 
         # 3) Last resort: deterministic template, never crashes generation.
@@ -558,6 +587,7 @@ Respond ONLY with valid JSON array containing a single shot object:
             characters=characters,
             lipsync_enabled=lipsync_enabled,
             scene_shot_scale=scene_shot_scale,
+            scene_dialogue=scene_dialogue,
         )
 
     @classmethod
@@ -631,6 +661,8 @@ Respond ONLY with valid JSON array containing a single shot object:
         if not emotion:
             return shots
         for shot in shots:
+            if getattr(shot, "shows_people", None) is False:
+                continue
             # getattr/setattr rather than attribute access: shots may be
             # plain objects from callers/tests that predate expression_desc.
             current = (getattr(shot, "expression_desc", "") or "").strip()
@@ -664,6 +696,13 @@ Respond ONLY with valid JSON array containing a single shot object:
           performance is GOING even when no end frame is rendered.
         """
         for shot in shots:
+            if getattr(shot, "shows_people", None) is False:
+                # Nobody to act. Without this the field is filled for every
+                # shot, and "LANDS on: the mouth tightening" is then sent to
+                # a plate of flames.
+                shot.expression_desc = ""
+                shot.expression_peak_desc = ""
+                continue
             try:
                 written = (getattr(shot, "expression_desc", "") or "").strip()
                 shot.expression_desc = acting.onset_expression(scene_emotion, written)
@@ -686,6 +725,7 @@ Respond ONLY with valid JSON array containing a single shot object:
         characters: Optional[List[CharacterInScene]] = None,
         lipsync_enabled: bool = False,
         scene_shot_scale: str = "",
+        scene_dialogue: str = "",
     ) -> List[StoryboardShot]:
         """Every path's last step: expression, acting beats, angles, durations.
 
@@ -698,8 +738,17 @@ Respond ONLY with valid JSON array containing a single shot object:
         cls._apply_acting_beats(shots, scene_emotion)
         cls._note_scale_drift(shots, scene_shot_scale)
         shots = cls._clamp_durations(shots, is_finale, tension, budget)
-        return cls._apply_shot_plan(
-            shots, scene_emotion, tension, characters or [], lipsync_enabled, budget
+        planned = cls._apply_shot_plan(
+            shots,
+            scene_emotion,
+            tension,
+            characters or [],
+            lipsync_enabled,
+            budget,
+            last_speaker=cls._last_visible_speaker(scene_dialogue),
+        )
+        return cls._ensure_speakers_are_shown(
+            planned, characters or [], scene_dialogue, scene_emotion
         )
 
     @classmethod
@@ -769,6 +818,152 @@ Respond ONLY with valid JSON array containing a single shot object:
         ]
         return " ".join(words)
 
+    #: How many shots of nobody a scene may keep on top of its coverage. They
+    #: are short establishing beats, and the brief rarely names more than two.
+    MAX_EMPTY_SHOTS_PER_SCENE = 2
+
+    @classmethod
+    def _cap_shots(cls, shots: List[StoryboardShot], limit: int) -> List[StoryboardShot]:
+        """Cost cap on a scene's coverage that does not eat its empty beats.
+
+        ``shots[:limit]`` kept the first N shots, and the designer writes the
+        scene in order: an opening beat of nobody ("black surf on wet stones")
+        used up the allowance and a shot of a person fell off the end, or the
+        reverse. Shots that declare ``shows_people: false`` are counted
+        separately, so the brief's empty beats survive the cap and the cap
+        still bounds the shots that show people.
+        """
+        kept: List[StoryboardShot] = []
+        people = empty = 0
+        for shot in shots:
+            if getattr(shot, "shows_people", None) is False:
+                if empty < cls.MAX_EMPTY_SHOTS_PER_SCENE:
+                    kept.append(shot)
+                    empty += 1
+            elif people < limit:
+                kept.append(shot)
+                people += 1
+        return kept
+
+    @staticmethod
+    def _visible_speaker_lines(scene_dialogue: str, characters) -> List[tuple]:
+        """``[(cast name, first line)]`` for each visible character who speaks.
+
+        Heard-only voices (O.S./V.O., a name with no portrait in the cast) are
+        left out: they have no face to be on.
+        """
+        visible = {
+            speaker_key(c.name): c.name
+            for c in (characters or [])
+            if getattr(c, "is_visible", True) and (c.name or "").strip()
+        }
+        found: dict = {}
+        for raw in (scene_dialogue or "").splitlines():
+            if ":" not in raw:
+                continue
+            head, line = raw.split(":", 1)
+            if re.search(r"\((?:o\.?s\.?|v\.?o\.?)\b", head, re.IGNORECASE):
+                continue
+            key = speaker_key(re.sub(r"\s*\(.*$", "", head).strip())
+            if key in visible and key not in found and line.strip():
+                found[key] = (visible[key], line.strip())
+        return list(found.values())
+
+    @classmethod
+    def _ensure_speakers_are_shown(
+        cls,
+        shots: List[StoryboardShot],
+        characters,
+        scene_dialogue: str,
+        scene_emotion: str = "",
+    ) -> List[StoryboardShot]:
+        """A visible character who SPEAKS in a scene is on screen in some shot.
+
+        The prompt says so ("THE PICTURE FOLLOWS THE SOUND") and the model
+        still wrote "Tomas hears Ilya's voice answer from the shadowed
+        doorway" for a character who is in the room and has a portrait: job
+        21a87c5a never shows Ilya, and his "Nobody goes out in this" plays
+        over Tomas's face. A rule a model may ignore is not a guarantee, so it
+        is enforced here.
+
+        Only rewrites; never adds a shot (the scene's count and its seconds
+        are the plan's). The shot repurposed is the LAST one that shows
+        people, because the first is the master the scene is built on. A
+        scene with a single shot is left alone -- rewriting it would remove
+        whoever it already shows. A speaker is "shown" when some shot's own
+        text names them as present (on_screen_name_matches, which does not
+        count "Ilya's voice answers" as a presence).
+        """
+        from pipelines.script2video import on_screen_name_matches
+
+        speakers = cls._visible_speaker_lines(scene_dialogue, characters)
+        if not speakers or len(shots) < 2:
+            return shots
+        cast = [c for c in (characters or []) if getattr(c, "is_visible", True)]
+
+        def shown() -> set:
+            seen = set()
+            for shot in shots:
+                if getattr(shot, "shows_people", None) is False:
+                    continue
+                text = f"{shot.visual_desc} {shot.motion_desc}".lower()
+                for _, character in on_screen_name_matches(text, cast):
+                    seen.add(speaker_key(character.name))
+            return seen
+
+        for name, line in speakers:
+            if speaker_key(name) in shown():
+                continue
+            candidates = [
+                i for i, s in enumerate(shots)
+                if i > 0 and getattr(s, "shows_people", None) is not False
+            ]
+            if not candidates:
+                continue
+            shot = shots[candidates[-1]]
+            spoken = line if len(line) <= 80 else line[:77].rstrip() + "..."
+            shot.visual_desc = (
+                f"Close-up on {name}'s face as {name} speaks to the others in "
+                f"the room: \"{spoken}\""
+            )
+            shot.motion_desc = (
+                f"{name} speaks, the mouth moving with the words; the smallest "
+                f"shift of the head and eyes. Almost still."
+            )
+            shot.shows_people = True
+            shot.shot_type = "close-up"
+            try:
+                shot.expression_desc = acting.onset_expression(scene_emotion, "")
+                shot.expression_peak_desc = acting.peak_expression(scene_emotion)
+            except AttributeError:
+                pass
+            logger.info(
+                "Scene's storyboard never showed %s, who speaks in it; shot %d "
+                "now shows them.",
+                name,
+                candidates[-1] + 1,
+            )
+        return shots
+
+    @staticmethod
+    def _last_visible_speaker(scene_dialogue: str) -> str:
+        """Name that speaks the last line a face is on screen for.
+
+        Heard-only voices (O.S./V.O., or a name the dialogue block marks as a
+        voice) are skipped: they have no face to be under.
+        """
+        for raw in reversed((scene_dialogue or "").splitlines()):
+            line = raw.strip()
+            if ":" not in line:
+                continue
+            head = line.split(":", 1)[0]
+            if re.search(r"\((?:o\.?s\.?|v\.?o\.?)\b", head, re.IGNORECASE):
+                continue
+            name = re.sub(r"\s*\(.*$", "", head).strip()
+            if name and not is_marked_unseen(name):
+                return name
+        return ""
+
     @classmethod
     def _apply_shot_plan(
         cls,
@@ -778,6 +973,7 @@ Respond ONLY with valid JSON array containing a single shot object:
         characters: List[CharacterInScene],
         lipsync_enabled: bool = False,
         budget: float = 0.0,
+        last_speaker: str = "",
     ) -> List[StoryboardShot]:
         """Give a peak scene a second angle, and set generate/deliver lengths.
 
@@ -792,6 +988,48 @@ Respond ONLY with valid JSON array containing a single shot object:
         """
         if not shots:
             return shots
+        empties = [s for s in shots if getattr(s, "shows_people", None) is False]
+        if empties:
+            # Beats of nobody are not coverage of a face, and the machinery
+            # below (a master, a reaction cut on the listener) is built around
+            # one. Plan the shots that show people on what the empty beats
+            # leave of the budget, and put the empty ones back where the
+            # designer had them.
+            empty_ids = {id(s) for s in empties}
+            people = [s for s in shots if id(s) not in empty_ids]
+            for shot in empties:
+                shot.role = "master"
+                shot.deliver_seconds = 0.0
+            if not people:
+                return shots
+            reserve = sum(float(s.duration_seconds or 0.0) for s in empties)
+            remaining = max(float(budget or 0.0) - reserve, 4.0) if budget else 0.0
+            planned = cls._apply_shot_plan(
+                people,
+                scene_emotion,
+                tension,
+                characters,
+                lipsync_enabled,
+                remaining,
+                last_speaker=last_speaker,
+            )
+            # Each empty beat goes back where the designer put it: after as
+            # many people shots as came before it. Job 82c56e88 sent every
+            # empty beat to the END of the scene, so the radio that is the
+            # source of the dispatcher's voice was shown after the voice had
+            # finished -- and the voice played over Mira's face.
+            seen = 0
+            slots: Dict[int, List[StoryboardShot]] = {}
+            for shot in shots:
+                if id(shot) in empty_ids:
+                    slots.setdefault(min(seen, len(planned)), []).append(shot)
+                else:
+                    seen += 1
+            out: List[StoryboardShot] = list(slots.get(0, []))
+            for position, shot in enumerate(planned, start=1):
+                out.append(shot)
+                out.extend(slots.get(position, []))
+            return out
         master = shots[0]
         # The plan is the SCENE's, so it is made from the scene's budget --
         # which is no longer the same number as the master's own length once
@@ -814,11 +1052,43 @@ Respond ONLY with valid JSON array containing a single shot object:
         # share _clamp_durations gave it was a share of a cut that no longer
         # happens there.
         master.duration_seconds = plan[0].generate_seconds
-        reaction = cls._build_reaction_shot(master, scene_emotion, characters)
+        if cls._subject_speaks_last(master, characters, last_speaker):
+            # The back half of the scene is where the last line is spoken, and
+            # it is the master subject's own. A cutaway there is either the
+            # listener under the speaker's words or a one-person "extreme
+            # close-up" the video model cannot frame (job 21a87c5a came back
+            # as a full body). The master already holds the speaker: let it
+            # carry the whole scene, uncut.
+            master.deliver_seconds = 0.0
+            return [master]
+        reaction = cls._build_reaction_shot(
+            master, scene_emotion, characters, last_speaker=last_speaker
+        )
         reaction.duration_seconds = plan[1].generate_seconds
         reaction.deliver_seconds = plan[1].deliver_seconds
         reaction.role = plan[1].role
         return [master, reaction]
+
+    @staticmethod
+    def _subject_speaks_last(
+        master: StoryboardShot,
+        characters: List[CharacterInScene],
+        last_speaker: str,
+    ) -> bool:
+        if not last_speaker:
+            return False
+        text = f"{master.visual_desc} {master.motion_desc}".lower()
+        subject = next(
+            (
+                c
+                for c in characters
+                if getattr(c, "is_visible", True) and (c.name or "").lower() in text
+            ),
+            None,
+        )
+        return subject is not None and speaker_key(subject.name) == speaker_key(
+            last_speaker
+        )
 
     #: Who the cutaway is ON. A drama with two people in the scene cuts to the
     #: OTHER one -- that is what a reaction shot is, and the pipeline can hold
@@ -832,6 +1102,7 @@ Respond ONLY with valid JSON array containing a single shot object:
         master: StoryboardShot,
         scene_emotion: str,
         characters: List[CharacterInScene],
+        last_speaker: str = "",
     ) -> StoryboardShot:
         visible = [c for c in characters if getattr(c, "is_visible", True)]
         master_text = f"{master.visual_desc} {master.motion_desc}".lower()
@@ -844,6 +1115,18 @@ Respond ONLY with valid JSON array containing a single shot object:
             (c for c in visible if (c.name or "").lower() in master_text), None
         )
         other = next((c for c in visible if c is not subject), None)
+        if (
+            subject is not None
+            and last_speaker
+            and speaker_key(subject.name) == speaker_key(last_speaker)
+        ):
+            # The cutaway lands on the back half of the scene, which is where
+            # the scene's LAST line is spoken. If that line is the master
+            # subject's own, cutting to the other person puts the speaker's
+            # words under a face that "is listening, not speaking" -- job
+            # 82c56e88 played Mira's "Tell them to stop the search" over eight
+            # seconds of Tomas. Go tighter on the speaker instead.
+            other = None
 
         peak = (getattr(master, "expression_peak_desc", "") or "").strip()
         if other is not None:
@@ -1201,7 +1484,7 @@ Respond ONLY with valid JSON array containing a single shot object:
             # Filter blocks by type; never index by position. (2) The old
             # flat 60s httpx deadline with no retries turned a slow or busy
             # upstream into the same silent template fallback.
-            client = anthropic.AsyncAnthropic(api_key=self.api_key, max_retries=2)
+            client = make_llm_client(self.api_key, max_retries=2)
             async with client.messages.stream(
                 model="claude-sonnet-5",
                 # Thinking and text share this budget, so the pre-thinking

@@ -163,6 +163,10 @@ class FalAIMiniMaxVideoGenerator:
     """
 
     accepts_reference_set = True
+    #: This endpoint can start a clip from a rendered first frame as well as
+    #: from references alone, so script2video may choose per shot. Declared,
+    #: not assumed: the call site is duck-typed.
+    can_start_from_frame = True
 
     def __init__(self, api_key: str, demo: bool = False):
         self.demo = demo
@@ -189,6 +193,7 @@ class FalAIMiniMaxVideoGenerator:
         last_image: Optional[str] = None,
         reference_images: Optional[Sequence[str]] = None,
         reference_labels: Optional[Sequence[str]] = None,
+        by_reference: Optional[bool] = None,
     ) -> str:
         """``reference_images`` is the ordered set to bind; ``reference_labels``
         says who or what each one is, in the same order.
@@ -203,7 +208,11 @@ class FalAIMiniMaxVideoGenerator:
         if self.demo:
             return DEMO_VIDEO_URL
 
-        by_reference = mode() == "reference"
+        # A per-shot ``by_reference`` wins over the deployment-wide mode: a
+        # tight close-up is started from a rendered frame even where every
+        # other shot is reference-only.
+        if by_reference is None:
+            by_reference = mode() == "reference"
         references = _reference_set(image_url, reference_images, anchor_first=by_reference)
         # Labels travel with their picture, not their position: de-duplicating
         # or capping the set must not hand one face another face's name.

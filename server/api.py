@@ -101,6 +101,7 @@ from interfaces.delivery import resolve_tier as resolve_delivery_tier
 from interfaces.language import normalize as normalize_language
 from interfaces.render_eta import RenderPlan, prior_seconds
 from interfaces.second_budget import SECONDS_PER_CREDIT, total_budget_seconds
+from tools.llm_provider import api_key as llm_api_key
 from tools.muapi_lipsync import is_lipsync_enabled
 from tools.muapi_voice_generator import is_dialogue_enabled
 from jobs import (
@@ -862,7 +863,7 @@ async def health():
         # /api/estimate is stuck at ~5s (that's the demo short-circuit).
         "demo_reason": _demo_reason(),
         "muapi_configured": bool((os.environ.get("MUAPI_KEY") or "").strip()),
-        "claude_configured": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "claude_configured": bool(llm_api_key()),
         # True if the screenwriter/storyboard agents have ANY working LLM
         # path (MuAPI's Claude route tried first, direct Anthropic as
         # fallback) -- distinct from claude_configured, which only reflects
@@ -870,7 +871,7 @@ async def health():
         # is already covering it.
         "creative_llm_available": bool(
             (os.environ.get("MUAPI_KEY") or "").strip()
-            or os.environ.get("ANTHROPIC_API_KEY")
+            or llm_api_key()
         ),
         "auth_configured": bool(SUPABASE_URL),
         # Whether the server will honour dialogue_enabled at all. The client
@@ -2589,6 +2590,10 @@ async def commission_episode(
         library_characters=series.preset_characters(),
         series_id=series.id,
         series_brief=brief,
+        # The room the series was established in, as a picture. Without it
+        # every episode drew its set from the setting's words alone, and the
+        # same words came back as a different room each time.
+        location_url=series.location_plate_url,
     )
     job.episode_number = series_store.reserve_episode(series, job.id)
     await series_store.save(current_user.user_id, series)
@@ -2776,6 +2781,7 @@ async def admin_retry_job(
         character_image=old.character_image,
         character_name=old.character_name,
         location_image=old.location_image,
+        location_url=old.location_url,
         music_enabled=old.music_enabled,
         dialogue_enabled=old.dialogue_enabled,
         lipsync_enabled=old.lipsync_enabled,
@@ -2895,6 +2901,20 @@ class PortalRequest(BaseModel):
     return_url: str
 
 
+def _embedded_checkout_session_id(url) -> Optional[str]:
+    """The Whop checkout-configuration id, for the on-site payment form.
+
+    On by default (Whop Elements `Checkout`, mounted from this id). The earlier
+    embed (@whop/checkout) answered "This checkout is no longer available" for
+    every fresh configuration, which is why #163 made it opt-in; that embed is
+    gone, and MUSEFORGE_WHOP_EMBED=0 stays as the kill switch that sends the
+    client back to the hosted purchase_url redirect without a release.
+    """
+    if os.environ.get("MUSEFORGE_WHOP_EMBED", "").strip().lower() in ("0", "false", "no", "off"):
+        return None
+    return getattr(url, "session_id", None)
+
+
 @app.post("/api/create-checkout-session")
 async def create_checkout_session(
     req: CheckoutRequest,
@@ -2926,7 +2946,7 @@ async def create_checkout_session(
             )
             # `session_id` lets the site embed Whop's form instead of leaving;
             # `url` stays as the redirect fallback.
-            return {"url": url, "session_id": getattr(url, "session_id", None)}
+            return {"url": url, "session_id": _embedded_checkout_session_id(url)}
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
@@ -2998,7 +3018,7 @@ async def buy_credits(
             )
             return {
                 "url": url,
-                "session_id": getattr(url, "session_id", None),
+                "session_id": _embedded_checkout_session_id(url),
                 "package": pkg_key,
                 "credits": CREDIT_PACKAGES[pkg_key]["credits"],
             }

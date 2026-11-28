@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Sparkles,
   Clapperboard,
@@ -22,6 +22,7 @@ import { useLanguage } from "../contexts/LanguageContext";
 import { useAuth } from "../contexts/AuthContext";
 import { API_BASE } from "../lib/apiBase";
 import { tr } from "../lib/tr";
+import { scenesAskedFor } from "../lib/sceneCount";
 
 // Plans allowed to attach optional background music. Kept in sync with the
 // server-side gate in server/api.py (music_enabled is silently ignored for
@@ -94,6 +95,8 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
   const [directorStyle, setDirectorStyle] = useState("cinematic_balanced");
   const [aspectRatio, setAspectRatio] = useState("16:9");
   const [numScenes, setNumScenes] = useState(3);
+  // Once the person moves the slider, the slider wins over the brief's wording.
+  const scenesTouched = useRef(false);
   const [userRequirement, setUserRequirement] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [charCount, setCharCount] = useState(0);
@@ -135,6 +138,14 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
     lipsyncAvailable && LIPSYNC_ELIGIBLE_PLANS.includes(plan);
   const maxScenes = PLAN_MAX_SCENES[plan] ?? PLAN_MAX_SCENES.free;
   const libraryEligible = plan === "pro";
+
+  // The brief is binding: "exactly 4 scenes" in the text sets the count, unless
+  // the person has chosen one themselves (see lib/sceneCount.js).
+  useEffect(() => {
+    if (scenesTouched.current) return;
+    const asked = scenesAskedFor(idea, maxScenes);
+    if (asked) setNumScenes(asked);
+  }, [idea, maxScenes]);
 
   // If the user's plan loads with a lower cap than the current slider value,
   // clamp so we never submit above what the server will accept.
@@ -635,7 +646,10 @@ export default function IdeaForm({ onSubmit, isSubmitting, prefill }) {
               min={2}
               max={maxScenes}
               value={Math.min(numScenes, maxScenes)}
-              onChange={(e) => setNumScenes(Number(e.target.value))}
+              onChange={(e) => {
+                scenesTouched.current = true;
+                setNumScenes(Number(e.target.value));
+              }}
               className="w-full accent-purple-500"
               disabled={isSubmitting}
             />

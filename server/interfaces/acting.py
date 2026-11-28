@@ -74,6 +74,13 @@ class ActingBeat:
 #: LANGUAGE_CLAUSE), and the emotion tag is prose like everything else -- an
 #: English-only table silently degrades every non-English drama to the neutral
 #: fallback, which is precisely the flat face this module exists to prevent.
+#: NO BEAT NAMES THE EXPRESSION IT IS NOT. The video endpoints here have no
+#: negative prompt (see script2video.build_motion_prompt on Kling's schema), so
+#: "no trace of a smile" is the word "smile" in the positive prompt. Job
+#: d91a4172's discovery close-up was sent exactly that peak and came back
+#: smiling -- the second job running to grin at a glowing container, the first
+#: (6efbb788) because the beat asked for a smile and the second because it
+#: forbade one. A face is directed by what its muscles DO.
 _BEATS: Tuple[Tuple[Tuple[str, ...], ActingBeat], ...] = (
     (
         ("tear", "grief", "sorrow", "mourn", "heartbreak", "weep", "cry",
@@ -226,8 +233,55 @@ _BEATS: Tuple[Tuple[Tuple[str, ...], ActingBeat], ...] = (
         ),
     ),
     (
-        ("suspicion", "doubt", "mistrust", "wary", "guarded", "tense", "confront",
-         "şüphe", "güvensiz", "temkinli", "gergin", "yüzleş"),
+        # Job 82c56e88: scene 2 was tagged "tense confrontation" -- two men
+        # arguing over whether to leave a hut in a blizzard -- and "tense" and
+        # "confront" lived on the suspicion beat, whose peak is "the smile
+        # staying on the mouth". Tomas leaned over the table grinning while he
+        # begged to go down for help, and Ilya grinned at "Nobody goes out in
+        # this". A quarrel is not a poker face. It gets its own beat, and the
+        # beat has no smile in it.
+        ("confront", "argument", "argue", "quarrel", "dispute", "heated",
+         "tense", "standoff", "gergin", "yüzleş", "tartış", "kavga"),
+        ActingBeat(
+            label="confrontation",
+            onset="braced: jaw set, shoulders squared, gaze level and hard on the other person",
+            peak=(
+                "the edge showing: brows drawing down, jaw working, lips thinning "
+                "to a line, chin lifting, breath held, the mouth held flat and closed"
+            ),
+            voice_tag="sharply",
+            stability=0.35,
+        ),
+    ),
+    (
+        # Job 6efbb788: "wary curiosity" -- a dock worker alone at night,
+        # watching a container leak light, a radio at her face -- matched
+        # "wary" on the suspicion beat below, whose onset is "the social face"
+        # and whose peak keeps "the smile staying on the mouth". That beat is
+        # a poker face held AT somebody; there was nobody there. The video
+        # model played the word it was given, and the one close-up of the
+        # discovery scene is a woman grinning into a walkie-talkie.
+        #
+        # Wariness is attention, not a mask: it is aimed at a THING as often
+        # as at a person, and it has no smile in it. Ahead of suspicion so
+        # "wary" lands here; "suspicion", "doubt" and "mistrust" -- which are
+        # about another person -- still land on the poker face.
+        ("wary", "wariness", "uneasy", "unease", "alert", "vigilan",
+         "curious", "curiosity", "temkinli", "tedirgin", "merak"),
+        ActingBeat(
+            label="wariness",
+            onset="alert and still: eyes fixed on the thing, brow slightly drawn, breath shallow",
+            peak=(
+                "the attention sharpening: eyes narrowing on one point, head "
+                "drawing back a fraction, jaw tightening, the mouth held flat and closed"
+            ),
+            voice_tag="warily",
+            stability=0.45,
+        ),
+    ),
+    (
+        ("suspicion", "doubt", "mistrust", "guarded",
+         "şüphe", "güvensiz"),
         ActingBeat(
             label="suspicion",
             onset="pleasant and blank: the social face, giving nothing",

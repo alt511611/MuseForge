@@ -73,6 +73,49 @@ class ContentFlagged(RuntimeError):
 #: in flight) should not sit doubling its wait on every poll cycle for that.
 CONTENT_POLICY_RETRIES = 1
 
+#: fal reports a runner that died (``Runner connection lost``) as a COMPLETED
+#: status carrying an ``error`` -- and then re-queues the same request itself,
+#: which goes on to finish and is billed. Job 01a2035e-666a-7551-a20f-44e759462b1e
+#: (Vidu Q4, 2026-11-22) did exactly that: we raised on the first status, showed
+#: the person a failure, and fal charged $0.126 for the video we had thrown
+#: away. So a failed status is watched for this long before it is believed.
+#: Seconds, not polls; 0 restores the old "believe it at once".
+FAILED_STATUS_GRACE_SECONDS = float(os.environ.get("FALAI_FAILED_STATUS_GRACE", "30"))
+
+
+def _may_be_requeued(error) -> bool:
+    """Only an infrastructure failure is worth watching; a refusal, a bad
+    input or an empty balance will not turn into a result by waiting."""
+    text = str(error).lower()
+    return any(k in text for k in ("runner", "connection lost", "worker", "timed out", "unavailable", "internal"))
+
+
+#: fal answers `downstream_service_unavailable` (or a bare 502/503/504) when a
+#: model host blinks. Job 782c689e: the script was written and paid for, the
+#: first portrait drew that error on result fetch, and the whole job died --
+#: "crashed before/during pipeline" -- because nothing here retried anything
+#: but a content flag. A failed fal job is not billed, so a resubmit costs the
+#: wait and nothing else.
+TRANSIENT_RETRIES = 2
+TRANSIENT_BACKOFF_SECONDS = 4.0
+_TRANSIENT_MARKERS = (
+    "downstream_service_unavailable",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+)
+
+
+def is_transient(exc: Exception) -> bool:
+    """A failure that a second submit of the same arguments can clear."""
+    if isinstance(exc, (MuAPICancelled, ContentFlagged, TimeoutError)):
+        return False
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int) and status in (500, 502, 503, 504):
+        return True
+    text = str(exc).lower()
+    return any(marker in text for marker in _TRANSIENT_MARKERS)
+
 
 async def fal_generate(
     client: fal_client.AsyncClient,
@@ -88,8 +131,9 @@ async def fal_generate(
     No silent MuAPI fallback -- fal.ai is an explicit user choice, so errors
     surface clearly rather than silently masking a wrong provider config.
     """
-    attempts = CONTENT_POLICY_RETRIES + 1
-    for attempt in range(attempts):
+    flag_retries = CONTENT_POLICY_RETRIES
+    outage_retries = TRANSIENT_RETRIES
+    while True:
         try:
             return await _submit_and_wait(
                 client,
@@ -100,16 +144,25 @@ async def fal_generate(
                 max_polls=max_polls,
             )
         except ContentFlagged:
-            if attempt == attempts - 1:
+            if flag_retries <= 0:
                 raise
+            flag_retries -= 1
             logger.warning(
-                "fal.ai flagged %s as a content policy violation on attempt "
-                "%d/%d; resubmitting the same arguments once before giving "
-                "up.",
+                "fal.ai flagged %s as a content policy violation; "
+                "resubmitting the same arguments once before giving up.",
                 endpoint,
-                attempt + 1,
-                attempts,
             )
+        except Exception as exc:
+            if outage_retries <= 0 or not is_transient(exc):
+                raise
+            outage_retries -= 1
+            delay = TRANSIENT_BACKOFF_SECONDS * (TRANSIENT_RETRIES - outage_retries)
+            logger.warning(
+                "fal.ai %s hit a transient failure (%s); resubmitting in "
+                "%.0fs (%d left).",
+                endpoint, str(exc)[:200], delay, outage_retries,
+            )
+            await asyncio.sleep(delay)
 
 
 async def _submit_and_wait(
@@ -124,6 +177,7 @@ async def _submit_and_wait(
     """One submit/poll/result cycle -- the retryable unit `fal_generate` wraps."""
     handle = await client.submit(endpoint, arguments=arguments)
     request_id = handle.request_id
+    grace_polls = int(-(-FAILED_STATUS_GRACE_SECONDS // max(poll_interval, 0.001)))
 
     for _ in range(max_polls):
         if is_cancelled and is_cancelled():
@@ -131,6 +185,18 @@ async def _submit_and_wait(
 
         status = await client.status(endpoint, request_id, with_logs=False)
         if isinstance(status, fal_client.Completed):
+            if status.error and grace_polls > 0 and _may_be_requeued(status.error):
+                # May be a request fal is about to re-queue; look again before
+                # giving up. A status that flips back to queued/running, or
+                # to completed without an error, carries on as normal.
+                grace_polls -= 1
+                logger.warning(
+                    "fal.ai job %s reported %r; watching %d more poll(s) in "
+                    "case fal retries it itself.",
+                    request_id, status.error, grace_polls,
+                )
+                await asyncio.sleep(poll_interval)
+                continue
             if status.error:
                 raise _translate(
                     RuntimeError(f"fal.ai job {request_id} failed: {status.error}"),

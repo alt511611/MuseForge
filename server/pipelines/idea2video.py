@@ -19,6 +19,10 @@ from interfaces.character import CharacterInScene, DramaScript
 from interfaces.shot import StoryboardShot
 from interfaces.film_look import build_film_look_filters
 from interfaces import gender as gender_of
+from interfaces.lighting import is_interior
+from interfaces.places import extra_locations, scene_location
+from interfaces import character_sheet, cut_bridge
+from interfaces.color_grade import palette_for
 from interfaces import micro_drama
 from interfaces.language import DEFAULT_LANGUAGE
 from interfaces import who_speaks
@@ -35,6 +39,8 @@ from interfaces.shot_plan import (
     plan_shot_scales,
     shots_the_line_reaches,
 )
+from interfaces.continuity import opening_state
+from interfaces.speaker import is_marked_unseen, speaker_key
 from interfaces.transitions import plan_transitions
 from interfaces.visual_style import resolve as resolve_visual_style
 from pipelines.script2video import (
@@ -44,6 +50,7 @@ from pipelines.script2video import (
     apply_color_grade,
     build_delivery_filters,
     resolve_delivery,
+    on_screen_name_matches,
     concatenate_videos,
     concatenate_videos_with_transitions,
     download_video,
@@ -441,6 +448,135 @@ def _speaks_in_a_readable_framing(
     )
 
 
+#: How much of a storyboarded angle a redraw may overwrite before that angle
+#: counts as lost. The rejoined tail keeps whatever is left of it; a second of
+#: an angle under the redraw is a second of the shot the storyboard designed
+#: replaced by a different shot.
+_REDRAW_ANGLE_OVERLAP_SECONDS = 1.0
+
+
+def _redraw_discards_an_angle(shots: Optional[Sequence[Any]], redraw_seconds: float) -> bool:
+    """Would redrawing this scene's first ``redraw_seconds`` erase an angle?
+
+    A redrawing lip sync (tools/falai_h3_lipsync) generates a new clip from
+    the scene's FIRST frame, as long as the line (5 s at least), and the rest
+    of the take is rejoined behind it. Everything the first seconds held
+    besides that first frame is gone. _scene_survives_a_redraw asks how many
+    PEOPLE that is; nothing asked how many SHOTS.
+
+    Job d91a4172: one woman in every scene, so both dialogue scenes passed.
+    Scene 1 was storyboarded wide (4 s), medium (4 s), close-up (3 s); the
+    redraw ran 9.46 s from the wide's first frame, so the medium -- Mara
+    stopping dead, keying the radio -- was replaced by more of the wide, and
+    the close-up kept its last 1.5 s. Scene 2 lost its medium and its close-up
+    the same way. Two of three designed angles, twice, for a mouth synced in a
+    WIDE shot, where it is hardest to see.
+
+    True when any angle after the first starts more than
+    _REDRAW_ANGLE_OVERLAP_SECONDS before the redraw ends. Fails OPEN (False)
+    when there is no storyboard or no durations to place the angles by.
+    """
+    shots = list(shots or ())
+    if len(shots) < 2 or redraw_seconds <= 0:
+        return False
+    start = 0.0
+    for index, shot in enumerate(shots):
+        if index > 0 and start < redraw_seconds - _REDRAW_ANGLE_OVERLAP_SECONDS:
+            return True
+        try:
+            length = float(
+                (shot.get("deliver_seconds") or shot.get("duration_seconds") or 0.0)
+                if isinstance(shot, dict)
+                else (
+                    getattr(shot, "deliver_seconds", 0.0)
+                    or getattr(shot, "duration_seconds", 0.0)
+                    or 0.0
+                )
+            )
+        except (TypeError, ValueError):
+            return False
+        if length <= 0:
+            return False
+        start += length
+    return False
+
+
+def _scene_opening(scenes: Sequence[Any], index: int) -> str:
+    """The state scene ``index`` opens in: the previous scene's ending, as
+    continuity reconciles it, or the scene's own ``starts_with`` for the
+    first scene (opening_state has nothing before it to read)."""
+    return opening_state(list(scenes or []), index) or (
+        _scene_field(scenes[index], "starts_with").strip()
+        if 0 <= index < len(scenes or [])
+        else ""
+    )
+
+
+def _carries_the_event(shots: Optional[Sequence[Any]]) -> bool:
+    """Whether this scene's take opens before the drama's event and ends after
+    it (interfaces/long_take.event_spans_take, recorded per shot).
+
+    Such a take must not be REDRAWN for its mouth. Job d9682326: the climax
+    was drawn from "doors shut, floodlights lit" to "doors open, harbour
+    dark", and the lip sync replaced its first 5.4 s with a clip redrawn from
+    the opening frame -- Mara standing at a shut door under lit floodlights,
+    saying "every light on the dock just dropped". What was left of the event
+    was squeezed into the last second and a half of the film. A redraw is a
+    new take from one still; the event IS the change from that still.
+    """
+    for shot in shots or ():
+        flag = shot.get("event_in_take") if isinstance(shot, dict) else getattr(shot, "event_in_take", False)
+        if flag:
+            return True
+    return False
+
+
+def _heard_only_names(characters: Optional[Sequence[Any]], dialogue: Any = ()) -> Set[str]:
+    """Casefolded speakers the film only HEARS: hidden characters, plus anyone
+    who speaks and has no entry in the cast at all.
+
+    Job bb6c6f1f: a dispatcher named Lena, "heard only over a radio and never
+    seen", was written into the dialogue but not into the cast (a cast entry is
+    a portrait and a face, and she has neither). Every place that decided who
+    is on screen read ``not c.is_visible`` off the cast, so Lena was nobody's
+    off-screen voice and "Lena, Mira" was a two-hander: lip sync was refused on
+    the scene and the surcharge refunded. A speaker with no portrait cannot be
+    shown, so she is heard-only by construction.
+    """
+    cast = list(characters or ())
+    heard = {c.name.casefold() for c in cast if not getattr(c, "is_visible", True)}
+    if not cast:
+        return heard
+    known = {speaker_key(c.name) for c in cast}
+    for entry in dialogue or ():
+        who = (
+            entry.get("character") if isinstance(entry, dict)
+            else getattr(entry, "character", "")
+        )
+        key = speaker_key(who) if who else ""
+        if key and key not in known:
+            heard.add(key)
+    return heard
+
+
+def _visible_speaker_names(
+    lines: Sequence[Dict[str, Any]], off_screen: Optional[Set[str]] = None
+) -> List[str]:
+    """The distinct speakers _has_one_visible_speaker counts, by display name."""
+    off_screen = {str(name).strip().casefold() for name in (off_screen or set())}
+    names: Dict[str, str] = {}
+    for track in lines or ():
+        who = str(track.get("character") or "").strip()
+        if (
+            str(track.get("line") or "").strip()
+            and who
+            and not is_marked_unseen(who)
+            and speaker_key(who) not in off_screen
+        ):
+            names.setdefault(speaker_key(who), who)
+    return sorted(names.values())
+
+
 def _has_one_visible_speaker(
     lines: Sequence[Dict[str, Any]], off_screen: Optional[Set[str]] = None
 ) -> bool:
@@ -457,14 +593,155 @@ def _has_one_visible_speaker(
     provider still make the final call in that case.
     """
     off_screen = {str(name).strip().casefold() for name in (off_screen or set())}
+    # A name the script itself marked (O.S.) or (V.O.) is a voice, not a mouth:
+    # "Yusuf (O.S.)" is neither a second face nor a stranger to "Yusuf".
     speakers = {
-        str(track.get("character") or "").strip().casefold()
+        speaker_key(track.get("character"))
         for track in lines or ()
         if str(track.get("line") or "").strip()
         and str(track.get("character") or "").strip()
-        and str(track.get("character") or "").strip().casefold() not in off_screen
+        and not is_marked_unseen(track.get("character"))
+        and speaker_key(track.get("character")) not in off_screen
     }
     return len(speakers) <= 1
+
+
+def _shot_declares_nobody(shot: Any) -> bool:
+    return (
+        shot.get("shows_people") if isinstance(shot, dict) else getattr(shot, "shows_people", None)
+    ) is False
+
+
+#: Below this much speech a redraw costs more picture than it buys mouth.
+_MIN_REDRAW_SPEECH_SECONDS = float(
+    os.environ.get("MUSEFORGE_REDRAW_MIN_SPEECH_SECONDS", "3.0") or 3.0
+)
+#: The lip-sync endpoint's own floor (tools/falai_h3_lipsync.MIN_AUDIO_SECONDS).
+_REDRAW_FLOOR_SECONDS = 5.0
+
+
+def _edit_backend_for_crowded_scenes(lipsync):
+    """The backend that syncs a scene the redrawing one cannot take, or None.
+
+    ``falai_h3`` redraws a scene from its first frame, so a scene with two
+    people in it is skipped (job 3570bab0: all three scenes of a two-hander
+    kept their unsynced mouths and the lip-sync fee was refunded). Sync
+    Lipsync v2 EDITS the given clip, so every shot survives: tried once on that
+    job's first scene it kept all cuts and moved the speaking mouth, but left a
+    small red mark above the lip and the test audio was the mixed master, not
+    clean dialogue. Unproven, so it is opt-in:
+    ``MUSEFORGE_LIPSYNC_MULTI_FALLBACK=1``. Only ever stands in for a backend
+    that redraws, and only where a FAL_KEY exists.
+    """
+    flag = (os.environ.get("MUSEFORGE_LIPSYNC_MULTI_FALLBACK", "") or "").strip().lower()
+    if flag not in ("1", "true", "yes", "on"):
+        return None
+    if not getattr(lipsync, "redraws_the_take", False):
+        return None
+    from tools.falai_lipsync import FalAILipsync
+
+    fallback = FalAILipsync(os.environ.get("FAL_KEY", ""), demo=getattr(lipsync, "demo", False))
+    return fallback if fallback.available() else None
+
+
+def _scene_survives_a_redraw(
+    shots: Optional[Sequence[Any]], characters: Optional[Sequence[Any]]
+) -> bool:
+    """Can this scene be thrown away and redrawn from its first frame?
+
+    ``falai_h3`` does not edit a mouth, it generates a new clip from ONE still
+    (tools/falai_h3_lipsync). Whatever else the scene showed is gone. The gate
+    that decided who may be redrawn asked how many people SPEAK, and job
+    7b4b7271 shows what that misses: scene 1 had five survivors on screen and
+    one line, so it passed, and the film's opening became five seconds of Yusuf
+    alone -- the wide of all five and the two-shot were generated, paid for and
+    discarded. Scene 4 lost a shot of Deniz the same way.
+
+    The question that matters is who is SEEN. A scene survives a redraw only if
+    no more than one character appears anywhere in its storyboard, because then
+    the still it is redrawn from is the whole scene.
+
+    Fails OPEN where it cannot tell (no storyboard, no cast), like every other
+    guard in this pass: the same sync it always made.
+    """
+    shots = list(shots or ())
+    cast = [c for c in (characters or ()) if getattr(c, "is_visible", True)]
+    if not shots or not cast:
+        return True
+    seen = set()
+    for shot in shots:
+        if _shot_declares_nobody(shot):
+            # An establishing beat is a shot of its own, and a redraw from the
+            # scene's first frame -- which may be exactly this one -- erases it.
+            return False
+        text = (
+            f"{_shot_field_text(shot, 'visual_desc')} "
+            f"{_shot_field_text(shot, 'motion_desc')}"
+        ).lower()
+        for _, character in on_screen_name_matches(text, cast):
+            seen.add((getattr(character, "name", "") or "").casefold())
+        if len(seen) > 1:
+            return False
+    return True
+
+
+def _location_plate_prompt(
+    location: str, time_of_day: str, era: str, style: str, look: Any, palette: str = ""
+) -> str:
+    """The prompt the drama's one empty set is drawn from.
+
+    Says what the place CONTAINS as well as that nobody is in it. "rocky coastal
+    shoreline with jagged rocks and a shingle beach" came back from FLUX.3 as a
+    seaside promenade -- railing, a footpath, street lamps down the bay, a
+    shelter -- and the plate is one of the reference images of every shot, so
+    job 7b4b7271's "deserted shore" had a promenade in all eight clips. An
+    image model fills a bare place with the furniture a place like that usually
+    has; a sentence saying the set holds only what is named takes that away
+    without a negation to misread.
+    """
+    outdoors = is_interior(location) is False
+    contents = (
+        "The set holds only what is named above; the ground, the water, the "
+        "horizon and the sky are natural and untouched, and nothing built "
+        "stands on them unless the setting names it. "
+        if outdoors
+        else "The set holds only what is named above, and nothing else is "
+        "furnished or added. "
+    )
+    return (
+        f"Empty location plate, {style} style. {location}. "
+        f"{('Time of day: ' + time_of_day + '. ') if time_of_day else ''}"
+        f"{('Era: ' + era + '. ') if era else ''}"
+        "Wide establishing view of the space itself, no people, no figures, "
+        "no characters. "
+        f"{contents}"
+        "Consistent architecture, materials, furniture and lighting. High detail."
+        # The plate is the reference every frame takes its light from, so it
+        # is drawn in the palette those frames are (interfaces/color_grade):
+        # a daylight-blue set behind tungsten faces is the mismatch a grade
+        # cannot undo.
+        f"{(' ' + palette.strip()) if (palette or '').strip() else ''}"
+        # Same reason as the character portrait: the plate is the set
+        # reference every establishing shot is drawn from, so it has to
+        # be built in the drama's own look.
+        f"{'' if look.is_photoreal else ' ' + look.render_note}"
+    )
+
+
+class _SceneLocation:
+    """A stored scene's ``location`` in the shape interfaces/places reads."""
+
+    def __init__(self, location: Any) -> None:
+        self.location = location or ""
+
+
+def _plate_for(
+    place: str, main_location: str, main_plate: Optional[str], plates: Dict[str, str]
+) -> Optional[str]:
+    """The picture of ``place``: its own plate, or the drama's for the drama's
+    own place. A place with neither gets None -- never the drama's room, which
+    is a picture of somewhere this scene is not."""
+    return (plates or {}).get(place) or (main_plate if place == main_location else None)
 
 
 async def _split_off_tail(
@@ -611,8 +888,10 @@ def _off_screen_speech_spans(
     spans: List[Tuple[float, float]] = []
     visible_speech = False
     for track in tracks:
-        character = str(track.get("character") or "").strip().casefold()
-        if character and character in off_screen:
+        character = speaker_key(track.get("character"))
+        if character and (
+            character in off_screen or is_marked_unseen(track.get("character"))
+        ):
             if "start_seconds" not in track or "end_seconds" not in track:
                 return [], True
             start = float(track["start_seconds"])
@@ -888,6 +1167,30 @@ DEFAULT_LIPSYNC_CONCURRENCY = 3
 #: without asking the provider to hold a whole film's worth of jobs open.
 DEFAULT_FOLEY_CONCURRENCY = 2
 
+#: How long the mix waits for foley once the picture is done.
+#:
+#: The model answers in about three seconds. fal's own request history for the
+#: two jobs before this change says where the rest of the "foley" stage went:
+#:
+#:     job 93be3d88   sent 18:03:52   started 18:05:55   ran 2.5 s
+#:     job 265209d6   sent 15:13:02   started 15:14:34   ran 10.2 s
+#:                    sent 15:13:02   started 15:14:44   ran 3.7 s
+#:
+#: Ninety seconds to two minutes in fal's queue, every time the model had gone
+#: cold, added straight to the end of a job (154 s and 111 s stages). The
+#: requests now leave as each scene's storyboard exists (_start_foley), so the
+#: queue runs while the video renders. What is still unfinished by the time
+#: the picture is done gets this long, and then the film is mixed without it:
+#: a sound bed is the layer a film can most afford to lose, and a customer
+#: should not wait two minutes for one.
+FOLEY_DEADLINE_SECONDS = 45.0
+
+#: Requested on top of the scene's budgeted length when foley starts before the
+#: clip exists. The take comes back a little long (MiniMax runs ~0.5 s over),
+#: and a bed that ends just after the cut is a crossfade where one that ends
+#: before it is a hole.
+FOLEY_HEAD_START_PAD_SECONDS = 0.5
+
 
 def _foley_concurrency(total_scenes: int) -> int:
     """Resolve how many scenes to generate foley for in parallel."""
@@ -975,8 +1278,16 @@ def _format_scene_direction(scene: Any) -> str:
         ("Dramatic function", "dramatic_function"),
         ("THE TURN — film this moment", "turn"),
         (
+            # The second sentence is job 6efbb788's. Its blackout scene was
+            # given one shot, and the shot drawn was the breath BEFORE the
+            # event -- "braced to pull ... floodlight poles still burn
+            # steadily behind her" -- because the scene opens there and the
+            # tension peaks there. Every other prompt in the scene then said
+            # the poles were dark, and the picture argued with all of them.
             "WHAT CHANGES ABOUT THE PLACE — this is the drama's event and it "
-            "must be VISIBLE in this scene's shots, not implied",
+            "must be VISIBLE in this scene's shots, not implied. If the scene "
+            "has only ONE shot, that shot is the moment AFTER it lands, in the "
+            "changed place — never the moment before it",
             "world_change",
         ),
         ("Subtext (what they really mean)", "subtext"),
@@ -1024,6 +1335,15 @@ def _format_story_state(scenes: List[Any], index: int) -> tuple:
         for i, scene in enumerate(scenes[index + 1 :], start=index + 1)
         if (line := _scene_beat_line(scene, i + 1))
     ]
+    # The turns say what HAPPENED; this says what is physically so as the scene
+    # opens (interfaces/continuity). Appended to the earlier-scenes block, which
+    # the storyboard artist already treats as binding.
+    opening = opening_state(scenes, index)
+    if opening:
+        before.append(
+            f"THIS SCENE OPENS IN THIS STATE (the first shot must show it; "
+            f"nothing in it resets): {opening}"
+        )
     return "\n".join(before), "\n".join(after)
 
 
@@ -1086,6 +1406,17 @@ def _world_state(scenes: List[Any], index: int) -> tuple:
         for scene in scenes[:index]
         if (change := _scene_field(scene, "world_change").strip())
     ]
+    opening = _scene_field(scenes[index], "starts_with").strip() if index < len(scenes) else ""
+    if opening and earlier:
+        # The writer states, per scene, what condition the place is in when
+        # this scene OPENS (interfaces/continuity holds it to the previous
+        # scene's ends_with). That is the scene's own answer to "which of the
+        # earlier changes still stands", and it beats the blanket list: job
+        # 82c56e88's scene 3 declared "the dead radio's light glows red and
+        # fills the hut with a live voice" as its change, and scene 4 -- the
+        # cold dawn, the radio silent -- inherited it as a standing fact and
+        # animated a red-lit radio and a burning stove into an empty room.
+        return current, opening
     return current, "; ".join(earlier)
 
 
@@ -1159,7 +1490,10 @@ def _format_scene_dialogue(
             line = str(getattr(entry, "line", "") or "").strip()
         if not line:
             continue
-        if character and character.casefold() in heard:
+        if character and is_marked_unseen(character):
+            # Already says what it is; do not append a second marker.
+            lines.append(f"{character}: {line}")
+        elif character and speaker_key(character) in heard:
             lines.append(
                 f"{character} (O.S. — a voice only, heard over comms and never "
                 f"in frame; do not stage them): {line}"
@@ -2353,6 +2687,11 @@ def spoken_seconds(dialogue_tracks: Optional[List[Dict[str, Any]]]) -> Optional[
     return end if spoke and end > 0 else None
 
 
+#: Room left after an event scene's line before the next scene (or the end of
+#: the film): the last word lands, and the cut is not on its consonant.
+EVENT_LINE_TAIL_SECONDS = 0.6
+
+
 def plan_scene_speech_anchors(
     dialogue_tracks: Optional[List[Dict[str, Any]]],
     scene_starts: Sequence[float],
@@ -2384,6 +2723,16 @@ def plan_scene_speech_anchors(
       a second opinion about where it drifted to is a desync.
     """
     lengths = _scene_speech_lengths(dialogue_tracks)
+    # Scenes whose take carries the drama's event (long_take.event_spans_take)
+    # speak at their END. Their lines are the reaction -- job d9682326's was
+    # "every light on the dock just dropped" -- and the take is drawn to reach
+    # the changed world at its last frame, so a line anchored at the picture's
+    # start is said before the thing it is about has happened.
+    after_event = {
+        int(track.get("scene_index", 0))
+        for track in dialogue_tracks or []
+        if track.get("after_event")
+    }
     anchors: Dict[int, float] = {}
     floor = 0.0
     for scene_index in sorted(lengths):
@@ -2393,6 +2742,17 @@ def plan_scene_speech_anchors(
             else 0.0
         )
         start = max(picture_start, floor)
+        if scene_index in after_event:
+            picture_end = (
+                float(scene_starts[scene_index + 1])
+                if scene_index + 1 < len(scene_starts)
+                else float(master_duration or 0.0)
+            )
+            if picture_end > picture_start:
+                start = max(
+                    start,
+                    picture_end - lengths[scene_index] - EVENT_LINE_TAIL_SECONDS,
+                )
         if master_duration > 0:
             # Never anchor past the end of the film: a line placed there is a
             # line nobody can hear, and a caption placed there never shows.
@@ -3839,6 +4199,48 @@ async def trim_clip(
         return source_path
 
 
+#: What a screenwriter writes in a character's description when the film only
+#: ever HEARS them. The screenwriter is told to write exactly this
+#: (agents/screenwriter: 'say so in the description ("heard only over the
+#: radio, never seen")'), and nothing downstream read it.
+#:
+#: "never seen" and "unseen" only count where they END the clause ("never
+#: seen", "never seen on screen") -- "a man who has never seen the sea" is a
+#: description of somebody the camera can very well see.
+_VOICE_ONLY_RE = re.compile(
+    r"\b(?:heard only|only heard|voice only|voice-only|never on screen|"
+    r"never appears on screen|off[- ]screen (?:voice|only|throughout))\b"
+    r"|\b(?:never seen|unseen)(?:\s+(?:on[- ]screen|on camera|in frame|in the film))?"
+    r"\s*(?:[,.;:)]|$)",
+    re.IGNORECASE,
+)
+
+
+def _declared_voice_only(character: Any) -> bool:
+    """Whether the script's own description says nobody ever sees them.
+
+    Job d9682326: Sol was written as "man in his sixties, heard only over the
+    radio, never seen on screen". The inference below found his name in an
+    action line -- "her radio crackles with Sol's warning" -- counted that as
+    a presence, and kept him visible. So he was given a portrait, the
+    storyboard was made to show every visible speaker and replaced two of
+    Mara's designed shots with "Close-up on Sol's face", the frame check
+    flagged both ("Do not show the man on screen") and the video model drew
+    him anyway from the portrait it was handed. Both dialogue scenes were then
+    two-handers, and lost their lip sync.
+
+    A writer's explicit statement outranks an inference from action lines:
+    it is the one piece of evidence that is about this question and nothing
+    else. Read from the description and the wardrobe line, which is where the
+    same writer put "not applicable, voice only".
+    """
+    text = " ".join(
+        str(getattr(character, field, "") or "")
+        for field in ("static_features", "description", "wardrobe", "dynamic_features")
+    )
+    return bool(_VOICE_ONLY_RE.search(text))
+
+
 def _heard_but_never_seen(script: DramaScript, cast: List[CharacterInScene]) -> set:
     """Casefolded names of characters the film only ever HEARS.
 
@@ -3898,6 +4300,10 @@ def _heard_but_never_seen(script: DramaScript, cast: List[CharacterInScene]) -> 
         on_screen_name_matches,
     )
 
+    # Said by the writer, in so many words: no inference needed, and none
+    # allowed to overrule it (see _declared_voice_only).
+    declared = {c.name.casefold() for c in cast or [] if _declared_voice_only(c)}
+
     on_screen = set()
     speaks = set()
     for scene in getattr(script, "scenes", None) or []:
@@ -3911,17 +4317,19 @@ def _heard_but_never_seen(script: DramaScript, cast: List[CharacterInScene]) -> 
                 else getattr(line, "character", "")
             )
             if who:
-                speaks.add(str(who).strip().casefold())
+                # "Arif (O.S.)" is Arif: without this he looked like a speaker
+                # named in no action line and was a candidate to be hidden.
+                speaks.add(speaker_key(who))
 
     # Nobody was named in any action line: the script is written without them,
     # not around one absent voice. Marking the whole cast invisible would
     # leave every frame with no identity lock at all.
     if not on_screen:
-        return set()
+        return declared
 
     unseen = {name for name in speaks if name not in on_screen}
     if not unseen:
-        return set()
+        return declared
 
     if not any(
         mentions_an_off_screen_device(_scene_action(scene))
@@ -3937,37 +4345,14 @@ def _heard_but_never_seen(script: DramaScript, cast: List[CharacterInScene]) -> 
             "handset or O.S.), so they are kept visible.",
             ", ".join(sorted(unseen)),
         )
-        return set()
-    return unseen
+        return declared
+    return unseen | declared
 
 
-#: Whether a character's lock is a single front-facing portrait or a
-#: multi-angle SHEET.
-#:
-#: OFF by default, and the reason is a real incompatibility rather than
-#: caution. The shipped reference model is flux-pulid, which is an IDENTITY
-#: model: it expects a photograph OF A FACE and returns that face in a picture
-#: of its own choosing. A four-panel contact sheet is not a photograph of a
-#: face, and handing one to PuLID is asking it to lock the identity of a
-#: collage.
-#:
-#: What it is for is the reference models that ask for exactly this. Kling's
-#: element definition takes "up to 4" views of one subject and combines them
-#: into a single locked subject, and Nano Banana Pro reads a multi-view sheet
-#: as evidence about the same person rather than as four people. On those a
-#: sheet is strictly more information than one front view -- a profile is what
-#: stops a character from being redrawn every time the camera moves off axis.
-#:
-#: So this is switched on WITH the backend that can use it, and the pairing is
-#: the operator's to make: there is no reliable way to ask a MuAPI slug what
-#: it does with a grid, and guessing wrong degrades every face in the film.
 def is_character_sheet_enabled() -> bool:
-    return os.environ.get("MUSEFORGE_CHARACTER_SHEET", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    """Whether a character's lock is a multi-angle SHEET rather than a single
+    front-facing portrait. See interfaces/character_sheet for the reasoning."""
+    return character_sheet.is_enabled()
 
 
 #: The sheet's own instruction. Kept beside the flag because the two only ever
@@ -4190,6 +4575,7 @@ class Idea2VideoPipeline:
         style: str = "Cinematic",
         aspect_ratio: str = "16:9",
         location_image_override: Optional[str] = None,
+        palette: str = "",
     ) -> Optional[str]:
         """Generate ONE empty-set plate of the drama's locked setting.
 
@@ -4219,18 +4605,7 @@ class Idea2VideoPipeline:
         time_of_day = (getattr(script, "setting_time_of_day", "") or "").strip()
         era = (getattr(script, "setting_era", "") or "").strip()
         look = resolve_visual_style(style)
-        prompt = (
-            f"Empty location plate, {style} style. {location}. "
-            f"{('Time of day: ' + time_of_day + '. ') if time_of_day else ''}"
-            f"{('Era: ' + era + '. ') if era else ''}"
-            "Wide establishing view of the space itself, no people, no figures, "
-            "no characters. Consistent architecture, materials, furniture and "
-            "lighting. High detail."
-            # Same reason as the character portrait: the plate is the set
-            # reference every establishing shot is drawn from, so it has to
-            # be built in the drama's own look.
-            f"{'' if look.is_photoreal else ' ' + look.render_note}"
-        )
+        prompt = _location_plate_prompt(location, time_of_day, era, style, look, palette)
         try:
             return await self.image_gen.generate_image(prompt, aspect_ratio=aspect_ratio)
         except Exception as exc:
@@ -4242,6 +4617,48 @@ class Idea2VideoPipeline:
                 exc,
             )
             return None
+
+    async def _lock_extra_location_plates(
+        self,
+        script: DramaScript,
+        style: str = "Cinematic",
+        aspect_ratio: str = "16:9",
+        palette: str = "",
+    ) -> Dict[str, str]:
+        """One plate per place a scene moves to, keyed by that place.
+
+        The drama's own place is _lock_location_plate's; this draws the others
+        a scene names in ``location`` (interfaces/places), all at once and with
+        the drama's hour and era, because a story that crosses the street does
+        not change the time on the way.
+
+        Fail-open per place. A place whose plate failed is LEFT OUT rather than
+        given the main plate: a scene set on the pier anchored to a picture of
+        the office is the compromise this exists to remove.
+        """
+        main = (getattr(script, "setting_location", "") or "").strip()
+        places = extra_locations(list(script.scenes or []), main)
+        if not places:
+            return {}
+        time_of_day = (getattr(script, "setting_time_of_day", "") or "").strip()
+        era = (getattr(script, "setting_era", "") or "").strip()
+        look = resolve_visual_style(style)
+
+        async def _one(place: str) -> Optional[str]:
+            prompt = _location_plate_prompt(place, time_of_day, era, style, look, palette)
+            try:
+                return await self.image_gen.generate_image(prompt, aspect_ratio=aspect_ratio)
+            except Exception as exc:
+                logger.warning(
+                    "Plate for %r failed; its scenes keep the words and lose "
+                    "the picture: %s",
+                    place,
+                    exc,
+                )
+                return None
+
+        urls = await asyncio.gather(*(_one(place) for place in places))
+        return {place: url for place, url in zip(places, urls) if url}
 
     async def _lipsync_scenes(
         self,
@@ -4256,6 +4673,7 @@ class Idea2VideoPipeline:
         off_screen: Optional[Set[str]] = None,
         shots_by_clip: Optional[Dict[int, Sequence[Any]]] = None,
         on_provider_job_submitted: Optional[Callable[[int, str], None]] = None,
+        characters: Optional[Sequence[Any]] = None,
     ) -> List[int]:
         """Replace each speaking scene's clip with a lip-synced one, in place.
 
@@ -4362,6 +4780,7 @@ class Idea2VideoPipeline:
                 type(lipsync).__name__,
             )
             return []
+        edit_fallback = _edit_backend_for_crowded_scenes(lipsync)
 
         # One request per SCENE, keyed off the track that actually carries the
         # audio (the voice generator returns one combined file per scene and
@@ -4401,6 +4820,11 @@ class Idea2VideoPipeline:
         # before ffmpeg splitting, uploads and provider calls, so an
         # intentionally unsupported scene consumes neither render time nor
         # third-party lip-sync spend.
+        if characters:
+            off_screen = set(off_screen or ()) | _heard_only_names(
+                characters,
+                [t for lines in lines_by_scene.values() for t in lines],
+            )
         for scene_index in list(audio_by_scene):
             if _has_one_visible_speaker(
                 lines_by_scene.get(scene_index, ()), off_screen
@@ -4409,9 +4833,13 @@ class Idea2VideoPipeline:
                 continue
             logger.info(
                 "Scene %s has multiple visible speakers in one combined "
-                "dialogue track; keeping it as voice-over instead of driving "
-                "the wrong face.",
+                "dialogue track (%s; off-screen: %s); keeping it as voice-over "
+                "instead of driving the wrong face.",
                 scene_index,
+                ", ".join(
+                    _visible_speaker_names(lines_by_scene.get(scene_index, ()), off_screen)
+                ),
+                ", ".join(sorted(off_screen or ())) or "none",
             )
             del audio_by_scene[scene_index]
 
@@ -4497,11 +4925,88 @@ class Idea2VideoPipeline:
                 )
                 drift = speech_anchors.get(scene_index, picture_start) - picture_start
 
+                driver = lipsync
+                if getattr(lipsync, "redraws_the_take", False) and not _scene_survives_a_redraw(
+                    (shots_by_clip or {}).get(scene_index), characters
+                ):
+                    if edit_fallback is None:
+                        logger.info(
+                            "Scene %s shows more than one character, and this lip-sync "
+                            "backend redraws the scene from its first frame, which "
+                            "would discard every other shot; keeping the unsynced take.",
+                            scene_index,
+                        )
+                        return None
+                    logger.info(
+                        "Scene %s shows more than one character; the redrawing "
+                        "lip-sync backend would discard every other shot, so this "
+                        "scene is synced by an editing backend instead.",
+                        scene_index,
+                    )
+                    driver = edit_fallback
+
                 # Asked BEFORE the splits below, which are ffmpeg re-encodes,
                 # and before the provider is called at all: a sync nobody can
                 # see is not worth the round trip OR the CPU behind it.
                 scene_lines = lines_by_scene.get(scene_index, ())
                 spoken = spoken_seconds(list(scene_lines)) or 0.0
+                # A redraw replaces the take's first FIVE seconds at least (the
+                # endpoint pads a shorter line with silence), so a line a
+                # second long buys four seconds of a mouth that has nothing to
+                # say. Job e85c3f62, scene 2: "What is that--", 0.88 s, was the
+                # moment she heaves the container open; the redraw swapped
+                # those seconds for a woman frozen mid-pull with a fixed grin,
+                # and the door never moved. An edit backend has no such cost.
+                if getattr(driver, "redraws_the_take", False) and _carries_the_event(
+                    (shots_by_clip or {}).get(scene_index)
+                ):
+                    if edit_fallback is None:
+                        logger.info(
+                            "Scene %s carries the drama's event across its take; a "
+                            "redraw from its first frame would erase it, so it keeps "
+                            "the take and no lip sync.",
+                            scene_index,
+                        )
+                        return None
+                    logger.info(
+                        "Scene %s carries the drama's event; synced by an editing "
+                        "backend, which keeps the take.",
+                        scene_index,
+                    )
+                    driver = edit_fallback
+                if getattr(driver, "redraws_the_take", False) and _redraw_discards_an_angle(
+                    (shots_by_clip or {}).get(scene_index),
+                    max(
+                        _REDRAW_FLOOR_SECONDS,
+                        spoken + (drift if timeline_known else 0.0),
+                    ),
+                ):
+                    if edit_fallback is None:
+                        logger.info(
+                            "Scene %s: a redraw from its first frame would replace "
+                            "storyboarded angles under its first %.1fs; keeping the "
+                            "take with every angle and no lip sync.",
+                            scene_index,
+                            max(_REDRAW_FLOOR_SECONDS, spoken),
+                        )
+                        return None
+                    logger.info(
+                        "Scene %s: a redraw would replace storyboarded angles; "
+                        "synced by an editing backend instead, which keeps them.",
+                        scene_index,
+                    )
+                    driver = edit_fallback
+                if (
+                    getattr(driver, "redraws_the_take", False)
+                    and 0.0 < spoken < _MIN_REDRAW_SPEECH_SECONDS
+                ):
+                    logger.info(
+                        "Scene %s speaks for %.2fs, too little to be worth "
+                        "replacing its first %.0fs with a redraw; keeping the "
+                        "unsynced take.",
+                        scene_index, spoken, _REDRAW_FLOOR_SECONDS,
+                    )
+                    return None
                 if not _speaks_in_a_readable_framing(
                     (shots_by_clip or {}).get(scene_index),
                     scene_lines,
@@ -4630,10 +5135,8 @@ class Idea2VideoPipeline:
                             sum(
                                 1
                                 for t in lines_by_scene.get(scene_index, ())
-                                if str(t.get("character") or "")
-                                .strip()
-                                .casefold()
-                                not in off_screen
+                                if speaker_key(t.get("character")) not in off_screen
+                                and not is_marked_unseen(t.get("character"))
                             ),
                         )
 
@@ -4646,7 +5149,7 @@ class Idea2VideoPipeline:
                     sync_kwargs["on_submitted"] = (
                         lambda rid, _idx=scene_index: on_provider_job_submitted(_idx, rid)
                     )
-                synced_url = await lipsync.sync(
+                synced_url = await driver.sync(
                     sync_source, guide_url, is_cancelled=is_cancelled, **sync_kwargs
                 )
                 if not synced_url:
@@ -4998,12 +5501,58 @@ class Idea2VideoPipeline:
             if location_plate_override is not None
             else previous_result.get("location_plate")
         )
+        main_location = (getattr(script, "setting_location", "") or "").strip()
+        # The other places' plates are reused as they were drawn. An override
+        # is a new picture of the drama's OWN place (a continuity edit of "the
+        # set"), so it replaces that entry and no other.
+        location_plates: Dict[str, str] = {
+            place: url
+            for place, url in (previous_result.get("location_plates") or {}).items()
+            if url
+        }
+        if location_plate and main_location:
+            location_plates[main_location] = location_plate
 
         for index in wanted:
             if index >= len(script.scenes):
                 raise SceneRegenerationUnavailable(
                     f"Scene {index + 1} is not part of this script."
                 )
+
+        # A retaken scene is bridged from the opening frame the scene before it
+        # was DELIVERED with -- the one the viewer actually sees across the cut
+        # (interfaces/cut_bridge). Not when that scene is being re-shot in the
+        # same batch: its delivered frame is about to stop being on screen.
+        retake_places = [scene_location(s, main_location) for s in script.scenes]
+        delivered_openings: Dict[int, str] = {}
+        for record in previous_result.get("scenes") or []:
+            shots_recorded = record.get("shots") or []
+            frame = (shots_recorded[0] or {}).get("frame_url") if shots_recorded else None
+            if frame and "index" in record:
+                delivered_openings[int(record["index"])] = frame
+
+        def _retake_bridge(index: int):
+            frame = delivered_openings.get(index - 1)
+            if (
+                not frame
+                or (index - 1) in wanted
+                or not cut_bridge.bridges(
+                    script.scenes,
+                    index,
+                    retake_places,
+                    has_plate=bool(
+                        _plate_for(
+                            retake_places[index], main_location, location_plate, location_plates
+                        )
+                    ),
+                )
+            ):
+                return None
+
+            async def _delivered() -> Optional[str]:
+                return frame
+
+            return _delivered
 
         durations = state.get("scene_durations") or []
         user_requirement = state.get("user_requirement") or ""
@@ -5068,18 +5617,23 @@ class Idea2VideoPipeline:
                     aspect_ratio=previous_result.get("aspect_ratio", "16:9"),
                     is_cancelled=is_cancelled,
                     plan=previous_result.get("plan", "free"),
-                    setting_location=getattr(script, "setting_location", "") or "",
+                    setting_location=scene_location(scene_script, main_location),
                     setting_time_of_day=getattr(script, "setting_time_of_day", "") or "",
                     setting_era=getattr(script, "setting_era", "") or "",
-                    location_plate_url=location_plate,
+                    location_plate_url=_plate_for(
+                        scene_location(scene_script, main_location),
+                        main_location,
+                        location_plate,
+                        location_plates,
+                    ),
                     has_dialogue=bool(_scene_dialogue(scene_script)),
                     lipsync_enabled=bool(previous_result.get("lipsynced_scenes")),
                     scene_emotion=_scene_emotion(scene_script),
                     scene_dialogue=_format_scene_dialogue(
                         _scene_dialogue(scene_script),
-                        off_screen={
-                            c.name.casefold() for c in characters if not c.is_visible
-                        },
+                        off_screen=_heard_only_names(
+                            characters, _scene_dialogue(scene_script)
+                        ),
                     ),
                     scene_direction=_format_scene_direction(scene_script),
                     # A retake replaces one scene inside a cut that already
@@ -5110,6 +5664,11 @@ class Idea2VideoPipeline:
                         if window is not None
                         else None
                     ),
+                    # A beat is not the frame after the cut unless it is
+                    # the scene's first, and a beat retake re-shoots
+                    # whichever beat it was asked for.
+                    bridge_frame=_retake_bridge(index) if window is None else None,
+                    scene_opening=_scene_opening(script.scenes, index),
                     # The same slice of the second budget as the take it
                     # replaces, so a retake can never quietly lengthen (or
                     # shorten) the paid runtime -- a beat's slice of it when
@@ -5206,6 +5765,7 @@ class Idea2VideoPipeline:
                     for scene in scenes
                     if scene.get("clip_index") is not None
                 },
+                characters=characters,
             )
 
         # A retake keeps the cut's order, so the foley beds are still keyed to
@@ -5265,6 +5825,7 @@ class Idea2VideoPipeline:
         result = {**previous_result, "scenes": scenes, "_reframe": reframe_plan}
         result["portraits"] = portraits
         result["location_plate"] = location_plate
+        result["location_plates"] = location_plates
         result["_render_state"] = {
             **state,
             "script": script_data,
@@ -5555,6 +6116,21 @@ class Idea2VideoPipeline:
                 previous_result.get("aspect_ratio", "16:9"),
                 is_cancelled=is_cancelled,
             )
+            # Which scenes are IN the set being edited -- read before the
+            # setting's words change below. A scene the story moved somewhere
+            # else (interfaces/places) is not in this room, and re-rendering
+            # it would charge for a scene the edit cannot touch.
+            main_before = str(script_data.get("setting_location") or "")
+            script_scenes = list(script_data.get("scenes") or [])
+
+            def _in_the_set(index: int) -> bool:
+                if index >= len(script_scenes) or isinstance(script_scenes[index], str):
+                    return True
+                place = scene_location(
+                    _SceneLocation(script_scenes[index].get("location", "")), main_before
+                )
+                return place == " ".join(main_before.split())
+
             # Restate the change in the script's setting so every re-rendered
             # scene's prompt agrees with the new plate.
             script_data["setting_location"] = (
@@ -5563,7 +6139,11 @@ class Idea2VideoPipeline:
             affected = (
                 scene_indices
                 if scene_indices is not None
-                else [int(s["index"]) for s in (previous_result.get("scenes") or [])]
+                else [
+                    int(s["index"])
+                    for s in (previous_result.get("scenes") or [])
+                    if _in_the_set(int(s["index"]))
+                ]
             )
         else:
             portraits = previous_result.get("portraits") or {}
@@ -6086,11 +6666,53 @@ class Idea2VideoPipeline:
             for track in tracks
         ]
 
+    def _start_foley(
+        self,
+        scene_index: int,
+        shots: Sequence[Any],
+        seconds: float,
+        scene: Any,
+        semaphore: "asyncio.Semaphore",
+        is_cancelled: Optional[Callable[[], bool]] = None,
+    ) -> Optional["asyncio.Task"]:
+        """Start one scene's foley now, from its storyboard and budget.
+
+        Returns the task, or None when there is nothing to start (demo, off,
+        no provider, no length). Never raises: see _generate_foley.
+        """
+        if self.demo or not is_foley_enabled() or seconds <= 0:
+            return None
+        try:
+            generator = make_sfx_generator(self.api_key, demo=self.demo)
+        except Exception as exc:
+            logger.warning("Foley provider unavailable, continuing without it: %s", exc)
+            return None
+        audio_desc = next(
+            (
+                str(_shot_field_text(s, "audio_desc")).strip()
+                for s in shots
+                if _shot_field_text(s, "audio_desc").strip()
+            ),
+            "",
+        )
+
+        async def _run() -> Optional[str]:
+            async with semaphore:
+                return await generator.generate_scene_sfx(
+                    audio_desc,
+                    duration=seconds + FOLEY_HEAD_START_PAD_SECONDS,
+                    scene_emotion=_scene_emotion(scene),
+                    is_cancelled=is_cancelled,
+                )
+
+        return asyncio.ensure_future(_run())
+
     async def _generate_foley(
         self,
         scene_results: List[Dict[str, Any]],
         scene_paths: List[str],
         is_cancelled: Optional[Callable[[], bool]] = None,
+        early: Optional[Dict[int, "asyncio.Task"]] = None,
     ) -> List[Dict[str, Any]]:
         """A sound bed per scene, or an empty list. Never raises.
 
@@ -6118,11 +6740,26 @@ class Idea2VideoPipeline:
             return []
 
         semaphore = asyncio.Semaphore(_foley_concurrency(len(scene_results)))
+        early = early or {}
 
         async def _one(scene: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             clip_index = scene.get("clip_index")
             if clip_index is None or not (0 <= clip_index < len(scene_paths)):
                 return None
+            started = early.get(int(scene.get("index", -1)))
+            if started is not None:
+                # Started from the storyboard while the picture rendered. Its
+                # failure is the same lost layer as any other foley failure.
+                try:
+                    url = await started
+                except Exception as exc:
+                    logger.warning(
+                        "Foley failed for scene %s, continuing without it: %s",
+                        scene.get("index"),
+                        exc,
+                    )
+                    return None
+                return {"scene_index": int(clip_index), "audio_url": url} if url else None
             shots = scene.get("shots") or []
             # The master shot's note describes the scene; a two-second cutaway
             # of a face has nothing of its own to sound like.
@@ -6159,10 +6796,29 @@ class Idea2VideoPipeline:
                 return None
             return {"scene_index": int(clip_index), "audio_url": url}
 
-        results = await asyncio.gather(
-            *[_one(scene) for scene in scene_results], return_exceptions=True
-        )
-        tracks = [r for r in results if isinstance(r, dict)]
+        pending = [asyncio.ensure_future(_one(scene)) for scene in scene_results]
+        done, late = await asyncio.wait(pending, timeout=FOLEY_DEADLINE_SECONDS)
+        for task in late:
+            task.cancel()
+        for task in early.values():
+            if not task.done():
+                task.cancel()
+        if late:
+            logger.warning(
+                "Foley for %d scene(s) was still in the provider's queue %.0fs "
+                "after the picture was done; mixing without it.",
+                len(late),
+                FOLEY_DEADLINE_SECONDS,
+            )
+        tracks = []
+        for task in done:
+            try:
+                result = task.result()
+            except Exception:
+                continue
+            if isinstance(result, dict):
+                tracks.append(result)
+        tracks.sort(key=lambda t: t["scene_index"])
         if tracks:
             logger.info("Generated foley for %d scene(s).", len(tracks))
         return tracks
@@ -6659,7 +7315,7 @@ class Idea2VideoPipeline:
         # so its framing has to match the frames it will condition.
         _check_cancel()
         await progress("portraits", "Locking cast and set for consistency", 10)
-        portraits, location_plate = await asyncio.gather(
+        portraits, location_plate, extra_plates = await asyncio.gather(
             self._lock_character_portraits(
                 characters, style, character_portraits_override=character_portraits_override
             ),
@@ -6668,8 +7324,19 @@ class Idea2VideoPipeline:
                 style,
                 aspect_ratio=aspect_ratio,
                 location_image_override=location_image_override,
+                palette=palette_for(director_style),
+            ),
+            self._lock_extra_location_plates(
+                script, style, aspect_ratio=aspect_ratio, palette=palette_for(director_style)
             ),
         )
+        # Every place's picture, keyed by the words the scenes name it with.
+        # The drama's own place is keyed too, so a scene's plate is ONE lookup
+        # whichever place it is in.
+        main_location = (getattr(script, "setting_location", "") or "").strip()
+        location_plates: Dict[str, str] = dict(extra_plates or {})
+        if location_plate and main_location:
+            location_plates[main_location] = location_plate
 
         # Dynamic reference selection (adapted from ViMax's "previous
         # timeline" technique): as scenes progress, prefer each character's
@@ -6980,7 +7647,76 @@ class Idea2VideoPipeline:
         progress_lock = asyncio.Lock()
         completed_scenes = 0
 
+        # Each scene's opening frame, for the scene after it to bridge from
+        # (interfaces/cut_bridge). One future per scene, resolved with the
+        # frame or with None -- ALWAYS resolved, in _render_scene's finally,
+        # so a scene that failed or drew no frame releases its neighbour
+        # instead of holding it until the timeout.
+        scene_places = [scene_location(s, main_location) for s in script.scenes]
+        opening_frames: List["asyncio.Future"] = [
+            asyncio.get_running_loop().create_future() for _ in script.scenes
+        ]
+
+        def _bridge_from(idx: int):
+            if not cut_bridge.bridges(
+                script.scenes,
+                idx,
+                scene_places,
+                has_plate=bool(
+                    _plate_for(scene_places[idx], main_location, location_plate, location_plates)
+                ),
+            ):
+                return None
+
+            async def _await_previous() -> Optional[str]:
+                try:
+                    return await asyncio.wait_for(
+                        asyncio.shield(opening_frames[idx - 1]),
+                        timeout=cut_bridge.BRIDGE_WAIT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Scene %s waited %.0fs for scene %s's opening frame and "
+                        "is drawn without the bridge.",
+                        idx + 1,
+                        cut_bridge.BRIDGE_WAIT_SECONDS,
+                        idx,
+                    )
+                    return None
+
+            return _await_previous
+
+        def _opened(idx: int):
+            def _record(url: Optional[str]) -> None:
+                if not opening_frames[idx].done():
+                    opening_frames[idx].set_result(url)
+
+            return _record
+
+        early_foley: Dict[int, "asyncio.Task"] = {}
+        foley_semaphore = asyncio.Semaphore(_foley_concurrency(len(script.scenes)))
+
+        def _foley_from_storyboard(idx: int, scene: Any, shots: Sequence[Any]) -> None:
+            if idx in early_foley:
+                return
+            task = self._start_foley(
+                idx,
+                shots,
+                scene_durations[idx] if idx < len(scene_durations) else 0.0,
+                scene,
+                foley_semaphore,
+                is_cancelled=is_cancelled,
+            )
+            if task is not None:
+                early_foley[idx] = task
+
         async def _render_scene(idx: int, scene: Any) -> None:
+            try:
+                await _render_one_scene(idx, scene)
+            finally:
+                _opened(idx)(None)
+
+        async def _render_one_scene(idx: int, scene: Any) -> None:
             nonlocal completed_scenes
             async with scene_semaphore:
                 _check_cancel()
@@ -7015,10 +7751,18 @@ class Idea2VideoPipeline:
                     aspect_ratio=aspect_ratio,
                     is_cancelled=is_cancelled,
                     plan=plan,
-                    setting_location=getattr(script, "setting_location", "") or "",
+                    # The place THIS scene is in, and that place's picture.
+                    # A scene set somewhere the cap left without a plate gets
+                    # none rather than the drama's room (interfaces/places).
+                    setting_location=scene_location(scene, main_location),
                     setting_time_of_day=getattr(script, "setting_time_of_day", "") or "",
                     setting_era=getattr(script, "setting_era", "") or "",
-                    location_plate_url=location_plate,
+                    location_plate_url=_plate_for(
+                        scene_location(scene, main_location),
+                        main_location,
+                        location_plate,
+                        location_plates,
+                    ),
                     has_dialogue=dialogue_requested and bool(scene_dialogue_lines),
                     # Decides whether the frame is asked to SHOW the mouth or
                     # hide it — opposite instructions, see build_frame_prompt.
@@ -7030,9 +7774,7 @@ class Idea2VideoPipeline:
                     # dialogue is what tells the artist which moment matters.
                     scene_dialogue=_format_scene_dialogue(
                         scene_dialogue_lines,
-                        off_screen={
-                            c.name.casefold() for c in characters if not c.is_visible
-                        },
+                        off_screen=_heard_only_names(characters, scene_dialogue_lines),
                     ),
                     # Measured, not counted in words. Decides which angles of
                     # this scene are still under the line when they open --
@@ -7053,6 +7795,11 @@ class Idea2VideoPipeline:
                     world_state=world_state,
                     scene_tension=_scene_tension(scene),
                     scene_duration=scene_durations[idx] if idx < len(scene_durations) else 0.0,
+                    # The foley starts here, from the storyboard, so its queue
+                    # runs while the picture renders (FOLEY_DEADLINE_SECONDS).
+                    on_storyboard=lambda shots, _idx=idx, _scene=scene: _foley_from_storyboard(
+                        _idx, _scene, shots
+                    ),
                     character_direction=character_direction,
                     theme=getattr(script, "theme", "") or "",
                     visual_motif=getattr(script, "visual_motif", "") or "",
@@ -7067,6 +7814,9 @@ class Idea2VideoPipeline:
                     scene_shot_scale=(
                         shot_scales[idx] if idx < len(shot_scales) else ""
                     ),
+                    bridge_frame=_bridge_from(idx),
+                    on_opening_frame=_opened(idx),
+                    scene_opening=_scene_opening(script.scenes, idx),
                 )
                 async with progress_lock:
                     completed_scenes += 1
@@ -7106,6 +7856,10 @@ class Idea2VideoPipeline:
                     # the siblings -- left alone they would keep polling the
                     # provider (and burning credits) behind a failed job.
                     for task in scene_tasks:
+                        task.cancel()
+                    # And the foley those scenes started: a failed job is
+                    # not mixed, so a sound bed still in the queue is waste.
+                    for task in early_foley.values():
                         task.cancel()
                     await asyncio.gather(*scene_tasks, return_exceptions=True)
                     raise
@@ -7183,7 +7937,8 @@ class Idea2VideoPipeline:
             # the FINISHED clip's length, and because a foley failure must not
             # be able to take a rendered scene down with it.
             sfx_tracks = await self._generate_foley(
-                scene_results, scene_paths, is_cancelled=is_cancelled
+                scene_results, scene_paths, is_cancelled=is_cancelled,
+                early=early_foley,
             )
 
             _check_cancel()
@@ -7199,12 +7954,17 @@ class Idea2VideoPipeline:
                     # is both free and, unlike a list of trigger words, in
                     # whatever language the drama is in.
                     turn = _scene_field(script.scenes[scene_number], "turn")
+                    # Spoken after the event when the take carries it (see
+                    # plan_scene_speech_anchors).
+                    slot = scene_slots[scene_number] if scene_number < len(scene_slots) else None
+                    after_event = _carries_the_event((slot or {}).get("shots"))
                     for track in generated_tracks:
                         dialogue_tracks.append(
                             {
                                 **track,
                                 "scene_index": assembled_scene_index,
                                 "emphasis": turn,
+                                **({"after_event": True} if after_event else {}),
                             }
                         )
                 except Exception as exc:
@@ -7363,6 +8123,7 @@ class Idea2VideoPipeline:
                     for scene in scene_results
                     if scene.get("clip_index") is not None
                 },
+                characters=characters,
                 on_provider_job_submitted=(
                     (lambda idx, rid: on_provider_job_submitted("lipsync", idx, rid))
                     if on_provider_job_submitted
@@ -7590,6 +8351,11 @@ class Idea2VideoPipeline:
             "characters": [c.model_dump() for c in characters],
             "portraits": portraits,
             "location_plate": location_plate,
+            # Every place's plate, the drama's own included. "location_plate"
+            # stays the drama's own place on its own, because a series locks
+            # THAT one (interfaces/series.location_plate_url) and a continuity
+            # edit of "the set" edits it.
+            "location_plates": location_plates,
             # Who ended up speaking with which voice, keyed by the character's
             # real name. Written out so a character SAVED to the library after
             # this drama carries the voice this drama gave them: without it the

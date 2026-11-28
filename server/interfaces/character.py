@@ -100,6 +100,25 @@ class ScriptScene(BaseModel):
     # Dramatic tension 1-10. Shapes the tension curve across the drama and
     # informs shot scale/duration for this beat.
     tension: int = 0
+    # The physical state this scene OPENS in and the one it LEAVES: who is
+    # where, who is wet or hurt, what is in whose hands, how much time has
+    # passed, what the light is doing. Scenes are rendered independently, so
+    # without these the second scene begins from nothing. See
+    # interfaces/continuity.
+    starts_with: str = ""
+    ends_with: str = ""
+    # Where this scene is, when it is NOT the drama's setting_location: the
+    # other place plus its fixed contents, in the same terms. Empty means the
+    # drama's own place, which is most scenes of most dramas.
+    #
+    # The screenwriter has been told since the plate existed that "if the
+    # story needs somewhere else, it is a different scene with a different
+    # location" -- and had no field to say so in. So a story that needed a
+    # second place was either crammed into the first one or wrote it into the
+    # action line, where the frame prompt still announced the drama's one
+    # room and the plate still showed it. Each place a scene names here gets a
+    # plate of its own (pipelines/idea2video._lock_extra_location_plates).
+    location: str = ""
 
 
 class DramaScript(BaseModel):

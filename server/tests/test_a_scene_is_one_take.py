@@ -524,7 +524,10 @@ async def test_the_opening_frame_is_drawn_from_the_same_faces_as_a_per_shot_rend
         scene_duration=12,
     )
 
-    assert len(frames) == 1, "One opening frame, not one per angle."
+    # The second drawing is the 12-second take's end (interfaces/long_take):
+    # the opening frame and the anchor's own portrait, nobody else.
+    assert len(frames) == 2, "One opening and one end, not one per angle."
+    assert frames[1][1:] == ["https://cdn/vivian.png"]
     assert frames[0] == [
         "https://cdn/vivian.png",
         "https://cdn/julian.png",

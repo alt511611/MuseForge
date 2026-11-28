@@ -78,13 +78,36 @@ TRUTHY = {"1", "true", "yes", "on"}
 FALSY = {"0", "false", "no", "off"}
 
 
-def _resolution() -> str:
-    """FALAI_H3_LIPSYNC_RESOLUTION, case-insensitively, or 768P. An unknown
-    value falls back: it is a 422 on every scene otherwise."""
+#: The short side each tier draws at. 2K is never chosen by size: it is twice
+#: 1080P's price, and nothing this pipeline delivers is taller than 1080.
+_TIER_SHORT_SIDE = (("480P", 480), ("768P", 768), ("1080P", 1080))
+
+
+def _resolution(short_side: int = 0) -> str:
+    """The tier to draw the redrawn take at.
+
+    FALAI_H3_LIPSYNC_RESOLUTION wins when it names a tier (case-insensitively;
+    an unknown value is ignored rather than sent, since it is a 422 on every
+    scene). Otherwise the SCENE decides: the smallest tier at least as tall as
+    the clip being replaced.
+
+    That used to be a flat 768P, and it is half the resolution of a 1080p film.
+    Job 6efbb788 delivered at 1920x1080; its two synced scenes came back
+    1344x768 and were scaled up 1.41x to rejoin the master -- the only two
+    scenes in the film that are soft, and they are the two whose whole point
+    is a face. Matching costs more on a 1080p film ($0.16/s against $0.08/s,
+    on the audio's length), which is the price of the mouth being as sharp as
+    the eyes above it; a deployment that wants the old trade pins 768P.
+    """
     raw = (os.environ.get("FALAI_H3_LIPSYNC_RESOLUTION", "") or "").strip()
     for known in VALID_RESOLUTIONS:
         if raw.lower() == known.lower():
             return known
+    if short_side > 0:
+        for tier, side in _TIER_SHORT_SIDE:
+            if short_side <= side:
+                return tier
+        return _TIER_SHORT_SIDE[-1][0]
     return DEFAULT_RESOLUTION
 
 
@@ -187,6 +210,11 @@ class FalAIH3Lipsync:
     #: the Sync Lipsync backend, so a fal.ai refusal is one lock, not two.
     provider_name = "falai"
 
+    #: Read by idea2video._lipsync_scenes. This backend REDRAWS the take from
+    #: its first frame (see the module docstring), so every other shot of the
+    #: scene is lost -- the caller must not hand it a scene that has any.
+    redraws_the_take = True
+
     def __init__(self, api_key: str = "", demo: bool = False):
         self.demo = demo
         self.api_key = (api_key or os.environ.get("FAL_KEY", "")).strip()
@@ -219,6 +247,10 @@ class FalAIH3Lipsync:
             ):
                 return None
 
+            # Measured before the call, not just after it: the tier is chosen
+            # from it (see _resolution), and _at_the_scenes_size reads it again.
+            source_size = await _probe_size(video_path_or_url)
+
             frame_path = os.path.join(workdir, "first_frame.png")
             if not await _first_frame(video_path_or_url, frame_path):
                 logger.warning("H3 lip sync: could not cut a first frame from the scene clip.")
@@ -245,7 +277,7 @@ class FalAIH3Lipsync:
                 {
                     "image_url": image_url,
                     "audio_url": audio_source,
-                    "resolution": _resolution(),
+                    "resolution": _resolution(min(source_size) if all(source_size) else 0),
                     "enable_transcription": _transcription(),
                 },
                 is_cancelled=is_cancelled,
